@@ -480,12 +480,13 @@ def search_for_album(album):
         logger.info(f"Stripped special characters from search: '{query}' -> '{clean}'")
         query = clean
 
-    # Soulseek silently drops search tokens with <= 3 characters, and
-    # their presence can poison results (causing 0 results even when
-    # longer tokens would match). Strip them proactively.
-    # e.g. "The Mountain Goats All Hail West Texas" → "Mountain Goats Hail West Texas"
+    # Soulseek silently drops search tokens with <= 2 characters.
+    # Strip them proactively to avoid wasting a token slot.
+    # e.g. "A Tribe Called Quest" → "Tribe Called Quest"
+    # NOTE: Do NOT strip 3-char tokens (e.g. "New", "All", "Raw") —
+    # they are meaningful and Soulseek matches them fine.
     tokens = query.split()
-    long_tokens = [t for t in tokens if len(t) > 3]
+    long_tokens = [t for t in tokens if len(t) > 2]
     if long_tokens:
         stripped = " ".join(long_tokens)
         if stripped != query:
