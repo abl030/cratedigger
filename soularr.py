@@ -309,14 +309,28 @@ def verify_filetype(file, allowed_filetype):
                         return True
                 else:
                     return False
+            # If it is a VBR quality preset (e.g. "mp3 v0", "mp3 v2")
+            elif selected_attributes.lower() in ("v0", "v2"):
+                if bitrate:
+                    cbr_values = {128, 160, 192, 224, 256, 320}
+                    is_vbr = bitrate not in cbr_values
+                    # Prefer isVariableBitRate flag from slskd if available
+                    if "isVariableBitRate" in file:
+                        is_vbr = file["isVariableBitRate"]
+                    if not is_vbr:
+                        return False
+                    if selected_attributes.lower() == "v0":
+                        return 220 <= bitrate <= 280
+                    else:  # v2
+                        return 170 <= bitrate <= 220
+                return False
             # If it is a bitrate
             else:
                 selected_bitrate = selected_attributes
                 if bitrate:
                     if str(bitrate) == str(selected_bitrate):
                         return True
-                else:
-                    return False
+                return False
         # If no bitrate or other info then it is a match so return true
         else:
             return True
@@ -860,9 +874,12 @@ def get_existing_quality_tier(album_id):
 
         # "MP3-320" -> "mp3 320", "FLAC" -> "flac", "FLAC 24bit" -> "flac 24bit"
         # "ALAC" -> "m4a" (ALAC is Apple Lossless in an m4a container)
+        # "MP3 VBR V0" -> "mp3 v0", "MP3 VBR V2" -> "mp3 v2"
         mapped = quality_name.lower().replace("-", " ")
         if mapped.startswith("alac"):
             mapped = "m4a" + mapped[4:]  # "alac" -> "m4a", "alac 16/44.1" -> "m4a 16/44.1"
+        elif mapped.startswith("mp3 vbr "):
+            mapped = "mp3 " + mapped[8:]  # "mp3 vbr v0" -> "mp3 v0"
 
         # Exact match first (e.g. "mp3 320" in allowed_filetypes)
         matched_index = None
