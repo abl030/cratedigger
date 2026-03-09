@@ -1491,13 +1491,17 @@ def stage_to_ai(album_data, source_path, staging_dir):
 def unmonitor_album(album_id):
     """Unmonitor album in Lidarr so Soularr doesn't re-download it."""
     try:
-        # Use raw requests PUT — pyarr doesn't expose album update
+        url = f"{lidarr_host_url}/api/v1/album/monitor"
+        payload = {"albumIds": [album_id], "monitored": False}
+        logger.info(f"UNMONITOR: PUT {url} albumId={album_id}")
         resp = requests.put(
-            f"{lidarr_host_url}/api/v1/album/monitor",
+            url,
             headers={"X-Api-Key": lidarr_api_key},
-            json={"albumIds": [album_id], "monitored": False},
+            json=payload,
         )
+        logger.info(f"UNMONITOR: response status={resp.status_code}")
         resp.raise_for_status()
+        logger.info(f"UNMONITOR: album {album_id} unmonitored successfully")
     except Exception:
         logger.exception(f"Failed to unmonitor album {album_id}")
 
