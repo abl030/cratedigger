@@ -1397,12 +1397,18 @@ def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
            "--search-id", mb_release_id, album_path]
     result = {"valid": False, "distance": None, "mbid_found": False, "error": None}
 
+    logger.info(f"BEETS_VALIDATE: path={album_path}, target_mbid={mb_release_id}, "
+                f"threshold={distance_threshold}")
+    logger.info(f"BEETS_VALIDATE: cmd={' '.join(cmd)}")
+
     try:
         proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
     except Exception as e:
         result["error"] = f"Failed to start harness: {e}"
+        logger.error(f"BEETS_VALIDATE: {result['error']}")
         return result
 
+    got_choose_match = False
     try:
         for line in proc.stdout:
             line = line.strip()
@@ -1411,18 +1417,27 @@ def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
+                logger.debug(f"BEETS_VALIDATE: non-JSON line: {line[:200]}")
                 continue
 
             msg_type = msg.get("type", "")
+            logger.info(f"BEETS_VALIDATE: msg type={msg_type}")
 
             if msg_type == "choose_match":
-                # Find candidate by MBID (NEVER by index)
-                for cand in msg.get("candidates", []):
-                    if cand.get("album_id") == mb_release_id:
+                got_choose_match = True
+                candidates = msg.get("candidates", [])
+                logger.info(f"BEETS_VALIDATE: {len(candidates)} candidates, "
+                            f"looking for mbid={mb_release_id}")
+                for i, cand in enumerate(candidates):
+                    cand_mbid = cand.get("album_id", "")
+                    cand_dist = cand.get("distance", "?")
+                    cand_album = cand.get("album", "?")
+                    logger.info(f"BEETS_VALIDATE:   candidate[{i}]: "
+                                f"mbid={cand_mbid}, dist={cand_dist}, album={cand_album}")
+                    if cand_mbid == mb_release_id:
                         result["mbid_found"] = True
                         result["distance"] = cand["distance"]
                         result["valid"] = cand["distance"] <= distance_threshold
-                        break
                 # Always skip (dry-run)
                 proc.stdin.write('{"action":"skip"}\n')
                 proc.stdin.flush()
@@ -1435,13 +1450,25 @@ def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
                 break
     except Exception as e:
         result["error"] = str(e)
+        logger.error(f"BEETS_VALIDATE: exception: {e}")
     finally:
+        stderr_out = ""
+        try:
+            stderr_out = proc.stderr.read()
+        except Exception:
+            pass
         proc.terminate()
         try:
             proc.wait(timeout=10)
         except sp.TimeoutExpired:
             proc.kill()
 
+    if stderr_out:
+        logger.warning(f"BEETS_VALIDATE: stderr: {stderr_out[:500]}")
+    if not got_choose_match:
+        logger.warning(f"BEETS_VALIDATE: harness never sent choose_match!")
+
+    logger.info(f"BEETS_VALIDATE: result={result}")
     return result
 
 
