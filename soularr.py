@@ -333,7 +333,17 @@ def verify_filetype(file, allowed_filetype):
                     else:  # v2
                         return 170 <= bitrate <= 220
                 return False
-            # If it is a bitrate
+            # If it is a minimum bitrate (e.g. "aac 256+", "ogg 256+", "opus 192+")
+            elif selected_attributes.endswith("+"):
+                try:
+                    min_bitrate = int(selected_attributes[:-1])
+                except ValueError:
+                    logger.warning(f"Invalid minimum bitrate in allowed_filetype: {allowed_filetype}")
+                    return False
+                if bitrate:
+                    return bitrate >= min_bitrate
+                return False
+            # If it is an exact bitrate
             else:
                 selected_bitrate = selected_attributes
                 if bitrate:
