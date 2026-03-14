@@ -38,6 +38,7 @@ def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
         "year": 2020,
         "country": "US",
         "track_count": 10,
+        "albumstatus": "Official",
     }]
     if extra_candidates:
         candidates.extend(extra_candidates)
@@ -198,7 +199,7 @@ class TestBeetsValidate(unittest.TestCase):
 
     @patch("soularr.sp.Popen")
     def test_just_above_threshold(self, mock_popen):
-        """Distance just above threshold → valid=False."""
+        """Distance 0.1501 is above 0.15 but below 0.30 → valid=True (good_match)."""
         mbid = "12345678-1234-1234-1234-123456789abc"
         proc = MagicMock()
         proc.stdout = iter([
@@ -211,7 +212,76 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = soularr.beets_validate("/test/album", mbid, 0.15)
 
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["scenario"], "good_match")
+
+    @patch("soularr.sp.Popen")
+    def test_above_hard_limit(self, mock_popen):
+        """Distance above 0.30 hard limit → valid=False."""
+        mbid = "12345678-1234-1234-1234-123456789abc"
+        proc = MagicMock()
+        proc.stdout = iter([
+            make_choose_match_msg(mbid, 0.35) + "\n",
+            make_session_end() + "\n",
+        ])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        result = soularr.beets_validate("/test/album", mbid, 0.15)
+
         self.assertFalse(result["valid"])
+        self.assertEqual(result["scenario"], "high_distance")
+
+
+    @patch("soularr.sp.Popen")
+    def test_non_official_accepted_if_match(self, mock_popen):
+        """Non-official release (bootleg/promo) with good match → valid=True."""
+        mbid = "12345678-1234-1234-1234-123456789abc"
+        proc = MagicMock()
+        candidates = [{
+            "index": 0, "distance": 0.05, "artist": "Test Artist",
+            "album": "Test Album", "album_id": mbid, "year": 2020,
+            "country": "US", "track_count": 10, "albumstatus": "Bootleg",
+        }]
+        msg = json.dumps({
+            "type": "choose_match", "task_id": 0, "path": "/test/path",
+            "cur_artist": "Test Artist", "cur_album": "Test Album",
+            "item_count": 10, "candidates": candidates,
+        })
+        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        result = soularr.beets_validate("/test/album", mbid, 0.15)
+
+        self.assertTrue(result["valid"])
+
+    @patch("soularr.sp.Popen")
+    def test_artist_collab_match(self, mock_popen):
+        """Collab credit where local artist is substring of MB artist → valid=True."""
+        mbid = "12345678-1234-1234-1234-123456789abc"
+        proc = MagicMock()
+        candidates = [{
+            "index": 0, "distance": 0.06, "artist": "Action Bronson & Party Supplies",
+            "album": "Blue Chips", "album_id": mbid, "year": 2012,
+            "country": "US", "track_count": 16, "albumstatus": "Official",
+        }]
+        msg = json.dumps({
+            "type": "choose_match", "task_id": 0, "path": "/test/path",
+            "cur_artist": "Action Bronson", "cur_album": "Blue Chips",
+            "item_count": 16, "candidates": candidates,
+        })
+        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        result = soularr.beets_validate("/test/album", mbid, 0.15)
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["scenario"], "artist_collab_match")
 
 
 class TestStageToAi(unittest.TestCase):

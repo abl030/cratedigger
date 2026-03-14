@@ -1523,13 +1523,13 @@ def classify_for_staging(msg, mb_release_id):
     logger.info(f"CLASSIFY: artist_match={artist_match}, album_match={album_match}, "
                 f"track_match={track_match}, distance={best_dist}")
 
-    # Non-Official: reject (soularr can't do LLM review)
+    # Non-Official: log but don't reject — if beets matched it with a valid MBID
+    # and the distance is acceptable, the user requested this album in Lidarr
     best_status = (best.get("albumstatus", "") or "").lower().strip()
-    if best_status != "official":
-        result["scenario"] = "non_official_release"
-        result["detail"] = f"Release status '{best_status}' — not Official"
-        logger.info(f"CLASSIFY: → REJECT {result['scenario']}: {result['detail']}")
-        return result
+    is_non_official = best_status != "official"
+    if is_non_official:
+        logger.info(f"CLASSIFY: non-official release (status='{best_status}') — "
+                     "will still evaluate distance/tracks")
 
     # Extra tracks means MB has more than local — reject
     if extra_tracks > 0:
@@ -1543,6 +1543,7 @@ def classify_for_staging(msg, mb_release_id):
         norm_local = _normalize_title(cur_artist)
         norm_best = _normalize_title(best_artist)
         logger.info(f"CLASSIFY: artist mismatch — normalized: '{norm_local}' vs '{norm_best}'")
+        # Accept if names normalize to equal
         if (norm_local == norm_best
                 and track_match and best_dist < 0.30
                 and _tracks_are_trivial_match(local_items, best)):
@@ -1550,6 +1551,17 @@ def classify_for_staging(msg, mb_release_id):
             result["scenario"] = "artist_name_variant"
             result["detail"] = f"'{cur_artist}' → '{best_artist}', distance={best_dist}"
             logger.info(f"CLASSIFY: → ACCEPT {result['scenario']}: {result['detail']}")
+            return result
+        # Accept collaboration credits: local artist is a substring of MB artist
+        # e.g. "Ben Folds" in "Ben Folds with yMusic", "Action Bronson" in
+        # "Action Bronson & Party Supplies", "Xiu Xiu" in "Xiu Xiu w/ Mantra Percussion"
+        if (norm_local in norm_best
+                and track_match and best_dist < 0.30):
+            result["valid"] = True
+            result["scenario"] = "artist_collab_match"
+            result["detail"] = f"'{cur_artist}' → '{best_artist}', distance={best_dist}"
+            logger.info(f"CLASSIFY: → ACCEPT {result['scenario']}: collab credit, "
+                         f"local artist '{cur_artist}' is substring of MB '{best_artist}'")
             return result
         result["scenario"] = "artist_mismatch"
         result["detail"] = f"'{cur_artist}' → '{best_artist}'"
