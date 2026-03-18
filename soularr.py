@@ -1043,6 +1043,10 @@ def find_download(album, grab_list):
                 if is_cutoff:
                     grab_list[album_id]["_is_cutoff"] = True
                     grab_list[album_id]["_pre_tier"] = existing_tier
+                # Propagate DB metadata for pipeline_db_source.mark_done/mark_failed
+                if album.get("_db_request_id"):
+                    grab_list[album_id]["_db_request_id"] = album["_db_request_id"]
+                    grab_list[album_id]["_db_source"] = album.get("_db_source")
                 return True
             elif len(release["media"]) > 1:
                 found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
@@ -1057,6 +1061,9 @@ def find_download(album, grab_list):
                     if is_cutoff:
                         grab_list[album_id]["_is_cutoff"] = True
                         grab_list[album_id]["_pre_tier"] = existing_tier
+                    if album.get("_db_request_id"):
+                        grab_list[album_id]["_db_request_id"] = album["_db_request_id"]
+                        grab_list[album_id]["_db_source"] = album.get("_db_source")
                     return True
 
             # If a monitored release was tried and didn't match, stop here.
