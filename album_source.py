@@ -47,6 +47,11 @@ class AlbumRecord:
             })
 
         total_tracks = sum(len(dt) for dt in discs.values())
+        num_discs = len(discs)
+
+        # Build format string like Lidarr: "CD", "2xCD", "Digital Media"
+        base_format = row.get("format") or "Digital Media"
+        lidarr_format = f"{num_discs}x{base_format}" if num_discs > 1 else base_format
 
         # Build a single release entry (in Lidarr, albums have multiple releases;
         # in DB mode, we have exactly one — the pinned edition)
@@ -55,6 +60,8 @@ class AlbumRecord:
             "foreignReleaseId": row["mb_release_id"] or "",
             "title": row["album_title"],
             "trackCount": total_tracks,
+            "mediumCount": num_discs,
+            "format": lidarr_format,
             "media": media,
             "monitored": True,  # Always monitored — it's explicitly wanted
             "country": [row.get("country") or "US"],
