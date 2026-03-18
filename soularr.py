@@ -1176,9 +1176,48 @@ def process_completed_album(album_data, failed_grab):
                 logger.info(f"STAGED: {album_data['artist']} - {album_data['title']} "
                             f"(scenario={bv_result.get('scenario')}, "
                             f"distance={bv_result['distance']:.4f}) → {dest}")
-                # Pipeline DB: mark done (staged for redownloads, staged for requests)
+
+                # Pipeline DB: two-track post-download pipeline
                 if is_db_mode:
-                    pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                    source_type = album_data.get("_db_source", "redownload")
+                    if source_type == "request" and bv_result.get("distance", 1.0) <= beets_distance_threshold:
+                        # Auto-import: convert + beets import (runs on doc1 via shared harness)
+                        auto_import_script = os.path.join(
+                            os.path.dirname(beets_harness_path), "auto_import.py")
+                        mb_id = album_data.get("mb_release_id", "")
+                        logger.info(f"AUTO-IMPORT: {album_data['artist']} - {album_data['title']} "
+                                    f"(source=request, dist={bv_result['distance']:.4f})")
+                        try:
+                            result = sp.run(
+                                ["python3", auto_import_script, dest, mb_id],
+                                capture_output=True, text=True, timeout=1800,
+                            )
+                            if result.returncode == 0:
+                                logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
+                                logger.info(f"  stdout: {result.stdout.rstrip()}")
+                                pipeline_db_source.update_status(
+                                    album_data, "imported",
+                                    beets_distance=bv_result.get("distance"),
+                                    beets_scenario=bv_result.get("scenario"),
+                                )
+                                # Log the download
+                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                            else:
+                                logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
+                                             f"{album_data['artist']} - {album_data['title']}")
+                                logger.error(f"  stderr: {result.stderr.rstrip()}")
+                                logger.error(f"  stdout: {result.stdout.rstrip()}")
+                                # Fall back to staged — user can manually import
+                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                        except sp.TimeoutExpired:
+                            logger.error(f"AUTO-IMPORT TIMEOUT: {album_data['artist']} - {album_data['title']}")
+                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                        except Exception:
+                            logger.exception(f"AUTO-IMPORT ERROR: {album_data['artist']} - {album_data['title']}")
+                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                    else:
+                        # Redownload or high distance: stage only, user reviews manually
+                        pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
             else:
                 move_failed_import(import_folder_fullpath)
                 log_validation_result(album_data, bv_result)
