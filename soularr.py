@@ -1004,9 +1004,10 @@ def find_download(album, grab_list):
 
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        # DB records carry releases inline; Lidarr records fetch from API
+        # DB records carry releases inline (copy to avoid mutation);
+        # Lidarr records fetch fresh from API each iteration
         if album.get("_db_request_id"):
-            releases = album.get("releases", [])
+            releases = list(album.get("releases", []))
         else:
             releases = lidarr.get_album(album_id)["releases"]
 
