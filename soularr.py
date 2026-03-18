@@ -93,6 +93,11 @@ beets_distance_threshold = 0.15
 beets_staging_dir = "/mnt/virtio/Music/AI"
 beets_tracking_file = "/mnt/virtio/Music/Re-download/beets-validated.jsonl"
 
+# === Pipeline DB Config ===
+pipeline_db_enabled = False
+pipeline_db_path = "/mnt/virtio/Music/pipeline.db"
+pipeline_db_source = None  # DatabaseSource instance when enabled
+
 # === Runtime State & Caches ===
 search_cache = {}
 folder_cache = {}
@@ -564,13 +569,9 @@ def search_for_album(album):
     # still validate that the returned directories contain the full album.
     if tokens and all(len(t) <= 3 for t in tokens):
         try:
-            releases = lidarr.get_album(album_id)["releases"]
+            releases = album.get("releases") or lidarr.get_album(album_id)["releases"]
             release = choose_release(artist_name, releases)
-            tracks = lidarr.get_tracks(
-                artistId=album["artistId"],
-                albumId=album_id,
-                albumReleaseId=release["id"],
-            )
+            tracks = get_album_tracks(album, release_id=release["id"])
             if tracks:
                 best_track = max(tracks, key=lambda t: len(t["title"]))
                 if len(best_track["title"]) > 3:
@@ -940,6 +941,21 @@ def get_existing_quality_tier(album_id):
         return fallback
 
 
+def get_album_tracks(album, release_id=None):
+    """Get tracks for an album — from pipeline DB or Lidarr API.
+
+    DB records have negative IDs. For those, fetch tracks from DatabaseSource.
+    For Lidarr records (positive IDs), use lidarr.get_tracks() as before.
+    """
+    if pipeline_db_enabled and pipeline_db_source is not None and album.get("_db_request_id"):
+        return pipeline_db_source.get_tracks(album)
+    return lidarr.get_tracks(
+        artistId=album["artistId"],
+        albumId=album["id"],
+        albumReleaseId=release_id,
+    )
+
+
 def find_download(album, grab_list):
     """
     This does the main loop over search results and user directories
@@ -994,7 +1010,7 @@ def find_download(album, grab_list):
             release = choose_release(artist_name, releases)
             releases.remove(release)
             release_id = release["id"]
-            all_tracks = lidarr.get_tracks(artistId=artist_id, albumId=album_id, albumReleaseId=release_id)
+            all_tracks = get_album_tracks(album, release_id=release_id)
             found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
 
             if found:
@@ -1124,6 +1140,8 @@ def process_completed_album(album_data, failed_grab):
                                        album_data["mb_release_id"],
                                        beets_distance_threshold)
 
+            is_db_mode = pipeline_db_enabled and pipeline_db_source is not None
+
             if bv_result["valid"]:
                 dest = stage_to_ai(album_data, import_folder_fullpath, beets_staging_dir)
                 log_validation_result(album_data, bv_result, dest)
@@ -1131,12 +1149,19 @@ def process_completed_album(album_data, failed_grab):
                 logger.info(f"STAGED: {album_data['artist']} - {album_data['title']} "
                             f"(scenario={bv_result.get('scenario')}, "
                             f"distance={bv_result['distance']:.4f}) → {dest}")
+                # Pipeline DB: mark done (staged for redownloads, staged for requests)
+                if is_db_mode:
+                    pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
             else:
                 move_failed_import(import_folder_fullpath)
                 log_validation_result(album_data, bv_result)
-                failed_grab.append(lidarr.get_album(album_data["album_id"]))
-                # Denylist the source user(s) so we try a different source next run
                 usernames = set(f["username"] for f in album_data.get("files", []))
+                # Pipeline DB: mark failed + denylist users
+                if is_db_mode:
+                    pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames)
+                else:
+                    failed_grab.append(lidarr.get_album(album_data["album_id"]))
+                # Denylist the source user(s) so we try a different source next run
                 aid = album_data["album_id"]
                 if aid not in cutoff_denylist:
                     cutoff_denylist[aid] = set()
@@ -2007,7 +2032,10 @@ def main():
         beets_harness_path, \
         beets_distance_threshold, \
         beets_staging_dir, \
-        beets_tracking_file
+        beets_tracking_file, \
+        pipeline_db_enabled, \
+        pipeline_db_path, \
+        pipeline_db_source
 
     # Let's allow some overrides to be passed to the script
     parser = argparse.ArgumentParser(description="""Soularr reads all of your "wanted" albums/artists from Lidarr and downloads them using Slskd""")
@@ -2151,6 +2179,14 @@ def main():
             logger.info(f"Beets validation ENABLED: harness={beets_harness_path}, "
                         f"threshold={beets_distance_threshold}, staging={beets_staging_dir}")
 
+        # Pipeline DB config
+        pipeline_db_enabled = config.getboolean("Pipeline DB", "enabled", fallback=False)
+        pipeline_db_path = config.get("Pipeline DB", "db_path", fallback="/mnt/virtio/Music/pipeline.db")
+        if pipeline_db_enabled:
+            from album_source import DatabaseSource
+            pipeline_db_source = DatabaseSource(pipeline_db_path)
+            logger.info(f"Pipeline DB ENABLED: {pipeline_db_path}")
+
         # Init directory cache. The wide search returns all the data we need. This prevents us from hammering the users on the Soulseek network
         search_cache = {}
         folder_cache = {}
@@ -2162,18 +2198,29 @@ def main():
         slskd = slskd_api.SlskdClient(host=slskd_host_url, api_key=slskd_api_key, url_base=slskd_url_base)
         lidarr = LidarrAPI(lidarr_host_url, lidarr_api_key)
         wanted_records = []
-        try:
-            for source in search_sources:
-                logging.debug(f"Getting records from {source}")
-                missing = source == "missing"
-                records = get_records(missing)
-                for record in records:
-                    record["_is_cutoff"] = not missing
-                wanted_records.extend(records)
-        except ValueError as ex:
-            logger.error(f"An error occurred: {ex}")
-            logger.error("Exiting...")
-            sys.exit(0)
+
+        if pipeline_db_enabled and pipeline_db_source is not None:
+            # === Pipeline DB mode: get wanted albums from DB ===
+            logger.info("Getting wanted records from pipeline DB...")
+            wanted_records = pipeline_db_source.get_wanted(limit=page_size)
+            logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
+            # Mark them as searching in the DB
+            for record in wanted_records:
+                pipeline_db_source.update_status(record, "searching")
+        else:
+            # === Lidarr mode (original): get wanted from Lidarr API ===
+            try:
+                for source in search_sources:
+                    logging.debug(f"Getting records from {source}")
+                    missing = source == "missing"
+                    records = get_records(missing)
+                    for record in records:
+                        record["_is_cutoff"] = not missing
+                    wanted_records.extend(records)
+            except ValueError as ex:
+                logger.error(f"An error occurred: {ex}")
+                logger.error("Exiting...")
+                sys.exit(0)
 
         if len(wanted_records) > 0:
             try:
@@ -2202,6 +2249,12 @@ def main():
             logger.info("No releases wanted. Exiting...")
 
     finally:
+        # Clean up pipeline DB connection
+        if pipeline_db_source is not None:
+            try:
+                pipeline_db_source.close()
+            except Exception:
+                pass
         # Remove the lock file after activity is done
         if os.path.exists(lock_file_path) and not is_docker():
             os.remove(lock_file_path)
