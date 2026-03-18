@@ -1180,41 +1180,41 @@ def process_completed_album(album_data, failed_grab):
                 # Pipeline DB: two-track post-download pipeline
                 if is_db_mode:
                     source_type = album_data.get("_db_source", "redownload")
+                    request_id = album_data.get("_db_request_id")
                     if source_type == "request" and bv_result.get("distance", 1.0) <= beets_distance_threshold:
-                        # Auto-import: convert + beets import (runs on doc1 via shared harness)
-                        auto_import_script = os.path.join(
-                            os.path.dirname(beets_harness_path), "auto_import.py")
+                        # Auto-import via import_one.py (handles convert + import + DB updates)
+                        import_script = os.path.join(
+                            os.path.dirname(beets_harness_path), "import_one.py")
                         mb_id = album_data.get("mb_release_id", "")
                         logger.info(f"AUTO-IMPORT: {album_data['artist']} - {album_data['title']} "
                                     f"(source=request, dist={bv_result['distance']:.4f})")
                         try:
-                            result = sp.run(
-                                ["python3", auto_import_script, dest, mb_id],
-                                capture_output=True, text=True, timeout=1800,
-                            )
+                            cmd = ["python3", import_script, dest, mb_id]
+                            if request_id:
+                                cmd.extend(["--request-id", str(request_id)])
+                            import_env = {**os.environ, "HOME": "/home/abl030"}
+                            result = sp.run(cmd, capture_output=True, text=True,
+                                            timeout=1800, env=import_env)
                             if result.returncode == 0:
                                 logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
-                                logger.info(f"  stdout: {result.stdout.rstrip()}")
-                                pipeline_db_source.update_status(
-                                    album_data, "imported",
-                                    beets_distance=bv_result.get("distance"),
-                                    beets_scenario=bv_result.get("scenario"),
-                                )
-                                # Log the download
-                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                                for line in result.stdout.strip().split("\n"):
+                                    logger.info(f"  {line}")
                             else:
                                 logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
                                              f"{album_data['artist']} - {album_data['title']}")
-                                logger.error(f"  stderr: {result.stderr.rstrip()}")
-                                logger.error(f"  stdout: {result.stdout.rstrip()}")
-                                # Fall back to staged — user can manually import
-                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                                for line in result.stderr.strip().split("\n"):
+                                    logger.error(f"  {line}")
+                                for line in result.stdout.strip().split("\n"):
+                                    logger.error(f"  {line}")
+                                # import_one.py already set DB to review_needed
                         except sp.TimeoutExpired:
                             logger.error(f"AUTO-IMPORT TIMEOUT: {album_data['artist']} - {album_data['title']}")
-                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                            if request_id:
+                                pipeline_db_source.update_status(album_data, "review_needed")
                         except Exception:
                             logger.exception(f"AUTO-IMPORT ERROR: {album_data['artist']} - {album_data['title']}")
-                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                            if request_id:
+                                pipeline_db_source.update_status(album_data, "review_needed")
                     else:
                         # Redownload or high distance: stage only, user reviews manually
                         pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
