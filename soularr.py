@@ -602,25 +602,17 @@ def search_for_album(album):
             return False
 
     logger.info(f"Searching for album: {query}")
-    search = None
-    for attempt in range(3):
-        try:
-            search = slskd.searches.search_text(
-                searchText=query,
-                searchTimeout=config.getint("Search Settings", "search_timeout", fallback=5000),
-                filterResponses=True,
-                maximumPeerQueueLength=config.getint("Search Settings", "maximum_peer_queue", fallback=50),
-                minimumPeerUploadSpeed=config.getint("Search Settings", "minimum_peer_upload_speed", fallback=0),
-            )
-            break
-        except Exception as e:
-            if "409" in str(e) and attempt < 2:
-                # slskd only allows one active search — wait for it to finish
-                logger.info(f"Search conflict (409), waiting 10s before retry ({attempt + 1}/3)")
-                time.sleep(10)
-                continue
-            logger.exception(f"Failed to perform search via SLSKD: {query}")
-            return False
+    try:
+        search = slskd.searches.search_text(
+            searchText=query,
+            searchTimeout=config.getint("Search Settings", "search_timeout", fallback=5000),
+            filterResponses=True,
+            maximumPeerQueueLength=config.getint("Search Settings", "maximum_peer_queue", fallback=50),
+            minimumPeerUploadSpeed=config.getint("Search Settings", "minimum_peer_upload_speed", fallback=0),
+        )
+    except Exception:
+        logger.exception(f"Failed to perform search via SLSKD: {query}")
+        return False
 
     # Add timeout here to increase reliability with Slskd. Sometimes it doesn't update search status fast enough. More of an issue with lots of historical searches in slskd
     time.sleep(5)
