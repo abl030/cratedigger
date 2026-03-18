@@ -438,7 +438,14 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
 
         if tracks_info["count"] == track_num and tracks_info["filetype"] != "":
             if album_match(tracks, directory["files"], username, allowed_filetype):
-                return True, directory, file_dir
+                if _track_titles_cross_check(tracks, directory["files"]):
+                    return True, directory, file_dir
+                else:
+                    logger.warning(
+                        f"Track title cross-check FAILED for user {username}, "
+                        f"dir {file_dir} — skipping (wrong pressing?)"
+                    )
+                    continue
             else:
                 continue
     return False, {}, ""
@@ -1511,6 +1518,83 @@ def _normalize_title(s):
     s = re.sub(r"[^\w\s'&]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _extract_title_from_filename(filename):
+    """Extract a track title from a Soulseek filename.
+
+    Strips: extension, leading track numbers, artist prefixes.
+    Returns normalized title via _normalize_title().
+
+    Examples:
+        "01 - Enter Sandman.mp3" → "enter sandman"
+        "01_Enter_Sandman.flac" → "enter sandman"
+        "Metallica - 01 - Enter Sandman.mp3" → "enter sandman"
+        "Enter Sandman.mp3" → "enter sandman"
+    """
+    # Strip extension
+    name = re.sub(r'\.[a-zA-Z0-9]{2,4}$', '', filename)
+    # Replace underscores with spaces
+    name = name.replace('_', ' ')
+    # Strip leading "Artist - " prefix (before track number)
+    # Pattern: "Something - 01 - Title" → "01 - Title"
+    name = re.sub(r'^.+?\s*-\s*(?=\d{1,2}\s*[-.\s])', '', name)
+    # Strip leading track number patterns: "01 - ", "01. ", "01 ", "1 - ", etc.
+    name = re.sub(r'^\d{1,3}\s*[-._)\s]+\s*', '', name)
+    # Strip leading "Artist - " if still present (e.g., "Artist - Title")
+    # Only strip if there's content after the dash
+    if ' - ' in name:
+        parts = name.split(' - ', 1)
+        # Heuristic: if the part before dash is short-ish, it might be artist
+        # But if after dash is empty, keep the whole thing
+        if len(parts) == 2 and parts[1].strip():
+            name = parts[1]
+    return _normalize_title(name)
+
+
+def _track_titles_cross_check(expected_tracks, slskd_files):
+    """Cross-check that Soulseek filenames match expected track titles.
+
+    This catches wrong pressings with different tracklists (e.g., Weezer Blue vs Green).
+    Runs AFTER album_match() passes (track count + fuzzy filename already verified).
+
+    Returns True if enough titles match, False if too many are missing.
+    Tolerance: up to 1/5 tracks can mismatch (same as _tracks_are_trivial_match).
+    """
+    if not expected_tracks or not slskd_files:
+        return True  # Nothing to check
+
+    # Extract and normalize expected titles
+    expected = [_normalize_title(t.get("title", "")) for t in expected_tracks]
+
+    # Extract and normalize titles from Soulseek filenames
+    slskd_titles = [_extract_title_from_filename(f.get("filename", "")) for f in slskd_files]
+
+    # For each expected title, find the best fuzzy match among Soulseek titles
+    mismatches = 0
+    for exp_title in expected:
+        if not exp_title:
+            continue
+        best_ratio = 0.0
+        for slskd_title in slskd_titles:
+            if not slskd_title:
+                continue
+            # Check substring containment first (fast path)
+            if exp_title in slskd_title or slskd_title in exp_title:
+                best_ratio = 1.0
+                break
+            ratio = difflib.SequenceMatcher(None, exp_title, slskd_title).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+        if best_ratio < 0.5:  # Lenient threshold — just catching obviously wrong tracks
+            mismatches += 1
+
+    max_allowed = max(1, len(expected) // 5)
+    if mismatches > max_allowed:
+        logger.info(f"CROSS-CHECK: {mismatches}/{len(expected)} tracks failed title match "
+                    f"(max allowed: {max_allowed})")
+        return False
+    return True
 
 
 def _tracks_are_trivial_match(local_items, candidate):
