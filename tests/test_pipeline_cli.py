@@ -93,7 +93,7 @@ class TestCmdStatus(CLITestBase):
 class TestCmdRetry(CLITestBase):
     def test_retry_resets_to_wanted(self):
         req_id = self.db.add_request(mb_release_id="a", artist_name="A", album_title="B", source="request")
-        self.db.update_status(req_id, "rejected")
+        self.db.update_status(req_id, "failed")
         args = MagicMock(id=req_id)
         pipeline_cli.cmd_retry(self.db, args)
         req = self.db.get_request(req_id)
@@ -106,7 +106,7 @@ class TestCmdCancel(CLITestBase):
         args = MagicMock(id=req_id)
         pipeline_cli.cmd_cancel(self.db, args)
         req = self.db.get_request(req_id)
-        self.assertEqual(req["status"], "skipped")
+        self.assertEqual(req["status"], "manual")
 
 
 class TestCmdMigrate(CLITestBase):

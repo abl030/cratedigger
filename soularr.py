@@ -91,6 +91,7 @@ beets_validation_enabled = False
 beets_harness_path = ""
 beets_distance_threshold = 0.15
 beets_staging_dir = "/mnt/virtio/Music/AI"
+audio_check_mode = "normal"  # strict | normal | off
 beets_tracking_file = "/mnt/virtio/Music/Re-download/beets-validated.jsonl"
 
 # === Pipeline DB Config ===
@@ -1188,6 +1189,19 @@ def process_completed_album(album_data, failed_grab):
             is_db_mode = pipeline_db_enabled and pipeline_db_source is not None
 
             if bv_result["valid"]:
+                # Audio integrity check before staging
+                audio_result = validate_audio(import_folder_fullpath, audio_check_mode)
+                if not audio_result["valid"]:
+                    bv_result = {
+                        "valid": False,
+                        "distance": bv_result.get("distance"),
+                        "mbid_found": bv_result.get("mbid_found"),
+                        "scenario": "audio_corrupt",
+                        "detail": audio_result["error"],
+                        "error": None,
+                    }
+
+            if bv_result["valid"]:
                 dest = stage_to_ai(album_data, import_folder_fullpath, beets_staging_dir)
                 log_validation_result(album_data, bv_result, dest)
                 if not is_db_mode:
@@ -1801,6 +1815,63 @@ def classify_for_staging(msg, mb_release_id):
     return result
 
 
+def validate_audio(folder_path, mode="normal"):
+    """Check audio integrity of downloaded files via ffmpeg full decode.
+
+    mode: "strict" = any error rejects, "normal" = reject if >10% fail, "off" = skip.
+    Returns: {"valid": bool, "error": str|None, "failed_files": list}
+    """
+    if mode == "off":
+        return {"valid": True, "error": None, "failed_files": []}
+
+    audio_exts = {"mp3", "flac", "m4a", "ogg", "opus", "wma", "aac", "alac", "wav"}
+    files = []
+    for f in os.listdir(folder_path):
+        ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+        if ext in audio_exts:
+            files.append(os.path.join(folder_path, f))
+
+    if not files:
+        return {"valid": True, "error": None, "failed_files": []}
+
+    failed = []
+    for filepath in files:
+        try:
+            result = sp.run(
+                ["ffmpeg", "-v", "error", "-i", filepath, "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode != 0 or result.stderr.strip():
+                err = result.stderr.strip()[:200]
+                failed.append((os.path.basename(filepath), err))
+        except sp.TimeoutExpired:
+            failed.append((os.path.basename(filepath), "ffmpeg timeout"))
+        except FileNotFoundError:
+            logger.error("AUDIO_CHECK: ffmpeg not found on PATH — skipping audio validation")
+            return {"valid": True, "error": None, "failed_files": []}
+
+    if not failed:
+        logger.info(f"AUDIO_CHECK: all {len(files)} files passed ({mode} mode)")
+        return {"valid": True, "error": None, "failed_files": []}
+
+    fail_pct = len(failed) / len(files)
+    detail = "; ".join(f"{name}: {err}" for name, err in failed[:5])
+    error_msg = f"{len(failed)}/{len(files)} files failed: {detail}"
+    logger.warning(f"AUDIO_CHECK: {error_msg}")
+
+    if mode == "strict":
+        reject = True
+    else:  # normal
+        reject = fail_pct > 0.10 or any(len(err) > 500 for _, err in failed)
+
+    if reject:
+        logger.warning(f"AUDIO_CHECK: → REJECT ({mode} mode, {fail_pct:.0%} failed)")
+        return {"valid": False, "error": error_msg, "failed_files": failed}
+    else:
+        logger.info(f"AUDIO_CHECK: → PASS ({mode} mode, {fail_pct:.0%} failed, below threshold)")
+        return {"valid": True, "error": None, "failed_files": failed}
+
+
 def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
     """Dry-run beets import with specific MBID. Returns validation result.
 
@@ -2206,6 +2277,7 @@ def main():
         beets_harness_path, \
         beets_distance_threshold, \
         beets_staging_dir, \
+        audio_check_mode, \
         beets_tracking_file, \
         pipeline_db_enabled, \
         pipeline_db_path, \
@@ -2347,6 +2419,7 @@ def main():
                                         fallback="/mnt/virtio/Music/harness/run_beets_harness.sh")
         beets_distance_threshold = config.getfloat("Beets Validation", "distance_threshold", fallback=0.15)
         beets_staging_dir = config.get("Beets Validation", "staging_dir", fallback="/mnt/virtio/Music/AI")
+        audio_check_mode = config.get("Beets Validation", "audio_check", fallback="normal")
         beets_tracking_file = config.get("Beets Validation", "tracking_file",
                                          fallback="/mnt/virtio/Music/Re-download/beets-validated.jsonl")
         if beets_validation_enabled:

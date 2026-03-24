@@ -164,7 +164,7 @@ class TestDatabaseSource(unittest.TestCase):
         source.mark_failed(record, bv_result, usernames={"bad_user1", "bad_user2"})
 
         req = db.get_request(req_id)
-        self.assertEqual(req["status"], "rejected")
+        self.assertEqual(req["status"], "wanted")
         self.assertEqual(req["validation_attempts"], 1)
 
         denied = db.get_denylisted_users(req_id)

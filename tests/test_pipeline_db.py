@@ -504,7 +504,7 @@ class TestImportFromJsonl(unittest.TestCase):
                 "album": "Gulag Orkestar",
                 "mb_release_id": "val-uuid",
                 "lidarr_album_id": 108842,
-                "status": "rejected",
+                "status": "failed",
                 "distance": 0.17,
                 "dest_path": None,
                 "error": None,
@@ -580,7 +580,7 @@ class TestResetToWanted(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        self.db.update_status(req_id, "rejected")
+        self.db.update_status(req_id, "failed")
         self.db.reset_to_wanted(req_id)
         req = self.db.get_request(req_id)
         self.assertEqual(req["status"], "wanted")
