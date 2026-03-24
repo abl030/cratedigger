@@ -1189,6 +1189,8 @@ def process_completed_album(album_data, failed_grab):
             is_db_mode = pipeline_db_enabled and pipeline_db_source is not None
 
             if bv_result["valid"]:
+                # Repair MP3 headers before audio validation
+                repair_mp3_headers(import_folder_fullpath)
                 # Audio integrity check before staging
                 audio_result = validate_audio(import_folder_fullpath, audio_check_mode)
                 if not audio_result["valid"]:
@@ -1813,6 +1815,26 @@ def classify_for_staging(msg, mb_release_id):
     result["detail"] = f"'{cur_album}' → '{best_album}', distance={best_dist}"
     logger.info(f"CLASSIFY: → REJECT {result['scenario']}: {result['detail']}")
     return result
+
+
+def repair_mp3_headers(folder_path):
+    """Run mp3val -f on all MP3 files to fix header issues before audio validation."""
+    for f in os.listdir(folder_path):
+        if not f.lower().endswith(".mp3"):
+            continue
+        filepath = os.path.join(folder_path, f)
+        try:
+            result = sp.run(["mp3val", "-f", filepath],
+                            capture_output=True, text=True, timeout=60)
+            if "FIXED" in result.stdout:
+                logger.info(f"MP3VAL: fixed {f}")
+        except FileNotFoundError:
+            logger.warning("MP3VAL: mp3val not found on PATH — skipping header repair")
+            return
+        except sp.TimeoutExpired:
+            logger.warning(f"MP3VAL: timeout on {f}")
+        except Exception:
+            logger.exception(f"MP3VAL: error on {f}")
 
 
 def validate_audio(folder_path, mode="normal"):
