@@ -1,8 +1,16 @@
+# **RUN `hostname` AT THE START OF EVERY CHAT. proxmox-vm = doc1, doc2 = doc2. You are likely already on doc1 — do NOT ssh to doc1 from doc1.**
+
+# **NEVER run destructive SQLite DDL (ALTER TABLE RENAME, DROP TABLE) directly against production databases. SQLite auto-commits DDL even inside BEGIN/COMMIT blocks — a failed migration WILL lose data. Always: (1) copy the DB file first (`cp pipeline.db pipeline.db.bak`), (2) test the migration on the copy, (3) only then run on production. This rule exists because a migration wiped the entire album_requests table (303 rows) on 2026-03-24.**
+
 # Soularr — Music Download Pipeline
 
 A Soulseek download engine driven by a SQLite pipeline database. Searches Soulseek via slskd, validates downloads against MusicBrainz via beets, auto-imports or stages for manual review.
 
 Forked from [mrusse/soularr](https://github.com/mrusse/soularr). This fork has diverged significantly — Lidarr is optional, replaced by a pipeline DB as the source of truth.
+
+## Beets
+
+Beets (v2.5.1, Nix-managed on doc1) is the library's source of truth — it matches albums against MusicBrainz, tags files, organizes them into `/Beets`, and maintains its own SQLite DB at `/mnt/virtio/Music/beets-library.db`. All automated imports go through the JSON harness (`harness/beets_harness.py` via `run_beets_harness.sh`), never raw `beet import`. The `musicbrainz` plugin MUST be in the plugins list or beets returns 0 candidates. Always match by `candidate_id` (MB release UUID), never `candidate_index`. For full details on config, commands, the harness protocol, and troubleshooting, read `docs/beets-primer.md`.
 
 ## Repository Structure
 

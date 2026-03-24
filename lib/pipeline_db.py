@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS album_requests (
         CHECK(status IN (
             'wanted', 'searching', 'downloading', 'downloaded',
             'validating', 'staged', 'converting', 'importing', 'imported',
-            'rejected', 'failed', 'review_needed', 'skipped'
+            'failed', 'review_needed', 'manual'
         )),
 
     -- Retry

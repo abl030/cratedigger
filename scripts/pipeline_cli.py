@@ -46,10 +46,24 @@ def fetch_mb_release(mb_release_id):
 
 
 def tracks_from_mb_release(release_data):
-    """Extract track list from MB API release response."""
+    """Extract track list from MB API release response.
+
+    Includes pregap tracks (to match beets' default behaviour) but excludes
+    data tracks (beets' ignore_data_tracks defaults to yes).
+    """
     tracks = []
     for medium in release_data.get("media", []):
         disc = medium.get("position", 1)
+        # Include pregap track if present (beets always counts these)
+        if "pregap" in medium:
+            pg = medium["pregap"]
+            length_ms = pg.get("length") or (pg.get("recording") or {}).get("length")
+            tracks.append({
+                "disc_number": disc,
+                "track_number": 0,
+                "title": pg.get("title", ""),
+                "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
+            })
         for track in medium.get("tracks", []):
             length_ms = track.get("length") or (track.get("recording") or {}).get("length")
             tracks.append({
@@ -133,7 +147,7 @@ def cmd_status(db, args):
     print(f"  Pipeline DB status ({total} total):\n")
     for status in ["wanted", "searching", "downloading", "downloaded",
                     "validating", "staged", "converting", "importing", "imported",
-                    "rejected", "failed", "review_needed", "skipped"]:
+                    "failed", "review_needed", "manual"]:
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")
@@ -153,8 +167,8 @@ def cmd_cancel(db, args):
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    db.update_status(args.id, "skipped")
-    print(f"  Cancelled: [{args.id}] {req['artist_name']} - {req['album_title']}")
+    db.update_status(args.id, "manual")
+    print(f"  Marked for manual download: [{args.id}] {req['artist_name']} - {req['album_title']}")
 
 
 def cmd_show(db, args):

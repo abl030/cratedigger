@@ -184,13 +184,13 @@ class DatabaseSource:
         )
 
     def mark_failed(self, album_record, bv_result, usernames=None):
-        """Mark album as rejected, log the failure, denylist users."""
+        """Log the failure and denylist users, but keep album wanted for retry."""
         request_id = album_record.get("_db_request_id")
         if not request_id:
             return
 
         db = self._get_db()
-        db.update_status(request_id, "rejected",
+        db.update_status(request_id, "wanted",
                          beets_distance=bv_result.get("distance"),
                          beets_scenario=bv_result.get("scenario"))
         db.record_attempt(request_id, "validation")
