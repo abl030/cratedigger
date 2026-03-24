@@ -1322,7 +1322,14 @@ def process_completed_album(album_data, failed_grab):
 def monitor_downloads(grab_list, failed_grab):
     def delete_album(reason):
         cancel_and_delete(grab_list[album_id]["files"])
-        logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']}")
+        usernames = set(f.get("username") for f in grab_list[album_id].get("files", []) if f.get("username"))
+        logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']}"
+                    + (f" | denylisted users: {', '.join(usernames)}" if usernames else ""))
+        if usernames:
+            if album_id not in cutoff_denylist:
+                cutoff_denylist[album_id] = set()
+            cutoff_denylist[album_id].update(usernames)
+            save_cutoff_denylist(cutoff_denylist_file_path, cutoff_denylist)
         del grab_list[album_id]
         if album_id > 0:  # Lidarr IDs are positive; DB IDs are negative
             failed_grab.append(lidarr.get_album(album_id))
