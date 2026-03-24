@@ -1190,7 +1190,8 @@ def process_completed_album(album_data, failed_grab):
             if bv_result["valid"]:
                 dest = stage_to_ai(album_data, import_folder_fullpath, beets_staging_dir)
                 log_validation_result(album_data, bv_result, dest)
-                unmonitor_album(album_data["album_id"])
+                if not is_db_mode:
+                    unmonitor_album(album_data["album_id"])
                 logger.info(f"STAGED: {album_data['artist']} - {album_data['title']} "
                             f"(scenario={bv_result.get('scenario')}, "
                             f"distance={bv_result['distance']:.4f}) → {dest}")
