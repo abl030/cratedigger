@@ -1045,6 +1045,9 @@ def find_download(album, grab_list):
             releases.remove(release)
             release_id = release["id"]
             all_tracks = get_album_tracks(album, release_id=release_id)
+            if not all_tracks:
+                logger.warning(f"No tracks for {artist_name} - {album['title']} (release {release_id}) — skipping")
+                continue
             found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
 
             if found:
