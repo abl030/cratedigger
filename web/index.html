@@ -20,9 +20,16 @@
   .artist-name { font-weight: 600; }
   .artist-dis { color: #777; font-size: 0.85em; }
   .rg-list { padding-left: 0; margin-top: 8px; }
+  .type-section { margin-bottom: 12px; }
+  .type-header { padding: 6px 10px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .type-header:hover { color: #8cb; }
+  .type-count { color: #555; font-weight: 400; }
+  .type-body { display: none; }
+  .type-body.open { display: block; }
   .rg { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #444; margin-bottom: 4px; cursor: pointer; border-radius: 0 6px 6px 0; }
   .rg:hover { background: #252525; }
   .rg-title { font-weight: 500; }
+  .rg-year { color: #777; font-size: 0.85em; }
   .rg-meta { color: #777; font-size: 0.8em; }
   .releases { margin-top: 6px; padding-left: 12px; }
   .release { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #222; border-radius: 6px; margin-bottom: 4px; }
@@ -124,20 +131,60 @@ async function loadArtist(id, el) {
     const r = await fetch(`${API}/api/artist/${id}`);
     const data = await r.json();
     const groups = data.release_groups || [];
-    // Sort: albums first, then by date
-    const typeOrder = {'Album': 0, 'EP': 1, 'Single': 2, '': 3};
-    groups.sort((a, b) => {
-      const ta = typeOrder[a.type] ?? 3, tb = typeOrder[b.type] ?? 3;
-      if (ta !== tb) return ta - tb;
-      return (a.first_release_date || '').localeCompare(b.first_release_date || '');
-    });
-    rgEl.innerHTML = groups.map(rg => `
-      <div class="rg" onclick="event.stopPropagation(); loadReleaseGroup('${rg.id}', this)">
-        <span class="rg-title">${esc(rg.title)}</span>
-        <span class="rg-meta">${rg.type || '?'} ${rg.first_release_date ? '(' + rg.first_release_date.slice(0,4) + ')' : ''}</span>
-        <div class="releases" id="rel-${rg.id}"></div>
-      </div>
-    `).join('');
+
+    // Classify into sections
+    function classify(rg) {
+      const st = rg.secondary_types || [];
+      if (st.includes('Compilation')) return 'Compilations';
+      if (st.includes('Live')) return 'Live';
+      if (st.includes('Remix')) return 'Remixes';
+      if (st.includes('DJ-mix')) return 'DJ Mixes';
+      if (st.includes('Demo')) return 'Demos';
+      if (st.length > 0) return 'Other';
+      // Primary types only
+      if (rg.type === 'Album') return 'Albums';
+      if (rg.type === 'EP') return 'EPs';
+      if (rg.type === 'Single') return 'Singles';
+      if (rg.type === 'Broadcast') return 'Other';
+      return 'Other';
+    }
+
+    const sectionOrder = ['Albums', 'EPs', 'Singles', 'Compilations', 'Live', 'Remixes', 'DJ Mixes', 'Demos', 'Other'];
+    const sections = {};
+    for (const rg of groups) {
+      const sec = classify(rg);
+      if (!sections[sec]) sections[sec] = [];
+      sections[sec].push(rg);
+    }
+    // Sort within each section by date
+    for (const sec of Object.values(sections)) {
+      sec.sort((a, b) => (a.first_release_date || '').localeCompare(b.first_release_date || ''));
+    }
+
+    rgEl.innerHTML = sectionOrder
+      .filter(s => sections[s])
+      .map(s => {
+        const rgs = sections[s];
+        const isAlbums = s === 'Albums';
+        return `
+          <div class="type-section">
+            <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
+              ${s} <span class="type-count">${rgs.length}</span>
+            </div>
+            <div class="type-body${isAlbums ? ' open' : ''}">
+              ${rgs.map(rg => {
+                const year = rg.first_release_date ? rg.first_release_date.slice(0,4) : '';
+                return `
+                  <div class="rg" onclick="event.stopPropagation(); loadReleaseGroup('${rg.id}', this)">
+                    <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>
+                    <div class="releases" id="rel-${rg.id}"></div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }).join('');
   } catch (e) { rgEl.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
