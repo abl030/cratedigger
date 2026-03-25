@@ -1235,6 +1235,15 @@ def process_completed_album(album_data, failed_grab):
                                 logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
                                 for line in result.stdout.strip().split("\n"):
                                     logger.info(f"  {line}")
+                                # Clean up staged directory — beets already moved files
+                                # to /Beets, or pre-flight found a dupe (files unneeded)
+                                if os.path.isdir(dest):
+                                    shutil.rmtree(dest)
+                                    logger.info(f"  Cleaned up staged dir: {dest}")
+                                    parent = os.path.dirname(dest)
+                                    if os.path.isdir(parent) and not os.listdir(parent):
+                                        os.rmdir(parent)
+                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
                             else:
                                 logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
                                              f"{album_data['artist']} - {album_data['title']}")
