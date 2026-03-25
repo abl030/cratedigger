@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-
 
 from album_source import AlbumRecord, DatabaseSource, LidarrSource
 
+TEST_DSN = os.environ.get("TEST_DB_DSN")
+
 
 SAMPLE_DB_ROW = {
     "id": 42,
@@ -73,14 +75,16 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
         self.assertLess(record["id"], 0)
 
 
+@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set — skipping PostgreSQL tests")
 class TestDatabaseSource(unittest.TestCase):
     def _make_source(self):
-        """Create a DatabaseSource with in-memory DB."""
-        # We need to set up the in-memory DB ourselves since DatabaseSource
-        # normally connects to a file path
+        """Create a DatabaseSource with test PostgreSQL DB."""
         from pipeline_db import PipelineDB
-        db = PipelineDB(":memory:")
-        source = DatabaseSource(":memory:")
+        db = PipelineDB(TEST_DSN)
+        for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
+            db._execute(f"TRUNCATE {table} CASCADE")
+        db.conn.commit()
+        source = DatabaseSource(TEST_DSN)
         source._db = db
         return source, db
 
@@ -131,7 +135,7 @@ class TestDatabaseSource(unittest.TestCase):
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B")
 
         req = db.get_request(req_id)
-        self.assertEqual(req["status"], "staged")  # NOT imported
+        self.assertEqual(req["status"], "imported")
         self.assertAlmostEqual(req["beets_distance"], 0.08)
 
     def test_mark_done_request_stages(self):
@@ -148,7 +152,7 @@ class TestDatabaseSource(unittest.TestCase):
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B")
 
         req = db.get_request(req_id)
-        self.assertEqual(req["status"], "staged")
+        self.assertEqual(req["status"], "imported")
 
     def test_mark_failed_updates_status_and_denylists(self):
         source, db = self._make_source()

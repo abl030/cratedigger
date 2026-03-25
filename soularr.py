@@ -96,7 +96,7 @@ beets_tracking_file = "/mnt/virtio/Music/Re-download/beets-validated.jsonl"
 
 # === Pipeline DB Config ===
 pipeline_db_enabled = False
-pipeline_db_path = "/mnt/virtio/Music/pipeline.db"
+pipeline_db_dsn = "postgresql://soularr@localhost/soularr"
 pipeline_db_source = None  # DatabaseSource instance when enabled
 
 # === Runtime State & Caches ===
@@ -1245,12 +1245,8 @@ def process_completed_album(album_data, failed_grab):
                                 # import_one.py already set DB to review_needed
                         except sp.TimeoutExpired:
                             logger.error(f"AUTO-IMPORT TIMEOUT: {album_data['artist']} - {album_data['title']}")
-                            if request_id:
-                                pipeline_db_source.update_status(album_data, "review_needed")
                         except Exception:
                             logger.exception(f"AUTO-IMPORT ERROR: {album_data['artist']} - {album_data['title']}")
-                            if request_id:
-                                pipeline_db_source.update_status(album_data, "review_needed")
                     else:
                         # Redownload or high distance: stage only, user reviews manually
                         pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
@@ -2192,7 +2188,7 @@ def main():
         audio_check_mode, \
         beets_tracking_file, \
         pipeline_db_enabled, \
-        pipeline_db_path, \
+        pipeline_db_dsn, \
         pipeline_db_source
 
     # Let's allow some overrides to be passed to the script
@@ -2340,11 +2336,12 @@ def main():
 
         # Pipeline DB config
         pipeline_db_enabled = config.getboolean("Pipeline DB", "enabled", fallback=False)
-        pipeline_db_path = config.get("Pipeline DB", "db_path", fallback="/mnt/virtio/Music/pipeline.db")
+        pipeline_db_dsn = config.get("Pipeline DB", "dsn",
+                                     fallback="postgresql://soularr@localhost/soularr")
         if pipeline_db_enabled:
             from album_source import DatabaseSource
-            pipeline_db_source = DatabaseSource(pipeline_db_path)
-            logger.info(f"Pipeline DB ENABLED: {pipeline_db_path}")
+            pipeline_db_source = DatabaseSource(pipeline_db_dsn)
+            logger.info(f"Pipeline DB ENABLED: {pipeline_db_dsn}")
 
         # Init directory cache. The wide search returns all the data we need. This prevents us from hammering the users on the Soulseek network
         search_cache = {}

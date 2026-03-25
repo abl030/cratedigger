@@ -239,7 +239,8 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
         from pipeline_db import PipelineDB
-        db = PipelineDB()
+        dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
+        db = PipelineDB(dsn)
         extra = {}
         if imported_path:
             extra["imported_path"] = imported_path
@@ -284,16 +285,11 @@ def main():
         sys.exit(3)
 
     # --- Convert FLAC → V0 ---
-    if request_id:
-        update_pipeline_db(request_id, "converting")
-
     print(f"[CONVERT] {args.path}")
     converted, failed = convert_flac_to_v0(args.path, dry_run=args.dry_run)
     print(f"  Converted {converted}, failed {failed}")
     if failed > 0:
         print("[ERROR] Conversion failures — aborting", file=sys.stderr)
-        if request_id:
-            update_pipeline_db(request_id, "review_needed")
         sys.exit(1)
 
     if args.dry_run:
@@ -301,24 +297,17 @@ def main():
         sys.exit(0)
 
     # --- Import ---
-    if request_id:
-        update_pipeline_db(request_id, "importing")
-
     print(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     rc = run_import(args.path, mbid)
 
     if rc != 0:
         print(f"[ERROR] Import failed (rc={rc})", file=sys.stderr)
-        if request_id:
-            update_pipeline_db(request_id, "review_needed")
         sys.exit(rc)
 
     # --- Post-flight verification ---
     result = postflight_verify(mbid)
     if not result:
         print(f"[ERROR] Post-flight: MBID {mbid} NOT in beets DB after import", file=sys.stderr)
-        if request_id:
-            update_pipeline_db(request_id, "review_needed")
         sys.exit(2)
 
     album_id, track_count, album_path = result

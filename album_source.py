@@ -10,7 +10,6 @@ search/download/matching code works without modification.
 import json
 import logging
 import os
-import sqlite3
 import urllib.request
 import urllib.error
 
@@ -89,20 +88,18 @@ class AlbumRecord:
 class DatabaseSource:
     """Fetch wanted albums from pipeline.db."""
 
-    def __init__(self, db_path):
-        self.db_path = db_path
+    def __init__(self, dsn):
+        self.dsn = dsn
         self._db = None
 
     def _get_db(self):
         if self._db is None:
-            # Import pipeline_db from the lib/ directory in the same repo.
-            # At runtime this is the Nix store path (e.g., /nix/store/.../lib/).
             import sys
             lib_dir = os.path.join(os.path.dirname(__file__), "lib")
             if lib_dir not in sys.path:
                 sys.path.insert(0, lib_dir)
             from pipeline_db import PipelineDB
-            self._db = PipelineDB(self.db_path)
+            self._db = PipelineDB(self.dsn)
         return self._db
 
     def get_wanted(self, limit=None):
@@ -153,25 +150,18 @@ class DatabaseSource:
         db.update_status(request_id, status, **extra)
 
     def mark_done(self, album_record, bv_result, dest_path=None):
-        """Mark album as completed (staged or imported based on source type)."""
+        """Mark album as imported."""
         request_id = album_record.get("_db_request_id")
-        source = album_record.get("_db_source", "request")
         if not request_id:
             return
 
         db = self._get_db()
         distance = bv_result.get("distance")
 
-        if source == "redownload":
-            # Always stage for manual review
-            db.update_status(request_id, "staged",
-                             beets_distance=distance,
-                             beets_scenario=bv_result.get("scenario"))
-        else:
-            # Request: mark as staged (auto-import happens in process_completed_album)
-            db.update_status(request_id, "staged",
-                             beets_distance=distance,
-                             beets_scenario=bv_result.get("scenario"))
+        db.update_status(request_id, "imported",
+                         beets_distance=distance,
+                         beets_scenario=bv_result.get("scenario"),
+                         imported_path=dest_path)
 
         # Log the download
         db.log_download(
@@ -179,7 +169,7 @@ class DatabaseSource:
             beets_distance=distance,
             beets_scenario=bv_result.get("scenario"),
             beets_detail=bv_result.get("detail"),
-            outcome="staged",
+            outcome="success",
             staged_path=dest_path,
         )
 

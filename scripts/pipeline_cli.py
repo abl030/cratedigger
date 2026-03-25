@@ -8,7 +8,6 @@ Commands:
     retry <id>          Reset a failed/rejected request to wanted
     cancel <id>         Set a request to skipped
     show <id>           Show full details of a request
-    migrate             Import existing JSONL files into the DB
 
 Usage:
     python3 scripts/pipeline_cli.py status
@@ -26,10 +25,9 @@ import urllib.request
 import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-from pipeline_db import PipelineDB, DEFAULT_DB_PATH
+from pipeline_db import PipelineDB, DEFAULT_DSN
 
 MB_API = "http://192.168.1.35:5200/ws/2"
-REDOWNLOAD_DIR = "/mnt/virtio/Music/Re-download"
 
 
 def fetch_mb_release(mb_release_id):
@@ -145,9 +143,7 @@ def cmd_status(db, args):
         return
     total = sum(counts.values())
     print(f"  Pipeline DB status ({total} total):\n")
-    for status in ["wanted", "searching", "downloading", "downloaded",
-                    "validating", "staged", "converting", "importing", "imported",
-                    "failed", "review_needed", "manual"]:
+    for status in ["wanted", "imported", "manual"]:
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")
@@ -220,90 +216,10 @@ def cmd_show(db, args):
             print(f"    {d['username']}: {d['reason']}")
 
 
-def cmd_migrate(db, args):
-    """Import existing JSONL tracking files into the pipeline DB."""
-    pending_path = os.path.join(REDOWNLOAD_DIR, "pending-lidarr.jsonl")
-    processed_path = os.path.join(REDOWNLOAD_DIR, "processed-lidarr.jsonl")
-    validated_path = os.path.join(REDOWNLOAD_DIR, "beets-validated.jsonl")
-
-    if args.dry_run:
-        print("  [DRY RUN] Would migrate:")
-        for path, label in [
-            (pending_path, "pending"),
-            (processed_path, "processed"),
-            (validated_path, "validated"),
-        ]:
-            if os.path.exists(path):
-                with open(path) as f:
-                    count = sum(1 for line in f if line.strip())
-                print(f"    {label}: {count} entries from {path}")
-        return
-
-    total = 0
-
-    # 1. Import processed entries first (they have the most metadata)
-    if os.path.exists(processed_path):
-        count = db.import_from_jsonl(processed_path, source="redownload", status="searching")
-        print(f"  Imported {count} from processed-lidarr.jsonl")
-        total += count
-
-    # 2. Import pending entries (new entries not yet pushed to Lidarr)
-    if os.path.exists(pending_path):
-        count = db.import_from_jsonl(pending_path, source="redownload", status="wanted")
-        print(f"  Imported {count} from pending-lidarr.jsonl")
-        total += count
-
-    # 3. Import validated entries (download log data — add request if missing)
-    if os.path.exists(validated_path):
-        with open(validated_path) as f:
-            dl_count = 0
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                mb_id = entry.get("mb_release_id")
-                if not mb_id:
-                    continue
-
-                # Ensure request exists
-                req = db.get_request_by_mb_release_id(mb_id)
-                if not req:
-                    req_id = db.add_request(
-                        mb_release_id=mb_id,
-                        artist_name=entry.get("artist", "Unknown"),
-                        album_title=entry.get("album", "Unknown"),
-                        source="redownload",
-                        lidarr_album_id=entry.get("lidarr_album_id"),
-                    )
-                    total += 1
-                else:
-                    req_id = req["id"]
-
-                # Log as download history
-                db.log_download(
-                    request_id=req_id,
-                    beets_distance=entry.get("distance"),
-                    beets_scenario=entry.get("scenario"),
-                    outcome="staged" if entry.get("status") == "staged" else "rejected",
-                    staged_path=entry.get("dest_path"),
-                    error_message=entry.get("error"),
-                )
-                dl_count += 1
-        print(f"  Imported {dl_count} download log entries from beets-validated.jsonl")
-
-    print(f"\n  Migration complete: {total} new album requests")
-
-    # Show status summary
-    counts = db.count_by_status()
-    print(f"  DB now contains: {sum(counts.values())} total requests")
-    for status, cnt in sorted(counts.items()):
-        print(f"    {status}: {cnt}")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
-    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to pipeline.db")
+    parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
     sub = parser.add_subparsers(dest="command")
 
     # list
@@ -331,16 +247,12 @@ def main():
     p_show = sub.add_parser("show", help="Show full details of a request")
     p_show.add_argument("id", type=int, help="Request ID")
 
-    # migrate
-    p_migrate = sub.add_parser("migrate", help="Import existing JSONL files into DB")
-    p_migrate.add_argument("--dry-run", action="store_true", help="Preview without changes")
-
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    db = PipelineDB(args.db)
+    db = PipelineDB(args.dsn)
 
     commands = {
         "list": cmd_list,
@@ -349,7 +261,6 @@ def main():
         "retry": cmd_retry,
         "cancel": cmd_cancel,
         "show": cmd_show,
-        "migrate": cmd_migrate,
     }
     commands[args.command](db, args)
     db.close()

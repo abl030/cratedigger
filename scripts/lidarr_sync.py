@@ -20,7 +20,7 @@ import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.dirname(__file__))
-from pipeline_db import PipelineDB, DEFAULT_DB_PATH
+from pipeline_db import PipelineDB, DEFAULT_DSN
 
 LIDARR_URL = os.environ.get("LIDARR_URL", "https://lidarr.ablz.au")
 LIDARR_KEY_FILE = os.path.join(os.path.dirname(__file__), "..", "secrets", "lidarr-api-key")
@@ -165,12 +165,12 @@ def sync_once(db, api_key, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Sync Lidarr wanted albums to pipeline DB")
-    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to pipeline.db")
+    parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
     parser.add_argument("--dry-run", action="store_true", help="Preview without changes")
     parser.add_argument("--watch", action="store_true", help="Poll every 5 minutes")
     args = parser.parse_args()
 
-    db = PipelineDB(args.db)
+    db = PipelineDB(args.dsn)
     api_key = get_lidarr_api_key()
 
     if args.watch:

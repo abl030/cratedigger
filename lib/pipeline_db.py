@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Pipeline DB — SQLite-based source of truth for the download pipeline.
+"""Pipeline DB — PostgreSQL-based source of truth for the download pipeline.
 
-Replaces the JSONL tracking files (pending-lidarr.jsonl, processed-lidarr.jsonl,
-beets-validated.jsonl) with a proper database. Shared between doc1 (scripts) and
-doc2 (Soularr) via virtiofs.
+Connects to PostgreSQL via a DSN (connection string). Both doc1 and doc2
+connect over the network — no more SQLite file locking issues on virtiofs.
 
 Usage:
     from pipeline_db import PipelineDB
-    db = PipelineDB("/mnt/virtio/Music/pipeline.db")
+    db = PipelineDB("postgresql://soularr@192.168.1.35/soularr")
     db.add_request(mb_release_id="...", artist_name="...", album_title="...", source="redownload")
 """
 
-import json
-import sqlite3
+import os
 from datetime import datetime, timedelta, timezone
 
-DEFAULT_DB_PATH = "/mnt/virtio/Music/pipeline.db"
+import psycopg2
+import psycopg2.extras
+
+DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
 
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
@@ -23,7 +24,7 @@ BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS album_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
 
     -- Identity (at least one required)
     mb_release_id TEXT UNIQUE,
@@ -45,18 +46,14 @@ CREATE TABLE IF NOT EXISTS album_requests (
 
     -- Status lifecycle
     status TEXT NOT NULL DEFAULT 'wanted'
-        CHECK(status IN (
-            'wanted', 'searching', 'downloading', 'downloaded',
-            'validating', 'staged', 'converting', 'importing', 'imported',
-            'failed', 'review_needed', 'manual'
-        )),
+        CHECK(status IN ('wanted', 'imported', 'manual')),
 
     -- Retry
     search_attempts INTEGER NOT NULL DEFAULT 0,
     download_attempts INTEGER NOT NULL DEFAULT 0,
     validation_attempts INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at TEXT,
-    next_retry_after TEXT,
+    last_attempt_at TIMESTAMPTZ,
+    next_retry_after TIMESTAMPTZ,
 
     -- Import result
     beets_distance REAL,
@@ -68,12 +65,12 @@ CREATE TABLE IF NOT EXISTS album_requests (
     lidarr_artist_id INTEGER,
 
     -- Timestamps
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS album_tracks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
     disc_number INTEGER NOT NULL DEFAULT 1,
     track_number INTEGER NOT NULL,
@@ -82,7 +79,7 @@ CREATE TABLE IF NOT EXISTS album_tracks (
 );
 
 CREATE TABLE IF NOT EXISTS download_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
     soulseek_username TEXT,
     filetype TEXT,
@@ -90,19 +87,19 @@ CREATE TABLE IF NOT EXISTS download_log (
     beets_distance REAL,
     beets_scenario TEXT,
     beets_detail TEXT,
-    valid INTEGER,
-    outcome TEXT CHECK(outcome IN ('staged', 'rejected', 'failed', 'timeout')),
+    valid BOOLEAN,
+    outcome TEXT CHECK(outcome IN ('success', 'rejected', 'failed', 'timeout')),
     staged_path TEXT,
     error_message TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS source_denylist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
     username TEXT NOT NULL,
     reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(request_id, username)
 );
 
@@ -116,28 +113,26 @@ CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
 
 
 class PipelineDB:
-    """SQLite-backed pipeline database."""
+    """PostgreSQL-backed pipeline database."""
 
-    def __init__(self, db_path=DEFAULT_DB_PATH):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        # Use delete journal mode (NOT WAL) — WAL uses mmap which
-        # corrupts on virtiofs. Delete mode uses plain file I/O,
-        # same as beets which runs fine on the same filesystem.
-        self.conn.execute("PRAGMA journal_mode = DELETE")
+    def __init__(self, dsn=None):
+        self.dsn = dsn or DEFAULT_DSN
+        self.conn = psycopg2.connect(self.dsn)
+        self.conn.autocommit = False
         self.init_schema()
 
     def init_schema(self):
-        self.conn.executescript(SCHEMA_SQL)
+        with self.conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
         self.conn.commit()
 
     def close(self):
         self.conn.close()
 
     def _execute(self, sql, params=()):
-        return self.conn.execute(sql, params)
+        cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        return cur
 
     # --- album_requests CRUD ---
 
@@ -148,7 +143,7 @@ class PipelineDB:
                     source_path=None, reasoning=None,
                     lidarr_album_id=None, lidarr_artist_id=None,
                     status="wanted"):
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        now = datetime.now(timezone.utc)
         cur = self._execute("""
             INSERT INTO album_requests (
                 mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
@@ -156,7 +151,8 @@ class PipelineDB:
                 source, source_path, reasoning, status,
                 lidarr_album_id, lidarr_artist_id,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (
             mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
             artist_name, album_title, year, country, format,
@@ -164,41 +160,43 @@ class PipelineDB:
             lidarr_album_id, lidarr_artist_id,
             now, now,
         ))
+        row = cur.fetchone()
         self.conn.commit()
-        return cur.lastrowid
+        return row["id"]
 
     def get_request(self, request_id):
-        row = self._execute(
-            "SELECT * FROM album_requests WHERE id = ?", (request_id,)
-        ).fetchone()
-        return dict(row) if row else None
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE id = %s", (request_id,)
+        )
+        return dict(cur.fetchone()) if cur.rowcount else None
 
     def get_request_by_mb_release_id(self, mb_release_id):
-        row = self._execute(
-            "SELECT * FROM album_requests WHERE mb_release_id = ?", (mb_release_id,)
-        ).fetchone()
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
+        )
+        row = cur.fetchone()
         return dict(row) if row else None
 
     def delete_request(self, request_id):
-        self._execute("DELETE FROM album_requests WHERE id = ?", (request_id,))
+        self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 
     def update_status(self, request_id, status, **extra):
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-        sets = ["status = ?", "updated_at = ?"]
+        now = datetime.now(timezone.utc)
+        sets = ["status = %s", "updated_at = %s"]
         params = [status, now]
         for key, val in extra.items():
-            sets.append(f"{key} = ?")
+            sets.append(f"{key} = %s")
             params.append(val)
         params.append(request_id)
         self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = ?",
+            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
             params,
         )
         self.conn.commit()
 
     def reset_to_wanted(self, request_id):
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        now = datetime.now(timezone.utc)
         self._execute("""
             UPDATE album_requests
             SET status = 'wanted',
@@ -207,47 +205,47 @@ class PipelineDB:
                 validation_attempts = 0,
                 next_retry_after = NULL,
                 last_attempt_at = NULL,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = %s
+            WHERE id = %s
         """, (now, request_id))
         self.conn.commit()
 
     # --- Query methods ---
 
     def get_wanted(self, limit=None):
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        now = datetime.now(timezone.utc)
         sql = """
             SELECT * FROM album_requests
             WHERE status = 'wanted'
-              AND (next_retry_after IS NULL OR next_retry_after <= ?)
+              AND (next_retry_after IS NULL OR next_retry_after <= %s)
             ORDER BY RANDOM()
         """
         if limit:
             sql += f" LIMIT {int(limit)}"
-        rows = self._execute(sql, (now,)).fetchall()
-        return [dict(r) for r in rows]
+        cur = self._execute(sql, (now,))
+        return [dict(r) for r in cur.fetchall()]
 
     def get_by_status(self, status):
-        rows = self._execute(
-            "SELECT * FROM album_requests WHERE status = ? ORDER BY created_at ASC",
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE status = %s ORDER BY created_at ASC",
             (status,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     def count_by_status(self):
-        rows = self._execute(
+        cur = self._execute(
             "SELECT status, COUNT(*) as cnt FROM album_requests GROUP BY status"
-        ).fetchall()
-        return {r["status"]: r["cnt"] for r in rows}
+        )
+        return {r["status"]: r["cnt"] for r in cur.fetchall()}
 
     # --- Track management ---
 
     def set_tracks(self, request_id, tracks):
-        self._execute("DELETE FROM album_tracks WHERE request_id = ?", (request_id,))
+        self._execute("DELETE FROM album_tracks WHERE request_id = %s", (request_id,))
         for t in tracks:
             self._execute("""
                 INSERT INTO album_tracks (request_id, disc_number, track_number, title, length_seconds)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             """, (
                 request_id,
                 t.get("disc_number", 1),
@@ -258,13 +256,13 @@ class PipelineDB:
         self.conn.commit()
 
     def get_tracks(self, request_id):
-        rows = self._execute("""
+        cur = self._execute("""
             SELECT disc_number, track_number, title, length_seconds
             FROM album_tracks
-            WHERE request_id = ?
+            WHERE request_id = %s
             ORDER BY disc_number, track_number
-        """, (request_id,)).fetchall()
-        return [dict(r) for r in rows]
+        """, (request_id,))
+        return [dict(r) for r in cur.fetchall()]
 
     # --- Download logging ---
 
@@ -277,7 +275,7 @@ class PipelineDB:
                 request_id, soulseek_username, filetype, download_path,
                 beets_distance, beets_scenario, beets_detail, valid,
                 outcome, staged_path, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             request_id, soulseek_username, filetype, download_path,
             beets_distance, beets_scenario, beets_detail, valid,
@@ -286,37 +284,37 @@ class PipelineDB:
         self.conn.commit()
 
     def get_download_history(self, request_id):
-        rows = self._execute("""
+        cur = self._execute("""
             SELECT * FROM download_log
-            WHERE request_id = ?
+            WHERE request_id = %s
             ORDER BY id DESC
-        """, (request_id,)).fetchall()
-        return [dict(r) for r in rows]
+        """, (request_id,))
+        return [dict(r) for r in cur.fetchall()]
 
     # --- Denylist ---
 
     def add_denylist(self, request_id, username, reason=None):
         self._execute("""
-            INSERT OR IGNORE INTO source_denylist (request_id, username, reason)
-            VALUES (?, ?, ?)
+            INSERT INTO source_denylist (request_id, username, reason)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (request_id, username) DO NOTHING
         """, (request_id, username, reason))
         self.conn.commit()
 
     def get_denylisted_users(self, request_id):
-        rows = self._execute("""
+        cur = self._execute("""
             SELECT username, reason, created_at
             FROM source_denylist
-            WHERE request_id = ?
+            WHERE request_id = %s
             ORDER BY created_at ASC
-        """, (request_id,)).fetchall()
-        return [dict(r) for r in rows]
+        """, (request_id,))
+        return [dict(r) for r in cur.fetchall()]
 
     # --- Retry logic ---
 
     def record_attempt(self, request_id, attempt_type):
         col = f"{attempt_type}_attempts"
         now = datetime.now(timezone.utc)
-        now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
 
         # Get current attempt count
         req = self.get_request(request_id)
@@ -328,49 +326,14 @@ class PipelineDB:
             BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
             BACKOFF_MAX_MINUTES,
         )
-        next_retry = (now + timedelta(minutes=backoff_minutes)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        next_retry = now + timedelta(minutes=backoff_minutes)
 
         self._execute(f"""
             UPDATE album_requests
-            SET {col} = ?,
-                last_attempt_at = ?,
-                next_retry_after = ?,
-                updated_at = ?
-            WHERE id = ?
-        """, (new_count, now_str, next_retry, now_str, request_id))
+            SET {col} = %s,
+                last_attempt_at = %s,
+                next_retry_after = %s,
+                updated_at = %s
+            WHERE id = %s
+        """, (new_count, now, next_retry, now, request_id))
         self.conn.commit()
-
-    # --- JSONL migration ---
-
-    def import_from_jsonl(self, jsonl_path, source="redownload", status="wanted"):
-        count = 0
-        with open(jsonl_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-
-                mb_release_id = entry.get("mb_release_id")
-                if not mb_release_id:
-                    continue
-
-                # Skip if already exists
-                if self.get_request_by_mb_release_id(mb_release_id):
-                    continue
-
-                self.add_request(
-                    mb_release_id=mb_release_id,
-                    mb_release_group_id=entry.get("release_group_id"),
-                    mb_artist_id=entry.get("artist_mb_id"),
-                    artist_name=entry.get("artist", "Unknown"),
-                    album_title=entry.get("album", "Unknown"),
-                    source=source,
-                    source_path=entry.get("source_path"),
-                    reasoning=entry.get("reasoning"),
-                    lidarr_album_id=entry.get("lidarr_album_id"),
-                    lidarr_artist_id=entry.get("lidarr_artist_id"),
-                    status=status,
-                )
-                count += 1
-        return count
