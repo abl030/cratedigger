@@ -14,6 +14,8 @@ import operator
 import configparser
 import logging
 import json
+import urllib.request
+import urllib.error
 from datetime import datetime
 import copy
 import requests
@@ -98,6 +100,11 @@ beets_tracking_file = "/mnt/virtio/Music/Re-download/beets-validated.jsonl"
 pipeline_db_enabled = False
 pipeline_db_dsn = "postgresql://soularr@localhost/soularr"
 pipeline_db_source = None  # DatabaseSource instance when enabled
+
+# === Meelo Config ===
+meelo_url = None  # e.g. "http://192.168.1.29:5001" — set via config to enable post-import scan
+meelo_username = None
+meelo_password = None
 
 # === Runtime State & Caches ===
 search_cache = {}
@@ -1237,6 +1244,7 @@ def process_completed_album(album_data, failed_grab):
                                     logger.info(f"  {line}")
                                 # Ensure DB status is set even if import_one's DB update failed
                                 pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest)
+                                trigger_meelo_scan()
                                 # Clean up staged directory — beets already moved files
                                 # to /Beets, or pre-flight found a dupe (files unneeded)
                                 if os.path.isdir(dest):
@@ -1896,6 +1904,34 @@ def unmonitor_album(album_id):
         logger.exception(f"Failed to unmonitor album {album_id}")
 
 
+def trigger_meelo_scan():
+    """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
+    if not meelo_url:
+        return
+    try:
+        # Get JWT
+        login_data = json.dumps({"username": meelo_username, "password": meelo_password}).encode()
+        login_req = urllib.request.Request(
+            f"{meelo_url}/api/auth/login",
+            data=login_data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(login_req, timeout=10) as resp:
+            jwt = json.loads(resp.read())["access_token"]
+
+        # Trigger scan of beets library only
+        scan_req = urllib.request.Request(
+            f"{meelo_url}/scanner/scan?library=beets",
+            method="POST",
+            headers={"Authorization": f"Bearer {jwt}"},
+        )
+        with urllib.request.urlopen(scan_req, timeout=10) as resp:
+            resp.read()
+        logger.info("MEELO: triggered beets library scan")
+    except Exception as e:
+        logger.warning(f"MEELO: scan trigger failed: {e}")
+
+
 def log_validation_result(album_data, result, dest_path=None):
     """Append beets validation result to tracking JSONL."""
     entry = {
@@ -2207,7 +2243,10 @@ def main():
         beets_tracking_file, \
         pipeline_db_enabled, \
         pipeline_db_dsn, \
-        pipeline_db_source
+        pipeline_db_source, \
+        meelo_url, \
+        meelo_username, \
+        meelo_password
 
     # Let's allow some overrides to be passed to the script
     parser = argparse.ArgumentParser(description="""Soularr reads all of your "wanted" albums/artists from Lidarr and downloads them using Slskd""")
@@ -2360,6 +2399,13 @@ def main():
             from album_source import DatabaseSource
             pipeline_db_source = DatabaseSource(pipeline_db_dsn)
             logger.info(f"Pipeline DB ENABLED: {pipeline_db_dsn}")
+
+        # Meelo config — trigger library scan after auto-import
+        meelo_url = config.get("Meelo", "url", fallback=None)
+        meelo_username = config.get("Meelo", "username", fallback=None)
+        meelo_password = config.get("Meelo", "password", fallback=None)
+        if meelo_url:
+            logger.info(f"Meelo post-import scan ENABLED: {meelo_url}")
 
         # Init directory cache. The wide search returns all the data we need. This prevents us from hammering the users on the Soulseek network
         search_cache = {}
