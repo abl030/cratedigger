@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Lidarr sync bridge — import Lidarr's monitored+missing albums into pipeline DB.
+"""Lidarr sync bridge — import Lidarr's monitored albums into pipeline DB.
 
-Fetches all monitored albums from Lidarr that are missing or cutoff_unmet,
-inserts them into the pipeline DB with source='request'.
+Lidarr is used as a mobile-friendly album picker — the pipeline DB is the SSOT.
+On each sync: pull monitored+missing albums → add to pipeline DB → unmonitor in Lidarr.
 
 Usage:
     python3 scripts/lidarr_sync.py                  # one-shot sync
     python3 scripts/lidarr_sync.py --dry-run         # preview without changes
     python3 scripts/lidarr_sync.py --watch            # poll every 5 min
+    python3 scripts/lidarr_sync.py --reset-all        # unmonitor ALL albums in Lidarr
 """
 
 import argparse
@@ -48,6 +49,17 @@ def lidarr_get(endpoint, api_key, params=None):
         return json.loads(resp.read())
 
 
+def lidarr_put(endpoint, api_key, data):
+    """PUT to Lidarr API."""
+    url = f"{LIDARR_URL}/api/v1/{endpoint}"
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(url, data=body, method="PUT")
+    req.add_header("X-Api-Key", api_key)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
 def get_wanted_albums(api_key, missing=True):
     """Fetch all wanted (missing or cutoff_unmet) albums from Lidarr."""
     albums = []
@@ -72,6 +84,44 @@ def extract_monitored_release(album):
         if release.get("monitored", False):
             return release.get("foreignReleaseId")
     return None
+
+
+def unmonitor_album(api_key, album):
+    """Unmonitor an album in Lidarr so it doesn't show up as wanted again."""
+    album["monitored"] = False
+    try:
+        lidarr_put(f"album/{album['id']}", api_key, album)
+    except Exception as e:
+        print(f"  [WARN] Failed to unmonitor album {album['id']}: {e}", file=sys.stderr)
+
+
+def unmonitor_all_albums(api_key, dry_run=False):
+    """Unmonitor every album in Lidarr. One-off reset."""
+    print("Fetching all albums from Lidarr...")
+    albums = lidarr_get("album", api_key)
+    monitored = [a for a in albums if a.get("monitored", False)]
+    print(f"  {len(monitored)} monitored albums out of {len(albums)} total")
+
+    if dry_run:
+        for a in monitored[:10]:
+            artist = a.get("artist", {}).get("artistName", "?")
+            print(f"  [DRY] Would unmonitor: {artist} - {a.get('title', '?')}")
+        if len(monitored) > 10:
+            print(f"  ... and {len(monitored) - 10} more")
+        return
+
+    count = 0
+    for a in monitored:
+        a["monitored"] = False
+        try:
+            lidarr_put(f"album/{a['id']}", api_key, a)
+            count += 1
+        except Exception as e:
+            artist = a.get("artist", {}).get("artistName", "?")
+            print(f"  [WARN] Failed to unmonitor {artist} - {a.get('title', '?')}: {e}",
+                  file=sys.stderr)
+
+    print(f"  Unmonitored {count} albums")
 
 
 def fetch_mb_tracks(mb_release_id):
@@ -122,9 +172,11 @@ def sync_once(db, api_key, dry_run=False):
         if not mb_release_id:
             continue
 
-        # Skip if already in DB
+        # Skip if already in DB — but unmonitor in Lidarr if still monitored
         existing = db.get_request_by_mb_release_id(mb_release_id)
         if existing:
+            if not dry_run and album.get("monitored", False):
+                unmonitor_album(api_key, album)
             skipped += 1
             continue
 
@@ -156,6 +208,10 @@ def sync_once(db, api_key, dry_run=False):
         if tracks:
             db.set_tracks(req_id, tracks)
 
+        # Unmonitor in Lidarr — pipeline DB is now the SSOT
+        if not dry_run:
+            unmonitor_album(api_key, album)
+
         added += 1
         print(f"  [ADD] {artist_name} - {album_title} ({len(tracks)} tracks)")
 
@@ -168,10 +224,17 @@ def main():
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
     parser.add_argument("--dry-run", action="store_true", help="Preview without changes")
     parser.add_argument("--watch", action="store_true", help="Poll every 5 minutes")
+    parser.add_argument("--reset-all", action="store_true",
+                        help="Unmonitor ALL albums in Lidarr (one-off reset)")
     args = parser.parse_args()
 
-    db = PipelineDB(args.dsn)
     api_key = get_lidarr_api_key()
+
+    if args.reset_all:
+        unmonitor_all_albums(api_key, dry_run=args.dry_run)
+        return
+
+    db = PipelineDB(args.dsn)
 
     if args.watch:
         print("Watching Lidarr (polling every 5 min)...")
