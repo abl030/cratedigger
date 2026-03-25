@@ -82,24 +82,38 @@ def get_official_release_group_ids(artist_mbid):
 
 def get_release_group_releases(rg_mbid):
     """Get all releases for a release group. Returns list of release summaries."""
-    data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?inc=releases+media&fmt=json")
+    # First get the release group metadata
+    rg_data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
+
+    # Then browse all releases (paginated — the lookup endpoint caps at 25)
     releases = []
-    for r in data.get("releases", []):
-        track_count = sum(m.get("track-count", 0) for m in r.get("media", []))
-        formats = [(m.get("format") or "?") for m in r.get("media", [])]
-        releases.append({
-            "id": r["id"],
-            "title": r.get("title", ""),
-            "date": r.get("date", ""),
-            "country": r.get("country", ""),
-            "status": r.get("status", ""),
-            "track_count": track_count,
-            "format": ", ".join(formats) if formats else "?",
-            "media_count": len(r.get("media", [])),
-        })
+    offset = 0
+    while True:
+        data = _get(
+            f"{MB_API_BASE}/release?release-group={rg_mbid}"
+            f"&inc=media&fmt=json&limit=100&offset={offset}"
+        )
+        for r in data.get("releases", []):
+            track_count = sum(m.get("track-count", 0) for m in r.get("media", []))
+            formats = [(m.get("format") or "?") for m in r.get("media", [])]
+            releases.append({
+                "id": r["id"],
+                "title": r.get("title", ""),
+                "date": r.get("date", ""),
+                "country": r.get("country", ""),
+                "status": r.get("status", ""),
+                "track_count": track_count,
+                "format": ", ".join(formats) if formats else "?",
+                "media_count": len(r.get("media", [])),
+            })
+        total = data.get("release-count", 0)
+        offset += 100
+        if offset >= total:
+            break
+
     return {
-        "title": data.get("title", ""),
-        "type": data.get("primary-type", ""),
+        "title": rg_data.get("title", ""),
+        "type": rg_data.get("primary-type", ""),
         "releases": releases,
     }
 
