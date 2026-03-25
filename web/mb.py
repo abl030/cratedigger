@@ -40,15 +40,18 @@ def get_artist_release_groups(artist_mbid):
     while True:
         data = _get(
             f"{MB_API_BASE}/release-group?artist={artist_mbid}"
-            f"&fmt=json&limit=100&offset={offset}"
+            f"&inc=artist-credits&fmt=json&limit=100&offset={offset}"
         )
         for rg in data.get("release-groups", []):
+            ac = rg.get("artist-credit", [])
+            credit_name = " / ".join(a.get("name", "?") for a in ac) if ac else ""
             results.append({
                 "id": rg["id"],
                 "title": rg.get("title", ""),
                 "type": rg.get("primary-type", ""),
                 "secondary_types": rg.get("secondary-types", []),
                 "first_release_date": rg.get("first-release-date", ""),
+                "artist_credit": credit_name,
             })
         total = data.get("release-group-count", 0)
         offset += 100

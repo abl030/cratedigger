@@ -114,7 +114,7 @@ async function searchArtists(q) {
       return;
     }
     el.innerHTML = data.artists.map(a => `
-      <div class="artist" onclick="loadArtist('${a.id}', this)">
+      <div class="artist" onclick="loadArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}', this)">
         <span class="artist-name">${esc(a.name)}</span>
         ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
         <div class="rg-list" id="rg-${a.id}"></div>
@@ -123,7 +123,7 @@ async function searchArtists(q) {
   } catch (e) { el.innerHTML = '<div class="loading">Search failed</div>'; }
 }
 
-async function loadArtist(id, el) {
+async function loadArtist(id, artistName, el) {
   const rgEl = document.getElementById('rg-' + id);
   if (rgEl.innerHTML) { rgEl.innerHTML = ''; return; }
   rgEl.innerHTML = '<div class="loading">Loading discography...</div>';
@@ -132,7 +132,19 @@ async function loadArtist(id, el) {
     const data = await r.json();
     const groups = data.release_groups || [];
 
-    // Classify into sections
+    // Split: own work vs appearances
+    const nameLC = artistName.toLowerCase();
+    const own = [], appearances = [];
+    for (const rg of groups) {
+      const credit = (rg.artist_credit || '').toLowerCase();
+      // Own work if credit starts with artist name or is exactly the artist
+      if (credit === nameLC || credit.startsWith(nameLC + ' /') || credit.startsWith(nameLC + ',') || !credit) {
+        own.push(rg);
+      } else {
+        appearances.push(rg);
+      }
+    }
+
     function classify(rg) {
       const st = rg.secondary_types || [];
       if (st.includes('Compilation')) return 'Compilations';
@@ -141,50 +153,65 @@ async function loadArtist(id, el) {
       if (st.includes('DJ-mix')) return 'DJ Mixes';
       if (st.includes('Demo')) return 'Demos';
       if (st.length > 0) return 'Other';
-      // Primary types only
       if (rg.type === 'Album') return 'Albums';
       if (rg.type === 'EP') return 'EPs';
       if (rg.type === 'Single') return 'Singles';
-      if (rg.type === 'Broadcast') return 'Other';
       return 'Other';
     }
 
-    const sectionOrder = ['Albums', 'EPs', 'Singles', 'Compilations', 'Live', 'Remixes', 'DJ Mixes', 'Demos', 'Other'];
-    const sections = {};
-    for (const rg of groups) {
-      const sec = classify(rg);
-      if (!sections[sec]) sections[sec] = [];
-      sections[sec].push(rg);
-    }
-    // Sort within each section by date
-    for (const sec of Object.values(sections)) {
-      sec.sort((a, b) => (a.first_release_date || '').localeCompare(b.first_release_date || ''));
+    function renderSection(rgs, defaultOpen) {
+      const sectionOrder = ['Albums', 'EPs', 'Singles', 'Compilations', 'Live', 'Remixes', 'DJ Mixes', 'Demos', 'Other'];
+      const sections = {};
+      for (const rg of rgs) {
+        const sec = classify(rg);
+        if (!sections[sec]) sections[sec] = [];
+        sections[sec].push(rg);
+      }
+      for (const sec of Object.values(sections)) {
+        sec.sort((a, b) => (a.first_release_date || '').localeCompare(b.first_release_date || ''));
+      }
+      return sectionOrder
+        .filter(s => sections[s])
+        .map(s => {
+          const items = sections[s];
+          const isOpen = defaultOpen && s === 'Albums';
+          return `
+            <div class="type-section">
+              <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
+                ${s} <span class="type-count">${items.length}</span>
+              </div>
+              <div class="type-body${isOpen ? ' open' : ''}">
+                ${items.map(rg => {
+                  const year = rg.first_release_date ? rg.first_release_date.slice(0,4) : '';
+                  const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
+                    ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
+                  return `
+                    <div class="rg" onclick="event.stopPropagation(); loadReleaseGroup('${rg.id}', this)">
+                      <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}
+                      <div class="releases" id="rel-${rg.id}"></div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          `;
+        }).join('');
     }
 
-    rgEl.innerHTML = sectionOrder
-      .filter(s => sections[s])
-      .map(s => {
-        const rgs = sections[s];
-        const isAlbums = s === 'Albums';
-        return `
-          <div class="type-section">
-            <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
-              ${s} <span class="type-count">${rgs.length}</span>
-            </div>
-            <div class="type-body${isAlbums ? ' open' : ''}">
-              ${rgs.map(rg => {
-                const year = rg.first_release_date ? rg.first_release_date.slice(0,4) : '';
-                return `
-                  <div class="rg" onclick="event.stopPropagation(); loadReleaseGroup('${rg.id}', this)">
-                    <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>
-                    <div class="releases" id="rel-${rg.id}"></div>
-                  </div>
-                `;
-              }).join('')}
-            </div>
+    let html = renderSection(own, true);
+    if (appearances.length > 0) {
+      html += `
+        <div class="type-section">
+          <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#777;">
+            Appearances <span class="type-count">${appearances.length}</span>
           </div>
-        `;
-      }).join('');
+          <div class="type-body">
+            ${renderSection(appearances, false)}
+          </div>
+        </div>
+      `;
+    }
+    rgEl.innerHTML = html;
   } catch (e) { rgEl.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
