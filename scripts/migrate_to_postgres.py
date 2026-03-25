@@ -74,6 +74,9 @@ def migrate(sqlite_path, pg_dsn, dry_run=False):
     pg_conn = db.conn
     cur = pg_conn.cursor()
 
+    # Track valid request IDs for FK filtering
+    valid_ids = {req["id"] for req in requests}
+
     for req in requests:
         cur.execute("""
             INSERT INTO album_requests (
@@ -104,6 +107,8 @@ def migrate(sqlite_path, pg_dsn, dry_run=False):
         ))
 
     for t in tracks:
+        if t["request_id"] not in valid_ids:
+            continue
         cur.execute("""
             INSERT INTO album_tracks (id, request_id, disc_number, track_number, title, length_seconds)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -111,6 +116,8 @@ def migrate(sqlite_path, pg_dsn, dry_run=False):
               t["title"], t["length_seconds"]))
 
     for dl in downloads:
+        if dl["request_id"] not in valid_ids:
+            continue
         cur.execute("""
             INSERT INTO download_log (
                 id, request_id, soulseek_username, filetype, download_path,
@@ -125,6 +132,8 @@ def migrate(sqlite_path, pg_dsn, dry_run=False):
         ))
 
     for d in denylists:
+        if d["request_id"] not in valid_ids:
+            continue
         cur.execute("""
             INSERT INTO source_denylist (id, request_id, username, reason, created_at)
             VALUES (%s, %s, %s, %s, %s)
