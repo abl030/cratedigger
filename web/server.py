@@ -40,6 +40,35 @@ def check_beets_library(mbids):
     return {r[0] for r in rows}
 
 
+def get_library_artist(artist_name):
+    """Get albums by an artist from the beets library."""
+    if not beets_db_path or not os.path.exists(beets_db_path):
+        return []
+    conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+    rows = conn.execute(
+        "SELECT album, albumartist, year, mb_albumid, disc_total, "
+        "       (SELECT COUNT(*) FROM items WHERE items.album_id = albums.id) as track_count "
+        "FROM albums WHERE albumartist LIKE ? COLLATE NOCASE "
+        "ORDER BY year, album",
+        (f"%{artist_name}%",),
+    ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        # Check for discogs — beets stores it in the 'data_source' flexible attr
+        # or we can check if mb_albumid is empty
+        has_mb = bool(r[3])
+        results.append({
+            "album": r[0],
+            "albumartist": r[1],
+            "year": r[2],
+            "mb_albumid": r[3],
+            "track_count": r[5],
+            "source": "musicbrainz" if has_mb else "discogs",
+        })
+    return results
+
+
 def check_pipeline(mbids):
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → status."""
     result = {}
@@ -93,6 +122,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 artists = mb_api.search_artists(q)
                 self._json({"artists": artists})
+
+            elif path == "/api/library/artist":
+                name = params.get("name", [""])[0].strip()
+                if not name:
+                    self._error("Missing parameter 'name'")
+                    return
+                albums = get_library_artist(name)
+                self._json({"albums": albums})
 
             elif re.match(r"^/api/artist/[a-f0-9-]+$", path):
                 artist_id = path.split("/")[-1]

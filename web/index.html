@@ -20,6 +20,14 @@
   .artist-name { font-weight: 600; }
   .artist-dis { color: #777; font-size: 0.85em; }
   .rg-list { padding-left: 0; margin-top: 8px; }
+  .library-section { background: #1a1a2a; border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+  .library-header { color: #6af; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .library-album { padding: 6px 10px; background: #222233; border-radius: 4px; margin-bottom: 3px; font-size: 0.85em; display: flex; justify-content: space-between; }
+  .library-album-title { flex: 1; }
+  .library-album-meta { color: #666; font-size: 0.8em; }
+  .library-src { font-size: 0.7em; padding: 1px 6px; border-radius: 3px; }
+  .library-src-mb { background: #1a3a2a; color: #6d6; }
+  .library-src-discogs { background: #3a2a1a; color: #da6; }
   .type-section { margin-bottom: 12px; }
   .type-header { padding: 6px 10px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .type-header:hover { color: #8cb; }
@@ -128,9 +136,14 @@ async function loadArtist(id, artistName, el) {
   if (rgEl.innerHTML) { rgEl.innerHTML = ''; return; }
   rgEl.innerHTML = '<div class="loading">Loading discography...</div>';
   try {
-    const r = await fetch(`${API}/api/artist/${id}`);
+    const [r, libR] = await Promise.all([
+      fetch(`${API}/api/artist/${id}`),
+      fetch(`${API}/api/library/artist?name=${encodeURIComponent(artistName)}`),
+    ]);
     const data = await r.json();
+    const libData = await libR.json();
     const groups = data.release_groups || [];
+    const libraryAlbums = libData.albums || [];
 
     // Split: own work vs appearances
     const nameLC = artistName.toLowerCase();
@@ -198,7 +211,29 @@ async function loadArtist(id, artistName, el) {
         }).join('');
     }
 
-    let html = renderSection(own, true);
+    // Library section — what you already own
+    let html = '';
+    if (libraryAlbums.length > 0) {
+      const discogs = libraryAlbums.filter(a => a.source === 'discogs');
+      const mb = libraryAlbums.filter(a => a.source === 'musicbrainz');
+      html += `<div class="library-section">
+        <div class="library-header">In Library (${libraryAlbums.length})</div>
+        ${mb.map(a => `
+          <div class="library-album">
+            <span class="library-album-title">${a.year || '?'} ${esc(a.album)} (${a.track_count}t)</span>
+            <span class="library-src library-src-mb">MB</span>
+          </div>
+        `).join('')}
+        ${discogs.map(a => `
+          <div class="library-album">
+            <span class="library-album-title">${a.year || '?'} ${esc(a.album)} (${a.track_count}t)</span>
+            <span class="library-src library-src-discogs">Discogs</span>
+          </div>
+        `).join('')}
+      </div>`;
+    }
+
+    html += renderSection(own, true);
     if (appearances.length > 0) {
       html += `
         <div class="type-section">
