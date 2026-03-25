@@ -1329,7 +1329,14 @@ def monitor_downloads(grab_list, failed_grab):
     def delete_album(reason):
         cancel_and_delete(grab_list[album_id]["files"])
         usernames = set(f.get("username") for f in grab_list[album_id].get("files", []) if f.get("username"))
-        logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']}")
+        files = grab_list[album_id]["files"]
+        total = len(files)
+        completed = sum(1 for f in files if f.get("status") and f["status"].get("state") == "Completed, Succeeded")
+        elapsed = time.time() - grab_list[album_id].get("count_start", time.time())
+        elapsed_min = elapsed / 60
+        logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']} "
+                     f"({completed}/{total} files done, {elapsed_min:.1f}min elapsed, "
+                     f"stalled_timeout={stalled_timeout}s, remote_queue_timeout={remote_queue_timeout}s)")
         for username in usernames:
             key = f"{album_id}:{username}"
             download_fail_counts[key] = download_fail_counts.get(key, 0) + 1
