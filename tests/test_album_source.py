@@ -5,7 +5,10 @@ import sys
 import unittest
 from unittest.mock import patch, MagicMock
 
-# Add both soularr root and tagging-workspace scripts to path
+# Bootstrap ephemeral PostgreSQL if available
+sys.path.insert(0, os.path.dirname(__file__))
+import conftest  # noqa: F401
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-workspace", "scripts"))
 

@@ -11,6 +11,10 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 
+# Bootstrap ephemeral PostgreSQL if available
+sys.path.insert(0, os.path.dirname(__file__))
+import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
