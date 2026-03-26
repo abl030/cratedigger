@@ -352,7 +352,7 @@ async function loadReleaseGroup(id, el) {
       if (rel.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
       const canAdd = !rel.in_library && !rel.pipeline_status;
       return `
-        <div class="release">
+        <div class="release" onclick="event.stopPropagation()">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta"><a href="https://musicbrainz.org/release/${rel.id}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:#777;text-decoration:none;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</a></div>
