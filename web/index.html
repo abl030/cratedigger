@@ -87,6 +87,12 @@
   .p-group-body.collapsed { display: none; }
   .r-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #1a4a2a; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
   .r-item:hover { background: #252525; }
+  .r-item.beets-missing { border-left-color: #a33; }
+  .r-item.beets-mismatch { border-left-color: #a93; }
+  .beets-status { font-size: 0.7em; padding: 2px 6px; border-radius: 3px; font-weight: 600; }
+  .beets-ok { background: #1a3a2a; color: #6d6; }
+  .beets-missing { background: #3a1a1a; color: #d66; }
+  .beets-mismatch { background: #3a2a1a; color: #da6; }
   .r-date-header { padding: 6px 12px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; }
   .loading { color: #666; padding: 20px; text-align: center; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
@@ -402,11 +408,22 @@ async function loadRecents() {
         const fmt = item.format || '?';
         const year = item.year || '?';
         const time = (item.updated_at || '').slice(11, 16);
+        let beetsClass = '';
+        let beetsLabel = '';
+        if (!item.in_beets) {
+          beetsClass = 'beets-missing';
+          beetsLabel = '<span class="beets-status beets-missing">not in beets</span>';
+        } else if (item.pipeline_tracks > 0 && item.beets_tracks < item.pipeline_tracks) {
+          beetsClass = 'beets-mismatch';
+          beetsLabel = `<span class="beets-status beets-mismatch">${item.beets_tracks}/${item.pipeline_tracks} tracks</span>`;
+        } else {
+          beetsLabel = `<span class="beets-status beets-ok">${item.beets_tracks}t in beets</span>`;
+        }
         return `
-          <div class="r-item" onclick="toggleDetail(${item.id})">
+          <div class="r-item ${beetsClass}" onclick="toggleDetail(${item.id})">
             <div class="p-top">
               <div>
-                <div class="p-title">${esc(item.album_title)}</div>
+                <div class="p-title">${esc(item.album_title)} ${beetsLabel}</div>
                 <div class="p-artist">${esc(item.artist_name)}</div>
               </div>
               <div style="font-size:0.75em;color:#666;">${time}</div>

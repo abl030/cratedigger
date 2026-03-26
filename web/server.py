@@ -40,6 +40,21 @@ def check_beets_library(mbids):
     return {r[0] for r in rows}
 
 
+def check_beets_library_detail(mbids):
+    """Check beets library with track counts. Returns dict of mbid → {track_count}."""
+    if not beets_db_path or not os.path.exists(beets_db_path):
+        return {}
+    conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+    placeholders = ",".join("?" for _ in mbids)
+    rows = conn.execute(
+        f"SELECT a.mb_albumid, "
+        f"       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count "
+        f"FROM albums a WHERE a.mb_albumid IN ({placeholders})", mbids
+    ).fetchall()
+    conn.close()
+    return {r[0]: {"beets_tracks": r[1]} for r in rows}
+
+
 def get_library_artist(artist_name):
     """Get albums by an artist from the beets library."""
     if not beets_db_path or not os.path.exists(beets_db_path):
@@ -186,7 +201,23 @@ class Handler(BaseHTTPRequestHandler):
                         for k, v in r.items()
                     }
                 recent = db.get_recent(limit=20)
-                self._json({"recent": [serialize_req(r) for r in recent]})
+                # Check beets library for each and get track counts
+                mbids = [r["mb_release_id"] for r in recent if r.get("mb_release_id")]
+                beets_info = check_beets_library_detail(mbids) if mbids else {}
+                serialized = []
+                for r in recent:
+                    item = serialize_req(r)
+                    mbid = r.get("mb_release_id")
+                    pipeline_tracks = len(db.get_tracks(r["id"]))
+                    item["pipeline_tracks"] = pipeline_tracks
+                    if mbid and mbid in beets_info:
+                        item["in_beets"] = True
+                        item["beets_tracks"] = beets_info[mbid]["beets_tracks"]
+                    else:
+                        item["in_beets"] = False
+                        item["beets_tracks"] = 0
+                    serialized.append(item)
+                self._json({"recent": serialized})
 
             elif path == "/api/pipeline/all":
                 def serialize_request(r):
