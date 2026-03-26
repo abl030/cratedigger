@@ -179,6 +179,18 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 })
 
+            elif path == "/api/pipeline/all":
+                def serialize_request(r):
+                    return {
+                        k: str(v) if hasattr(v, 'isoformat') else v
+                        for k, v in r.items()
+                    }
+                counts = db.count_by_status()
+                result = {"counts": counts}
+                for status in ("wanted", "imported", "manual"):
+                    result[status] = [serialize_request(r) for r in db.get_by_status(status)]
+                self._json(result)
+
             elif re.match(r"^/api/pipeline/\d+$", path):
                 req_id = int(path.split("/")[-1])
                 req = db.get_request(req_id)
@@ -249,6 +261,31 @@ class Handler(BaseHTTPRequestHandler):
                     "album": release["title"],
                     "tracks": len(release.get("tracks", [])),
                 })
+
+            elif path == "/api/pipeline/update":
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                req_id = body.get("id")
+                new_status = body.get("status", "").strip()
+
+                if not req_id or not new_status:
+                    self._error("Missing id or status")
+                    return
+                if new_status not in ("wanted", "imported", "manual"):
+                    self._error(f"Invalid status: {new_status}")
+                    return
+
+                req = db.get_request(int(req_id))
+                if not req:
+                    self._error("Not found", 404)
+                    return
+
+                if new_status == "wanted" and req["status"] != "wanted":
+                    db.reset_to_wanted(int(req_id))
+                else:
+                    db.update_status(int(req_id), new_status)
+
+                self._json({"status": "ok", "id": req_id, "new_status": new_status})
 
             else:
                 self._error("Not found", 404)

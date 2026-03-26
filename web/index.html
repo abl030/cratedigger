@@ -54,13 +54,37 @@
   .badge-imported { background: #1a4a2a; color: #6d6; }
   .badge-manual { background: #3a3a3a; color: #aaa; }
   .status-card { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 12px; }
-  .status-counts { display: flex; gap: 16px; margin-bottom: 16px; }
-  .count { text-align: center; }
-  .count-num { font-size: 2em; font-weight: 700; }
+  .status-counts { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .count { text-align: center; padding: 8px 16px; background: #222; border-radius: 6px; cursor: pointer; border: 1px solid #333; flex: 1; min-width: 80px; }
+  .count.active { border-color: #6a9; background: #2a3a2a; }
+  .count-num { font-size: 1.8em; font-weight: 700; }
   .count-label { font-size: 0.8em; color: #777; }
-  .wanted-item { padding: 8px 12px; background: #222; border-radius: 6px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
-  .wanted-info { font-size: 0.9em; }
-  .wanted-source { color: #777; font-size: 0.75em; }
+  .p-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #444; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
+  .p-item:hover { background: #252525; }
+  .p-item.src-request { border-left-color: #6a9; }
+  .p-item.src-redownload { border-left-color: #a96; }
+  .p-item.src-manual { border-left-color: #96a; }
+  .p-top { display: flex; justify-content: space-between; align-items: center; }
+  .p-title { font-weight: 500; font-size: 0.95em; }
+  .p-artist { color: #999; font-size: 0.85em; }
+  .p-meta { color: #666; font-size: 0.75em; margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .p-detail { background: #191919; padding: 10px 12px; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; border-left: 3px solid #333; }
+  .p-detail.open { display: block; }
+  .p-detail-row { display: flex; gap: 8px; margin-bottom: 4px; font-size: 0.8em; }
+  .p-detail-label { color: #666; min-width: 80px; }
+  .p-detail-value { color: #bbb; }
+  .p-tracks { margin-top: 8px; }
+  .p-track { font-size: 0.78em; color: #888; padding: 1px 0; }
+  .p-history { margin-top: 8px; }
+  .p-hist-item { font-size: 0.75em; color: #777; padding: 3px 0; border-bottom: 1px solid #222; }
+  .p-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .p-btn { padding: 4px 12px; border: 1px solid #444; background: #222; color: #aaa; border-radius: 4px; cursor: pointer; font-size: 0.78em; }
+  .p-btn:hover { background: #333; color: #eee; }
+  .p-btn.active-status { border-color: #6a9; color: #6a9; background: #2a3a2a; }
+  .p-group-header { padding: 8px 12px; color: #6a9; font-size: 0.85em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; display: flex; justify-content: space-between; cursor: pointer; }
+  .p-group-header:hover { color: #8cb; }
+  .p-group-body { }
+  .p-group-body.collapsed { display: none; }
   .loading { color: #666; padding: 20px; text-align: center; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
@@ -339,33 +363,203 @@ async function addRelease(mbid, btn) {
   }
 }
 
+let pipelineData = null;
+let pipelineFilter = 'all';
+
 async function loadPipeline() {
   const el = document.getElementById('pipeline-content');
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
-    const r = await fetch(`${API}/api/pipeline/status`);
-    const data = await r.json();
-    const counts = data.counts || {};
-    const wanted = data.wanted || [];
-    el.innerHTML = `
-      <div class="status-card">
-        <div class="status-counts">
-          <div class="count"><div class="count-num">${counts.wanted || 0}</div><div class="count-label">Wanted</div></div>
-          <div class="count"><div class="count-num">${counts.imported || 0}</div><div class="count-label">Imported</div></div>
-          <div class="count"><div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div></div>
+    const r = await fetch(`${API}/api/pipeline/all`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    pipelineData = await r.json();
+    renderPipeline();
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load pipeline</div>'; }
+}
+
+function setFilter(f) {
+  pipelineFilter = f;
+  renderPipeline();
+}
+
+function renderPipeline() {
+  const el = document.getElementById('pipeline-content');
+  const data = pipelineData;
+  if (!data) return;
+  const counts = data.counts || {};
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  let items = [];
+  if (pipelineFilter === 'all') {
+    items = [...(data.wanted || []), ...(data.imported || []), ...(data.manual || [])];
+  } else {
+    items = data[pipelineFilter] || [];
+  }
+
+  // Group by artist
+  const byArtist = {};
+  for (const item of items) {
+    const artist = item.artist_name || 'Unknown';
+    if (!byArtist[artist]) byArtist[artist] = [];
+    byArtist[artist].push(item);
+  }
+  // Sort artists alphabetically, albums by year within each
+  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
+  for (const a of artists) {
+    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
+  }
+
+  el.innerHTML = `
+    <div class="status-card">
+      <div class="status-counts">
+        <div class="count ${pipelineFilter === 'all' ? 'active' : ''}" onclick="setFilter('all')">
+          <div class="count-num">${total}</div><div class="count-label">All</div>
+        </div>
+        <div class="count ${pipelineFilter === 'wanted' ? 'active' : ''}" onclick="setFilter('wanted')">
+          <div class="count-num">${counts.wanted || 0}</div><div class="count-label">Wanted</div>
+        </div>
+        <div class="count ${pipelineFilter === 'imported' ? 'active' : ''}" onclick="setFilter('imported')">
+          <div class="count-num">${counts.imported || 0}</div><div class="count-label">Imported</div>
+        </div>
+        <div class="count ${pipelineFilter === 'manual' ? 'active' : ''}" onclick="setFilter('manual')">
+          <div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div>
         </div>
       </div>
-      <h2 style="font-size:1.1em;margin-bottom:8px;color:#aaa;">Wanted (${wanted.length})</h2>
-      ${wanted.map(w => `
-        <div class="wanted-item">
-          <div>
-            <div class="wanted-info">${esc(w.artist)} - ${esc(w.album)}</div>
-            <div class="wanted-source">${w.source} - ${w.created_at.slice(0,10)}</div>
-          </div>
+    </div>
+    ${artists.map(artist => `
+      <div class="p-group-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+        ${esc(artist)} <span style="color:#555;font-weight:400;">${byArtist[artist].length}</span>
+      </div>
+      <div class="p-group-body">
+        ${byArtist[artist].map(item => renderPipelineItem(item)).join('')}
+      </div>
+    `).join('')}
+    ${artists.length === 0 ? '<div class="loading">No items</div>' : ''}
+  `;
+}
+
+function renderPipelineItem(item) {
+  const statusBadge = item.status === 'wanted' ? '<span class="badge badge-wanted">wanted</span>'
+    : item.status === 'imported' ? '<span class="badge badge-imported">imported</span>'
+    : '<span class="badge badge-manual">manual</span>';
+  const srcClass = 'src-' + (item.source || 'request');
+  const year = item.year || '?';
+  const fmt = item.format || '?';
+  const country = item.country || '';
+  const date = (item.created_at || '').slice(0, 10);
+  const attempts = [];
+  if (item.search_attempts) attempts.push(`${item.search_attempts} search`);
+  if (item.download_attempts) attempts.push(`${item.download_attempts} dl`);
+  if (item.validation_attempts) attempts.push(`${item.validation_attempts} val`);
+  const attemptStr = attempts.length ? attempts.join(', ') : '';
+  const dist = item.beets_distance != null ? `dist ${item.beets_distance.toFixed(3)}` : '';
+
+  return `
+    <div class="p-item ${srcClass}" onclick="toggleDetail(${item.id})">
+      <div class="p-top">
+        <div>
+          <div class="p-title">${esc(item.album_title)}${statusBadge}</div>
         </div>
-      `).join('')}
-    `;
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load pipeline status</div>'; }
+        <div style="font-size:0.75em;color:#666;">#${item.id}</div>
+      </div>
+      <div class="p-meta">
+        <span>${year}</span>
+        <span>${fmt}</span>
+        ${country ? `<span>${country}</span>` : ''}
+        <span>${item.source}</span>
+        <span>${date}</span>
+        ${attemptStr ? `<span>${attemptStr}</span>` : ''}
+        ${dist ? `<span>${dist}</span>` : ''}
+      </div>
+    </div>
+    <div class="p-detail" id="detail-${item.id}"></div>
+  `;
+}
+
+async function toggleDetail(id) {
+  const el = document.getElementById('detail-' + id);
+  if (el.classList.contains('open')) {
+    el.classList.remove('open');
+    return;
+  }
+  el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
+  el.classList.add('open');
+  try {
+    const r = await fetch(`${API}/api/pipeline/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const req = data.request;
+    const tracks = data.tracks || [];
+    const history = data.history || [];
+
+    let html = '';
+    // Reasoning
+    if (req.reasoning) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">Reasoning</span><span class="p-detail-value">${esc(req.reasoning)}</span></div>`;
+    }
+    // MB link
+    if (req.mb_release_id) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">MusicBrainz</span><span class="p-detail-value"><a href="https://musicbrainz.org/release/${req.mb_release_id}" target="_blank" rel="noopener" style="color:#6af;">${req.mb_release_id.slice(0,8)}...</a></span></div>`;
+    }
+    if (req.imported_path) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">Imported to</span><span class="p-detail-value" style="font-size:0.9em;">${esc(req.imported_path)}</span></div>`;
+    }
+    if (req.beets_scenario) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">Scenario</span><span class="p-detail-value">${esc(req.beets_scenario)}</span></div>`;
+    }
+
+    // Tracks
+    if (tracks.length > 0) {
+      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Tracks (' + tracks.length + ')</div>';
+      html += tracks.map(t => {
+        const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
+        return `<div class="p-track">${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</div>`;
+      }).join('');
+      html += '</div>';
+    }
+
+    // Download history
+    if (history.length > 0) {
+      html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
+      html += history.map(h => {
+        const outcome = h.outcome || '?';
+        const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
+        const user = h.soulseek_username || '?';
+        const date = (h.created_at || '').slice(0, 16).replace('T', ' ');
+        const dist = h.beets_distance != null ? ` dist=${h.beets_distance.toFixed(3)}` : '';
+        const err = h.error_message ? ` - ${h.error_message}` : '';
+        return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''} ${date}${dist}${err}</div>`;
+      }).join('');
+      html += '</div>';
+    }
+
+    // Status change buttons
+    html += `<div class="p-actions">
+      <span class="p-detail-label" style="line-height:28px;">Set status:</span>
+      <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'wanted')">wanted</button>
+      <button class="p-btn ${req.status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'imported')">imported</button>
+      <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'manual')">manual</button>
+    </div>`;
+
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load details</div>'; }
+}
+
+async function updateStatus(id, newStatus) {
+  try {
+    const r = await fetch(`${API}/api/pipeline/update`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id, status: newStatus}),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      toast(`#${id} → ${newStatus}`);
+      loadPipeline();
+    } else {
+      toast(data.error || 'Update failed', true);
+    }
+  } catch (e) { toast('Update failed', true); }
 }
 
 function esc(s) {
