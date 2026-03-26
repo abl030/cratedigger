@@ -200,7 +200,7 @@ async function loadArtist(id, artistName, el) {
   try {
     const [r, libR] = await Promise.all([
       fetch(`${API}/api/artist/${id}`),
-      fetch(`${API}/api/library/artist?name=${encodeURIComponent(artistName)}`),
+      fetch(`${API}/api/library/artist?name=${encodeURIComponent(artistName)}&mbid=${id}`),
     ]);
     const data = await r.json();
     const libData = await libR.json();

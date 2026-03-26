@@ -71,18 +71,28 @@ def check_beets_by_artist_album(artist, album):
     return rows[0][0] if rows else None
 
 
-def get_library_artist(artist_name):
+def get_library_artist(artist_name, mb_artist_id=None):
     """Get albums by an artist from the beets library."""
     if not beets_db_path or not os.path.exists(beets_db_path):
         return []
     conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
-    rows = conn.execute(
-        "SELECT album, albumartist, year, mb_albumid, discogs_albumid, "
-        "       (SELECT COUNT(*) FROM items WHERE items.album_id = albums.id) as track_count "
-        "FROM albums WHERE albumartist LIKE ? COLLATE NOCASE "
-        "ORDER BY year, album",
-        (f"%{artist_name}%",),
-    ).fetchall()
+    # Prefer MB artist ID match (exact), fall back to name LIKE
+    if mb_artist_id:
+        rows = conn.execute(
+            "SELECT album, albumartist, year, mb_albumid, discogs_albumid, "
+            "       (SELECT COUNT(*) FROM items WHERE items.album_id = albums.id) as track_count "
+            "FROM albums WHERE mb_albumartistid = ? OR mb_albumartistids LIKE ? "
+            "ORDER BY year, album",
+            (mb_artist_id, f"%{mb_artist_id}%"),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT album, albumartist, year, mb_albumid, discogs_albumid, "
+            "       (SELECT COUNT(*) FROM items WHERE items.album_id = albums.id) as track_count "
+            "FROM albums WHERE albumartist LIKE ? COLLATE NOCASE "
+            "ORDER BY year, album",
+            (f"%{artist_name}%",),
+        ).fetchall()
     conn.close()
     results = []
     for r in rows:
@@ -157,10 +167,11 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/library/artist":
                 name = params.get("name", [""])[0].strip()
+                mbid = params.get("mbid", [""])[0].strip()
                 if not name:
                     self._error("Missing parameter 'name'")
                     return
-                albums = get_library_artist(name)
+                albums = get_library_artist(name, mbid)
                 self._json({"albums": albums})
 
             elif re.match(r"^/api/artist/[a-f0-9-]+$", path):
