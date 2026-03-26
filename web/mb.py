@@ -14,8 +14,17 @@ USER_AGENT = "soularr-web/1.0"
 def _get(url):
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
+    req.add_header("Connection", "close")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError:
+        # Retry once — MB mirror may have closed a keep-alive connection
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", USER_AGENT)
+        req.add_header("Connection", "close")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
 
 
 def search_artists(query):

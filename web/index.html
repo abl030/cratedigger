@@ -271,7 +271,9 @@ async function loadReleaseGroup(id, el) {
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';
   try {
     const r = await fetch(`${API}/api/release-group/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
+    if (data.error) throw new Error(data.error);
     const all = (data.releases || []).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const official = all.filter(r => r.status === 'Official' || !r.status);
     const bootleg = all.filter(r => r.status && r.status !== 'Official');
