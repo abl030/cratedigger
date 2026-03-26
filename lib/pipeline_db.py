@@ -232,6 +232,14 @@ class PipelineDB:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def get_recent(self, limit=20):
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE status = 'imported' "
+            "ORDER BY updated_at DESC LIMIT %s",
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def count_by_status(self):
         cur = self._execute(
             "SELECT status, COUNT(*) as cnt FROM album_requests GROUP BY status"

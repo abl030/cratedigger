@@ -85,6 +85,9 @@
   .p-group-header:hover { color: #8cb; }
   .p-group-body { }
   .p-group-body.collapsed { display: none; }
+  .r-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #1a4a2a; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
+  .r-item:hover { background: #252525; }
+  .r-date-header { padding: 6px 12px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; }
   .loading { color: #666; padding: 20px; text-align: center; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
@@ -94,12 +97,17 @@
 <h1>Music Pipeline</h1>
 <div class="tabs">
   <div class="tab active" onclick="showTab('search')">Search</div>
+  <div class="tab" onclick="showTab('recents')">Recents</div>
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
 </div>
 
 <div id="search-section" class="section active">
   <input type="text" id="q" placeholder="Search artists..." autofocus>
   <div id="results"></div>
+</div>
+
+<div id="recents-section" class="section">
+  <div id="recents-content" class="loading">Loading...</div>
 </div>
 
 <div id="pipeline-section" class="section">
@@ -112,12 +120,14 @@
 const API = '';
 let searchTimer = null;
 
+const tabOrder = ['search', 'recents', 'pipeline'];
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.querySelector(`.tab:nth-child(${name === 'search' ? 1 : 2})`).classList.add('active');
+  document.querySelector(`.tab:nth-child(${tabOrder.indexOf(name) + 1})`).classList.add('active');
   document.getElementById(name + '-section').classList.add('active');
   if (name === 'pipeline') loadPipeline();
+  if (name === 'recents') loadRecents();
 }
 
 function toast(msg, isError) {
@@ -361,6 +371,59 @@ async function addRelease(mbid, btn) {
     btn.textContent = 'Error';
     toast('Request failed', true);
   }
+}
+
+async function loadRecents() {
+  const el = document.getElementById('recents-content');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${API}/api/pipeline/recent`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const items = data.recent || [];
+    if (items.length === 0) {
+      el.innerHTML = '<div class="loading">No recent imports</div>';
+      return;
+    }
+
+    // Group by date
+    const byDate = {};
+    for (const item of items) {
+      const date = (item.updated_at || item.created_at || '').slice(0, 10);
+      if (!byDate[date]) byDate[date] = [];
+      byDate[date].push(item);
+    }
+    const dates = Object.keys(byDate).sort().reverse();
+
+    el.innerHTML = dates.map(date => `
+      <div class="r-date-header">${date}</div>
+      ${byDate[date].map(item => {
+        const dist = item.beets_distance != null ? `dist ${item.beets_distance.toFixed(3)}` : '';
+        const fmt = item.format || '?';
+        const year = item.year || '?';
+        const time = (item.updated_at || '').slice(11, 16);
+        return `
+          <div class="r-item" onclick="toggleDetail(${item.id})">
+            <div class="p-top">
+              <div>
+                <div class="p-title">${esc(item.album_title)}</div>
+                <div class="p-artist">${esc(item.artist_name)}</div>
+              </div>
+              <div style="font-size:0.75em;color:#666;">${time}</div>
+            </div>
+            <div class="p-meta">
+              <span>${year}</span>
+              <span>${fmt}</span>
+              ${item.country ? `<span>${item.country}</span>` : ''}
+              <span>${item.source}</span>
+              ${dist ? `<span>${dist}</span>` : ''}
+            </div>
+          </div>
+          <div class="p-detail" id="detail-${item.id}"></div>
+        `;
+      }).join('')}
+    `).join('');
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load recents</div>'; }
 }
 
 let pipelineData = null;

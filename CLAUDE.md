@@ -1,4 +1,6 @@
-# **RUN `hostname` AT THE START OF EVERY CHAT. proxmox-vm = doc1, doc2 = doc2. You are likely already on doc1 — do NOT ssh to doc1 from doc1.**
+# **RUN `hostname` AT THE START OF EVERY CHAT. proxmox-vm = doc1, doc2 = doc2. You are likely already on doc1 — do NOT ssh to doc1 from doc1. If hostname returns a Windows machine (e.g. DESKTOP-*), you're on the Windows laptop — see below for SSH access.**
+
+# **Windows laptop SSH access**: There is no native SSH key on Windows. A NixOS WSL2 instance has the SSH key via sops-nix at `/run/secrets/ssh_key_abl030`. To get SSH access to doc1/doc2, run: `mkdir -p ~/.ssh && wsl -d NixOS -- bash -c 'cat /run/secrets/ssh_key_abl030' > ~/.ssh/id_doc2 && chmod 600 ~/.ssh/id_doc2` then SSH with `ssh -i ~/.ssh/id_doc2 abl030@doc2` or `ssh -i ~/.ssh/id_doc2 abl030@proxmox-vm`. The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 
 # **The pipeline DB is PostgreSQL (migrated from SQLite on 2026-03-25). It runs in an nspawn container on doc2 (192.168.100.11:5432). Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Data lives at `/mnt/virtio/soularr/postgres` for portability. Only 3 statuses: wanted, imported, manual.**
 
@@ -119,22 +121,32 @@ Lidarr (optional)                    CLI / Dashboard
 
 ## Deploying Changes
 
+Flake input changes (step 2) MUST be done on doc1 and pushed from there. Doc2 has no git push credentials. Doc2 is only for building/running.
+
+**From doc1 (or Windows laptop via SSH to doc1):**
 ```bash
-# 1. Edit code, commit, push
+# 1. Edit code, commit, push (from wherever the repo lives)
 cd ~/soularr
 git add . && git commit -m "description" && git push
 
-# 2. Update Nix flake input
-cd ~/nixosconfig
-nix flake update soularr-src
-nix fmt
-git add flake.lock && git commit -m "soularr: description" && git push
+# 2. Update Nix flake input (MUST be on doc1 — it has git push access)
+ssh doc1 'cd ~/nixosconfig && nix flake update soularr-src && git add flake.lock && git commit -m "soularr: description" && git push'
 
 # 3. Deploy to doc2
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 
-# 4. Verify (daemon-reload if service unit changed)
-ssh doc2 'sudo systemctl daemon-reload; sudo systemctl start soularr' &
+# 4. Restart the web UI (soularr itself picks up changes on next timer cycle)
+ssh doc2 'sudo systemctl restart soularr-web'
+```
+
+**From doc1 directly:**
+```bash
+# Steps 2-4 without the ssh wrapper
+cd ~/nixosconfig
+nix flake update soularr-src
+git add flake.lock && git commit -m "soularr: description" && git push
+ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+ssh doc2 'sudo systemctl restart soularr-web'
 ```
 
 **IMPORTANT**: `restartIfChanged = false` on the service — deploys don't restart Soularr. The 5-min timer picks up new code on the next cycle, or manually start.
@@ -165,6 +177,46 @@ python3 -m unittest discover tests -v    # all 83 tests
 python3 -m unittest tests.test_pipeline_db -v   # just pipeline DB
 python3 -m unittest tests.test_track_crosscheck  # just track matching
 ```
+
+## Playwright MCP (Web UI Testing)
+
+The Playwright MCP server provides browser automation tools for testing the web UI at `https://music.ablz.au`. Configured in `.mcp.json` (not committed — platform-specific). Use `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_fill_form`, `browser_console_messages`, etc.
+
+### Setup
+
+**Windows laptop**: Node.js installed via scoop. `.mcp.json` must use absolute paths because scoop shims aren't in the Claude Code process PATH:
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "C:\\Users\\abl030\\scoop\\apps\\nodejs\\current\\node.exe",
+      "args": ["C:\\Users\\abl030\\scoop\\apps\\nodejs\\current\\bin\\node_modules\\@playwright\\mcp\\cli.js"]
+    }
+  }
+}
+```
+Requires: `scoop install nodejs`, then `npm install -g @playwright/mcp@latest` (with PATH set), then `npx playwright install chromium` to download the browser binary (~183MB, stored in `%LOCALAPPDATA%\ms-playwright\`).
+
+**Linux (doc1)**: Use npx directly — Node.js is available system-wide:
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}
+```
+First run will auto-install the package. You may still need `npx playwright install chromium` for the browser binary.
+
+### Usage notes
+
+- Always use `https://music.ablz.au` (not http — connection will time out)
+- `browser_snapshot` returns an accessibility tree (better than screenshots for automation)
+- Use `browser_console_messages` with `level: "error"` to check for JS errors after interactions
+- Use `browser_wait_for` with `textGone` to wait for loading states to resolve
+- `.mcp.json` is gitignored (platform-specific paths) — each machine needs its own
 
 ## Critical Rules
 

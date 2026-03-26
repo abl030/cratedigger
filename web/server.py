@@ -179,6 +179,15 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 })
 
+            elif path == "/api/pipeline/recent":
+                def serialize_req(r):
+                    return {
+                        k: str(v) if hasattr(v, 'isoformat') else v
+                        for k, v in r.items()
+                    }
+                recent = db.get_recent(limit=20)
+                self._json({"recent": [serialize_req(r) for r in recent]})
+
             elif path == "/api/pipeline/all":
                 def serialize_request(r):
                     return {
