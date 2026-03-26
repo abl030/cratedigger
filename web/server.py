@@ -280,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
                 rows = conn.execute(
                     "SELECT a.id, a.album, a.albumartist, a.year, a.mb_albumid, "
-                    "       a.albumtype, a.label, a.country, a.format, "
+                    "       a.albumtype, a.label, a.country, "
                     "       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count, "
                     "       (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) as formats, "
                     "       a.added "
@@ -293,8 +293,8 @@ class Handler(BaseHTTPRequestHandler):
                 albums = [{
                     "id": r[0], "album": r[1], "artist": r[2], "year": r[3],
                     "mb_albumid": r[4], "type": r[5], "label": r[6],
-                    "country": r[7], "format": r[8], "track_count": r[9],
-                    "formats": r[10], "added": r[11],
+                    "country": r[7], "track_count": r[8],
+                    "formats": r[9], "added": r[10],
                 } for r in rows]
                 self._json({"albums": albums})
 
