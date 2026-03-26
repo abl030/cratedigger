@@ -444,7 +444,7 @@ async function loadRecents() {
 }
 
 let pipelineData = null;
-let pipelineFilter = 'all';
+let pipelineFilter = 'wanted';
 
 async function loadPipeline() {
   const el = document.getElementById('pipeline-content');
@@ -492,17 +492,17 @@ function renderPipeline() {
   el.innerHTML = `
     <div class="status-card">
       <div class="status-counts">
-        <div class="count ${pipelineFilter === 'all' ? 'active' : ''}" onclick="setFilter('all')">
-          <div class="count-num">${total}</div><div class="count-label">All</div>
-        </div>
         <div class="count ${pipelineFilter === 'wanted' ? 'active' : ''}" onclick="setFilter('wanted')">
           <div class="count-num">${counts.wanted || 0}</div><div class="count-label">Wanted</div>
+        </div>
+        <div class="count ${pipelineFilter === 'manual' ? 'active' : ''}" onclick="setFilter('manual')">
+          <div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div>
         </div>
         <div class="count ${pipelineFilter === 'imported' ? 'active' : ''}" onclick="setFilter('imported')">
           <div class="count-num">${counts.imported || 0}</div><div class="count-label">Imported</div>
         </div>
-        <div class="count ${pipelineFilter === 'manual' ? 'active' : ''}" onclick="setFilter('manual')">
-          <div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div>
+        <div class="count ${pipelineFilter === 'all' ? 'active' : ''}" onclick="setFilter('all')">
+          <div class="count-num">${total}</div><div class="count-label">All</div>
         </div>
       </div>
     </div>
