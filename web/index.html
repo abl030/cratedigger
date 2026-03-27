@@ -946,6 +946,28 @@ async function toggleLibDetail(id) {
       }).join('');
       html += '</div>';
     }
+    // Pipeline download history
+    const history = data.download_history || [];
+    if (history.length > 0) {
+      html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
+      html += history.map(h => {
+        const outcome = h.outcome || '?';
+        const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
+        const user = h.soulseek_username || '?';
+        const date = awstDateTime(h.created_at || '');
+        const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
+        const err = h.error_message ? ` - ${h.error_message}` : '';
+        const br = h.bitrate ? ` ${Math.round(h.bitrate)}kbps` : '';
+        const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
+        const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
+        const vbr = h.is_vbr ? ' VBR' : '';
+        const conv = h.was_converted ? ` (converted from ${h.original_filetype || '?'})` : '';
+        return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''}${br}${bd}${sr}${vbr}${conv} ${date}${dist}${err}</div>`;
+      }).join('');
+      html += '</div>';
+    } else if (data.pipeline_status) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">Pipeline</span><span class="p-detail-value">${data.pipeline_status} (${data.pipeline_source || '?'})</span></div>`;
+    }
     // Delete button
     html += `<div class="p-actions" style="margin-top:10px;">
       <button class="p-btn delete-beets" onclick="event.stopPropagation(); confirmDeleteBeets(${id}, '${esc(data.artist).replace(/'/g, "\\'")}', '${esc(data.album).replace(/'/g, "\\'")}', ${data.tracks ? data.tracks.length : 0})">Delete from beets</button>

@@ -372,13 +372,27 @@ class Handler(BaseHTTPRequestHandler):
                 } for i in items]
                 # Derive album directory from first track path
                 album_path = os.path.dirname(tracks[0]["path"]) if tracks else None
-                self._json({
+                result = {
                     "id": album[0], "album": album[1], "artist": album[2],
                     "year": album[3], "mb_albumid": album[4], "type": album[5],
                     "label": album[6], "country": album[7],
                     "artpath": album[8].decode("utf-8", errors="replace") if isinstance(album[8], bytes) else album[8],
                     "added": album[9], "tracks": tracks, "path": album_path,
-                })
+                }
+                # Include pipeline download history if available
+                mb_id = album[4]
+                if mb_id and db:
+                    req = db.get_request_by_mb_release_id(mb_id)
+                    if req:
+                        history = db.get_download_history(req["id"])
+                        result["pipeline_id"] = req["id"]
+                        result["pipeline_status"] = req["status"]
+                        result["pipeline_source"] = req["source"]
+                        result["download_history"] = [
+                            {k: str(v) if hasattr(v, 'isoformat') else v for k, v in h.items()}
+                            for h in history
+                        ]
+                self._json(result)
 
             elif path == "/api/beets/recent":
                 if not beets_db_path or not os.path.exists(beets_db_path):
