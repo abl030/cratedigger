@@ -1271,6 +1271,16 @@ def process_completed_album(album_data, failed_grab):
                                 logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
                                 for line in result.stdout.strip().split("\n"):
                                     logger.info(f"  {line}")
+                                    # Detect FLAC→V0 conversion from import_one output
+                                    if line.strip().startswith("Converted ") and ", failed " in line:
+                                        try:
+                                            parts = line.strip().split()
+                                            conv_count = int(parts[1].rstrip(","))
+                                            if conv_count > 0:
+                                                dl_info["was_converted"] = True
+                                                dl_info["original_filetype"] = "flac"
+                                        except (ValueError, IndexError):
+                                            pass
                                 # Ensure DB status is set even if import_one's DB update failed
                                 pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
                                 trigger_meelo_scan()

@@ -167,6 +167,24 @@
 const API = '';
 let searchTimer = null;
 
+function renderDownloadHistoryItem(h) {
+  const outcome = h.outcome || '?';
+  const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
+  const user = h.soulseek_username || '?';
+  const date = awstDateTime(h.created_at || '');
+  const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
+  const err = h.error_message ? ` - ${h.error_message}` : '';
+  const scenario = h.beets_scenario ? ` [${h.beets_scenario}]` : '';
+  // Audio quality info
+  const br = h.bitrate ? ` ${Math.round(h.bitrate)}kbps` : '';
+  const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
+  const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
+  const vbr = h.is_vbr ? ' VBR' : '';
+  const conv = h.was_converted ? ` (converted from ${h.original_filetype || '?'})` : '';
+  const detail = h.beets_detail && h.beets_detail !== `distance=${h.beets_distance}` ? `<div style="color:#666;font-size:0.9em;padding-left:8px;">${esc(h.beets_detail)}</div>` : '';
+  return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''}${br}${bd}${sr}${vbr}${conv} ${date}${dist}${scenario}${err}</div>${detail}`;
+}
+
 // Convert UTC ISO string to AWST (UTC+8)
 function toAWST(isoStr) {
   if (!isoStr) return '';
@@ -719,21 +737,7 @@ async function toggleDetail(id) {
     // Download history
     if (history.length > 0) {
       html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
-      html += history.map(h => {
-        const outcome = h.outcome || '?';
-        const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
-        const user = h.soulseek_username || '?';
-        const date = awstDateTime(h.created_at || '');
-        const dist = h.beets_distance != null ? ` dist=${h.beets_distance.toFixed(3)}` : '';
-        const err = h.error_message ? ` - ${h.error_message}` : '';
-        // Audio quality info
-        const br = h.bitrate ? ` ${Math.round(h.bitrate)}kbps` : '';
-        const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
-        const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
-        const vbr = h.is_vbr ? ' VBR' : '';
-        const conv = h.was_converted ? ` (converted from ${h.original_filetype || '?'})` : '';
-        return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''}${br}${bd}${sr}${vbr}${conv} ${date}${dist}${err}</div>`;
-      }).join('');
+      html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     }
 
@@ -950,20 +954,7 @@ async function toggleLibDetail(id) {
     const history = data.download_history || [];
     if (history.length > 0) {
       html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
-      html += history.map(h => {
-        const outcome = h.outcome || '?';
-        const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
-        const user = h.soulseek_username || '?';
-        const date = awstDateTime(h.created_at || '');
-        const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
-        const err = h.error_message ? ` - ${h.error_message}` : '';
-        const br = h.bitrate ? ` ${Math.round(h.bitrate)}kbps` : '';
-        const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
-        const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
-        const vbr = h.is_vbr ? ' VBR' : '';
-        const conv = h.was_converted ? ` (converted from ${h.original_filetype || '?'})` : '';
-        return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''}${br}${bd}${sr}${vbr}${conv} ${date}${dist}${err}</div>`;
-      }).join('');
+      html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     } else if (data.pipeline_status) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Pipeline</span><span class="p-detail-value">${data.pipeline_status} (${data.pipeline_source || '?'})</span></div>`;
