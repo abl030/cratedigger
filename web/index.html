@@ -15,8 +15,9 @@
   .tab.active { background: #2a3a2a; border-color: #6a9; color: #6a9; }
   .section { display: none; }
   .section.active { display: block; }
-  .artist { padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
-  .artist:hover { background: #222; }
+  .artist { padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 8px; }
+  .artist-header { cursor: pointer; }
+  .artist-header:hover { opacity: 0.8; }
   .artist-name { font-weight: 600; }
   .artist-dis { color: #777; font-size: 0.85em; }
   .rg-list { padding-left: 0; margin-top: 8px; }
@@ -97,6 +98,14 @@
   .beets-missing { background: #3a1a1a; color: #d66; }
   .beets-mismatch { background: #3a2a1a; color: #da6; }
   .r-date-header { padding: 6px 12px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; }
+  .lib-artist { margin-bottom: 12px; }
+  .lib-artist-header { padding: 10px 12px; background: #1a1a2a; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .lib-artist-header:hover { background: #222238; }
+  .lib-artist-name { font-weight: 600; color: #8af; }
+  .lib-artist-count { color: #556; font-size: 0.8em; }
+  .lib-artist-body { display: none; padding-top: 4px; }
+  .lib-artist-body.open { display: block; }
+  .lib-type-header { padding: 4px 12px; color: #6a9; font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px; }
   .lib-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #336; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
   .lib-item:hover { background: #252525; }
   .lib-detail { background: #191919; padding: 10px 12px; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; border-left: 3px solid #333; }
@@ -185,9 +194,11 @@ async function searchArtists(q) {
       return;
     }
     el.innerHTML = data.artists.map(a => `
-      <div class="artist" onclick="loadArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}', this)">
-        <span class="artist-name">${esc(a.name)}</span>
-        ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
+      <div class="artist">
+        <div class="artist-header" onclick="loadArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}', this.parentElement)">
+          <span class="artist-name">${esc(a.name)}</span>
+          ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
+        </div>
         <div class="rg-list" id="rg-${a.id}"></div>
       </div>
     `).join('');
@@ -726,26 +737,75 @@ function renderLibraryResults(albums) {
     el.innerHTML = '<div class="loading">No results</div>';
     return;
   }
-  el.innerHTML = albums.map(a => {
-    const added = a.added ? new Date(a.added * 1000).toISOString().slice(0, 10) : '?';
-    return `
-      <div class="lib-item" onclick="toggleLibDetail(${a.id})">
-        <div class="p-top">
-          <div>
-            <div class="p-title">${esc(a.album)}</div>
-            <div class="p-artist">${esc(a.artist)}</div>
+  // Group by artist
+  const byArtist = {};
+  for (const a of albums) {
+    const artist = a.artist || 'Unknown';
+    if (!byArtist[artist]) byArtist[artist] = [];
+    byArtist[artist].push(a);
+  }
+  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
+  // Sort albums within each artist by year
+  for (const a of artists) {
+    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
+  }
+
+  // Auto-expand if only one artist
+  const autoOpen = artists.length === 1;
+
+  el.innerHTML = artists.map(artist => {
+    const artistAlbums = byArtist[artist];
+    // Sub-group by type
+    const typeOrder = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Remix', 'Soundtrack', 'Other', ''];
+    const byType = {};
+    for (const a of artistAlbums) {
+      const t = a.type || '';
+      if (!byType[t]) byType[t] = [];
+      byType[t].push(a);
+    }
+    const types = typeOrder.filter(t => byType[t]);
+    // If all same type or only one type, don't show type headers
+    const showTypes = types.length > 1;
+
+    function renderAlbum(a) {
+      const added = a.added ? new Date(a.added * 1000).toISOString().slice(0, 10) : '?';
+      return `
+        <div class="lib-item" onclick="toggleLibDetail(${a.id})">
+          <div class="p-top">
+            <div>
+              <div class="p-title">${esc(a.album)}</div>
+            </div>
+            <div style="font-size:0.75em;color:#666;">${a.track_count}t</div>
           </div>
-          <div style="font-size:0.75em;color:#666;">${a.track_count}t</div>
+          <div class="p-meta">
+            <span>${a.year || '?'}</span>
+            ${a.formats ? `<span>${a.formats}</span>` : ''}
+            ${a.country ? `<span>${a.country}</span>` : ''}
+            ${!showTypes && a.type ? `<span>${a.type}</span>` : ''}
+            <span>added ${added}</span>
+          </div>
         </div>
-        <div class="p-meta">
-          <span>${a.year || '?'}</span>
-          ${a.formats ? `<span>${a.formats}</span>` : ''}
-          ${a.country ? `<span>${a.country}</span>` : ''}
-          ${a.type ? `<span>${a.type}</span>` : ''}
-          <span>added ${added}</span>
+        <div class="lib-detail" id="lib-${a.id}"></div>
+      `;
+    }
+
+    const albumsHtml = showTypes
+      ? types.map(t => `
+          <div class="lib-type-header">${t || 'Other'}s (${byType[t].length})</div>
+          ${byType[t].map(renderAlbum).join('')}
+        `).join('')
+      : artistAlbums.map(renderAlbum).join('');
+
+    return `
+      <div class="lib-artist">
+        <div class="lib-artist-header" onclick="this.nextElementSibling.classList.toggle('open')">
+          <span class="lib-artist-name">${esc(artist)}</span>
+          <span class="lib-artist-count">${artistAlbums.length} album${artistAlbums.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="lib-artist-body${autoOpen ? ' open' : ''}">
+          ${albumsHtml}
         </div>
       </div>
-      <div class="lib-detail" id="lib-${a.id}"></div>
     `;
   }).join('');
 }
