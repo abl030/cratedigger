@@ -386,6 +386,11 @@ def main():
     # soularr denylists the user and keeps searching for real lossless.
     new_min_br = _get_folder_min_bitrate(args.path)
     existing_min_br = _get_beets_min_bitrate(mbid)
+    # Output both for soularr to track upgrade delta
+    if existing_min_br is not None:
+        print(f"  prev_min_bitrate={existing_min_br}")
+    if new_min_br is not None:
+        print(f"  new_min_bitrate={new_min_br}")
     if existing_min_br is not None and new_min_br is not None:
         if new_min_br <= existing_min_br:
             print(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing {existing_min_br}kbps — skipping import",

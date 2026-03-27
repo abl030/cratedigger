@@ -1200,6 +1200,9 @@ def _check_quality_gate(album_data, request_id):
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
         else:
+            # Update min_bitrate to current on-disk value (quality gate passed)
+            db = pipeline_db_source._get_db()
+            db.update_status(request_id, "imported", min_bitrate=min_br_kbps)
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"min_bitrate={min_br_kbps}kbps — quality OK")
@@ -1346,6 +1349,8 @@ def process_completed_album(album_data, failed_grab):
                                             timeout=1800, env=import_env)
                             if result.returncode == 0:
                                 logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
+                                prev_min_br = None
+                                new_min_br = None
                                 for line in result.stdout.strip().split("\n"):
                                     logger.info(f"  {line}")
                                     # Detect FLAC→V0 conversion from import_one output
@@ -1367,8 +1372,28 @@ def process_completed_album(album_data, failed_grab):
                                             dl_info["bitrate"] = actual_br * 1000
                                         except (ValueError, IndexError):
                                             pass
+                                    # Capture upgrade delta from import_one
+                                    if line.strip().startswith("prev_min_bitrate="):
+                                        try:
+                                            prev_min_br = int(line.strip().split("=")[1])
+                                        except (ValueError, IndexError):
+                                            pass
+                                    if line.strip().startswith("new_min_bitrate="):
+                                        try:
+                                            new_min_br = int(line.strip().split("=")[1])
+                                        except (ValueError, IndexError):
+                                            pass
                                 # Ensure DB status is set even if import_one's DB update failed
                                 pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
+                                # Update upgrade delta on the pipeline request
+                                if request_id and (prev_min_br is not None or new_min_br is not None):
+                                    try:
+                                        db = pipeline_db_source._get_db()
+                                        db.update_status(request_id, "imported",
+                                                         prev_min_bitrate=prev_min_br or db.get_request(request_id).get("min_bitrate"),
+                                                         min_bitrate=new_min_br)
+                                    except Exception:
+                                        logger.exception("Failed to update upgrade delta")
                                 # Quality gate: if below V0, queue for upgrade
                                 _check_quality_gate(album_data, request_id)
                                 trigger_meelo_scan()

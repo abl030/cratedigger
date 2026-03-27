@@ -572,14 +572,16 @@ async function loadRecents() {
                  : (item.dl_bit_depth || 0) > 16 ? `${item.dl_bit_depth}bit` : '';
         const qualityParts = [tier, bd, sr].filter(Boolean);
         let quality = qualityParts.length ? qualityParts.join(' ') : '';
-        // Show upgrade delta if prev_min_bitrate exists
-        if (item.prev_min_bitrate && item.min_bitrate) {
-          const prevKbps = Math.round(item.prev_min_bitrate / 1000);
-          const curKbps = Math.round(item.min_bitrate / 1000);
-          if (curKbps > prevKbps) {
-            quality += ` <span style="color:#6d6;">↑${prevKbps}→${curKbps}</span>`;
-          } else if (curKbps < prevKbps) {
-            quality += ` <span style="color:#d66;">↓${prevKbps}→${curKbps}</span>`;
+        // Show upgrade delta if prev_min_bitrate exists (both stored in kbps)
+        if (item.prev_min_bitrate && item.min_bitrate && item.prev_min_bitrate !== item.min_bitrate) {
+          const prev = item.prev_min_bitrate;
+          const cur = item.min_bitrate;
+          const prevLabel = qualityLabel('MP3', prev * 1000);
+          const curLabel = qualityLabel('MP3', cur * 1000);
+          if (cur > prev) {
+            quality += ` <span style="color:#6d6;">↑${prevLabel}→${curLabel}</span>`;
+          } else {
+            quality += ` <span style="color:#d66;">↓${prevLabel}→${curLabel}</span>`;
           }
         }
         const user = item.dl_soulseek_username || '';
