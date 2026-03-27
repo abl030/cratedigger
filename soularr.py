@@ -1342,6 +1342,15 @@ def process_completed_album(album_data, failed_grab):
                                             if conv_count > 0:
                                                 dl_info["was_converted"] = True
                                                 dl_info["original_filetype"] = "flac"
+                                                dl_info["filetype"] = "mp3"
+                                                dl_info["is_vbr"] = True
+                                        except (ValueError, IndexError):
+                                            pass
+                                    # Capture actual post-conversion bitrate
+                                    if line.strip().startswith("min_bitrate="):
+                                        try:
+                                            actual_br = int(line.strip().split("=")[1])
+                                            dl_info["bitrate"] = actual_br * 1000
                                         except (ValueError, IndexError):
                                             pass
                                 # Ensure DB status is set even if import_one's DB update failed
@@ -1358,19 +1367,29 @@ def process_completed_album(album_data, failed_grab):
                                     if os.path.isdir(parent) and not os.listdir(parent):
                                         os.rmdir(parent)
                                         logger.info(f"  Cleaned up empty artist dir: {parent}")
-                            elif result.returncode == 5:
-                                # Quality downgrade prevented by import_one.py
+                            elif result.returncode in (5, 6):
+                                # 5 = quality downgrade, 6 = transcode detected
+                                reason = "transcode detected" if result.returncode == 6 else "quality downgrade prevented"
                                 logger.warning(
-                                    f"QUALITY DOWNGRADE PREVENTED: {album_data['artist']} - {album_data['title']}")
+                                    f"{reason.upper()}: {album_data['artist']} - {album_data['title']}")
                                 for line in result.stderr.strip().split("\n"):
                                     logger.warning(f"  {line}")
+                                # Parse actual bitrate from import_one output for logging
+                                actual_br = None
+                                for line in (result.stdout or "").strip().split("\n"):
+                                    if line.strip().startswith("min_bitrate="):
+                                        try:
+                                            actual_br = int(line.strip().split("=")[1])
+                                        except (ValueError, IndexError):
+                                            pass
+                                if actual_br:
+                                    logger.warning(f"  Actual min bitrate: {actual_br}kbps")
                                 # Denylist source users so we try someone else
                                 usernames = set(f.get("username") for f in album_data.get("files", [])
                                                 if f.get("username"))
                                 db = pipeline_db_source._get_db()
                                 for username in usernames:
-                                    db.add_denylist(request_id, username,
-                                                    "quality downgrade prevented")
+                                    db.add_denylist(request_id, username, reason)
                                 logger.info(f"  Denylisted {usernames} for request {request_id}")
                                 # Clean up staged dir
                                 if os.path.isdir(dest):

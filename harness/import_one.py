@@ -14,6 +14,8 @@ Exit codes:
     2 = beets import failed (harness error, post-flight verification failed)
     3 = album path not found
     4 = MBID not found in beets candidates
+    5 = quality downgrade (new files worse than existing)
+    6 = transcode detected (converted FLAC produced sub-threshold bitrate)
 """
 
 import argparse
@@ -30,6 +32,7 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_ha
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
+TRANSCODE_MIN_BITRATE_KBPS = 220  # V0 floor — converted FLAC below this is a transcode
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +353,22 @@ def main():
     if failed > 0:
         print("[ERROR] Conversion failures — aborting", file=sys.stderr)
         sys.exit(1)
+
+    # --- Transcode detection ---
+    # If we converted FLACs, check the resulting MP3 bitrate.
+    # Genuine lossless→V0 produces ~220-260kbps. Sub-threshold means
+    # the FLAC was a transcode (MP3 wrapped in FLAC container).
+    if converted > 0:
+        post_conv_br = _get_folder_min_bitrate(args.path)
+        if post_conv_br is not None and post_conv_br < TRANSCODE_MIN_BITRATE_KBPS:
+            print(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
+                  f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless",
+                  file=sys.stderr)
+            print(f"  min_bitrate={post_conv_br}")
+            sys.exit(6)
+        if post_conv_br is not None:
+            print(f"  [TRANSCODE CHECK] post-conversion min bitrate {post_conv_br}kbps — OK")
+            print(f"  min_bitrate={post_conv_br}")
 
     if args.dry_run:
         print("[DRY] Would import via harness")
