@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 # Redirect beets logging to stderr so stdout stays clean for JSON protocol
 logging.basicConfig(
     stream=sys.stderr,
-    level=logging.WARNING,
-    format="%(levelname)s: %(message)s",
+    level=logging.INFO,
+    format="%(levelname)s: %(name)s: %(message)s",
 )
 # Suppress noisy musicbrainzngs XML parser warnings
 logging.getLogger("musicbrainzngs").setLevel(logging.ERROR)

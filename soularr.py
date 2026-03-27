@@ -1349,6 +1349,10 @@ def process_completed_album(album_data, failed_grab):
                                             timeout=1800, env=import_env)
                             if result.returncode == 0:
                                 logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
+                                # Log beets internal logging (stderr)
+                                for line in (result.stderr or "").strip().split("\n"):
+                                    if line.strip():
+                                        logger.info(f"  [beets] {line}")
                                 prev_min_br = None
                                 new_min_br = None
                                 for line in result.stdout.strip().split("\n"):
