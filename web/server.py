@@ -78,7 +78,7 @@ def check_beets_library_detail(mbids):
         f"SELECT a.mb_albumid, "
         f"       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count, "
         f"       (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) as formats, "
-        f"       (SELECT CAST(MIN(i.bitrate) AS INTEGER) FROM items i WHERE i.album_id = a.id) as min_bitrate, "
+        f"       (SELECT CAST(AVG(i.bitrate) AS INTEGER) FROM items i WHERE i.album_id = a.id) as avg_bitrate, "
         f"       (SELECT MAX(i.samplerate) FROM items i WHERE i.album_id = a.id) as max_samplerate, "
         f"       (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) as max_bitdepth "
         f"FROM albums a WHERE a.mb_albumid IN ({placeholders})", mbids
