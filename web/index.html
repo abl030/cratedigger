@@ -190,14 +190,15 @@ function renderDownloadHistoryItem(h) {
   const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
   const err = h.error_message ? ` - ${h.error_message}` : '';
   const scenario = h.beets_scenario ? ` [${h.beets_scenario}]` : '';
-  // Audio quality info
-  const br = h.bitrate ? ` ${Math.round(h.bitrate)}kbps` : '';
+  // Audio quality — use tier label, show what actually ended up on disk
+  const actualFmt = h.was_converted ? h.filetype : (h.filetype || '');
+  const actualBr = h.bitrate || 0;  // download log stores bps, same as qualityLabel
+  const tier = actualFmt && actualBr ? qualityLabel(actualFmt, actualBr) : (h.filetype || '');
   const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
   const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
-  const vbr = h.is_vbr ? ' VBR' : '';
-  const conv = h.was_converted ? ` (converted from ${h.original_filetype || '?'})` : '';
+  const conv = h.was_converted ? ` (from ${h.original_filetype || '?'})` : '';
   const detail = h.beets_detail && h.beets_detail !== `distance=${h.beets_distance}` ? `<div style="color:#666;font-size:0.9em;padding-left:8px;">${esc(h.beets_detail)}</div>` : '';
-  return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${h.filetype || ''}${br}${bd}${sr}${vbr}${conv} ${date}${dist}${scenario}${err}</div>${detail}`;
+  return `<div class="p-hist-item"><span style="color:${color};">${outcome}</span> ${user} ${tier}${bd}${sr}${conv} ${date}${dist}${scenario}${err}</div>${detail}`;
 }
 
 // Convert UTC ISO string to AWST (UTC+8)
