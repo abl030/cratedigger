@@ -125,7 +125,7 @@ CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
 class PipelineDB:
     """PostgreSQL-backed pipeline database."""
 
-    def __init__(self, dsn=None, run_migrations=True):
+    def __init__(self, dsn=None, run_migrations=False):
         self.dsn = dsn or DEFAULT_DSN
         self.conn = psycopg2.connect(self.dsn)
         self.conn.autocommit = False
