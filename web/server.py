@@ -628,19 +628,50 @@ class Handler(BaseHTTPRequestHandler):
                         "quality_override": quality,
                     })
                 else:
-                    # Album in beets but not in pipeline DB — create new request
-                    release = mb_api.get_release(mbid)
+                    # Album in beets but not in pipeline DB — create new request.
+                    # Try MB API first, fall back to beets DB for non-UUID IDs (e.g. Discogs).
+                    release = None
+                    try:
+                        release = mb_api.get_release(mbid)
+                    except Exception:
+                        pass
+                    if release:
+                        artist_name = release["artist_name"]
+                        album_title = release["title"]
+                        year = release.get("year")
+                        country = release.get("country")
+                        artist_id = release.get("artist_id")
+                        tracks = release.get("tracks")
+                    else:
+                        # Fall back to beets DB
+                        beets_info = None
+                        if beets_db_path and os.path.exists(beets_db_path):
+                            bconn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+                            beets_info = bconn.execute(
+                                "SELECT albumartist, album, year FROM albums WHERE mb_albumid = ?",
+                                (mbid,),
+                            ).fetchone()
+                            bconn.close()
+                        if not beets_info:
+                            self._error("Release not found in MusicBrainz or beets")
+                            return
+                        artist_name = beets_info[0]
+                        album_title = beets_info[1]
+                        year = str(beets_info[2]) if beets_info[2] else None
+                        country = None
+                        artist_id = None
+                        tracks = None
                     req_id = db.add_request(
                         mb_release_id=mbid,
-                        mb_artist_id=release.get("artist_id"),
-                        artist_name=release["artist_name"],
-                        album_title=release["title"],
-                        year=release.get("year"),
-                        country=release.get("country"),
+                        mb_artist_id=artist_id,
+                        artist_name=artist_name,
+                        album_title=album_title,
+                        year=year,
+                        country=country,
                         source="request",
                     )
-                    if release.get("tracks"):
-                        db.set_tracks(req_id, release["tracks"])
+                    if tracks:
+                        db.set_tracks(req_id, tracks)
                     db.reset_to_wanted(req_id,
                                        quality_override=quality,
                                        min_bitrate=min_bitrate)
