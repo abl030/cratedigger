@@ -1358,6 +1358,23 @@ def process_completed_album(album_data, failed_grab):
                                     if os.path.isdir(parent) and not os.listdir(parent):
                                         os.rmdir(parent)
                                         logger.info(f"  Cleaned up empty artist dir: {parent}")
+                            elif result.returncode == 5:
+                                # Quality downgrade prevented by import_one.py
+                                logger.warning(
+                                    f"QUALITY DOWNGRADE PREVENTED: {album_data['artist']} - {album_data['title']}")
+                                for line in result.stderr.strip().split("\n"):
+                                    logger.warning(f"  {line}")
+                                # Denylist source users so we try someone else
+                                usernames = set(f.get("username") for f in album_data.get("files", [])
+                                                if f.get("username"))
+                                db = pipeline_db_source._get_db()
+                                for username in usernames:
+                                    db.add_denylist(request_id, username,
+                                                    "quality downgrade prevented")
+                                logger.info(f"  Denylisted {usernames} for request {request_id}")
+                                # Clean up staged dir
+                                if os.path.isdir(dest):
+                                    shutil.rmtree(dest)
                             else:
                                 logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
                                              f"{album_data['artist']} - {album_data['title']}")

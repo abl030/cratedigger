@@ -77,6 +77,59 @@ def postflight_verify(mb_release_id):
 
 
 # ---------------------------------------------------------------------------
+# Quality checking
+# ---------------------------------------------------------------------------
+
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma"}
+
+
+def _get_beets_min_bitrate(mb_release_id):
+    """Get min track bitrate (kbps) for an MBID already in beets. Returns None if not found."""
+    try:
+        conn = sqlite3.connect(BEETS_DB)
+        row = conn.execute(
+            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            return None
+        br = conn.execute(
+            "SELECT MIN(bitrate) FROM items WHERE album_id = ?", (row[0],)
+        ).fetchone()
+        conn.close()
+        if br and br[0] and br[0] > 0:
+            return int(br[0] / 1000)
+        return None
+    except Exception:
+        return None
+
+
+def _get_folder_min_bitrate(folder_path):
+    """Get min bitrate (kbps) of audio files in a folder via ffprobe."""
+    min_br = None
+    for fname in os.listdir(folder_path):
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in AUDIO_EXTENSIONS:
+            continue
+        fpath = os.path.join(folder_path, fname)
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0",
+                 "-show_entries", "stream=bit_rate",
+                 "-of", "csv=p=0", fpath],
+                capture_output=True, text=True, timeout=30,
+            )
+            br_str = result.stdout.strip()
+            if br_str and br_str.isdigit():
+                br_kbps = int(br_str) // 1000
+                if br_kbps > 0 and (min_br is None or br_kbps < min_br):
+                    min_br = br_kbps
+        except Exception:
+            continue
+    return min_br
+
+
+# ---------------------------------------------------------------------------
 # FLAC → MP3 VBR V0 conversion
 # ---------------------------------------------------------------------------
 
@@ -301,6 +354,18 @@ def main():
     if args.dry_run:
         print("[DRY] Would import via harness")
         sys.exit(0)
+
+    # --- Quality downgrade check ---
+    # If this MBID is already in beets, check that new files are better
+    existing_min_br = _get_beets_min_bitrate(mbid)
+    if existing_min_br is not None:
+        new_min_br = _get_folder_min_bitrate(args.path)
+        if new_min_br is not None and new_min_br <= existing_min_br:
+            print(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing {existing_min_br}kbps — skipping import",
+                  file=sys.stderr)
+            sys.exit(5)
+        if new_min_br is not None:
+            print(f"  [QUALITY CHECK] new {new_min_br}kbps > existing {existing_min_br}kbps — OK")
 
     # --- Import ---
     print(f"[IMPORT] {args.path} → beets (mbid={mbid})")

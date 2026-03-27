@@ -570,7 +570,17 @@ async function loadRecents() {
                  : (item.dl_bit_depth || 0) > 16 ? `${item.dl_bit_depth}bit` : '';
         const dlFmt = item.beets_format || item.dl_filetype || '';
         const qualityParts = [dlFmt, br, bd, sr].filter(Boolean);
-        const quality = qualityParts.length ? qualityParts.join(' ') : '';
+        let quality = qualityParts.length ? qualityParts.join(' ') : '';
+        // Show upgrade delta if prev_min_bitrate exists
+        if (item.prev_min_bitrate && item.min_bitrate) {
+          const prevKbps = Math.round(item.prev_min_bitrate / 1000);
+          const curKbps = Math.round(item.min_bitrate / 1000);
+          if (curKbps > prevKbps) {
+            quality += ` <span style="color:#6d6;">↑${prevKbps}→${curKbps}</span>`;
+          } else if (curKbps < prevKbps) {
+            quality += ` <span style="color:#d66;">↓${prevKbps}→${curKbps}</span>`;
+          }
+        }
         const user = item.dl_soulseek_username || '';
         return `
           <div class="r-item ${beetsClass}" onclick="toggleDetail(${item.id})">

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS album_requests (
     -- Quality upgrade
     quality_override TEXT,
     min_bitrate INTEGER,
+    prev_min_bitrate INTEGER,
 
     -- Lidarr bridge
     lidarr_album_id INTEGER,
@@ -176,6 +177,7 @@ class PipelineDB:
             for col, coltype in [
                 ("quality_override", "TEXT"),
                 ("min_bitrate", "INTEGER"),
+                ("prev_min_bitrate", "INTEGER"),
             ]:
                 cur.execute(f"""
                     DO $$ BEGIN
@@ -266,6 +268,7 @@ class PipelineDB:
                 next_retry_after = NULL,
                 last_attempt_at = NULL,
                 quality_override = %s,
+                prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate),
                 min_bitrate = %s,
                 updated_at = %s
             WHERE id = %s
