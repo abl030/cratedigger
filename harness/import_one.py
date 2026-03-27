@@ -34,7 +34,7 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_ha
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
-TRANSCODE_MIN_BITRATE_KBPS = 220  # V0 floor — converted FLAC below this is a transcode
+TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 floor — converted FLAC below this is a transcode
 
 
 # ---------------------------------------------------------------------------

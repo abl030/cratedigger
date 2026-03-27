@@ -1156,7 +1156,7 @@ def search_and_queue(albums):
 
 
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
-QUALITY_MIN_BITRATE_KBPS = 220  # V0 floor — below this triggers upgrade
+QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 
 
 def _check_quality_gate(album_data, request_id):
