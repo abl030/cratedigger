@@ -135,10 +135,10 @@ class PipelineDB:
         conn = psycopg2.connect(
             self.dsn,
             connect_timeout=10,
-            options="-c statement_timeout=30000",
-            tcp_keepalives_idle=60,
-            tcp_keepalives_interval=10,
-            tcp_keepalives_count=5,
+            options="-c statement_timeout=30000"
+                    " -c tcp_keepalives_idle=60"
+                    " -c tcp_keepalives_interval=10"
+                    " -c tcp_keepalives_count=5",
         )
         conn.autocommit = True
         return conn
