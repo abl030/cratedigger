@@ -894,13 +894,17 @@ function renderLibraryResults(albums) {
 
     function renderAlbum(a) {
       const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
+      const mbid = a.mb_albumid || '';
       return `
         <div class="lib-item" onclick="toggleLibDetail(${a.id})">
           <div class="p-top">
             <div>
               <div class="p-title">${esc(a.album)}</div>
             </div>
-            <div style="font-size:0.75em;color:#666;">${a.track_count}t</div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              ${mbid ? `<button class="p-btn upgrade-btn" style="padding:2px 8px;font-size:0.7em;" onclick="event.stopPropagation(); upgradeAlbum('${mbid}', this)">Upgrade</button>` : ''}
+              <span style="font-size:0.75em;color:#666;">${a.track_count}t</span>
+            </div>
           </div>
           <div class="p-meta">
             <span>${a.year || '?'}</span>
