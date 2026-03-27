@@ -42,18 +42,26 @@ def check_beets_library(mbids):
 
 
 def check_beets_library_detail(mbids):
-    """Check beets library with track counts. Returns dict of mbid → {track_count}."""
+    """Check beets library with track counts and audio quality. Returns dict of mbid → info."""
     if not beets_db_path or not os.path.exists(beets_db_path):
         return {}
     conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
     placeholders = ",".join("?" for _ in mbids)
     rows = conn.execute(
         f"SELECT a.mb_albumid, "
-        f"       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count "
+        f"       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count, "
+        f"       (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) as formats, "
+        f"       (SELECT CAST(AVG(i.bitrate) AS INTEGER) FROM items i WHERE i.album_id = a.id) as avg_bitrate, "
+        f"       (SELECT MAX(i.samplerate) FROM items i WHERE i.album_id = a.id) as max_samplerate, "
+        f"       (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) as max_bitdepth "
         f"FROM albums a WHERE a.mb_albumid IN ({placeholders})", mbids
     ).fetchall()
     conn.close()
-    return {r[0]: {"beets_tracks": r[1]} for r in rows}
+    return {r[0]: {
+        "beets_tracks": r[1], "beets_format": r[2],
+        "beets_bitrate": r[3], "beets_samplerate": r[4],
+        "beets_bitdepth": r[5],
+    } for r in rows}
 
 
 def check_beets_by_artist_album(artist, album):
@@ -262,7 +270,11 @@ class Handler(BaseHTTPRequestHandler):
                     item["pipeline_tracks"] = pipeline_tracks
                     if mbid and mbid in beets_info:
                         item["in_beets"] = True
-                        item["beets_tracks"] = beets_info[mbid]["beets_tracks"]
+                        bi = beets_info[mbid]
+                        item["beets_tracks"] = bi["beets_tracks"]
+                        for k in ("beets_format", "beets_bitrate", "beets_samplerate", "beets_bitdepth"):
+                            if bi.get(k):
+                                item[k] = bi[k]
                     else:
                         # Fallback: match by artist + album name (different pressing)
                         fallback = check_beets_by_artist_album(
