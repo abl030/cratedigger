@@ -1470,9 +1470,11 @@ def process_completed_album(album_data, failed_grab):
                                     db.add_denylist(request_id, username, reason)
                                 logger.info(f"  Denylisted {usernames} for request {request_id}")
                                 # Reset to wanted so we keep searching for better quality
+                                # Only update min_bitrate if we actually imported — otherwise
+                                # keep the existing on-disk value
                                 db.reset_to_wanted(request_id,
                                                    quality_override=QUALITY_UPGRADE_TIERS,
-                                                   min_bitrate=actual_br)
+                                                   min_bitrate=actual_br if imported_transcode else None)
                                 # Clean up staged dir (beets already moved files if imported)
                                 if os.path.isdir(dest):
                                     shutil.rmtree(dest)

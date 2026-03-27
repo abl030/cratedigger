@@ -259,20 +259,36 @@ class PipelineDB:
 
     def reset_to_wanted(self, request_id, quality_override=None, min_bitrate=None):
         now = datetime.now(timezone.utc)
-        self._execute("""
-            UPDATE album_requests
-            SET status = 'wanted',
-                search_attempts = 0,
-                download_attempts = 0,
-                validation_attempts = 0,
-                next_retry_after = NULL,
-                last_attempt_at = NULL,
-                quality_override = %s,
-                prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate),
-                min_bitrate = %s,
-                updated_at = %s
-            WHERE id = %s
-        """, (quality_override, min_bitrate, now, request_id))
+        if min_bitrate is not None:
+            # Upgrading: save current as prev, set new
+            self._execute("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    search_attempts = 0,
+                    download_attempts = 0,
+                    validation_attempts = 0,
+                    next_retry_after = NULL,
+                    last_attempt_at = NULL,
+                    quality_override = %s,
+                    prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate),
+                    min_bitrate = %s,
+                    updated_at = %s
+                WHERE id = %s
+            """, (quality_override, min_bitrate, now, request_id))
+        else:
+            # No new bitrate info — keep existing values
+            self._execute("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    search_attempts = 0,
+                    download_attempts = 0,
+                    validation_attempts = 0,
+                    next_retry_after = NULL,
+                    last_attempt_at = NULL,
+                    quality_override = %s,
+                    updated_at = %s
+                WHERE id = %s
+            """, (quality_override, now, request_id))
         self.conn.commit()
 
     # --- Query methods ---
