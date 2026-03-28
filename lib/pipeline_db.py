@@ -306,6 +306,21 @@ class PipelineDB:
         cur = self._execute(sql, (now,))
         return [dict(r) for r in cur.fetchall()]
 
+    def get_log(self, limit=50):
+        """Get recent download_log entries joined with album_requests."""
+        cur = self._execute("""
+            SELECT dl.*,
+                   ar.album_title, ar.artist_name, ar.mb_release_id,
+                   ar.year, ar.country, ar.status AS request_status,
+                   ar.min_bitrate AS request_min_bitrate,
+                   ar.prev_min_bitrate, ar.quality_override, ar.source
+            FROM download_log dl
+            JOIN album_requests ar ON dl.request_id = ar.id
+            ORDER BY dl.created_at DESC
+            LIMIT %s
+        """, (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
     def get_by_status(self, status):
         cur = self._execute(
             "SELECT * FROM album_requests WHERE status = %s ORDER BY created_at ASC",

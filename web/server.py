@@ -270,6 +270,25 @@ class Handler(BaseHTTPRequestHandler):
                     conn.close()
                 self._json(data)
 
+            elif path == "/api/pipeline/log":
+                entries = db.get_log(limit=50)
+                # Batch-check beets for all MBIDs
+                mbids = list(set(e["mb_release_id"] for e in entries if e.get("mb_release_id")))
+                beets_info = check_beets_library_detail(mbids) if mbids else {}
+                result = []
+                for e in entries:
+                    item = {k: str(v) if hasattr(v, 'isoformat') else v for k, v in e.items()}
+                    mbid = e.get("mb_release_id")
+                    bi = beets_info.get(mbid)
+                    if bi:
+                        item["in_beets"] = True
+                        item["beets_format"] = bi.get("beets_format")
+                        item["beets_bitrate"] = bi.get("beets_bitrate")
+                    else:
+                        item["in_beets"] = False
+                    result.append(item)
+                self._json({"log": result})
+
             elif path == "/api/pipeline/status":
                 counts = db.count_by_status()
                 wanted = db.get_wanted(limit=50)
@@ -705,6 +724,51 @@ class Handler(BaseHTTPRequestHandler):
                     "id": req_id,
                     "new_status": new_status or existing["status"],
                     "min_bitrate": min_bitrate,
+                })
+
+            elif path == "/api/pipeline/ban-source":
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                req_id = body.get("request_id")
+                username = body.get("username", "").strip()
+                mb_release_id = body.get("mb_release_id", "").strip()
+
+                if not req_id or not username:
+                    self._error("Missing request_id or username")
+                    return
+
+                # 1. Denylist the user for this album
+                db.add_denylist(int(req_id), username, "manually banned via web UI")
+
+                # 2. Remove from beets if present
+                beets_removed = False
+                if mb_release_id and beets_db_path and os.path.exists(beets_db_path):
+                    conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+                    album_row = conn.execute(
+                        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
+                    ).fetchone()
+                    conn.close()
+                    if album_row:
+                        # Use beet remove (without -d to keep files? No, remove completely)
+                        import subprocess as _sp
+                        result = _sp.run(
+                            ["beet", "remove", "-d", f"mb_albumid:{mb_release_id}"],
+                            capture_output=True, text=True, timeout=30,
+                            env={**os.environ, "HOME": "/home/abl030"},
+                        )
+                        beets_removed = result.returncode == 0
+
+                # 3. Requeue for re-download
+                req = db.get_request(int(req_id))
+                if req:
+                    quality = req.get("quality_override") or "flac,mp3 v0,mp3 320"
+                    min_br = req.get("min_bitrate")
+                    db.reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
+
+                self._json({
+                    "status": "ok",
+                    "username": username,
+                    "beets_removed": beets_removed,
                 })
 
             elif path == "/api/pipeline/delete":

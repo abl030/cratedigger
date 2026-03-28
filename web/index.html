@@ -56,6 +56,10 @@
   .btn-add:hover { background: #3a6a3a; }
   .btn-add:disabled { background: #333; color: #666; cursor: default; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 600; margin-left: 6px; }
+  .badge-new { background: #1a4a2a; color: #6d6; }
+  .badge-upgraded { background: #1a4a2a; color: #6d6; }
+  .badge-rejected { background: #4a1a1a; color: #d66; }
+  .badge-transcode { background: #3a3a1a; color: #da6; }
   .badge-library { background: #1a3a5a; color: #6af; }
   .badge-wanted { background: #5a3a1a; color: #fa6; }
   .badge-imported { background: #1a4a2a; color: #6d6; }
@@ -526,19 +530,19 @@ async function loadRecents() {
   const el = document.getElementById('recents-content');
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
-    const r = await fetch(`${API}/api/pipeline/recent`);
+    const r = await fetch(`${API}/api/pipeline/log`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const items = data.recent || [];
+    const items = data.log || [];
     if (items.length === 0) {
-      el.innerHTML = '<div class="loading">No recent imports</div>';
+      el.innerHTML = '<div class="loading">No pipeline activity</div>';
       return;
     }
 
     // Group by date (AWST)
     const byDate = {};
     for (const item of items) {
-      const date = awstDate(item.updated_at || item.created_at || '');
+      const date = awstDate(item.created_at || '');
       if (!byDate[date]) byDate[date] = [];
       byDate[date].push(item);
     }
@@ -547,70 +551,86 @@ async function loadRecents() {
     el.innerHTML = dates.map(date => `
       <div class="r-date-header">${date}</div>
       ${byDate[date].map(item => {
-        const dist = item.beets_distance != null ? `dist ${item.beets_distance.toFixed(3)}` : '';
-        const fmt = item.format || '?';
-        const year = item.year || '?';
-        const time = awstTime(item.updated_at || '');
-        let beetsClass = '';
-        let beetsLabel = '';
-        if (!item.in_beets) {
-          beetsClass = 'beets-missing';
-          beetsLabel = '<span class="beets-status beets-missing">not in beets</span>';
-        } else if (item.pipeline_tracks > 0 && item.beets_tracks < item.pipeline_tracks) {
-          beetsClass = 'beets-mismatch';
-          beetsLabel = `<span class="beets-status beets-mismatch">${item.beets_tracks}/${item.pipeline_tracks} tracks</span>`;
-        } else {
-          beetsLabel = `<span class="beets-status beets-ok">${item.beets_tracks}t in beets</span>`;
+        const time = awstTime(item.created_at || '');
+        const user = item.soulseek_username || '';
+        const isRejected = item.outcome === 'rejected';
+        const isSuccess = item.outcome === 'success';
+        const scenario = item.beets_scenario || '';
+        const wasConverted = item.was_converted;
+        const prevBr = item.prev_min_bitrate;
+        const curBr = item.request_min_bitrate;
+
+        // Classify the event
+        let badge = '', badgeClass = '', borderColor = '#444';
+        if (isRejected) {
+          const reasons = {
+            'high_distance': 'Wrong match',
+            'audio_corrupt': 'Corrupt audio',
+            'no_candidates': 'No MB match',
+            'quality_downgrade': 'Quality downgrade',
+            'album_name_mismatch': 'Name mismatch',
+          };
+          badge = reasons[scenario] || 'Rejected';
+          badgeClass = 'badge-rejected';
+          borderColor = '#a33';
+        } else if (isSuccess && prevBr && curBr && curBr > prevBr) {
+          badge = 'Upgraded';
+          badgeClass = 'badge-upgraded';
+          borderColor = '#3a6';
+        } else if (isSuccess && wasConverted && item.bitrate && item.bitrate < 210000) {
+          badge = 'Transcode';
+          badgeClass = 'badge-transcode';
+          borderColor = '#a93';
+        } else if (isSuccess) {
+          badge = prevBr ? 'Re-imported' : 'New import';
+          badgeClass = 'badge-new';
+          borderColor = '#1a4a2a';
         }
-        // Audio quality — use qualityLabel for tier display (V0, 320, etc.)
-        const beetsFormat = item.beets_format || item.dl_filetype || '';
-        const beetsBr = item.beets_bitrate || (item.dl_bitrate ? item.dl_bitrate * 1000 : 0);
-        const tier = qualityLabel(beetsFormat, beetsBr);
-        const sr = (item.beets_samplerate || 0) > 44100 ? `${(item.beets_samplerate/1000).toFixed(1)}kHz`
-                 : (item.dl_sample_rate || 0) > 44100 ? `${(item.dl_sample_rate/1000).toFixed(1)}kHz` : '';
-        const bd = (item.beets_bitdepth || 0) > 16 ? `${item.beets_bitdepth}bit`
-                 : (item.dl_bit_depth || 0) > 16 ? `${item.dl_bit_depth}bit` : '';
-        const qualityParts = [tier, bd, sr].filter(Boolean);
-        let quality = qualityParts.length ? qualityParts.join(' ') : '';
-        // Show upgrade delta if prev_min_bitrate exists (both stored in kbps)
-        if (item.prev_min_bitrate && item.min_bitrate && item.prev_min_bitrate !== item.min_bitrate) {
-          const prev = item.prev_min_bitrate;
-          const cur = item.min_bitrate;
-          const prevLabel = qualityLabel('MP3', prev * 1000);
-          const curLabel = qualityLabel('MP3', cur * 1000);
-          // Use tier labels if different, raw kbps if same tier
-          const prevStr = prevLabel !== curLabel ? prevLabel : `${prev}k`;
-          const curStr = prevLabel !== curLabel ? curLabel : `${cur}k`;
-          if (cur > prev) {
-            quality += ` <span style="color:#6d6;">↑${prevStr}→${curStr}</span>`;
-          } else {
-            quality += ` <span style="color:#d66;">↓${prevStr}→${curStr}</span>`;
+
+        // Quality display
+        let qualityInfo = '';
+        if (isSuccess) {
+          const fmt = item.beets_format || item.filetype || '';
+          const br = item.beets_bitrate || item.bitrate || 0;
+          qualityInfo = qualityLabel(fmt, br);
+          if (wasConverted) qualityInfo += ' (from flac)';
+          // Upgrade delta
+          if (prevBr && curBr && prevBr !== curBr) {
+            const prevL = qualityLabel('MP3', prevBr * 1000);
+            const curL = qualityLabel('MP3', curBr * 1000);
+            const prevS = prevL !== curL ? prevL : `${prevBr}k`;
+            const curS = prevL !== curL ? curL : `${curBr}k`;
+            if (curBr > prevBr) {
+              qualityInfo += ` <span style="color:#6d6;">↑${prevS}→${curS}</span>`;
+            } else {
+              qualityInfo += ` <span style="color:#d66;">↓${prevS}→${curS}</span>`;
+            }
           }
+        } else {
+          const dist = item.beets_distance != null ? `dist ${parseFloat(item.beets_distance).toFixed(3)}` : '';
+          qualityInfo = dist;
         }
-        const user = item.dl_soulseek_username || '';
+
         return `
-          <div class="r-item ${beetsClass}" onclick="toggleDetail(${item.id})">
+          <div class="r-item" style="border-left-color:${borderColor}" onclick="toggleDetail(${item.request_id})">
             <div class="p-top">
               <div>
-                <div class="p-title">${esc(item.album_title)} ${beetsLabel}</div>
+                <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
                 <div class="p-artist">${esc(item.artist_name)}</div>
               </div>
               <div style="font-size:0.75em;color:#666;">${time}</div>
             </div>
             <div class="p-meta">
-              <span>${year}</span>
-              ${quality ? `<span>${quality}</span>` : `<span>${fmt}</span>`}
-              ${item.country ? `<span>${item.country}</span>` : ''}
-              <span>${item.source}</span>
+              ${qualityInfo ? `<span>${qualityInfo}</span>` : ''}
               ${user ? `<span>from ${esc(user)}</span>` : ''}
-              ${dist ? `<span>${dist}</span>` : ''}
+              ${isRejected && item.beets_detail ? `<span style="color:#888;">${esc(item.beets_detail)}</span>` : ''}
             </div>
           </div>
-          <div class="p-detail" id="detail-${item.id}"></div>
+          <div class="p-detail" id="detail-${item.request_id}"></div>
         `;
       }).join('')}
     `).join('');
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load recents</div>'; }
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load log</div>'; }
 }
 
 let pipelineData = null;
@@ -791,13 +811,32 @@ async function toggleDetail(id) {
     }
 
     // Status change buttons
+    const mbid = req.mb_release_id || '';
     html += `<div class="p-actions">
-      <span class="p-detail-label" style="line-height:28px;">Set status:</span>
+      <span class="p-detail-label" style="line-height:28px;">Status:</span>
       <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'wanted')">wanted</button>
       <button class="p-btn ${req.status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'imported')">imported</button>
       <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'manual')">manual</button>
       <button class="p-btn delete" onclick="event.stopPropagation(); deleteRequest(${id})">delete</button>
     </div>`;
+    // Min bitrate + Accept as V0
+    if (mbid) {
+      html += `<div class="p-actions">
+        <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
+        <input type="number" id="det-minbr-${id}" value="" placeholder="${req.min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
+        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('det-minbr-${id}').value; if(v) setLibQuality('${mbid}', null, parseInt(v))">Set</button>
+        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', 210)">Accept as V0</button>
+      </div>`;
+    }
+    // Ban source buttons (one per user in history)
+    const usersToBan = [...new Set(history.filter(h => h.soulseek_username).map(h => h.soulseek_username))];
+    if (usersToBan.length > 0 && mbid) {
+      html += '<div class="p-actions">';
+      html += usersToBan.map(u =>
+        `<button class="p-btn delete" onclick="event.stopPropagation(); banSource(${id}, '${u.replace(/'/g, "\\'")}', '${mbid}')">Ban ${esc(u)}</button>`
+      ).join('');
+      html += '</div>';
+    }
 
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load details</div>'; }
@@ -1045,6 +1084,23 @@ async function toggleLibDetail(id) {
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
+}
+
+async function banSource(requestId, username, mbid) {
+  if (!confirm(`Ban ${username} for this album?\nThis will remove files from beets and requeue for re-download.`)) return;
+  try {
+    const r = await fetch(`${API}/api/pipeline/ban-source`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({request_id: requestId, username, mb_release_id: mbid}),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      toast(`Banned ${username}, ${data.beets_removed ? 'removed from beets' : 'not in beets'}, requeued`);
+    } else {
+      toast(data.error || 'Ban failed', true);
+    }
+  } catch (e) { toast('Ban failed', true); }
 }
 
 async function setLibQuality(mbid, status, minBitrate) {
