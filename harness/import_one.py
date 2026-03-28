@@ -354,6 +354,43 @@ def main():
         print(f"[ERROR] Path not found: {args.path}", file=sys.stderr)
         sys.exit(3)
 
+    # --- Spectral analysis (pre-conversion) ---
+    try:
+        lib_dir = os.path.join(os.path.dirname(__file__), "..", "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from spectral_check import analyze_album as spectral_analyze
+        spectral_result = spectral_analyze(args.path, trim_seconds=30)
+        print(f"  spectral_grade={spectral_result.grade}")
+        if spectral_result.estimated_bitrate_kbps is not None:
+            print(f"  spectral_bitrate={spectral_result.estimated_bitrate_kbps}")
+        if spectral_result.grade == "suspect":
+            cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
+            if cliff_tracks:
+                print(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
+        # Spectral check on existing beets files (if album already in beets)
+        if already_in_beets:
+            existing_path = None
+            try:
+                conn = sqlite3.connect(BEETS_DB)
+                row = conn.execute(
+                    "SELECT (SELECT path FROM items WHERE album_id = a.id LIMIT 1) "
+                    "FROM albums a WHERE a.mb_albumid = ?", (mbid,)
+                ).fetchone()
+                conn.close()
+                if row and row[0]:
+                    p = row[0].decode() if isinstance(row[0], bytes) else row[0]
+                    existing_path = os.path.dirname(p)
+            except Exception:
+                pass
+            if existing_path and os.path.isdir(existing_path):
+                existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
+                if existing_spectral.estimated_bitrate_kbps is not None:
+                    print(f"  existing_spectral_bitrate={existing_spectral.estimated_bitrate_kbps}")
+                print(f"  existing_spectral_grade={existing_spectral.grade}")
+    except Exception as e:
+        print(f"  [SPECTRAL] error: {e}", file=sys.stderr)
+
     # --- Convert FLAC → V0 ---
     print(f"[CONVERT] {args.path}")
     converted, failed = convert_flac_to_v0(args.path, dry_run=args.dry_run)

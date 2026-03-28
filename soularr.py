@@ -1183,7 +1183,20 @@ def _check_quality_gate(album_data, request_id):
         if not br_row or not br_row[0]:
             return
         min_br_kbps = int(br_row[0] / 1000)
-        if min_br_kbps < QUALITY_MIN_BITRATE_KBPS:
+        # Use spectral_bitrate for quality gate if available (catches fake 320s)
+        gate_br = min_br_kbps
+        spectral_br = None
+        if request_id:
+            try:
+                req = pipeline_db_source._get_db().get_request(request_id)
+                spectral_br = req.get("spectral_bitrate") if req else None
+                if spectral_br and spectral_br < gate_br:
+                    gate_br = spectral_br
+                    logger.info(f"QUALITY GATE: using spectral_bitrate={spectral_br}kbps "
+                                f"(lower than beets min_bitrate={min_br_kbps}kbps)")
+            except Exception:
+                pass
+        if gate_br < QUALITY_MIN_BITRATE_KBPS:
             db = pipeline_db_source._get_db()
             db.reset_to_wanted(request_id,
                                quality_override=QUALITY_UPGRADE_TIERS,
@@ -1194,15 +1207,19 @@ def _check_quality_gate(album_data, request_id):
             for username in usernames:
                 db.add_denylist(request_id, username,
                                 f"quality gate: {min_br_kbps}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps")
+            spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                f"min_bitrate={min_br_kbps}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps, "
+                f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
         else:
             # Update min_bitrate to current on-disk value (quality gate passed)
             db = pipeline_db_source._get_db()
-            db.update_status(request_id, "imported", min_bitrate=min_br_kbps)
+            update_fields = {"min_bitrate": min_br_kbps}
+            if spectral_br:
+                update_fields["spectral_bitrate"] = spectral_br
+            db.update_status(request_id, "imported", **update_fields)
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"min_bitrate={min_br_kbps}kbps — quality OK")
@@ -1387,6 +1404,26 @@ def process_completed_album(album_data, failed_grab):
                                             new_min_br = int(line.strip().split("=")[1])
                                         except (ValueError, IndexError):
                                             pass
+                                    # Capture spectral analysis results
+                                    if line.strip().startswith("spectral_grade="):
+                                        dl_info["spectral_grade"] = line.strip().split("=")[1]
+                                    if line.strip().startswith("spectral_bitrate="):
+                                        try:
+                                            dl_info["spectral_bitrate"] = int(line.strip().split("=")[1])
+                                        except (ValueError, IndexError):
+                                            pass
+                                    if line.strip().startswith("existing_spectral_bitrate="):
+                                        try:
+                                            dl_info["existing_spectral_bitrate"] = int(line.strip().split("=")[1])
+                                        except (ValueError, IndexError):
+                                            pass
+                                # Set slskd-reported quality (before conversion changed it)
+                                if dl_info.get("was_converted"):
+                                    dl_info["slskd_filetype"] = dl_info.get("original_filetype", "flac")
+                                    dl_info["actual_filetype"] = dl_info.get("filetype", "mp3")
+                                else:
+                                    dl_info["slskd_filetype"] = dl_info.get("filetype")
+                                    dl_info["actual_filetype"] = dl_info.get("filetype")
                                 # Ensure DB status is set even if import_one's DB update failed
                                 pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
                                 # Update upgrade delta on the pipeline request
