@@ -190,6 +190,7 @@ class PipelineDB:
                 # Spectral quality verification columns
                 ("spectral_bitrate", "INTEGER"),
                 ("spectral_grade", "TEXT"),
+                ("verified_lossless", "BOOLEAN DEFAULT FALSE"),
             ]:
                 cur.execute(f"""
                     DO $$ BEGIN

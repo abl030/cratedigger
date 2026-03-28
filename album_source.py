@@ -166,11 +166,17 @@ class DatabaseSource:
             beets_scenario=bv_result.get("scenario"),
             imported_path=dest_path,
         )
-        # Propagate spectral data to album_requests for quality gate
+        # Propagate spectral data to album_requests
         if dl.get("spectral_bitrate") is not None:
             update_fields["spectral_bitrate"] = dl["spectral_bitrate"]
         if dl.get("spectral_grade"):
             update_fields["spectral_grade"] = dl["spectral_grade"]
+        # verified_lossless: only True when we converted a FLAC that
+        # spectral analysis confirmed as genuine lossless
+        if (dl.get("was_converted") and
+                dl.get("original_filetype") in ("flac", "FLAC") and
+                dl.get("spectral_grade") == "genuine"):
+            update_fields["verified_lossless"] = True
         db.update_status(request_id, "imported", **update_fields)
 
         # Log the download

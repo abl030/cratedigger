@@ -1197,27 +1197,14 @@ def _check_quality_gate(album_data, request_id):
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
             except Exception:
                 pass
-        # If spectral verified this as genuine lossless AND files are VBR
-        # (i.e. came from FLAC→V0 conversion), trust the low bitrate —
-        # it's just quiet/simple music. spectral on CBR is meaningless.
-        spectral_grade = req.get("spectral_grade") if req else None
-        is_vbr_on_disk = False
-        try:
-            import sqlite3 as _sq2
-            _c2 = _sq2.connect(f"file:{beets_db}?mode=ro", uri=True)
-            _dbr = _c2.execute(
-                "SELECT COUNT(DISTINCT bitrate) FROM items WHERE album_id = ?",
-                (album_row[0],)
-            ).fetchone()
-            _c2.close()
-            is_vbr_on_disk = _dbr and _dbr[0] > 1
-        except Exception:
-            pass
-        if spectral_grade == "genuine" and is_vbr_on_disk and gate_br < QUALITY_MIN_BITRATE_KBPS:
+        # If we verified this album from a genuine FLAC (converted to V0),
+        # trust the low bitrate — it's just quiet/simple music.
+        verified_lossless = req.get("verified_lossless") if req else False
+        if verified_lossless and gate_br < QUALITY_MIN_BITRATE_KBPS:
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"gate_bitrate={gate_br}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps but "
-                f"spectral=genuine + VBR — verified lossless source, accepting")
+                f"verified_lossless=True — accepting")
             gate_br = QUALITY_MIN_BITRATE_KBPS  # force pass
 
         if gate_br < QUALITY_MIN_BITRATE_KBPS:
@@ -1237,11 +1224,9 @@ def _check_quality_gate(album_data, request_id):
                 f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
-        else:
-            # Check if files are CBR (all tracks same bitrate) — unverifiable.
-            # spectral_grade on CBR files is meaningless — "genuine" just means
-            # no cliff detected, not that the source was lossless.
-            # Only VBR from FLAC→V0 conversion can prove source quality.
+        elif not verified_lossless:
+            # Above threshold but not verified from lossless source.
+            # Check if files are CBR — if so, re-queue for FLAC.
             is_cbr = False
             try:
                 import sqlite3 as _sq
@@ -1261,7 +1246,7 @@ def _check_quality_gate(album_data, request_id):
                                    min_bitrate=min_br_kbps)
                 logger.info(
                     f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                    f"min_bitrate={min_br_kbps}kbps CBR but not verified lossless — "
+                    f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                     f"searching for FLAC to verify")
             else:
                 # VBR above threshold — quality OK
@@ -1270,6 +1255,14 @@ def _check_quality_gate(album_data, request_id):
                 if spectral_br:
                     update_fields["spectral_bitrate"] = spectral_br
                 db.update_status(request_id, "imported", **update_fields)
+                logger.info(
+                    f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
+                    f"min_bitrate={min_br_kbps}kbps VBR — quality OK")
+        else:
+            # verified_lossless + above threshold — gold standard
+            db = pipeline_db_source._get_db()
+            update_fields = {"min_bitrate": min_br_kbps}
+            db.update_status(request_id, "imported", **update_fields)
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"min_bitrate={min_br_kbps}kbps — quality OK")
