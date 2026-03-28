@@ -599,7 +599,8 @@ async function loadRecents() {
         let qualityInfo = '';
         if (isSuccess) {
           const fmt = item.beets_format || item.filetype || '';
-          const br = item.beets_bitrate || item.bitrate || 0;
+          // Use DB min_bitrate (avg after accept) if set, else beets min
+          const br = (curBr ? curBr * 1000 : null) || item.beets_bitrate || item.bitrate || 0;
           qualityInfo = qualityLabel(fmt, br);
           if (wasConverted) qualityInfo += ' (from flac)';
           // Upgrade delta
@@ -827,13 +828,13 @@ async function toggleDetail(id) {
       <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'manual')">manual</button>
       <button class="p-btn delete" onclick="event.stopPropagation(); deleteRequest(${id})">delete</button>
     </div>`;
-    // Min bitrate + Accept as V0
+    // Min bitrate + Accept
     if (mbid) {
       html += `<div class="p-actions">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
         <input type="number" id="det-minbr-${id}" value="" placeholder="${req.min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
         <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('det-minbr-${id}').value; if(v) setLibQuality('${mbid}', null, parseInt(v), ${id})">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', 210, ${id})">Accept as V0</button>
+        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', null, ${id})">Accept</button>
       </div>`;
     }
     // Ban source buttons (one per user in history)
@@ -1075,7 +1076,7 @@ async function toggleLibDetail(id) {
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
         <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
         <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) setLibQuality('${data.mb_albumid}', null, parseInt(v))">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${data.mb_albumid}', 'imported', 210)">Accept as V0</button>
+        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${data.mb_albumid}', 'imported', null)">Accept</button>
       </div>`;
     }
     // Upgrade + Delete buttons
