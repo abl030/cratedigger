@@ -582,9 +582,15 @@ async function loadRecents() {
           badgeClass = 'badge-transcode';
           borderColor = '#a93';
         } else if (isSuccess) {
-          badge = prevBr ? 'Re-imported' : 'New import';
-          badgeClass = 'badge-new';
-          borderColor = '#1a4a2a';
+          if (prevBr && curBr && curBr <= prevBr) {
+            badge = 'Beets quality mismatch';
+            badgeClass = 'badge-transcode';
+            borderColor = '#a93';
+          } else {
+            badge = prevBr ? 'Upgraded' : 'New import';
+            badgeClass = 'badge-new';
+            borderColor = '#1a4a2a';
+          }
         }
 
         // Quality display
@@ -824,8 +830,8 @@ async function toggleDetail(id) {
       html += `<div class="p-actions">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
         <input type="number" id="det-minbr-${id}" value="" placeholder="${req.min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('det-minbr-${id}').value; if(v) setLibQuality('${mbid}', null, parseInt(v))">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', 210)">Accept as V0</button>
+        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('det-minbr-${id}').value; if(v) setLibQuality('${mbid}', null, parseInt(v), ${id})">Set</button>
+        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', 210, ${id})">Accept as V0</button>
       </div>`;
     }
     // Ban source buttons (one per user in history)
@@ -1103,7 +1109,7 @@ async function banSource(requestId, username, mbid) {
   } catch (e) { toast('Ban failed', true); }
 }
 
-async function setLibQuality(mbid, status, minBitrate) {
+async function setLibQuality(mbid, status, minBitrate, detailId) {
   try {
     const body = {mb_release_id: mbid};
     if (status) body.status = status;
@@ -1119,6 +1125,14 @@ async function setLibQuality(mbid, status, minBitrate) {
       if (status) parts.push(status);
       if (minBitrate != null) parts.push(`min_bitrate=${minBitrate}`);
       toast(`Set ${parts.join(', ')}`);
+      // Refresh the detail panel if open
+      if (detailId) {
+        const el = document.getElementById('detail-' + detailId);
+        if (el && el.classList.contains('open')) {
+          el.classList.remove('open');
+          toggleDetail(detailId);
+        }
+      }
     } else {
       toast(data.error || 'Failed', true);
     }
