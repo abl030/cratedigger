@@ -1224,6 +1224,18 @@ def _check_quality_gate(album_data, request_id):
                 f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
+        elif spectral_grade != "genuine" and min_br_kbps >= 295:
+            # CBR 320 on disk but NOT verified from lossless source.
+            # CBR 320 is unverifiable — could be upsampled garbage.
+            # Keep searching for FLAC to convert to V0 ourselves.
+            db = pipeline_db_source._get_db()
+            db.reset_to_wanted(request_id,
+                               quality_override="flac",
+                               min_bitrate=min_br_kbps)
+            logger.info(
+                f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
+                f"min_bitrate={min_br_kbps}kbps CBR 320 but not verified lossless — "
+                f"searching for FLAC to verify")
         else:
             # Update min_bitrate to current on-disk value (quality gate passed)
             db = pipeline_db_source._get_db()
