@@ -1364,21 +1364,70 @@ def process_completed_album(album_data, failed_grab):
                                 beets_db = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
                                 if os.path.exists(beets_db):
                                     conn = _sqlite3.connect(f"file:{beets_db}?mode=ro", uri=True)
+                                    # Get existing album path + min bitrate
                                     row = conn.execute(
-                                        "SELECT (SELECT path FROM items WHERE album_id = a.id LIMIT 1) "
+                                        "SELECT a.id, "
+                                        "  (SELECT path FROM items WHERE album_id = a.id LIMIT 1), "
+                                        "  (SELECT CAST(MIN(bitrate)/1000 AS INTEGER) FROM items WHERE album_id = a.id) "
                                         "FROM albums a WHERE a.mb_albumid = ?", (mb_id,)
                                     ).fetchone()
                                     conn.close()
-                                    if row and row[0]:
+                                    if row and row[1]:
                                         existing_path = os.path.dirname(
-                                            row[0].decode() if isinstance(row[0], bytes) else row[0])
+                                            row[1].decode() if isinstance(row[1], bytes) else row[1])
+                                        album_data["_existing_min_bitrate"] = row[2]
                                         if os.path.isdir(existing_path):
                                             existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
                                             album_data["_existing_spectral_bitrate"] = existing_spectral.estimated_bitrate_kbps
                                             logger.info(f"SPECTRAL: existing on disk: grade={existing_spectral.grade}, "
-                                                        f"estimated_bitrate={existing_spectral.estimated_bitrate_kbps}kbps")
+                                                        f"estimated_bitrate={existing_spectral.estimated_bitrate_kbps}kbps, "
+                                                        f"beets_min={row[2]}kbps")
                             except Exception:
                                 logger.exception("SPECTRAL: failed to check existing files")
+                        # Decision: compare spectral bitrates
+                        new_quality = spectral_result.estimated_bitrate_kbps
+                        existing_quality = album_data.get("_existing_spectral_bitrate") or 0
+                        request_id = album_data.get("_db_request_id")
+
+                        if spectral_result.grade == "suspect":
+                            if new_quality and existing_quality and new_quality <= existing_quality:
+                                # Not an upgrade — reject and denylist
+                                logger.warning(
+                                    f"SPECTRAL REJECT: {album_data['artist']} - {album_data['title']} "
+                                    f"new spectral {new_quality}kbps <= existing {existing_quality}kbps")
+                                usernames = set(f.get("username") for f in album_data.get("files", [])
+                                                if f.get("username"))
+                                if request_id and pipeline_db_source:
+                                    db = pipeline_db_source._get_db()
+                                    for username in usernames:
+                                        db.add_denylist(request_id, username,
+                                                        f"spectral: {new_quality}kbps <= existing {existing_quality}kbps")
+                                    # Log the rejected download
+                                    dl_info_rej = _build_download_info(album_data)
+                                    dl_info_rej["spectral_grade"] = spectral_result.grade
+                                    dl_info_rej["spectral_bitrate"] = new_quality
+                                    dl_info_rej["existing_spectral_bitrate"] = existing_quality
+                                    dl_info_rej["slskd_filetype"] = dl_info_rej.get("filetype")
+                                    dl_info_rej["actual_filetype"] = dl_info_rej.get("filetype")
+                                    pipeline_db_source.mark_failed(
+                                        album_data,
+                                        {"distance": bv_result.get("distance"), "scenario": "spectral_reject",
+                                         "detail": f"spectral {new_quality}kbps <= existing {existing_quality}kbps",
+                                         "error": None},
+                                        usernames=usernames, download_info=dl_info_rej)
+                                    logger.info(f"  Denylisted {usernames} for request {request_id}")
+                                move_failed_import(import_folder_fullpath)
+                                bv_result["valid"] = False
+                            elif new_quality and (not existing_quality or new_quality > existing_quality):
+                                # Suspect but better than what we have — import as upgrade
+                                logger.info(
+                                    f"SPECTRAL UPGRADE: {album_data['artist']} - {album_data['title']} "
+                                    f"suspect at {new_quality}kbps but > existing {existing_quality}kbps, importing")
+                            elif not existing_quality:
+                                # Nothing on disk yet — something is better than nothing
+                                logger.info(
+                                    f"SPECTRAL: {album_data['artist']} - {album_data['title']} "
+                                    f"suspect at {new_quality}kbps but no existing album, importing")
                     except Exception:
                         logger.exception(f"SPECTRAL: failed for {album_data['artist']} - {album_data['title']}")
 
@@ -1399,6 +1448,7 @@ def process_completed_album(album_data, failed_grab):
                         dl_info["spectral_grade"] = album_data["_spectral_grade"]
                         dl_info["spectral_bitrate"] = album_data.get("_spectral_bitrate")
                         dl_info["existing_spectral_bitrate"] = album_data.get("_existing_spectral_bitrate")
+                        dl_info["existing_min_bitrate"] = album_data.get("_existing_min_bitrate")
                         dl_info["slskd_filetype"] = dl_info.get("filetype")
                         dl_info["actual_filetype"] = dl_info.get("filetype")
                     source_type = album_data.get("_db_source", "redownload")
