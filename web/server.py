@@ -708,10 +708,26 @@ class Handler(BaseHTTPRequestHandler):
                         self._error(f"Invalid status: {new_status}")
                         return
                     if new_status == "imported":
+                        # Auto-set min_bitrate to average if not explicitly provided
+                        if min_bitrate is None and mbid and beets_db_path and os.path.exists(beets_db_path):
+                            conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+                            album_row = conn.execute(
+                                "SELECT id FROM albums WHERE mb_albumid = ?", (mbid,)
+                            ).fetchone()
+                            if album_row:
+                                avg_row = conn.execute(
+                                    "SELECT CAST(AVG(bitrate) AS INTEGER) FROM items WHERE album_id = ?",
+                                    (album_row[0],),
+                                ).fetchone()
+                                if avg_row and avg_row[0]:
+                                    min_bitrate = int(avg_row[0] / 1000)
+                            conn.close()
                         # Clear quality_override so it stops looping
+                        sets = "status = 'imported', quality_override = NULL, updated_at = NOW()"
+                        if min_bitrate is not None:
+                            sets += f", min_bitrate = {int(min_bitrate)}"
                         db._execute(
-                            "UPDATE album_requests SET status = 'imported', "
-                            "quality_override = NULL, updated_at = NOW() WHERE id = %s",
+                            f"UPDATE album_requests SET {sets} WHERE id = %s",
                             (req_id,),
                         )
                     elif new_status == "wanted" and existing["status"] != "wanted":
