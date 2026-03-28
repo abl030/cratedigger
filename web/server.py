@@ -605,7 +605,25 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 if new_status == "wanted" and req["status"] != "wanted":
-                    db.reset_to_wanted(int(req_id))
+                    # If album is in beets, set quality override for upgrade search
+                    mbid = req.get("mb_release_id")
+                    quality = None
+                    min_br = None
+                    if mbid and beets_db_path and os.path.exists(beets_db_path):
+                        conn = sqlite3.connect(f"file:{beets_db_path}?mode=ro", uri=True)
+                        album_row = conn.execute(
+                            "SELECT id FROM albums WHERE mb_albumid = ?", (mbid,)
+                        ).fetchone()
+                        if album_row:
+                            quality = "flac,mp3 v0,mp3 320"
+                            br_row = conn.execute(
+                                "SELECT CAST(MIN(bitrate) AS INTEGER) FROM items WHERE album_id = ?",
+                                (album_row[0],),
+                            ).fetchone()
+                            if br_row and br_row[0]:
+                                min_br = int(br_row[0] / 1000)
+                        conn.close()
+                    db.reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
                 else:
                     db.update_status(int(req_id), new_status)
 
