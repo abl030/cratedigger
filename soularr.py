@@ -1224,8 +1224,10 @@ def _check_quality_gate(album_data, request_id):
                 f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
-        elif spectral_grade != "genuine":
+        else:
             # Check if files are CBR (all tracks same bitrate) — unverifiable.
+            # spectral_grade on CBR files is meaningless — "genuine" just means
+            # no cliff detected, not that the source was lossless.
             # Only VBR from FLAC→V0 conversion can prove source quality.
             is_cbr = False
             try:
@@ -1248,13 +1250,13 @@ def _check_quality_gate(album_data, request_id):
                     f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                     f"min_bitrate={min_br_kbps}kbps CBR but not verified lossless — "
                     f"searching for FLAC to verify")
-        else:
-            # Update min_bitrate to current on-disk value (quality gate passed)
-            db = pipeline_db_source._get_db()
-            update_fields = {"min_bitrate": min_br_kbps}
-            if spectral_br:
-                update_fields["spectral_bitrate"] = spectral_br
-            db.update_status(request_id, "imported", **update_fields)
+            else:
+                # VBR above threshold — quality OK
+                db = pipeline_db_source._get_db()
+                update_fields = {"min_bitrate": min_br_kbps}
+                if spectral_br:
+                    update_fields["spectral_bitrate"] = spectral_br
+                db.update_status(request_id, "imported", **update_fields)
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"min_bitrate={min_br_kbps}kbps — quality OK")
