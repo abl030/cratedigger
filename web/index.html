@@ -194,10 +194,16 @@ function renderDownloadHistoryItem(h) {
   const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
   const err = h.error_message ? ` - ${h.error_message}` : '';
   const scenario = h.beets_scenario ? ` [${h.beets_scenario}]` : '';
-  // Audio quality — use tier label, show what actually ended up on disk
-  const actualFmt = h.was_converted ? h.filetype : (h.filetype || '');
-  const actualBr = h.bitrate || 0;  // download log stores bps, same as qualityLabel
-  const tier = actualFmt && actualBr ? qualityLabel(actualFmt, actualBr) : (h.filetype || '');
+  // Audio quality — for conversions, don't trust slskd bitrate (it's the FLAC stream rate)
+  const actualFmt = h.filetype || '';
+  let tier;
+  if (h.was_converted) {
+    // Converted from FLAC — slskd bitrate is meaningless, just show format
+    tier = actualFmt ? actualFmt.toUpperCase() : '?';
+  } else {
+    const actualBr = h.bitrate || 0;
+    tier = actualFmt && actualBr ? qualityLabel(actualFmt, actualBr) : (actualFmt || '?');
+  }
   const bd = h.bit_depth && h.bit_depth > 16 ? ` ${h.bit_depth}bit` : '';
   const sr = h.sample_rate && h.sample_rate > 44100 ? ` ${(h.sample_rate/1000).toFixed(1)}kHz` : '';
   const conv = h.was_converted ? ` (from ${h.original_filetype || '?'})` : '';
