@@ -120,24 +120,73 @@ Sox bandpass + stats takes ~0.5-1s per band per track. For 4 bands on a 12-track
 - **D'Alessandro & Shi (2009)**: "MP3 Bit Rate Quality Detection through Frequency Spectrum Analysis" — 97% overall accuracy using SVM on 100 frequency bands in the 16-20kHz range. Seminal paper.
 - **FLAD**: Neural network (EfficientNet) achieving 99.75% accuracy. Analyses 2.4-20kHz, suggesting lossy artifacts exist in mid-frequencies too, not just at the cutoff. Heavy deps (PyTorch).
 
-## Proposed Thresholds (conservative — minimise false positives)
+## V2: Spectral Gradient Analysis (tested 2026-03-28)
 
-For CBR 320kbps claimed files, flag as SUSPECT if:
-- 16-18kHz energy < **1.5%** of 1-4kHz reference (genuine: 2-5%, suspect: 0.6-1.1%)
-- AND 18-20kHz energy < **1.0%** of reference (genuine: 0.8-6.4%, suspect: 0.2-0.7%)
+The wide-band energy ratio approach (v1) produces too many false positives on lo-fi and quiet music. V2 uses 500Hz slices and detects the **shape** of the rolloff instead of absolute levels.
 
-Album-level decision:
-- **>50%** of tracks fail both → SUSPECT
-- **>75%** of tracks fail → LIKELY_TRANSCODE
+### Method
+
+1. Divide 12-20kHz into 16 x 500Hz slices
+2. Measure RMS energy in each slice via `sox file -n trim 0 30 sinc {lo}-{hi} stat`
+3. Compute gradient (dB/kHz) between adjacent slices
+4. **Cliff detection**: 2+ consecutive slices with gradient steeper than -12 dB/kHz
+5. **HF deficit**: average dB of top 4 slices (18-20kHz) vs reference band (1-4kHz)
+
+### Per-track classification
+
+- **SUSPECT**: cliff detected, OR HF deficit > 60dB
+- **MARGINAL**: HF deficit 40-60dB, no cliff
+- **GENUINE**: HF deficit < 40dB, no cliff
+
+### Album-level classification
+
+- **LIKELY_TRANSCODE**: >75% of tracks SUSPECT
+- **SUSPECT**: >60% of tracks SUSPECT
+- **GENUINE**: <60% suspect
 - Never auto-reject; flag for review
+
+### Two-tier verification
+
+1. **FLAC downloads**: Run spectral check pre-conversion. If cliff detected → transcode in container. Still convert to V0 — if bitrate > existing on disk, import as upgrade.
+2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
+3. **Already converted V0 with good bitrate (>210kbps)**: Skip spectral check — the V0 conversion already proved source quality.
+
+### Tuning results (Mountain Goats library, 65 albums)
+
+Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.
+
+At `HF_DEFICIT_SUSPECT=60dB + cliff detection`:
+- **19 correctly flagged SUSPECT** (confirmed bad source, transcodes, or upsampled 320s)
+- **46 correctly GENUINE** (including lo-fi albums with good V0 conversion bitrates)
+- **0 false positives** on albums with verified good sources
+- Successfully catches: cliffs at 16kHz (128kbps transcodes), cliffs at 18kHz (192kbps), upsampled CBR 320, terrible pre-pipeline rips
+
+Albums that were downloaded as FLAC, converted to V0 at >210kbps, and have no cliff: always pass — confirming the V0 conversion is the primary quality proof.
+
+### What the spectral check catches that V0 conversion doesn't
+
+- **CBR 320 downloads**: V0 conversion only happens for FLACs. Native MP3 320 downloads skip conversion entirely. Spectral check catches upsampled garbage (e.g. Hot Garden Stomp at 52dB deficit, Songs for Peter Hughes at 72dB + cliffs).
+- **Pre-pipeline imports**: Albums imported before the pipeline existed have no download history or V0 conversion data. Spectral check is the only way to assess their quality.
+
+### Reference: HF deficit ranges observed
+
+| Source quality | HF deficit range | Cliffs? |
+|---------------|-----------------|---------|
+| Genuine CD rip (FLAC) | 28-46dB | None |
+| Genuine V0 from FLAC | 32-48dB | None |
+| Lo-fi genuine (Mountain Goats boombox era) | 42-59dB | None |
+| Transcode 192→anything | 53-67dB | Often (at 18kHz) |
+| Transcode 128→anything | 71-84dB | Always (at 16kHz) |
+| Upsampled CBR 320 (from ~96kbps) | 52-97dB | Sometimes |
+| Quiet jazz/classical (genuine CD) | 33-57dB | None |
+| Children's choir (genuine CD) | 31-62dB | None |
 
 ## TODO
 
-- [ ] Integrate spectral check into `import_one.py` post-download pipeline
-- [ ] Test `spectro` pip package as validation of our approach
-- [ ] Add 16kHz shelf ratio check (14-16k / 16-18k) as primary indicator
-- [ ] Add spectral quality score to pipeline DB and web UI display
-- [ ] Run spectral check on downloaded FLACs BEFORE conversion to catch transcodes early
-- [ ] For MP3 downloads (non-FLAC), run spectral check post-download to catch upsampled 320s
-- [ ] Handle per-track vs per-album decisions (flag album if majority of tracks fail)
-- [ ] Performance: use 30-second trim for speed
+- [ ] Integrate spectral gradient check into pipeline (import_one.py or soularr.py)
+- [ ] Add spectral quality score to pipeline DB (new column) and web UI display
+- [ ] Run spectral check on CBR 320 MP3 downloads post-download
+- [ ] Run spectral check on FLACs pre-conversion to catch transcodes early
+- [ ] Skip spectral check for albums that already passed V0 conversion (>210kbps)
+- [ ] Test `spectro` pip package as second-opinion validation
+- [ ] Performance: 16 sox calls per track x 30s trim ≈ 8s/track, ~100s per 12-track album
