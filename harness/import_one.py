@@ -366,7 +366,7 @@ def main():
         print(f"  spectral_grade={spectral_result.grade}")
         if spectral_result.estimated_bitrate_kbps is not None:
             print(f"  spectral_bitrate={spectral_result.estimated_bitrate_kbps}")
-        if spectral_result.grade == "suspect":
+        if spectral_result.grade in ("suspect", "likely_transcode"):
             cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
             if cliff_tracks:
                 print(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")

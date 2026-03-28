@@ -1155,8 +1155,7 @@ def search_and_queue(albums):
     return grab_list, failed_search, failed_grab
 
 
-QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
-QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
+from lib.quality import quality_gate_decision, QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS
 
 
 def _check_quality_gate(album_data, request_id):
@@ -1179,93 +1178,85 @@ def _check_quality_gate(album_data, request_id):
         br_row = conn.execute(
             "SELECT MIN(bitrate) FROM items WHERE album_id = ?", (album_row[0],)
         ).fetchone()
-        conn.close()
         if not br_row or not br_row[0]:
+            conn.close()
             return
         min_br_kbps = int(br_row[0] / 1000)
-        # Use spectral_bitrate for quality gate if available (catches fake 320s)
-        gate_br = min_br_kbps
+
+        # Gather pipeline DB state
         spectral_br = None
         req = None
         if request_id:
             try:
                 req = pipeline_db_source._get_db().get_request(request_id)
                 spectral_br = req.get("spectral_bitrate") if req else None
-                if spectral_br and spectral_br < gate_br:
-                    gate_br = spectral_br
+                if spectral_br and spectral_br < min_br_kbps:
                     logger.info(f"QUALITY GATE: using spectral_bitrate={spectral_br}kbps "
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
             except Exception:
                 pass
-        # If we verified this album from a genuine FLAC (converted to V0),
-        # trust the low bitrate — it's just quiet/simple music.
         verified_lossless = req.get("verified_lossless") if req else False
-        if verified_lossless and gate_br < QUALITY_MIN_BITRATE_KBPS:
-            logger.info(
-                f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                f"gate_bitrate={gate_br}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps but "
-                f"verified_lossless=True — accepting")
-            gate_br = QUALITY_MIN_BITRATE_KBPS  # force pass
 
-        if gate_br < QUALITY_MIN_BITRATE_KBPS:
+        # CBR detection
+        is_cbr = False
+        try:
+            distinct_br = conn.execute(
+                "SELECT COUNT(DISTINCT bitrate) FROM items WHERE album_id = ?",
+                (album_row[0],)
+            ).fetchone()
+            is_cbr = distinct_br and distinct_br[0] == 1
+        except Exception:
+            pass
+        conn.close()
+
+        # --- Pure decision ---
+        decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
+
+        # --- Act on decision ---
+        label = f"{album_data['artist']} - {album_data['title']}"
+        spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
+
+        if decision == "requeue_upgrade":
+            if verified_lossless:
+                logger.info(
+                    f"QUALITY GATE: {label} gate_bitrate < {QUALITY_MIN_BITRATE_KBPS}kbps "
+                    f"but verified_lossless=True — accepting")
+                # verified_lossless override means quality_gate_decision already
+                # forced accept; we only get here if spectral overrode that too,
+                # which shouldn't happen. Defensive fallthrough.
             db = pipeline_db_source._get_db()
             db.reset_to_wanted(request_id,
                                quality_override=QUALITY_UPGRADE_TIERS,
                                min_bitrate=min_br_kbps)
-            # Denylist the source user(s) so we don't re-download same quality
             usernames = set(f.get("username") for f in album_data.get("files", [])
                            if f.get("username"))
             for username in usernames:
                 db.add_denylist(request_id, username,
                                 f"quality gate: {min_br_kbps}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps")
-            spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
             logger.info(
-                f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
+                f"QUALITY GATE: {label} "
+                f"min_bitrate={min_br_kbps}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {QUALITY_UPGRADE_TIERS})")
-        elif not verified_lossless:
-            # Above threshold but not verified from lossless source.
-            # Check if files are CBR — if so, re-queue for FLAC.
-            is_cbr = False
-            try:
-                import sqlite3 as _sq
-                _conn = _sq.connect(f"file:{beets_db}?mode=ro", uri=True)
-                distinct_br = _conn.execute(
-                    "SELECT COUNT(DISTINCT bitrate) FROM items WHERE album_id = ?",
-                    (album_row[0],)
-                ).fetchone()
-                _conn.close()
-                is_cbr = distinct_br and distinct_br[0] == 1
-            except Exception:
-                pass
-            if is_cbr:
-                db = pipeline_db_source._get_db()
-                db.reset_to_wanted(request_id,
-                                   quality_override="flac",
-                                   min_bitrate=min_br_kbps)
-                logger.info(
-                    f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                    f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
-                    f"searching for FLAC to verify")
-            else:
-                # VBR above threshold — quality OK
-                db = pipeline_db_source._get_db()
-                update_fields = {"min_bitrate": min_br_kbps}
-                if spectral_br:
-                    update_fields["spectral_bitrate"] = spectral_br
-                db.update_status(request_id, "imported", **update_fields)
-                logger.info(
-                    f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                    f"min_bitrate={min_br_kbps}kbps VBR — quality OK")
-        else:
-            # verified_lossless + above threshold — gold standard
+        elif decision == "requeue_flac":
+            db = pipeline_db_source._get_db()
+            db.reset_to_wanted(request_id,
+                               quality_override="flac",
+                               min_bitrate=min_br_kbps)
+            logger.info(
+                f"QUALITY GATE: {label} "
+                f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
+                f"searching for FLAC to verify")
+        else:  # accept
             db = pipeline_db_source._get_db()
             update_fields = {"min_bitrate": min_br_kbps}
+            if spectral_br:
+                update_fields["spectral_bitrate"] = spectral_br
             db.update_status(request_id, "imported", **update_fields)
-            logger.info(
-                f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
-                f"min_bitrate={min_br_kbps}kbps — quality OK")
+            if verified_lossless:
+                logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
+            else:
+                logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps VBR — quality OK")
     except Exception:
         logger.exception("QUALITY GATE: failed to check quality")
 
@@ -1432,7 +1423,7 @@ def process_completed_album(album_data, failed_grab):
                         existing_quality = album_data.get("_existing_spectral_bitrate") or 0
                         request_id = album_data.get("_db_request_id")
 
-                        if spectral_result.grade == "suspect":
+                        if spectral_result.grade in ("suspect", "likely_transcode"):
                             if new_quality and existing_quality and new_quality <= existing_quality:
                                 # Not an upgrade — reject and denylist
                                 logger.warning(
