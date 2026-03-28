@@ -1197,14 +1197,27 @@ def _check_quality_gate(album_data, request_id):
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
             except Exception:
                 pass
-        # If spectral verified this as genuine lossless, trust it — the low
-        # V0 bitrate is just quiet/simple music, not a bad source.
+        # If spectral verified this as genuine lossless AND files are VBR
+        # (i.e. came from FLAC→V0 conversion), trust the low bitrate —
+        # it's just quiet/simple music. spectral on CBR is meaningless.
         spectral_grade = req.get("spectral_grade") if req else None
-        if spectral_grade == "genuine" and gate_br < QUALITY_MIN_BITRATE_KBPS:
+        is_vbr_on_disk = False
+        try:
+            import sqlite3 as _sq2
+            _c2 = _sq2.connect(f"file:{beets_db}?mode=ro", uri=True)
+            _dbr = _c2.execute(
+                "SELECT COUNT(DISTINCT bitrate) FROM items WHERE album_id = ?",
+                (album_row[0],)
+            ).fetchone()
+            _c2.close()
+            is_vbr_on_disk = _dbr and _dbr[0] > 1
+        except Exception:
+            pass
+        if spectral_grade == "genuine" and is_vbr_on_disk and gate_br < QUALITY_MIN_BITRATE_KBPS:
             logger.info(
                 f"QUALITY GATE: {album_data['artist']} - {album_data['title']} "
                 f"gate_bitrate={gate_br}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps but "
-                f"spectral=genuine — verified lossless source, accepting")
+                f"spectral=genuine + VBR — verified lossless source, accepting")
             gate_br = QUALITY_MIN_BITRATE_KBPS  # force pass
 
         if gate_br < QUALITY_MIN_BITRATE_KBPS:
