@@ -28,3 +28,24 @@ if not TEST_DSN and shutil.which("initdb") and shutil.which("pg_ctl"):
     except Exception as e:
         print(f"[WARN] Could not start ephemeral PostgreSQL: {e}", file=sys.stderr)
         _pg = None
+
+# Try to start ephemeral slskd if docker + creds available
+_slskd = None
+CREDS_FILE = os.path.join(os.path.dirname(__file__), ".slskd-creds.json")
+
+if not os.environ.get("SLSKD_TEST_HOST") and os.path.exists(CREDS_FILE) and shutil.which("docker"):
+    try:
+        from ephemeral_slskd import EphemeralSlskd
+        _slskd = EphemeralSlskd(CREDS_FILE)
+        _slskd.start()
+        os.environ["SLSKD_TEST_HOST"] = _slskd.host_url
+        os.environ["SLSKD_TEST_API_KEY"] = _slskd.api_key
+        os.environ["SLSKD_TEST_DOWNLOAD_DIR"] = _slskd.download_dir
+        # Wait for Soulseek connection (needed for search tests)
+        if _slskd.wait_for_soulseek(timeout=60):
+            print(f"[INFO] Ephemeral slskd connected to Soulseek on port {_slskd.port}", file=sys.stderr)
+        else:
+            print(f"[WARN] Ephemeral slskd API up but not connected to Soulseek", file=sys.stderr)
+    except Exception as e:
+        print(f"[WARN] Could not start ephemeral slskd: {e}", file=sys.stderr)
+        _slskd = None

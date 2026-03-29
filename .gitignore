@@ -7,3 +7,4 @@ __pycache__/
 .mcp.json
 .playwright-mcp/
 .claude/
+tests/.slskd-creds.json
