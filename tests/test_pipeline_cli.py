@@ -38,7 +38,7 @@ SAMPLE_MB_RELEASE = {
 
 def make_db():
     from pipeline_db import PipelineDB
-    db = PipelineDB(TEST_DSN)
+    db = PipelineDB(TEST_DSN, run_migrations=True)
     for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()

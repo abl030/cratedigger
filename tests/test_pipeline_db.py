@@ -29,7 +29,7 @@ def requires_postgres(cls):
 def make_db():
     """Create a PipelineDB connected to the test database, with clean tables."""
     import pipeline_db
-    db = pipeline_db.PipelineDB(TEST_DSN)
+    db = pipeline_db.PipelineDB(TEST_DSN, run_migrations=True)
     # Truncate all tables for a clean slate
     for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")

@@ -12,7 +12,7 @@
 
 A Soulseek download engine driven by a PostgreSQL pipeline database. Searches Soulseek via slskd, validates downloads against MusicBrainz via beets, auto-imports or stages for manual review. Includes a web UI at `music.ablz.au` for browsing MusicBrainz and adding album requests.
 
-Forked from [mrusse/soularr](https://github.com/mrusse/soularr). This fork has diverged significantly — Lidarr is optional (used only as a mobile album picker), replaced by the pipeline DB as the source of truth.
+Forked from [mrusse/soularr](https://github.com/mrusse/soularr). This fork has diverged significantly — the pipeline DB is the sole source of truth, and the web UI at `music.ablz.au` is the album picker.
 
 ## Web UI (music.ablz.au)
 
@@ -29,28 +29,38 @@ Beets (v2.5.1, Nix-managed on doc1) is the library's source of truth — it matc
 ## Repository Structure
 
 ```
-soularr.py              — Main Soularr script (~2400 lines)
-album_source.py         — AlbumRecord, DatabaseSource, LidarrSource abstraction
+soularr.py              — Main Soularr script (~2100 lines)
+album_source.py         — AlbumRecord, DatabaseSource abstraction
 config.ini              — Config template (not used in production — Nix generates it)
 web/
   server.py             — Web UI server (http.server, JSON API)
   mb.py                 — MusicBrainz API helpers
   index.html            — Frontend (vanilla JS, inline CSS)
 lib/
+  beets.py              — Beets library helpers (query bitrate, check existing albums)
+  config.py             — SoularrConfig dataclass (typed config from config.ini)
+  grab_list.py          — GrabList: wanted-album selection with priority/ordering
   pipeline_db.py        — PipelineDB class (PostgreSQL CRUD, queries, schema)
+  quality.py            — Quality classification and upgrade logic
+  search.py             — Search query building and normalization
+  spectral_check.py     — Spectral analysis (sox-based transcode detection)
 harness/
   beets_harness.py      — Beets interactive import harness (JSON protocol over stdin/stdout)
   run_beets_harness.sh  — Shell wrapper to bootstrap Nix beets Python environment
   import_one.py         — One-shot beets import (pre-flight, convert, import, post-flight verify)
 scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, migrate
-  lidarr_sync.py        — Sync Lidarr wanted albums into pipeline DB
   populate_tracks.py    — Populate tracks from MusicBrainz API
 tests/
-  test_pipeline_db.py   — 42 tests for PipelineDB
-  test_pipeline_cli.py  — 9 tests for CLI
-  test_album_source.py  — 14 tests for AlbumSource
-  test_beets_validation.py — 18 tests for beets validation
+  test_album_source.py  — 11 tests for AlbumSource
+  test_beets_validation.py — 19 tests for beets validation
+  test_config.py         — 41 tests for SoularrConfig
+  test_grab_list.py      — 60 tests for GrabList
+  test_pipeline_cli.py   — 7 tests for CLI
+  test_pipeline_db.py    — 33 tests for PipelineDB
+  test_quality_classification.py — 17 tests for quality classification
+  test_search.py         — 32 tests for search query building
+  test_spectral_check.py — 39 tests for spectral analysis
   test_track_crosscheck.py — 15 tests (track title cross-check)
 test_soularr.py         — Isolated tests for verify_filetype (AST extraction)
 ```
@@ -89,10 +99,10 @@ sudo cat /var/lib/soularr/config.ini               # view generated config
 ## Pipeline Flow
 
 ```
-Lidarr (optional)                    CLI / Dashboard
-      │                                    │
-      │ lidarr_sync.py                     │ pipeline_cli.py add
-      ▼                                    ▼
+Web UI (music.ablz.au)               CLI
+      │                                │
+      │ /api/add                       │ pipeline_cli.py add
+      ▼                                ▼
 ┌──────────────────────────────────────────────┐
 │           PostgreSQL (pipeline DB)            │
 │  status: wanted→searching→downloading→       │
@@ -127,7 +137,7 @@ Lidarr (optional)                    CLI / Dashboard
 
 ## Two-Track Pipeline
 
-- **Requests** (`source='request'`): User-added via Lidarr/CLI/web UI. Auto-imported to beets if beets validation passes at distance ≤ 0.15. Files stage temporarily in `/Incoming`, then `import_one.py` converts (if FLAC), imports to beets (`/Beets`), and cleans up `/Incoming`.
+- **Requests** (`source='request'`): User-added via CLI or web UI. Auto-imported to beets if beets validation passes at distance ≤ 0.15. Files stage temporarily in `/Incoming`, then `import_one.py` converts (if FLAC), imports to beets (`/Beets`), and cleans up `/Incoming`.
 - **Redownloads** (`source='redownload'`): Replacing bad source material. Always staged to `/Incoming` for manual review, never auto-imported.
 
 ## Quality Upgrade System
@@ -263,22 +273,23 @@ Key options under `homelab.services.soularr`:
 - `downloadDir` — slskd download directory
 - `beetsValidation.enable` — enable beets validation
 - `beetsValidation.harnessPath` — path to harness (defaults to `${inputs.soularr-src}/harness/...`)
-- `pipelineDb.enable` — use pipeline DB instead of Lidarr
-- `pipelineDb.dbPath` — path to SQLite DB
+- `pipelineDb.enable` — use pipeline DB as album source
+- `pipelineDb.dbPath` — PostgreSQL connection string
 
 The module:
-1. Builds a Python environment with dependencies (requests, pyarr, music-tag, slskd-api)
+1. Builds a Python environment with dependencies (requests, music-tag, slskd-api, psycopg2)
 2. Wraps `soularr.py` in a shell script
 3. Generates `config.ini` at runtime from sops secrets
-4. Pre-start: health-check slskd → sync Lidarr → integrity-check DB → start Soularr
+4. Pre-start: health-check slskd → integrity-check DB → start Soularr
 
 ## Running Tests
 
 ```bash
 cd ~/soularr
-python3 -m unittest discover tests -v    # all 83 tests
-python3 -m unittest tests.test_pipeline_db -v   # just pipeline DB
-python3 -m unittest tests.test_track_crosscheck  # just track matching
+nix-shell                                          # enter dev shell with dependencies
+python3 -m unittest discover tests -v              # all tests
+python3 -m unittest tests.test_pipeline_db -v      # just pipeline DB
+python3 -m unittest tests.test_track_crosscheck    # just track matching
 ```
 
 ## Playwright MCP (Web UI Testing)
@@ -326,14 +337,13 @@ First run will auto-install the package. You may still need `npx playwright inst
 1. **NEVER use `beet remove -d`** — deletes files from disk permanently (exception: ban-source endpoint which is an explicit user action)
 2. **NEVER import without inspecting the match** — always use the harness, never pipe blind input to beet
 3. **NEVER match by candidate_index** — always match by MB release ID (candidate ordering is not stable)
-4. **NEVER match by release group** — always exact MB release ID. The user left Lidarr over this.
+4. **NEVER match by release group** — always exact MB release ID. Release groups conflate different pressings.
 5. **Auto-import only for `source='request'`** — redownloads always stage for manual review
 6. **All scripts deploy via Nix** — no manual `cp` to virtiofs. Change code → push → flake update → rebuild
 7. **PostgreSQL must use `autocommit=True`** — prevents idle-in-transaction deadlocks. DDL migrations run on separate short-lived connections with `lock_timeout`. See the PostgreSQL audit in git history (commit ca579e3).
 
 ## Known Issues
 
-- **SQLite on virtiofs**: Has corrupted multiple times. `PRAGMA synchronous = NORMAL` was the cause — removed, now using SQLite defaults. Migration to PostgreSQL planned.
 - **Track name matching**: `album_match()` uses fuzzy filename matching — can match wrong pressings with same title. Track title cross-check added as post-match gate but won't catch all cases.
 - **`searching` status not updating**: `update_status()` in main loop doesn't reliably persist — cosmetic issue, doesn't affect functionality.
 
@@ -353,6 +363,5 @@ curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 
 ## Secrets
 
-- Lidarr API key: sops-managed, injected via `LIDARR_API_KEY` env var in pre-start
 - slskd API key: sops-managed, injected into config.ini at runtime
 - Discogs token: `~/.config/beets/secrets.yaml` on doc1 (not used by Soularr directly)

@@ -156,9 +156,12 @@ class PipelineDB:
         with mig_conn.cursor() as cur:
             cur.execute("SET lock_timeout TO '5s'")
             # Safety net: kill any future idle-in-transaction after 60s
-            cur.execute(
-                "ALTER ROLE soularr SET idle_in_transaction_session_timeout = '60s'"
-            )
+            try:
+                cur.execute(
+                    "ALTER ROLE soularr SET idle_in_transaction_session_timeout = '60s'"
+                )
+            except psycopg2.errors.UndefinedObject:
+                pass  # Role doesn't exist (e.g. ephemeral test DB)
             cur.execute(SCHEMA_SQL)
             for col, coltype in [
                 ("bitrate", "INTEGER"),
@@ -216,7 +219,6 @@ class PipelineDB:
                     mb_artist_id=None, discogs_release_id=None,
                     year=None, country=None, format=None,
                     source_path=None, reasoning=None,
-                    lidarr_album_id=None, lidarr_artist_id=None,
                     status="wanted"):
         now = datetime.now(timezone.utc)
         cur = self._execute("""
@@ -224,15 +226,13 @@ class PipelineDB:
                 mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
                 artist_name, album_title, year, country, format,
                 source, source_path, reasoning, status,
-                lidarr_album_id, lidarr_artist_id,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
             artist_name, album_title, year, country, format,
             source, source_path, reasoning, status,
-            lidarr_album_id, lidarr_artist_id,
             now, now,
         ))
         row = cur.fetchone()

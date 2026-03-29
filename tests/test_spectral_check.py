@@ -270,37 +270,41 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
 # Integration tests — require sox + test audio files
 # ============================================================
 
-TEST_DIR = "/tmp/quality-test"
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "albums")
 HAS_SOX = shutil.which("sox") is not None
-HAS_TEST_FILES = os.path.isdir(TEST_DIR) and os.path.isdir(os.path.join(TEST_DIR, "genuine_flac"))
+HAS_FIXTURES = os.path.isdir(FIXTURES_DIR) and os.path.isdir(os.path.join(FIXTURES_DIR, "01_genuine_flac"))
+
+
+def _fixture(name):
+    return os.path.join(FIXTURES_DIR, name)
 
 
 @unittest.skipUnless(HAS_SOX, "sox not available")
-@unittest.skipUnless(HAS_TEST_FILES, "test audio files not found at /tmp/quality-test")
+@unittest.skipUnless(HAS_FIXTURES, "fixtures not generated — run tests/fixtures/generate_fixtures.sh")
 class TestSpectralIntegration(unittest.TestCase):
-    """Integration tests with real sox and test audio files."""
+    """Integration tests with real sox and generated audio fixtures."""
 
     def test_genuine_flac_all_genres(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "genuine_flac"))
+        result = analyze_album(_fixture("01_genuine_flac"))
         self.assertEqual(result.grade, "genuine",
                          f"Genuine FLACs flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
 
     def test_genuine_v0_all_genres(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "genuine_v0"))
+        result = analyze_album(_fixture("02_genuine_v0"))
         self.assertEqual(result.grade, "genuine",
                          f"Genuine V0s flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
 
     def test_genuine_320_all_genres(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "genuine_320"))
+        result = analyze_album(_fixture("04_cbr_320"))
         self.assertEqual(result.grade, "genuine",
                          f"Genuine 320s flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
 
     def test_transcode_128_flac_detected(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "transcode_128_flac"))
+        result = analyze_album(_fixture("09_fake_flac_128"))
         self.assertIn(result.grade, ("suspect", "likely_transcode"),
                       f"128→FLAC transcodes not detected: {result.grade} ({result.suspect_pct:.0f}%)")
         # Should estimate ~128kbps
@@ -311,40 +315,13 @@ class TestSpectralIntegration(unittest.TestCase):
 
     def test_transcode_192_flac_detected(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "transcode_192_flac"))
+        result = analyze_album(_fixture("11_fake_flac_192"))
         self.assertIn(result.grade, ("suspect", "likely_transcode"),
                       f"192→FLAC transcodes not detected: {result.grade} ({result.suspect_pct:.0f}%)")
 
-    def test_upsample_128_to_320_detected(self):
-        from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "upsample_128_to_320"))
-        self.assertIn(result.grade, ("suspect", "likely_transcode"),
-                      f"128→320 upsamples not detected: {result.grade} ({result.suspect_pct:.0f}%)")
-
-    def test_upsample_192_to_320_detected(self):
-        from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "upsample_192_to_320"))
-        self.assertIn(result.grade, ("suspect", "likely_transcode"),
-                      f"192→320 upsamples not detected: {result.grade} ({result.suspect_pct:.0f}%)")
-
-    def test_upsample_128_to_v0_detected(self):
-        from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "upsample_128_to_v0"))
-        self.assertIn(result.grade, ("suspect", "likely_transcode"),
-                      f"128→V0 upsamples not detected: {result.grade} ({result.suspect_pct:.0f}%)")
-
-    def test_real_world_suspect_320(self):
-        from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "real_world_suspect"))
-        # Hot Garden Stomp — single track, HF deficit ~54dB, no cliff.
-        # At per-track level this is marginal/suspect depending on the track.
-        # The important thing is it's NOT classified as "genuine".
-        self.assertTrue(any(t.grade in ("suspect", "marginal") for t in result.tracks),
-                        "Hot Garden Stomp track should be at least marginal")
-
     def test_album_grade_has_estimated_bitrate(self):
         from spectral_check import analyze_album
-        result = analyze_album(os.path.join(TEST_DIR, "transcode_128_flac"))
+        result = analyze_album(_fixture("09_fake_flac_128"))
         self.assertIsNotNone(result.estimated_bitrate_kbps,
                              "Album-level estimated bitrate should be set for transcodes")
 

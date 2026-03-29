@@ -1,6 +1,6 @@
 """Tests for beets validation pipeline in soularr.
 
-Since soularr.py has heavy external dependencies (pyarr, slskd_api, music_tag),
+Since soularr.py has heavy external dependencies (slskd_api, music_tag),
 we mock at the module level before importing, or test via subprocess simulation.
 """
 
@@ -20,11 +20,12 @@ sys.modules["music_tag"] = MagicMock()
 sys.modules["slskd_api"] = MagicMock()
 sys.modules["slskd_api.apis"] = MagicMock()
 sys.modules["slskd_api.apis.users"] = MagicMock()
-sys.modules["pyarr"] = MagicMock()
 
-# Now import soularr
+# Now import soularr and lib.beets
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import soularr
+from lib.beets import beets_validate
+from lib.grab_list import GrabListEntry
 
 
 def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
@@ -64,10 +65,9 @@ def make_should_resume():
 class TestBeetsValidate(unittest.TestCase):
     """Test beets_validate() function with mocked subprocess."""
 
-    def setUp(self):
-        soularr.beets_harness_path = "/fake/harness.sh"
+    HARNESS = "/fake/harness.sh"
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_good_match(self, mock_popen):
         """Distance 0.05 with threshold 0.15 → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -80,7 +80,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
 
         self.assertTrue(result["valid"])
         self.assertTrue(result["mbid_found"])
@@ -89,7 +89,7 @@ class TestBeetsValidate(unittest.TestCase):
         # Verify skip was sent (dry-run)
         proc.stdin.write.assert_called_with('{"action":"skip"}\n')
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_high_distance(self, mock_popen):
         """Distance 0.30 with threshold 0.15 → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -102,13 +102,13 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertFalse(result["valid"])
         self.assertTrue(result["mbid_found"])
         self.assertAlmostEqual(result["distance"], 0.30)
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_mbid_not_found(self, mock_popen):
         """Target MBID not in candidates → valid=False, mbid_found=False."""
         target_mbid = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -122,13 +122,13 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", target_mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", target_mbid, 0.15)
 
         self.assertFalse(result["valid"])
         self.assertFalse(result["mbid_found"])
         self.assertIsNone(result["distance"])
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_no_candidates(self, mock_popen):
         """Empty candidates list → valid=False."""
         proc = MagicMock()
@@ -145,22 +145,22 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", "some-mbid", 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
 
         self.assertFalse(result["valid"])
         self.assertFalse(result["mbid_found"])
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_subprocess_start_failure(self, mock_popen):
         """Harness fails to start → valid=False, error set."""
         mock_popen.side_effect = FileNotFoundError("No such file")
 
-        result = soularr.beets_validate("/test/album", "some-mbid", 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
 
         self.assertFalse(result["valid"])
         self.assertIn("Failed to start harness", result["error"])
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_handles_should_resume_then_choose_match(self, mock_popen):
         """should_resume followed by choose_match → handles both correctly."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -174,13 +174,13 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertTrue(result["valid"])
         # Two skip calls: one for should_resume, one for choose_match
         self.assertEqual(proc.stdin.write.call_count, 2)
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_exact_threshold(self, mock_popen):
         """Distance exactly at threshold → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -193,11 +193,11 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertTrue(result["valid"])  # <= threshold
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_just_above_threshold(self, mock_popen):
         """Distance 0.1501 is above 0.15 → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -210,12 +210,12 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertFalse(result["valid"])
         self.assertEqual(result["scenario"], "high_distance")
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_above_hard_limit(self, mock_popen):
         """Distance above 0.30 hard limit → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -228,13 +228,13 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertFalse(result["valid"])
         self.assertEqual(result["scenario"], "high_distance")
 
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_extra_tracks_rejected(self, mock_popen):
         """MB has more tracks than local files → valid=False even at low distance."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -255,12 +255,12 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertFalse(result["valid"])
         self.assertEqual(result["scenario"], "extra_tracks")
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_non_official_accepted_if_match(self, mock_popen):
         """Non-official release (bootleg/promo) with good match → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -280,11 +280,11 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertTrue(result["valid"])
 
-    @patch("soularr.sp.Popen")
+    @patch("lib.beets.sp.Popen")
     def test_artist_collab_match(self, mock_popen):
         """Collab credit — MBID matches and distance is good → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
@@ -304,10 +304,20 @@ class TestBeetsValidate(unittest.TestCase):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        result = soularr.beets_validate("/test/album", mbid, 0.15)
+        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
         self.assertTrue(result["valid"])
         self.assertEqual(result["scenario"], "strong_match")
+
+
+def _make_album_data(**overrides):
+    """Build a minimal GrabListEntry for tests that need album_data."""
+    defaults = dict(
+        album_id=0, files=[], filetype="mp3", title="Test Album",
+        artist="Test Artist", year="2024", mb_release_id="",
+    )
+    defaults.update(overrides)
+    return GrabListEntry(**defaults)  # type: ignore[arg-type]
 
 
 class TestStageToAi(unittest.TestCase):
@@ -329,7 +339,7 @@ class TestStageToAi(unittest.TestCase):
         for name in ["01 - Track.flac", "02 - Track.flac", "cover.jpg"]:
             open(os.path.join(source, name), "w").close()
 
-        album_data = {"artist": "Test Artist", "title": "Test Album"}
+        album_data = _make_album_data(artist="Test Artist", title="Test Album")
         dest = soularr.stage_to_ai(album_data, source, staging)
 
         self.assertEqual(dest, os.path.join(staging, "Test Artist", "Test Album"))
@@ -345,7 +355,7 @@ class TestStageToAi(unittest.TestCase):
         os.makedirs(staging)
         open(os.path.join(source, "track.flac"), "w").close()
 
-        album_data = {"artist": "Artist", "title": "Album"}
+        album_data = _make_album_data(artist="Artist", title="Album")
         soularr.stage_to_ai(album_data, source, staging)
 
         self.assertFalse(os.path.exists(source))
@@ -358,7 +368,7 @@ class TestStageToAi(unittest.TestCase):
         os.makedirs(staging)
         open(os.path.join(source, "track.flac"), "w").close()
 
-        album_data = {"artist": 'Test: "Artist"', "title": "Album/Title?"}
+        album_data = _make_album_data(artist='Test: "Artist"', title="Album/Title?")
         dest = soularr.stage_to_ai(album_data, source, staging)
 
         # sanitize_folder_name removes <>:"/\|?*
@@ -373,19 +383,21 @@ class TestLogValidationResult(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.tracking_file = os.path.join(self.tmpdir, "tracking.jsonl")
-        soularr.beets_tracking_file = self.tracking_file
+        self._orig_cfg = soularr.cfg
+        mock_cfg = MagicMock()
+        mock_cfg.beets_tracking_file = self.tracking_file
+        soularr.cfg = mock_cfg
 
     def tearDown(self):
+        soularr.cfg = self._orig_cfg
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_appends_staged_entry(self):
         """Staged result writes correct JSONL."""
-        album_data = {
-            "artist": "Test Artist",
-            "title": "Test Album",
-            "mb_release_id": "abc-123",
-            "album_id": 42,
-        }
+        album_data = _make_album_data(
+            artist="Test Artist", title="Test Album",
+            mb_release_id="abc-123", album_id=42,
+        )
         result = {"valid": True, "distance": 0.05, "mbid_found": True, "error": None}
 
         soularr.log_validation_result(album_data, result, "/AI/Test Artist/Test Album")
@@ -401,7 +413,7 @@ class TestLogValidationResult(unittest.TestCase):
 
     def test_appends_rejected_entry(self):
         """Rejected result writes status=rejected."""
-        album_data = {"artist": "A", "title": "B", "album_id": 1}
+        album_data = _make_album_data(artist="A", title="B", album_id=1)
         result = {"valid": False, "distance": 0.40, "mbid_found": True, "error": None}
 
         soularr.log_validation_result(album_data, result)
@@ -414,7 +426,7 @@ class TestLogValidationResult(unittest.TestCase):
 
     def test_appends_multiple_entries(self):
         """Multiple calls append to same file."""
-        album_data = {"artist": "A", "title": "B", "album_id": 1}
+        album_data = _make_album_data(artist="A", title="B", album_id=1)
         result = {"valid": True, "distance": 0.01, "error": None}
 
         soularr.log_validation_result(album_data, result, "/dest1")

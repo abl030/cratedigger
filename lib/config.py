@@ -14,12 +14,6 @@ from typing import Optional
 class SoularrConfig:
     """All configuration values, read-only after initialization."""
 
-    # --- Lidarr ---
-    lidarr_api_key: str = ""
-    lidarr_host_url: str = "http://localhost:8686"
-    lidarr_download_dir: str = ""
-    lidarr_disable_sync: bool = False
-
     # --- Slskd ---
     slskd_api_key: str = ""
     slskd_host_url: str = "http://localhost:5030"
@@ -31,14 +25,8 @@ class SoularrConfig:
 
     # --- Search ---
     ignored_users: tuple[str, ...] = ()
-    search_type: str = "first_page"
-    search_source: str = "missing"
-    search_sources: tuple[str, ...] = ("missing",)
     minimum_match_ratio: float = 0.5
     page_size: int = 10
-    remove_wanted_on_failure: bool = True
-    enable_search_denylist: bool = False
-    max_search_failures: int = 3
     search_blacklist: tuple[str, ...] = ()
     album_prepend_artist: bool = False
     track_prepend_artist: bool = False
@@ -84,10 +72,6 @@ class SoularrConfig:
     # --- Paths (derived from args) ---
     lock_file_path: str = ""
     config_file_path: str = ""
-    failure_file_path: str = ""
-    current_page_file_path: str = ""
-    denylist_file_path: str = ""
-    cutoff_denylist_file_path: str = ""
 
     @classmethod
     def from_ini(cls, config: configparser.ConfigParser,
@@ -112,13 +96,6 @@ class SoularrConfig:
             raw = get(section, key, fallback)
             return tuple(s.strip() for s in raw.split(",") if s.strip())
 
-        # Search source expansion
-        search_source = get("Search Settings", "search_source", "missing").lower().strip()
-        if search_source == "all":
-            search_sources = ("missing", "cutoff_unmet")
-        else:
-            search_sources = (search_source,)
-
         # Filetypes parsing
         raw_filetypes = get("Search Settings", "allowed_filetypes", "flac,mp3")
         if "," in raw_filetypes:
@@ -137,11 +114,6 @@ class SoularrConfig:
         title_blacklist = tuple(w.strip() for w in title_bl_raw.split(",") if w.strip())
 
         return cls(
-            # Lidarr
-            lidarr_api_key=get("Lidarr", "api_key"),
-            lidarr_host_url=get("Lidarr", "host_url", "http://localhost:8686"),
-            lidarr_download_dir=get("Lidarr", "download_dir"),
-            lidarr_disable_sync=getbool("Lidarr", "disable_sync", False),
             # Slskd
             slskd_api_key=get("Slskd", "api_key"),
             slskd_host_url=get("Slskd", "host_url", "http://localhost:5030"),
@@ -152,14 +124,8 @@ class SoularrConfig:
             delete_searches=getbool("Slskd", "delete_searches", True),
             # Search
             ignored_users=ignored_users,
-            search_type=get("Search Settings", "search_type", "first_page").lower().strip(),
-            search_source=search_source,
-            search_sources=search_sources,
             minimum_match_ratio=getfloat("Search Settings", "minimum_filename_match_ratio", 0.5),
             page_size=getint("Search Settings", "number_of_albums_to_grab", 10),
-            remove_wanted_on_failure=getbool("Search Settings", "remove_wanted_on_failure", True),
-            enable_search_denylist=getbool("Search Settings", "enable_search_denylist", False),
-            max_search_failures=getint("Search Settings", "max_search_failures", 3),
             search_blacklist=search_blacklist,
             album_prepend_artist=getbool("Search Settings", "album_prepend_artist", False),
             track_prepend_artist=getbool("Search Settings", "track_prepend_artist", False),
@@ -198,8 +164,4 @@ class SoularrConfig:
             # Paths
             lock_file_path=os.path.join(var_dir, ".soularr.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
-            failure_file_path=os.path.join(var_dir, "failure_list.txt"),
-            current_page_file_path=os.path.join(var_dir, ".current_page.txt"),
-            denylist_file_path=os.path.join(var_dir, "search_denylist.json"),
-            cutoff_denylist_file_path=os.path.join(var_dir, "cutoff_denylist.json"),
         )

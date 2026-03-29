@@ -1,7 +1,7 @@
 #!/usr/bin/env python
+from __future__ import annotations
 
 import argparse
-import math
 import re
 import unicodedata
 import os
@@ -10,19 +10,21 @@ import time
 import subprocess as sp
 import shutil
 import difflib
-import operator
 import configparser
 import logging
 import json
 import urllib.request
 import urllib.error
 from datetime import datetime
+from typing import TYPE_CHECKING
 import copy
-import requests
 import music_tag
 import slskd_api
-from pyarr import LidarrAPI
 from slskd_api.apis import users
+
+if TYPE_CHECKING:
+    from album_source import DatabaseSource
+    from lib.config import SoularrConfig
 
 
 class EnvInterpolation(configparser.ExtendedInterpolation):
@@ -45,62 +47,59 @@ DEFAULT_LOGGING_CONF = {
 }
 
 # === Typed Config (populated in main() via SoularrConfig.from_ini()) ===
-cfg = None  # SoularrConfig instance — the source of truth after init
+cfg: SoularrConfig = None  # type: ignore[assignment]  # Set in main()
 
 # === API Clients & Logging ===
-lidarr = None
-slskd = None
+slskd: slskd_api.SlskdClient = None  # type: ignore[assignment]  # Set in main()
 config = None
 logger = logging.getLogger("soularr")
 
 # === API client instances (set in main()) ===
-pipeline_db_source = None  # DatabaseSource instance when enabled
+pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
 
 # === Runtime State & Caches ===
 search_cache = {}
 folder_cache = {}
 user_upload_speed = {}  # username → upload speed in bytes/sec (from search results)
 broken_user = []
-cutoff_denylist = {}  # album_id → set of usernames that provided bad quality
-download_fail_counts = {}  # "album_id:username" → int, denylist after 3 failures
 
 
-def album_match(lidarr_tracks, slskd_tracks, username, filetype):
+def album_match(expected_tracks, slskd_tracks, username, filetype):
     counted = []
     total_match = 0.0
 
-    lidarr_album = get_album_by_id(lidarr_tracks[0]["albumId"])
-    lidarr_album_name = lidarr_album["title"]
-    lidarr_artist_name = lidarr_album["artist"]["artistName"]
+    album_info = get_album_by_id(expected_tracks[0]["albumId"])
+    album_name = album_info["title"]
+    artist_name = album_info["artist"]["artistName"]
 
-    for lidarr_track in lidarr_tracks:
-        lidarr_filename = lidarr_track["title"] + "." + filetype.split(" ")[0]
+    for expected_track in expected_tracks:
+        expected_filename = expected_track["title"] + "." + filetype.split(" ")[0]
         best_match = 0.0
 
         for slskd_track in slskd_tracks:
             slskd_filename = slskd_track["filename"]
 
             # Try to match the ratio with the exact filenames
-            ratio = difflib.SequenceMatcher(None, lidarr_filename, slskd_filename).ratio()
+            ratio = difflib.SequenceMatcher(None, expected_filename, slskd_filename).ratio()
 
             # If ratio is a bad match try and split off (with " " as the separator) the garbage at the start of the slskd_filename and try again
-            ratio = check_ratio(" ", ratio, lidarr_filename, slskd_filename)
+            ratio = check_ratio(" ", ratio, expected_filename, slskd_filename)
             # Same but with "_" as the separator
-            ratio = check_ratio("_", ratio, lidarr_filename, slskd_filename)
+            ratio = check_ratio("_", ratio, expected_filename, slskd_filename)
 
             # Same checks but preappend album name.
-            ratio = check_ratio("", ratio, lidarr_album_name + " " + lidarr_filename, slskd_filename)
-            ratio = check_ratio(" ", ratio, lidarr_album_name + " " + lidarr_filename, slskd_filename)
-            ratio = check_ratio("_", ratio, lidarr_album_name + " " + lidarr_filename, slskd_filename)
+            ratio = check_ratio("", ratio, album_name + " " + expected_filename, slskd_filename)
+            ratio = check_ratio(" ", ratio, album_name + " " + expected_filename, slskd_filename)
+            ratio = check_ratio("_", ratio, album_name + " " + expected_filename, slskd_filename)
 
             if ratio > best_match:
                 best_match = ratio
 
         if best_match > cfg.minimum_match_ratio:
-            counted.append(lidarr_filename)
+            counted.append(expected_filename)
             total_match += best_match
 
-    if len(counted) == len(lidarr_tracks) and username not in cfg.ignored_users:
+    if len(counted) == len(expected_tracks) and username not in cfg.ignored_users:
         logger.info(f"Found match from user: {username} for {len(counted)} tracks! Track attributes: {filetype}")
         logger.info(f"Average sequence match ratio: {total_match / len(counted)}")
         logger.info("SUCCESSFUL MATCH")
@@ -110,14 +109,14 @@ def album_match(lidarr_tracks, slskd_tracks, username, filetype):
     return False
 
 
-def check_ratio(separator, ratio, lidarr_filename, slskd_filename):
+def check_ratio(separator, ratio, expected_filename, slskd_filename):
     if ratio < cfg.minimum_match_ratio:
         if separator != "":
-            lidarr_filename_word_count = len(lidarr_filename.split()) * -1
-            truncated_slskd_filename = " ".join(slskd_filename.split(separator)[lidarr_filename_word_count:])
-            ratio = difflib.SequenceMatcher(None, lidarr_filename, truncated_slskd_filename).ratio()
+            expected_filename_word_count = len(expected_filename.split()) * -1
+            truncated_slskd_filename = " ".join(slskd_filename.split(separator)[expected_filename_word_count:])
+            ratio = difflib.SequenceMatcher(None, expected_filename, truncated_slskd_filename).ratio()
         else:
-            ratio = difflib.SequenceMatcher(None, lidarr_filename, slskd_filename).ratio()
+            ratio = difflib.SequenceMatcher(None, expected_filename, slskd_filename).ratio()
 
         return ratio
     return ratio
@@ -154,10 +153,10 @@ def sanitize_folder_name(folder_name):
 def cancel_and_delete(files):
     for file in files:
         try:
-            slskd.transfers.cancel_download(username=file["username"], id=file["id"])
+            slskd.transfers.cancel_download(username=file.username, id=file.id)
         except Exception:
-            logger.warning(f"Failed to cancel download {file['filename']} for {file['username']}", exc_info=True)
-        delete_dir = file["file_dir"].split("\\")[-1]
+            logger.warning(f"Failed to cancel download {file.filename} for {file.username}", exc_info=True)
+        delete_dir = file.file_dir.split("\\")[-1]
         os.chdir(cfg.slskd_download_dir)
 
         if os.path.exists(delete_dir):
@@ -188,7 +187,7 @@ def release_trackcount_mode(releases):
 def choose_release(artist_name, releases):
     most_common_trackcount = release_trackcount_mode(releases)
 
-    # Prefer the release Lidarr has marked as monitored — this is the one the
+    # Prefer the release marked as monitored — this is the one the
     # user explicitly selected in the UI and represents the edition they want.
     for release in releases:
         if not release.get("monitored", False):
@@ -252,17 +251,17 @@ def choose_release(artist_name, releases):
 
 
 def verify_filetype(file, allowed_filetype):
-    current_filetype = file["filename"].split(".")[-1]
+    current_filetype = file.filename.split(".")[-1]
     bitdepth = None
     samplerate = None
     bitrate = None
 
-    if "bitRate" in file:
-        bitrate = file["bitRate"]
-    if "sampleRate" in file:
-        samplerate = file["sampleRate"]
-    if "bitDepth" in file:
-        bitdepth = file["bitDepth"]
+    if file.bitRate is not None:
+        bitrate = file.bitRate
+    if file.sampleRate is not None:
+        samplerate = file.sampleRate
+    if file.bitDepth is not None:
+        bitdepth = file.bitDepth
 
     # Check if the types match up for the current files type and the current type from the config
     if current_filetype == allowed_filetype.split(" ")[0]:
@@ -289,8 +288,8 @@ def verify_filetype(file, allowed_filetype):
                     cbr_values = {128, 160, 192, 224, 256, 320}
                     is_vbr = bitrate not in cbr_values
                     # Prefer isVariableBitRate flag from slskd if available
-                    if "isVariableBitRate" in file:
-                        is_vbr = file["isVariableBitRate"]
+                    if file.isVariableBitRate is not None:
+                        is_vbr = file.isVariableBitRate
                     if not is_vbr:
                         return False
                     if selected_attributes.lower() == "v0":
@@ -333,27 +332,27 @@ def download_filter(allowed_filetype, directory):
     if cfg.download_filtering:
         whitelist = []  # Init an empty list to take just the allowed_filetype
         if cfg.use_extension_whitelist:
-            whitelist = copy.deepcopy(cfg.extensions_whitelist)  # Copy the whitelist to allow us to append the allowed_filetype
+            whitelist = list(cfg.extensions_whitelist)
         whitelist.append(allowed_filetype.split(" ")[0])
         unwanted = []
         logger.debug(f"Accepted extensions: {whitelist}")
         for file in directory["files"]:
             for extension in whitelist:
-                if file["filename"].split(".")[-1].lower() == extension.lower():
+                if file.filename.split(".")[-1].lower() == extension.lower():
                     break  # Jump out and don't add wanted files to the unwanted list
             else:
-                unwanted.append(file["filename"])  # Add to list of files to remove from the wanted list
-                logger.debug(f"Unwanted file: {file['filename']}")
+                unwanted.append(file.filename)  # Add to list of files to remove from the wanted list
+                logger.debug(f"Unwanted file: {file.filename}")
         if len(unwanted) > 0:
             temp = []
             logger.debug(f"Unwanted Files: {unwanted}")
             for file in directory["files"]:
-                if file["filename"] not in unwanted:
-                    logger.debug(f"Added file to queue: {file['filename']}")
+                if file.filename not in unwanted:
+                    logger.debug(f"Added file to queue: {file.filename}")
                     temp.append(file)  # Build the new list of files
             directory["files"] = temp
             for files in temp:
-                logger.debug(f"File in final list: {files['filename']}")
+                logger.debug(f"File in final list: {files.filename}")
             return directory  # Return the modified list
     return directory  # If we didn't find unwanted files or we aren't filtering just return the original list
 
@@ -424,19 +423,8 @@ def filter_list(albums):
     Helper to do all the various filtering in one go and in one place. Same net effect as the previous multi-stage approach
     Just neater and easier to work on.
     """
-    if cfg.enable_search_denylist:
-        temp_list = []
-        denylist = load_search_denylist(denylist_file_path)
-        for album in albums:
-            if not is_search_denylisted(denylist, album["id"], cfg.max_search_failures):
-                temp_list.append(album)
-            else:
-                logger.info(f"Skipping denylisted album: {album['artist']['artistName']} - {album['title']} (ID: {album['id']})")
-    else:
-        temp_list = copy.deepcopy(albums)
-
     list_to_download = []
-    for album in temp_list:
+    for album in albums:
         if is_blacklisted(album["title"]):
             logger.info(f"Skipping blacklisted album: {album['artist']['artistName']} - {album['title']} (ID: {album['id']}")
             continue
@@ -543,13 +531,13 @@ def slskd_do_enqueue(username, files, file_dir):
                 if directory["directory"] == file_dir:
                     for slskd_file in directory["files"]:
                         if file["filename"] == slskd_file["filename"]:
-                            file_details = {}
-                            file_details["filename"] = file["filename"]
-                            file_details["id"] = slskd_file["id"]
-                            file_details["file_dir"] = file_dir
-                            file_details["username"] = username
-                            file_details["size"] = file["size"]
-                            downloads.append(file_details)
+                            downloads.append(DownloadFile(
+                                filename=file["filename"],
+                                id=slskd_file["id"],
+                                file_dir=file_dir,
+                                username=username,
+                                size=file["size"],
+                            ))
         return downloads
     else:
         return None
@@ -562,11 +550,11 @@ def slskd_download_status(downloads):
     ok = True
     for file in downloads:
         try:
-            status = slskd.transfers.get_download(file["username"], file["id"])
-            file["status"] = status
+            status = slskd.transfers.get_download(file.username, file.id)
+            file.status = status
         except Exception:
-            logger.exception(f"Error getting download status of {file['filename']}")
-            file["status"] = None
+            logger.exception(f"Error getting download status of {file.filename}")
+            file.status = None
             ok = False
     return ok
 
@@ -580,10 +568,10 @@ def downloads_all_done(downloads):
     error_list = []
     remote_queue = 0
     for file in downloads:
-        if file["status"] is not None:
-            if not file["status"]["state"] == "Completed, Succeeded":
+        if file.status is not None:
+            if not file.status["state"] == "Completed, Succeeded":
                 all_done = False
-            if file["status"]["state"] in [
+            if file.status["state"] in [
                 "Completed, Cancelled",
                 "Completed, TimedOut",
                 "Completed, Errored",
@@ -591,7 +579,7 @@ def downloads_all_done(downloads):
                 "Completed, Aborted",
             ]:
                 error_list.append(file)
-            if file["status"]["state"] == "Queued, Remotely":
+            if file.status["state"] == "Queued, Remotely":
                 remote_queue += 1
     if not len(error_list) > 0:
         error_list = None
@@ -599,16 +587,14 @@ def downloads_all_done(downloads):
 
 
 def _get_denied_users(album_id):
-    """Merge file-based cutoff denylist with pipeline DB source_denylist."""
-    denied = set(cutoff_denylist.get(album_id, set()))
-    # In DB mode, album_id is negative; request_id is the positive counterpart
-    if cfg.pipeline_db_enabled and pipeline_db_source is not None and album_id < 0:
-        request_id = abs(album_id)
-        try:
-            db = pipeline_db_source._get_db()
-            denied.update(e["username"] for e in db.get_denylisted_users(request_id))
-        except Exception:
-            pass
+    """Get denied users from pipeline DB source_denylist."""
+    denied = set()
+    request_id = abs(album_id)
+    try:
+        db = pipeline_db_source._get_db()
+        denied.update(e["username"] for e in db.get_denylisted_users(request_id))
+    except Exception:
+        pass
     return denied
 
 
@@ -709,8 +695,8 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
                 downloads = slskd_do_enqueue(username=username, files=directory["files"], file_dir=file_dir)
                 if downloads is not None:
                     for file in downloads:
-                        file["disk_no"] = disk["disk_no"]
-                        file["disk_count"] = disk["disk_count"]
+                        file.disk_no = disk["disk_no"]
+                        file.disk_count = disk["disk_count"]
                     all_downloads.extend(downloads)
                     enqueued += 1
                 else:
@@ -745,116 +731,20 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
         return False, None
 
 
-def get_existing_quality_tier(album_id):
-    """
-    For cutoff_unmet albums, determine which cfg.allowed_filetypes index matches
-    the existing files' quality.  Only filetypes at a LOWER index (higher
-    priority) would be a genuine upgrade.
-
-    Returns (index, quality_name) where index is into cfg.allowed_filetypes, or
-    len(cfg.allowed_filetypes) when quality can't be determined (safe fallback —
-    all filetypes are tried).  quality_name is the raw Lidarr quality string.
-
-    Lidarr quality names look like "MP3-320", "MP3-192", "FLAC", "FLAC 24bit".
-    We map them to cfg.allowed_filetypes format: "mp3 320", "mp3 192", "flac", etc.
-    """
-    fallback = (len(cfg.allowed_filetypes), "Unknown")
-    try:
-        response = requests.get(
-            f"{lidarr_host_url}/api/v1/trackfile",
-            params={"albumId": album_id},
-            headers={"X-Api-Key": lidarr_api_key},
-            timeout=10,
-        )
-        response.raise_for_status()
-        track_files = response.json()
-
-        if not track_files:
-            return fallback
-
-        # Use the quality reported by Lidarr for the first track file
-        quality_name = (
-            track_files[0]
-            .get("quality", {})
-            .get("quality", {})
-            .get("name", "")
-        )
-        if not quality_name:
-            return fallback
-
-        # "MP3-320" -> "mp3 320", "FLAC" -> "flac", "FLAC 24bit" -> "flac 24bit"
-        # "ALAC" -> "m4a" (ALAC is Apple Lossless in an m4a container)
-        # "MP3 VBR V0" -> "mp3 v0", "MP3 VBR V2" -> "mp3 v2"
-        mapped = quality_name.lower().replace("-", " ")
-        if mapped.startswith("alac"):
-            mapped = "m4a" + mapped[4:]  # "alac" -> "m4a", "alac 16/44.1" -> "m4a 16/44.1"
-        elif mapped.startswith("mp3 vbr "):
-            mapped = "mp3 " + mapped[8:]  # "mp3 vbr v0" -> "mp3 v0"
-
-        # Exact match first (e.g. "mp3 320" in allowed_filetypes)
-        matched_index = None
-        for i, ft in enumerate(cfg.allowed_filetypes):
-            if ft.strip().lower() == mapped:
-                matched_index = i
-                break
-
-        # Bare-format fallback (e.g. "mp3 192" not in list → match bare "mp3")
-        if matched_index is None:
-            bare_format = mapped.split()[0] if " " in mapped else mapped
-            for i, ft in enumerate(cfg.allowed_filetypes):
-                if ft.strip().lower() == bare_format:
-                    matched_index = i
-                    break
-
-        if matched_index is None:
-            return fallback
-
-        # When Lidarr reports a bare format (e.g. "FLAC" with no bitrate/depth),
-        # it can't distinguish sub-variants (flac 24/192 vs flac 16/44.1).
-        # Downloading any FLAC variant would import as "FLAC" again → infinite
-        # loop.  Prevent this by returning the index of the FIRST entry with the
-        # same base format, so all same-format variants are excluded.
-        if " " not in mapped:
-            for i in range(matched_index):
-                if cfg.allowed_filetypes[i].strip().lower().split()[0] == mapped:
-                    logger.info(
-                        f"Bare format '{quality_name}' detected — excluding "
-                        f"all '{mapped}' variants (indices {i}-{matched_index})"
-                    )
-                    return (i, quality_name)
-        return (matched_index, quality_name)
-    except Exception:
-        logger.debug(
-            f"Could not determine existing quality for album {album_id}",
-            exc_info=True,
-        )
-        return fallback
-
-
 def get_album_tracks(album, release_id=None):
-    """Get tracks for an album — from pipeline DB or Lidarr API.
-
-    DB records have negative IDs. For those, fetch tracks from DatabaseSource.
-    For Lidarr records (positive IDs), use lidarr.get_tracks() as before.
-    """
-    if cfg.pipeline_db_enabled and pipeline_db_source is not None and album.get("_db_request_id"):
-        return pipeline_db_source.get_tracks(album)
-    return lidarr.get_tracks(
-        artistId=album["artistId"],
-        albumId=album["id"],
-        albumReleaseId=release_id,
-    )
+    """Get tracks for an album from pipeline DB."""
+    return pipeline_db_source.get_tracks(album)
 
 
-# Cache for current album being processed — avoids lidarr.get_album() for DB records
+# Cache for current album being processed
 _current_album_cache = {}
 
 
 def get_album_by_id(album_id):
-    """Get album data by ID — from cache (DB mode) or Lidarr API."""
+    """Get album data by ID from cache."""
     if album_id in _current_album_cache:
         return _current_album_cache[album_id]
-    return lidarr.get_album(album_id)
+    raise KeyError(f"Album {album_id} not found in cache")
 
 
 def find_download(album, grab_list):
@@ -868,29 +758,10 @@ def find_download(album, grab_list):
     artist_id = album["artistId"]
     results = search_cache[album_id]
 
-    # Cache album for DB mode so try_enqueue doesn't need lidarr.get_album()
+    # Cache album so get_album_by_id() works during matching
     _current_album_cache[album_id] = album
 
-    # For cutoff_unmet albums, only try filetypes that are strictly better
-    # than what Lidarr already has.  This prevents re-downloading the same
-    # quality in an endless loop (e.g. mp3-192 replacing mp3-192).
-    is_cutoff = album.get("_is_cutoff", False)
     filetypes_to_try = cfg.allowed_filetypes
-    if is_cutoff:
-        existing_tier, lidarr_quality = get_existing_quality_tier(album_id)
-        if existing_tier == 0:
-            logger.info(
-                f"Already at highest quality tier, skipping cutoff upgrade: "
-                f"{artist_name} - {album['title']} (Lidarr quality: {lidarr_quality})"
-            )
-            return False
-        if existing_tier < len(cfg.allowed_filetypes):
-            filetypes_to_try = cfg.allowed_filetypes[:existing_tier]
-            logger.info(
-                f"Cutoff upgrade for {artist_name} - {album['title']}: "
-                f"Lidarr quality '{lidarr_quality}' → tier '{cfg.allowed_filetypes[existing_tier]}', "
-                f"only trying {len(filetypes_to_try)} higher-priority formats"
-            )
 
     # Per-album quality override from pipeline DB (e.g. upgrade requests)
     quality_override = album.get("_db_quality_override")
@@ -903,22 +774,9 @@ def find_download(album, grab_list):
 
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        # DB records carry releases inline (copy to avoid mutation);
-        # Lidarr records fetch fresh from API each iteration
-        if album.get("_db_request_id"):
-            releases = list(album.get("releases", []))
-        else:
-            releases = lidarr.get_album(album_id)["releases"]
+        releases = list(album.get("releases", []))
 
         # Check if any release is explicitly monitored by the user.
-        # When a monitored release exists, we ONLY try that release and skip
-        # all others. Rationale: Lidarr imports against the monitored release,
-        # so downloading a non-monitored release (different track count/edition)
-        # will always fail at import time. This avoids wasted downloads and
-        # bandwidth — e.g. downloading an 11-track edition when Lidarr expects
-        # a 20-track deluxe. If the monitored release isn't available on
-        # Soulseek, the album simply fails and can be retried later or the
-        # user can manually select a different release in Lidarr.
         has_monitored = any(r.get("monitored", False) for r in releases)
 
         num_releases = len(releases)
@@ -935,44 +793,40 @@ def find_download(album, grab_list):
             found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
 
             if found:
-                grab_list[album_id] = {}
-                grab_list[album_id]["files"] = downloads
-                grab_list[album_id]["filetype"] = allowed_filetype
-                grab_list[album_id]["title"] = album["title"]
-                grab_list[album_id]["artist"] = artist_name
-                grab_list[album_id]["year"] = album["releaseDate"][0:4]
-                grab_list[album_id]["mb_release_id"] = release.get("foreignReleaseId", "")
-                if is_cutoff:
-                    grab_list[album_id]["_is_cutoff"] = True
-                    grab_list[album_id]["_pre_tier"] = existing_tier
-                # Propagate DB metadata for pipeline_db_source.mark_done/mark_failed
-                if album.get("_db_request_id"):
-                    grab_list[album_id]["_db_request_id"] = album["_db_request_id"]
-                    grab_list[album_id]["_db_source"] = album.get("_db_source")
-                    grab_list[album_id]["_db_quality_override"] = album.get("_db_quality_override")
+                assert downloads is not None
+                grab_list[album_id] = GrabListEntry(
+                    album_id=album_id,
+                    files=downloads,
+                    filetype=allowed_filetype,
+                    title=album["title"],
+                    artist=artist_name,
+                    year=album["releaseDate"][0:4],
+                    mb_release_id=release.get("foreignReleaseId", ""),
+
+                    db_request_id=album.get("_db_request_id"),
+                    db_source=album.get("_db_source"),
+                    db_quality_override=album.get("_db_quality_override"),
+                )
                 return True
             elif len(release["media"]) > 1:
                 found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
                 if found:
-                    grab_list[album_id] = {}
-                    grab_list[album_id]["files"] = downloads
-                    grab_list[album_id]["filetype"] = allowed_filetype
-                    grab_list[album_id]["title"] = album["title"]
-                    grab_list[album_id]["artist"] = artist_name
-                    grab_list[album_id]["year"] = album["releaseDate"][0:4]
-                    grab_list[album_id]["mb_release_id"] = release.get("foreignReleaseId", "")
-                    if is_cutoff:
-                        grab_list[album_id]["_is_cutoff"] = True
-                        grab_list[album_id]["_pre_tier"] = existing_tier
-                    if album.get("_db_request_id"):
-                        grab_list[album_id]["_db_request_id"] = album["_db_request_id"]
-                        grab_list[album_id]["_db_source"] = album.get("_db_source")
-                        grab_list[album_id]["_db_quality_override"] = album.get("_db_quality_override")
+                    assert downloads is not None
+                    grab_list[album_id] = GrabListEntry(
+                        album_id=album_id,
+                        files=downloads,
+                        filetype=allowed_filetype,
+                        title=album["title"],
+                        artist=artist_name,
+                        year=album["releaseDate"][0:4],
+                        mb_release_id=release.get("foreignReleaseId", ""),
+                        db_request_id=album.get("_db_request_id"),
+                        db_source=album.get("_db_source"),
+                        db_quality_override=album.get("_db_quality_override"),
+                    )
                     return True
 
             # If a monitored release was tried and didn't match, stop here.
-            # Don't fall through to other releases — Lidarr will reject them
-            # at import because they won't match the monitored edition.
             if has_monitored and not release.get("monitored", False):
                 # We already tried the monitored release (choose_release
                 # returns it first) and we're now on a non-monitored one.
@@ -1007,12 +861,13 @@ def search_and_queue(albums):
     return grab_list, failed_search, failed_grab
 
 
+from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import quality_gate_decision, QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS
 
 
 def _check_quality_gate(album_data, request_id):
     """Post-import quality gate: if min track bitrate is below V0, queue for upgrade."""
-    mb_id = album_data.get("mb_release_id")
+    mb_id = album_data.mb_release_id
     if not mb_id or not cfg.pipeline_db_enabled or pipeline_db_source is None:
         return
     try:
@@ -1065,7 +920,7 @@ def _check_quality_gate(album_data, request_id):
         decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
 
         # --- Act on decision ---
-        label = f"{album_data['artist']} - {album_data['title']}"
+        label = f"{album_data.artist} - {album_data.title}"
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
         if decision == "requeue_upgrade":
@@ -1080,8 +935,8 @@ def _check_quality_gate(album_data, request_id):
             db.reset_to_wanted(request_id,
                                quality_override=QUALITY_UPGRADE_TIERS,
                                min_bitrate=min_br_kbps)
-            usernames = set(f.get("username") for f in album_data.get("files", [])
-                           if f.get("username"))
+            usernames = set(f.username for f in album_data.files
+                           if f.username)
             gate_br = spectral_br if (spectral_br and spectral_br < min_br_kbps) else min_br_kbps
             if spectral_br and spectral_br < min_br_kbps:
                 reason = (f"quality gate: spectral {spectral_br}kbps "
@@ -1120,15 +975,15 @@ def _check_quality_gate(album_data, request_id):
 
 def _build_download_info(album_data):
     """Extract audio quality metadata from album files for download logging."""
-    files = album_data.get("files", [])
+    files = album_data.files
     if not files:
         return {}
-    usernames = set(f.get("username") for f in files if f.get("username"))
-    filetypes = set(f["filename"].split(".")[-1].lower() for f in files if "." in f["filename"])
-    bitrates = [f["bitRate"] for f in files if "bitRate" in f]
-    sample_rates = [f["sampleRate"] for f in files if "sampleRate" in f]
-    bit_depths = [f["bitDepth"] for f in files if "bitDepth" in f]
-    vbr_flags = [f["isVariableBitRate"] for f in files if "isVariableBitRate" in f]
+    usernames = set(f.username for f in files if f.username)
+    filetypes = set(f.filename.split(".")[-1].lower() for f in files if "." in f.filename)
+    bitrates = [f.bitRate for f in files if f.bitRate is not None]
+    sample_rates = [f.sampleRate for f in files if f.sampleRate is not None]
+    bit_depths = [f.bitDepth for f in files if f.bitDepth is not None]
+    vbr_flags = [f.isVariableBitRate for f in files if f.isVariableBitRate is not None]
 
     info = {}
     if usernames:
@@ -1146,32 +1001,30 @@ def _build_download_info(album_data):
     return info
 
 
-def process_completed_album(album_data, failed_grab):
+def process_completed_album(album_data: GrabListEntry, failed_grab):
     os.chdir(cfg.slskd_download_dir)
-    import_folder_name = sanitize_folder_name(album_data["artist"] + " - " + album_data["title"] + " (" + album_data["year"] + ")")
+    import_folder_name = sanitize_folder_name(album_data.artist + " - " + album_data.title + " (" + album_data.year + ")")
     import_folder_fullpath = os.path.join(cfg.slskd_download_dir, import_folder_name)
-    lidarr_import_fullpath = os.path.join(cfg.lidarr_download_dir, import_folder_name)
-    album_data["import_folder"] = lidarr_import_fullpath
     rm_dirs = []
     moved_files_history = []
     if not os.path.exists(import_folder_fullpath):
         os.mkdir(import_folder_fullpath)
-    for file in album_data["files"]:
-        file_folder = file["file_dir"].split("\\")[-1]
-        filename = file["filename"].split("\\")[-1]
+    for file in album_data.files:
+        file_folder = file.file_dir.split("\\")[-1]
+        filename = file.filename.split("\\")[-1]
         src_folder = os.path.join(cfg.slskd_download_dir, file_folder)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)  # Multi disk albums are sometimes in multiple folders. eg. CD01 CD02. So we need to clean up both
         src_file = os.path.join(src_folder, filename)
-        if "disk_no" in file and "disk_count" in file and file["disk_count"] > 1:
-            filename = f"Disk {file['disk_no']} - {filename}"
+        if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
+            filename = f"Disk {file.disk_no} - {filename}"
         dst_file = os.path.join(import_folder_fullpath, filename)
-        file["import_path"] = dst_file
+        file.import_path = dst_file
         try:
             shutil.move(src_file, dst_file)
             moved_files_history.append((src_file, dst_file))
         except Exception:
-            logger.exception(f"Failed to move: {file['filename']} to temp location for import into Lidarr. Rolling back...")
+            logger.exception(f"Failed to move: {file.filename} to temp location for import. Rolling back...")
             for src, dst in reversed(moved_files_history):
                 try:
                     shutil.move(dst, src)
@@ -1181,8 +1034,6 @@ def process_completed_album(album_data, failed_grab):
                 os.rmdir(import_folder_fullpath)
             except OSError:
                 logger.warning(f"Could not remove temp import directory {import_folder_fullpath}")
-            if album_data["album_id"] > 0:
-                failed_grab.append(lidarr.get_album(album_data["album_id"]))
             return
     else:  # Only runs if all files are successfully moved
         for rm_dir in rm_dirs:
@@ -1191,26 +1042,25 @@ def process_completed_album(album_data, failed_grab):
                     os.rmdir(rm_dir)
                 except OSError:
                     logger.warning(f"Skipping removal of {rm_dir} because it's not empty.")
-        logger.info(f"Attempting Lidarr import of {album_data['artist']} - {album_data['title']}")
-        for file in album_data["files"]:
+        logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
+        for file in album_data.files:
             try:  # This sometimes fails. No idea why. Nor do we care. We try and that's what matters
-                song = music_tag.load_file(file["import_path"])
-                if "disk_no" in file:
-                    song["discnumber"] = file["disk_no"]
-                    song["totaldiscs"] = file["disk_count"]
+                song = music_tag.load_file(file.import_path)
+                assert song is not None
+                if file.disk_no is not None:
+                    song["discnumber"] = file.disk_no
+                    song["totaldiscs"] = file.disk_count
 
-                song["albumartist"] = album_data["artist"]
-                song["album"] = album_data["title"]
+                song["albumartist"] = album_data.artist
+                song["album"] = album_data.title
                 song.save()
             except Exception:
-                logger.exception(f"Error writing tags for: {file['import_path']}")
-        if cfg.beets_validation_enabled and album_data.get("mb_release_id"):
+                logger.exception(f"Error writing tags for: {file.import_path}")
+        if cfg.beets_validation_enabled and album_data.mb_release_id:
             # === Beets validation path ===
             bv_result = beets_validate(import_folder_fullpath,
-                                       album_data["mb_release_id"],
+                                       album_data.mb_release_id,
                                        cfg.beets_distance_threshold)
-
-            is_db_mode = cfg.pipeline_db_enabled and pipeline_db_source is not None
 
             if bv_result["valid"]:
                 # Repair MP3 headers before audio validation
@@ -1228,7 +1078,7 @@ def process_completed_album(album_data, failed_grab):
                     }
 
             # Spectral check for non-VBR MP3 downloads (CBR 320 has no other quality signal)
-            if bv_result["valid"] and is_db_mode:
+            if bv_result["valid"]:
                 dl_info_pre = _build_download_info(album_data)
                 filetype_str = dl_info_pre.get("filetype", "").lower()
                 is_vbr = dl_info_pre.get("is_vbr", False)
@@ -1240,15 +1090,15 @@ def process_completed_album(album_data, failed_grab):
                             sys.path.insert(0, lib_dir)
                         from spectral_check import analyze_album as spectral_analyze
                         spectral_result = spectral_analyze(import_folder_fullpath, trim_seconds=30)
-                        logger.info(f"SPECTRAL: {album_data['artist']} - {album_data['title']} "
+                        logger.info(f"SPECTRAL: {album_data.artist} - {album_data.title} "
                                     f"grade={spectral_result.grade}, "
                                     f"estimated_bitrate={spectral_result.estimated_bitrate_kbps}kbps, "
                                     f"suspect={spectral_result.suspect_pct:.0f}%")
                         # Store in album_data for downstream dl_info
-                        album_data["_spectral_grade"] = spectral_result.grade
-                        album_data["_spectral_bitrate"] = spectral_result.estimated_bitrate_kbps
+                        album_data.spectral_grade = spectral_result.grade
+                        album_data.spectral_bitrate = spectral_result.estimated_bitrate_kbps
                         # Also check existing beets files for comparison
-                        mb_id = album_data.get("mb_release_id")
+                        mb_id = album_data.mb_release_id
                         if mb_id:
                             try:
                                 import sqlite3 as _sqlite3
@@ -1266,10 +1116,10 @@ def process_completed_album(album_data, failed_grab):
                                     if row and row[1]:
                                         existing_path = os.path.dirname(
                                             row[1].decode() if isinstance(row[1], bytes) else row[1])
-                                        album_data["_existing_min_bitrate"] = row[2]
+                                        album_data.existing_min_bitrate = row[2]
                                         if os.path.isdir(existing_path):
                                             existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
-                                            album_data["_existing_spectral_bitrate"] = existing_spectral.estimated_bitrate_kbps
+                                            album_data.existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
                                             logger.info(f"SPECTRAL: existing on disk: grade={existing_spectral.grade}, "
                                                         f"estimated_bitrate={existing_spectral.estimated_bitrate_kbps}kbps, "
                                                         f"beets_min={row[2]}kbps")
@@ -1277,17 +1127,17 @@ def process_completed_album(album_data, failed_grab):
                                 logger.exception("SPECTRAL: failed to check existing files")
                         # Decision: compare spectral bitrates
                         new_quality = spectral_result.estimated_bitrate_kbps
-                        existing_quality = album_data.get("_existing_spectral_bitrate") or 0
-                        request_id = album_data.get("_db_request_id")
+                        existing_quality = album_data.existing_spectral_bitrate or 0
+                        request_id = album_data.db_request_id
 
                         if spectral_result.grade in ("suspect", "likely_transcode"):
                             if new_quality and existing_quality and new_quality <= existing_quality:
                                 # Not an upgrade — reject and denylist
                                 logger.warning(
-                                    f"SPECTRAL REJECT: {album_data['artist']} - {album_data['title']} "
+                                    f"SPECTRAL REJECT: {album_data.artist} - {album_data.title} "
                                     f"new spectral {new_quality}kbps <= existing {existing_quality}kbps")
-                                usernames = set(f.get("username") for f in album_data.get("files", [])
-                                                if f.get("username"))
+                                usernames = set(f.username for f in album_data.files
+                                                if f.username)
                                 if request_id and pipeline_db_source:
                                     db = pipeline_db_source._get_db()
                                     for username in usernames:
@@ -1312,330 +1162,258 @@ def process_completed_album(album_data, failed_grab):
                             elif new_quality and (not existing_quality or new_quality > existing_quality):
                                 # Suspect but better than what we have — import as upgrade
                                 logger.info(
-                                    f"SPECTRAL UPGRADE: {album_data['artist']} - {album_data['title']} "
+                                    f"SPECTRAL UPGRADE: {album_data.artist} - {album_data.title} "
                                     f"suspect at {new_quality}kbps but > existing {existing_quality}kbps, importing")
                             elif not existing_quality:
                                 # Nothing on disk yet — something is better than nothing
                                 logger.info(
-                                    f"SPECTRAL: {album_data['artist']} - {album_data['title']} "
+                                    f"SPECTRAL: {album_data.artist} - {album_data.title} "
                                     f"suspect at {new_quality}kbps but no existing album, importing")
                     except Exception:
-                        logger.exception(f"SPECTRAL: failed for {album_data['artist']} - {album_data['title']}")
+                        logger.exception(f"SPECTRAL: failed for {album_data.artist} - {album_data.title}")
 
             if bv_result["valid"]:
                 dest = stage_to_ai(album_data, import_folder_fullpath, cfg.beets_staging_dir)
                 log_validation_result(album_data, bv_result, dest)
-                if not is_db_mode:
-                    unmonitor_album(album_data["album_id"])
-                logger.info(f"STAGED: {album_data['artist']} - {album_data['title']} "
+                logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
                             f"(scenario={bv_result.get('scenario')}, "
                             f"distance={bv_result['distance']:.4f}) → {dest}")
 
-                # Pipeline DB: two-track post-download pipeline
-                if is_db_mode:
-                    dl_info = _build_download_info(album_data)
-                    # Inject spectral analysis results from pre-staging check
-                    if album_data.get("_spectral_grade"):
-                        dl_info["spectral_grade"] = album_data["_spectral_grade"]
-                        dl_info["spectral_bitrate"] = album_data.get("_spectral_bitrate")
-                        dl_info["existing_spectral_bitrate"] = album_data.get("_existing_spectral_bitrate")
-                        dl_info["existing_min_bitrate"] = album_data.get("_existing_min_bitrate")
-                        dl_info["slskd_filetype"] = dl_info.get("filetype")
-                        dl_info["actual_filetype"] = dl_info.get("filetype")
-                    source_type = album_data.get("_db_source", "redownload")
-                    request_id = album_data.get("_db_request_id")
-                    if source_type == "request" and bv_result.get("distance", 1.0) <= cfg.beets_distance_threshold:
-                        # Auto-import via import_one.py (handles convert + import + DB updates)
-                        import_script = os.path.join(
-                            os.path.dirname(cfg.beets_harness_path), "import_one.py")
-                        mb_id = album_data.get("mb_release_id", "")
-                        logger.info(f"AUTO-IMPORT: {album_data['artist']} - {album_data['title']} "
-                                    f"(source=request, dist={bv_result['distance']:.4f})")
-                        try:
-                            cmd = [sys.executable, import_script, dest, mb_id]
-                            if request_id:
-                                cmd.extend(["--request-id", str(request_id)])
-                                # Pass pipeline DB min_bitrate to override beets
-                                # comparison when existing files are known garbage
-                                try:
-                                    req = pipeline_db_source._get_db().get_request(request_id)
-                                    db_min_br = req.get("min_bitrate") if req else None
-                                    if db_min_br is not None:
-                                        cmd.extend(["--override-min-bitrate", str(db_min_br)])
-                                except Exception:
-                                    pass
-                            import_env = {**os.environ, "HOME": "/home/abl030"}
-                            result = sp.run(cmd, capture_output=True, text=True,
-                                            timeout=1800, env=import_env)
-                            if result.returncode == 0:
-                                logger.info(f"AUTO-IMPORT OK: {album_data['artist']} - {album_data['title']}")
-                                # Log beets internal logging (stderr)
-                                for line in (result.stderr or "").strip().split("\n"):
-                                    if line.strip():
-                                        logger.info(f"  [beets] {line}")
-                                prev_min_br = None
-                                new_min_br = None
-                                for line in result.stdout.strip().split("\n"):
-                                    logger.info(f"  {line}")
-                                    # Detect FLAC→V0 conversion from import_one output
-                                    if line.strip().startswith("Converted ") and ", failed " in line:
-                                        try:
-                                            parts = line.strip().split()
-                                            conv_count = int(parts[1].rstrip(","))
-                                            if conv_count > 0:
-                                                dl_info["was_converted"] = True
-                                                dl_info["original_filetype"] = "flac"
-                                                dl_info["filetype"] = "mp3"
-                                                dl_info["is_vbr"] = True
-                                        except (ValueError, IndexError):
-                                            pass
-                                    # Capture actual post-conversion bitrate
-                                    if line.strip().startswith("min_bitrate="):
-                                        try:
-                                            actual_br = int(line.strip().split("=")[1])
-                                            dl_info["bitrate"] = actual_br * 1000
-                                        except (ValueError, IndexError):
-                                            pass
-                                    # Capture upgrade delta from import_one
-                                    if line.strip().startswith("prev_min_bitrate="):
-                                        try:
-                                            prev_min_br = int(line.strip().split("=")[1])
-                                        except (ValueError, IndexError):
-                                            pass
-                                    if line.strip().startswith("new_min_bitrate="):
-                                        try:
-                                            new_min_br = int(line.strip().split("=")[1])
-                                        except (ValueError, IndexError):
-                                            pass
-                                    # Capture spectral analysis results
-                                    if line.strip().startswith("spectral_grade="):
-                                        dl_info["spectral_grade"] = line.strip().split("=")[1]
-                                    if line.strip().startswith("spectral_bitrate="):
-                                        try:
-                                            dl_info["spectral_bitrate"] = int(line.strip().split("=")[1])
-                                        except (ValueError, IndexError):
-                                            pass
-                                    if line.strip().startswith("existing_spectral_bitrate="):
-                                        try:
-                                            dl_info["existing_spectral_bitrate"] = int(line.strip().split("=")[1])
-                                        except (ValueError, IndexError):
-                                            pass
-                                # Set slskd-reported quality (before conversion changed it)
-                                if dl_info.get("was_converted"):
-                                    dl_info["slskd_filetype"] = dl_info.get("original_filetype", "flac")
-                                    dl_info["actual_filetype"] = dl_info.get("filetype", "mp3")
-                                else:
-                                    dl_info["slskd_filetype"] = dl_info.get("filetype")
-                                    dl_info["actual_filetype"] = dl_info.get("filetype")
-                                # Ensure DB status is set even if import_one's DB update failed
-                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
-                                # Update upgrade delta on the pipeline request
-                                if request_id and (prev_min_br is not None or new_min_br is not None):
+                dl_info = _build_download_info(album_data)
+                # Inject spectral analysis results from pre-staging check
+                if album_data.spectral_grade:
+                    dl_info["spectral_grade"] = album_data.spectral_grade
+                    dl_info["spectral_bitrate"] = album_data.spectral_bitrate
+                    dl_info["existing_spectral_bitrate"] = album_data.existing_spectral_bitrate
+                    dl_info["existing_min_bitrate"] = album_data.existing_min_bitrate
+                    dl_info["slskd_filetype"] = dl_info.get("filetype")
+                    dl_info["actual_filetype"] = dl_info.get("filetype")
+                source_type = album_data.db_source or "redownload"
+                request_id = album_data.db_request_id
+                if source_type == "request" and bv_result.get("distance", 1.0) <= cfg.beets_distance_threshold:
+                    # Auto-import via import_one.py (handles convert + import + DB updates)
+                    import_script = os.path.join(
+                        os.path.dirname(cfg.beets_harness_path), "import_one.py")
+                    mb_id = album_data.mb_release_id or ""
+                    logger.info(f"AUTO-IMPORT: {album_data.artist} - {album_data.title} "
+                                f"(source=request, dist={bv_result['distance']:.4f})")
+                    try:
+                        cmd = [sys.executable, import_script, dest, mb_id]
+                        if request_id:
+                            cmd.extend(["--request-id", str(request_id)])
+                            # Pass pipeline DB min_bitrate to override beets
+                            # comparison when existing files are known garbage
+                            try:
+                                req = pipeline_db_source._get_db().get_request(request_id)
+                                db_min_br = req.get("min_bitrate") if req else None
+                                if db_min_br is not None:
+                                    cmd.extend(["--override-min-bitrate", str(db_min_br)])
+                            except Exception:
+                                pass
+                        import_env = {**os.environ, "HOME": "/home/abl030"}
+                        result = sp.run(cmd, capture_output=True, text=True,
+                                        timeout=1800, env=import_env)
+                        if result.returncode == 0:
+                            logger.info(f"AUTO-IMPORT OK: {album_data.artist} - {album_data.title}")
+                            # Log beets internal logging (stderr)
+                            for line in (result.stderr or "").strip().split("\n"):
+                                if line.strip():
+                                    logger.info(f"  [beets] {line}")
+                            prev_min_br = None
+                            new_min_br = None
+                            for line in result.stdout.strip().split("\n"):
+                                logger.info(f"  {line}")
+                                # Detect FLAC->V0 conversion from import_one output
+                                if line.strip().startswith("Converted ") and ", failed " in line:
                                     try:
-                                        db = pipeline_db_source._get_db()
-                                        db.update_status(request_id, "imported",
-                                                         prev_min_bitrate=prev_min_br or db.get_request(request_id).get("min_bitrate"),
-                                                         min_bitrate=new_min_br)
-                                    except Exception:
-                                        logger.exception("Failed to update upgrade delta")
-                                # Quality gate: if below V0, queue for upgrade
-                                _check_quality_gate(album_data, request_id)
-                                trigger_meelo_scan()
-                                # Clean up staged directory — beets already moved files
-                                # to /Beets, or pre-flight found a dupe (files unneeded)
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
-                                    logger.info(f"  Cleaned up staged dir: {dest}")
-                                    parent = os.path.dirname(dest)
-                                    if os.path.isdir(parent) and not os.listdir(parent):
-                                        os.rmdir(parent)
-                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
-                            elif result.returncode == 5:
-                                # Quality downgrade — not imported
-                                logger.warning(
-                                    f"QUALITY DOWNGRADE PREVENTED: {album_data['artist']} - {album_data['title']}")
-                                for line in result.stderr.strip().split("\n"):
-                                    logger.warning(f"  {line}")
-                                usernames = set(f.get("username") for f in album_data.get("files", [])
-                                                if f.get("username"))
-                                db = pipeline_db_source._get_db()
-                                for username in usernames:
-                                    db.add_denylist(request_id, username, "quality downgrade prevented")
-                                logger.info(f"  Denylisted {usernames} for request {request_id}")
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
-                            elif result.returncode == 6:
-                                # Transcode detected. May or may not have imported:
-                                # - "[OK] Transcode imported" = imported as upgrade, keep searching
-                                # - "[QUALITY DOWNGRADE]" = not imported, keep searching
-                                stdout_text = result.stdout or ""
-                                imported_transcode = "[OK] Transcode imported" in stdout_text
-                                actual_br = None
-                                for line in stdout_text.strip().split("\n"):
-                                    logger.info(f"  {line}")
-                                    if line.strip().startswith("min_bitrate="):
-                                        try:
-                                            actual_br = int(line.strip().split("=")[1])
-                                        except (ValueError, IndexError):
-                                            pass
-                                    # Capture conversion info for download log
-                                    if line.strip().startswith("Converted ") and ", failed " in line:
-                                        try:
-                                            parts = line.strip().split()
-                                            conv_count = int(parts[1].rstrip(","))
-                                            if conv_count > 0:
-                                                dl_info["was_converted"] = True
-                                                dl_info["original_filetype"] = "flac"
-                                                dl_info["filetype"] = "mp3"
-                                                dl_info["is_vbr"] = True
-                                        except (ValueError, IndexError):
-                                            pass
-                                if actual_br:
-                                    dl_info["bitrate"] = actual_br * 1000
-                                for line in (result.stderr or "").strip().split("\n"):
-                                    if line.strip():
-                                        logger.warning(f"  {line}")
-                                if imported_transcode:
-                                    logger.info(
-                                        f"TRANSCODE UPGRADE: {album_data['artist']} - {album_data['title']} "
-                                        f"imported at {actual_br}kbps, denylisting + continuing search")
-                                    pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
-                                    trigger_meelo_scan()
-                                else:
-                                    logger.warning(
-                                        f"TRANSCODE REJECTED: {album_data['artist']} - {album_data['title']} "
-                                        f"at {actual_br}kbps — not an upgrade")
-                                # Denylist source user and reset to wanted for further searching
-                                usernames = set(f.get("username") for f in album_data.get("files", [])
-                                                if f.get("username"))
-                                db = pipeline_db_source._get_db()
-                                reason = f"transcode: {actual_br}kbps" if actual_br else "transcode detected"
-                                for username in usernames:
-                                    db.add_denylist(request_id, username, reason)
-                                logger.info(f"  Denylisted {usernames} for request {request_id}")
-                                # Reset to wanted so we keep searching for better quality
-                                # Only update min_bitrate if we actually imported — otherwise
-                                # keep the existing on-disk value
-                                db.reset_to_wanted(request_id,
-                                                   quality_override=QUALITY_UPGRADE_TIERS,
-                                                   min_bitrate=actual_br if imported_transcode else None)
-                                # Clean up staged dir (beets already moved files if imported)
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
-                                    logger.info(f"  Cleaned up staged dir: {dest}")
-                                    parent = os.path.dirname(dest)
-                                    if os.path.isdir(parent) and not os.listdir(parent):
-                                        os.rmdir(parent)
-                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
+                                        parts = line.strip().split()
+                                        conv_count = int(parts[1].rstrip(","))
+                                        if conv_count > 0:
+                                            dl_info["was_converted"] = True
+                                            dl_info["original_filetype"] = "flac"
+                                            dl_info["filetype"] = "mp3"
+                                            dl_info["is_vbr"] = True
+                                    except (ValueError, IndexError):
+                                        pass
+                                # Capture actual post-conversion bitrate
+                                if line.strip().startswith("min_bitrate="):
+                                    try:
+                                        actual_br = int(line.strip().split("=")[1])
+                                        dl_info["bitrate"] = actual_br * 1000
+                                    except (ValueError, IndexError):
+                                        pass
+                                # Capture upgrade delta from import_one
+                                if line.strip().startswith("prev_min_bitrate="):
+                                    try:
+                                        prev_min_br = int(line.strip().split("=")[1])
+                                    except (ValueError, IndexError):
+                                        pass
+                                if line.strip().startswith("new_min_bitrate="):
+                                    try:
+                                        new_min_br = int(line.strip().split("=")[1])
+                                    except (ValueError, IndexError):
+                                        pass
+                                # Capture spectral analysis results
+                                if line.strip().startswith("spectral_grade="):
+                                    dl_info["spectral_grade"] = line.strip().split("=")[1]
+                                if line.strip().startswith("spectral_bitrate="):
+                                    try:
+                                        dl_info["spectral_bitrate"] = int(line.strip().split("=")[1])
+                                    except (ValueError, IndexError):
+                                        pass
+                                if line.strip().startswith("existing_spectral_bitrate="):
+                                    try:
+                                        dl_info["existing_spectral_bitrate"] = int(line.strip().split("=")[1])
+                                    except (ValueError, IndexError):
+                                        pass
+                            # Set slskd-reported quality (before conversion changed it)
+                            if dl_info.get("was_converted"):
+                                dl_info["slskd_filetype"] = dl_info.get("original_filetype", "flac")
+                                dl_info["actual_filetype"] = dl_info.get("filetype", "mp3")
                             else:
-                                logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
-                                             f"{album_data['artist']} - {album_data['title']}")
-                                for line in result.stderr.strip().split("\n"):
-                                    logger.error(f"  {line}")
-                                for line in result.stdout.strip().split("\n"):
-                                    logger.error(f"  {line}")
-                                # import_one.py already set DB to review_needed
-                        except sp.TimeoutExpired:
-                            logger.error(f"AUTO-IMPORT TIMEOUT: {album_data['artist']} - {album_data['title']}")
-                        except Exception:
-                            logger.exception(f"AUTO-IMPORT ERROR: {album_data['artist']} - {album_data['title']}")
-                    else:
-                        # Redownload or high distance: stage only, user reviews manually
-                        pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
+                                dl_info["slskd_filetype"] = dl_info.get("filetype")
+                                dl_info["actual_filetype"] = dl_info.get("filetype")
+                            # Ensure DB status is set even if import_one's DB update failed
+                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
+                            # Update upgrade delta on the pipeline request
+                            if request_id and (prev_min_br is not None or new_min_br is not None):
+                                try:
+                                    db = pipeline_db_source._get_db()
+                                    db.update_status(request_id, "imported",
+                                                     prev_min_bitrate=prev_min_br or db.get_request(request_id).get("min_bitrate"),
+                                                     min_bitrate=new_min_br)
+                                except Exception:
+                                    logger.exception("Failed to update upgrade delta")
+                            # Quality gate: if below V0, queue for upgrade
+                            _check_quality_gate(album_data, request_id)
+                            trigger_meelo_scan()
+                            # Clean up staged directory -- beets already moved files
+                            # to /Beets, or pre-flight found a dupe (files unneeded)
+                            if os.path.isdir(dest):
+                                shutil.rmtree(dest)
+                                logger.info(f"  Cleaned up staged dir: {dest}")
+                                parent = os.path.dirname(dest)
+                                if os.path.isdir(parent) and not os.listdir(parent):
+                                    os.rmdir(parent)
+                                    logger.info(f"  Cleaned up empty artist dir: {parent}")
+                        elif result.returncode == 5:
+                            # Quality downgrade -- not imported
+                            logger.warning(
+                                f"QUALITY DOWNGRADE PREVENTED: {album_data.artist} - {album_data.title}")
+                            for line in result.stderr.strip().split("\n"):
+                                logger.warning(f"  {line}")
+                            usernames = set(f.username for f in album_data.files
+                                            if f.username)
+                            db = pipeline_db_source._get_db()
+                            for username in usernames:
+                                db.add_denylist(request_id, username, "quality downgrade prevented")
+                            logger.info(f"  Denylisted {usernames} for request {request_id}")
+                            if os.path.isdir(dest):
+                                shutil.rmtree(dest)
+                        elif result.returncode == 6:
+                            # Transcode detected. May or may not have imported:
+                            # - "[OK] Transcode imported" = imported as upgrade, keep searching
+                            # - "[QUALITY DOWNGRADE]" = not imported, keep searching
+                            stdout_text = result.stdout or ""
+                            imported_transcode = "[OK] Transcode imported" in stdout_text
+                            actual_br = None
+                            for line in stdout_text.strip().split("\n"):
+                                logger.info(f"  {line}")
+                                if line.strip().startswith("min_bitrate="):
+                                    try:
+                                        actual_br = int(line.strip().split("=")[1])
+                                    except (ValueError, IndexError):
+                                        pass
+                                # Capture conversion info for download log
+                                if line.strip().startswith("Converted ") and ", failed " in line:
+                                    try:
+                                        parts = line.strip().split()
+                                        conv_count = int(parts[1].rstrip(","))
+                                        if conv_count > 0:
+                                            dl_info["was_converted"] = True
+                                            dl_info["original_filetype"] = "flac"
+                                            dl_info["filetype"] = "mp3"
+                                            dl_info["is_vbr"] = True
+                                    except (ValueError, IndexError):
+                                        pass
+                            if actual_br:
+                                dl_info["bitrate"] = actual_br * 1000
+                            for line in (result.stderr or "").strip().split("\n"):
+                                if line.strip():
+                                    logger.warning(f"  {line}")
+                            if imported_transcode:
+                                logger.info(
+                                    f"TRANSCODE UPGRADE: {album_data.artist} - {album_data.title} "
+                                    f"imported at {actual_br}kbps, denylisting + continuing search")
+                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
+                                trigger_meelo_scan()
+                            else:
+                                logger.warning(
+                                    f"TRANSCODE REJECTED: {album_data.artist} - {album_data.title} "
+                                    f"at {actual_br}kbps -- not an upgrade")
+                            # Denylist source user and reset to wanted for further searching
+                            usernames = set(f.username for f in album_data.files
+                                            if f.username)
+                            db = pipeline_db_source._get_db()
+                            reason = f"transcode: {actual_br}kbps" if actual_br else "transcode detected"
+                            for username in usernames:
+                                db.add_denylist(request_id, username, reason)
+                            logger.info(f"  Denylisted {usernames} for request {request_id}")
+                            # Reset to wanted so we keep searching for better quality
+                            # Only update min_bitrate if we actually imported -- otherwise
+                            # keep the existing on-disk value
+                            db.reset_to_wanted(request_id,
+                                               quality_override=QUALITY_UPGRADE_TIERS,
+                                               min_bitrate=actual_br if imported_transcode else None)
+                            # Clean up staged dir (beets already moved files if imported)
+                            if os.path.isdir(dest):
+                                shutil.rmtree(dest)
+                                logger.info(f"  Cleaned up staged dir: {dest}")
+                                parent = os.path.dirname(dest)
+                                if os.path.isdir(parent) and not os.listdir(parent):
+                                    os.rmdir(parent)
+                                    logger.info(f"  Cleaned up empty artist dir: {parent}")
+                        else:
+                            logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
+                                         f"{album_data.artist} - {album_data.title}")
+                            for line in result.stderr.strip().split("\n"):
+                                logger.error(f"  {line}")
+                            for line in result.stdout.strip().split("\n"):
+                                logger.error(f"  {line}")
+                            # import_one.py already set DB to review_needed
+                    except sp.TimeoutExpired:
+                        logger.error(f"AUTO-IMPORT TIMEOUT: {album_data.artist} - {album_data.title}")
+                    except Exception:
+                        logger.exception(f"AUTO-IMPORT ERROR: {album_data.artist} - {album_data.title}")
+                else:
+                    # Redownload or high distance: stage only, user reviews manually
+                    pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
             else:
                 move_failed_import(import_folder_fullpath)
                 log_validation_result(album_data, bv_result)
-                usernames = set(f["username"] for f in album_data.get("files", []))
-                # Pipeline DB: mark failed + denylist users
-                if is_db_mode:
-                    dl_info = _build_download_info(album_data)
-                    pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames, download_info=dl_info)
-                else:
-                    failed_grab.append(lidarr.get_album(album_data["album_id"]))
-                # Denylist the source user(s) so we try a different source next run
-                aid = album_data["album_id"]
-                if aid not in cutoff_denylist:
-                    cutoff_denylist[aid] = set()
-                cutoff_denylist[aid].update(usernames)
-                save_cutoff_denylist(cutoff_denylist_file_path, cutoff_denylist)
-                logger.warning(f"REJECTED: {album_data['artist']} - {album_data['title']} "
+                usernames = set(f.username for f in album_data.files)
+                dl_info = _build_download_info(album_data)
+                pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames, download_info=dl_info)
+                logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
                               f"(scenario={bv_result.get('scenario')}, "
                               f"distance={bv_result.get('distance')}, "
                               f"detail={bv_result.get('detail')}) "
                               f"| denylisted users: {', '.join(usernames)}")
-        else:
-            # === Lidarr DownloadedAlbumsScan path (original) ===
-            command = lidarr.post_command(
-                name="DownloadedAlbumsScan",
-                path=album_data["import_folder"],
-            )
-            logger.info(f"Starting Lidarr import for: {album_data['title']} ID: {command['id']}")
-
-            while True:
-                current_task = lidarr.get_command(command["id"])
-                if current_task["status"] == "completed" or current_task["status"] == "failed":
-                    break
-                time.sleep(2)
-
-            try:
-                logger.info(f"{current_task['commandName']} {current_task['message']} from: {current_task['body']['path']}")
-
-                if "Failed" in current_task["message"]:
-                    move_failed_import(current_task["body"]["path"])
-                    failed_grab.append(lidarr.get_album(album_data["album_id"]))
-                elif album_data.get("_is_cutoff"):
-                    post_tier, post_quality = get_existing_quality_tier(album_data["album_id"])
-                    pre_tier = album_data.get("_pre_tier", len(cfg.allowed_filetypes))
-                    if post_tier >= pre_tier:
-                        usernames = set(f["username"] for f in album_data.get("files", []))
-                        aid = album_data["album_id"]
-                        logger.warning(
-                            f"Cutoff upgrade failed for {album_data['artist']} - {album_data['title']}: "
-                            f"quality still '{post_quality}' after import (tier {post_tier} >= {pre_tier}). "
-                            f"Source users likely had mislabeled files: {', '.join(usernames)}. "
-                            f"Denylisting user/album pairs permanently."
-                        )
-                        if aid not in cutoff_denylist:
-                            cutoff_denylist[aid] = set()
-                        cutoff_denylist[aid].update(usernames)
-                        save_cutoff_denylist(cutoff_denylist_file_path, cutoff_denylist)
-                    else:
-                        logger.info(
-                            f"Cutoff upgrade verified for {album_data['artist']} - {album_data['title']}: "
-                            f"quality improved to '{post_quality}' (tier {pre_tier} → {post_tier})"
-                        )
-            except Exception:
-                logger.exception("Error printing lidarr task message")
-                logger.error(current_task)
 
 
 def monitor_downloads(grab_list, failed_grab):
     def delete_album(reason):
-        cancel_and_delete(grab_list[album_id]["files"])
-        usernames = set(f.get("username") for f in grab_list[album_id].get("files", []) if f.get("username"))
-        files = grab_list[album_id]["files"]
-        total = len(files)
-        completed = sum(1 for f in files if f.get("status") and f["status"].get("state") == "Completed, Succeeded")
-        elapsed = time.time() - grab_list[album_id].get("count_start", time.time())
+        entry = grab_list[album_id]
+        cancel_and_delete(entry.files)
+        usernames = set(f.username for f in entry.files if f.username)
+        total = len(entry.files)
+        completed = sum(1 for f in entry.files if f.status and f.status.get("state") == "Completed, Succeeded")
+        elapsed = time.time() - (entry.count_start or time.time())
         elapsed_min = elapsed / 60
-        logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']} "
+        logger.info(f"{reason} Album: {entry.title} Artist: {entry.artist} "
                      f"({completed}/{total} files done, {elapsed_min:.1f}min elapsed, "
                      f"stalled_timeout={cfg.stalled_timeout}s, cfg.remote_queue_timeout={cfg.remote_queue_timeout}s)")
-        for username in usernames:
-            key = f"{album_id}:{username}"
-            download_fail_counts[key] = download_fail_counts.get(key, 0) + 1
-            save_download_fail_counts(cutoff_denylist_file_path, download_fail_counts)
-            if download_fail_counts[key] >= 3:
-                if album_id not in cutoff_denylist:
-                    cutoff_denylist[album_id] = set()
-                cutoff_denylist[album_id].add(username)
-                save_cutoff_denylist(cutoff_denylist_file_path, cutoff_denylist)
-                logger.info(f"Denylisted user '{username}' for album {album_id} after {download_fail_counts[key]} failures")
-            else:
-                logger.info(f"Download failure {download_fail_counts[key]}/3 for user '{username}' on album {album_id}")
         del grab_list[album_id]
-        if album_id > 0:  # Lidarr IDs are positive; DB IDs are negative
-            failed_grab.append(lidarr.get_album(album_id))
 
     while True:
         total_albums = len(grab_list)
@@ -1648,59 +1426,60 @@ def monitor_downloads(grab_list, failed_grab):
         # We're going to need to drop items out of the list. So we might have to resort to enumerating the keys so we don't hit issues.
         done_count = 0
         for album_id in list(grab_list.keys()):
-            if slskd_download_status(grab_list[album_id]["files"]):
-                album_done, problems, queued = downloads_all_done(grab_list[album_id]["files"])  # Lets check to see what status the files have
-                if "count_start" not in grab_list[album_id]:
-                    grab_list[album_id]["count_start"] = time.time()
-                if (time.time() - grab_list[album_id]["count_start"]) >= cfg.stalled_timeout:  # Album is taking too long. Bail out regardless
+            entry = grab_list[album_id]
+            if slskd_download_status(entry.files):
+                album_done, problems, queued = downloads_all_done(entry.files)  # Lets check to see what status the files have
+                if entry.count_start is None:
+                    entry.count_start = time.time()
+                if (time.time() - entry.count_start) >= cfg.stalled_timeout:  # Album is taking too long. Bail out regardless
                     delete_album("Timeout waiting for download of")
                     continue
-                if queued == len(grab_list[album_id]["files"]):  # Shorter time out for whole albums in "Queued, Remotely"
-                    if (time.time() - grab_list[album_id]["count_start"]) >= cfg.remote_queue_timeout:
+                if queued == len(entry.files):  # Shorter time out for whole albums in "Queued, Remotely"
+                    if (time.time() - entry.count_start) >= cfg.remote_queue_timeout:
                         delete_album("Timeout waiting for download of")
                         continue
                 # Also timeout when most files are done but some are stuck queued remotely
                 if queued > 0 and done_count > 0:
-                    completed = sum(1 for f in grab_list[album_id]["files"]
-                                    if f.get("status") and f["status"]["state"] == "Completed, Succeeded")
-                    if completed + queued == len(grab_list[album_id]["files"]):
+                    completed = sum(1 for f in entry.files
+                                    if f.status and f.status["state"] == "Completed, Succeeded")
+                    if completed + queued == len(entry.files):
                         # All files are either done or stuck — apply remote_queue_timeout
-                        if (time.time() - grab_list[album_id]["count_start"]) >= cfg.remote_queue_timeout:
+                        if (time.time() - entry.count_start) >= cfg.remote_queue_timeout:
                             delete_album("Timeout waiting for stuck remote queue file in")
                             continue
                 done_count += album_done
                 if problems is not None:
                     logger.debug("We got problems!")
                     for file in problems:
-                        logger.debug(f"Checking {file['filename']}")
-                        match file["status"]["state"]:
+                        logger.debug(f"Checking {file.filename}")
+                        match file.status["state"]:
                             case (
                                 "Completed, Cancelled" | "Completed, TimedOut" | "Completed, Errored" | "Completed, Aborted"
                             ):  # Normal errors. We'll retry a few times as sometumes the error is transient
                                 abort = False
-                                if len(problems) == len(grab_list[album_id]["files"]):
+                                if len(problems) == len(entry.files):
                                     delete_album("Failed grab of")
                                     break
-                                for download_file in grab_list[album_id]["files"]:
-                                    if file["filename"] == download_file["filename"]:
-                                        if "retry" not in download_file:
-                                            download_file["retry"] = 0
-                                        download_file["retry"] += 1
-                                        if download_file["retry"] < 5:
-                                            retry = download_file["retry"]
-                                            size = file["size"]
-                                            data_dict = [{"filename": file["filename"], "size": size}]
-                                            logger.info(f"Download error. Requeue file: {file['filename']}")
+                                for download_file in entry.files:
+                                    if file.filename == download_file.filename:
+                                        if download_file.retry is None:
+                                            download_file.retry = 0
+                                        download_file.retry += 1
+                                        if download_file.retry < 5:
+                                            retry = download_file.retry
+                                            size = file.size
+                                            data_dict = [{"filename": file.filename, "size": size}]
+                                            logger.info(f"Download error. Requeue file: {file.filename}")
                                             requeue = slskd_do_enqueue(
-                                                file["username"],
+                                                file.username,
                                                 data_dict,
-                                                file["file_dir"],
+                                                file.file_dir,
                                             )
                                             if requeue is not None:
-                                                download_file["id"] = requeue[0]["id"]
-                                                download_file["retry"] = retry
+                                                download_file.id = requeue[0].id
+                                                download_file.retry = retry
                                                 time.sleep(1)
-                                                _ = slskd_download_status(grab_list[album_id]["files"])  # Refresh the status of the files to prevent issues.
+                                                _ = slskd_download_status(entry.files)  # Refresh the status of the files to prevent issues.
                                             else:
                                                 delete_album("Failed grab of")
                                                 abort = True  # Move to the next album so we don't block or overload a remote user
@@ -1720,50 +1499,48 @@ def monitor_downloads(grab_list, failed_grab):
                                 # If we aren't in that condition we need to fall back to per file retry counts as files will also be rejected if the file is
                                 # too long or too short based on the share record. This can happen when people re-tag media but don't rescan media.
                                 # Also I've seen cases of single files out of a set being in the "not shared" category.
-                                if len(problems) == len(grab_list[album_id]["files"]):
+                                if len(problems) == len(entry.files):
                                     delete_album("Failed grab of")  # They are all rejected. Usually this happens because of misconfigurations. Files appear in search but aren't shared.
                                     break
                                 else:
-                                    if "rejected_retries" not in grab_list[album_id]:
-                                        grab_list[album_id]["rejected_retries"] = 0
-                                    working_count = len(grab_list[album_id]["files"]) - len(problems)
-                                    for gfile in grab_list[album_id]["files"]:
-                                        if gfile["status"]["state"] in [
+                                    if entry.rejected_retries is None:
+                                        entry.rejected_retries = 0
+                                    working_count = len(entry.files) - len(problems)
+                                    for gfile in entry.files:
+                                        if gfile.status["state"] in [
                                             "Completed, Succeeded",
                                             "Queued, Remotely",
                                             "Queued, Locally",
                                         ]:
                                             working_count -= 1
                                     if working_count == 0:
-                                        if grab_list[album_id]["rejected_retries"] < int(len(grab_list[album_id]["files"]) * 1.2):  # Little bit of wiggle room here
+                                        if entry.rejected_retries < int(len(entry.files) * 1.2):  # Little bit of wiggle room here
                                             abort = False
-                                            for gfile in grab_list[album_id]["files"]:
-                                                if gfile["filename"] == file["filename"]:
-                                                    size = file["size"]
+                                            for gfile in entry.files:
+                                                if gfile.filename == file.filename:
+                                                    size = file.size
                                                     data_dict = [
                                                         {
-                                                            "filename": file["filename"],
+                                                            "filename": file.filename,
                                                             "size": size,
                                                         }
                                                     ]
-                                                    logger.info(f"Download error. Requeue file: {file['filename']}")
+                                                    logger.info(f"Download error. Requeue file: {file.filename}")
                                                     requeue = slskd_do_enqueue(
-                                                        file["username"],
+                                                        file.username,
                                                         data_dict,
-                                                        file["file_dir"],
+                                                        file.file_dir,
                                                     )
                                                     if requeue is not None:
-                                                        gfile["id"] = requeue[0]["id"]
-                                                        grab_list[album_id]["rejected_retries"] += 1
-                                                        _ = slskd_download_status(grab_list[album_id]["files"])
+                                                        gfile.id = requeue[0].id
+                                                        entry.rejected_retries += 1
+                                                        _ = slskd_download_status(entry.files)
                                                         abort = True
                                                         break
                                                     else:
-                                                        cancel_and_delete(grab_list[album_id]["files"])
-                                                        logger.info(f"Failed grab of Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']}")
+                                                        cancel_and_delete(entry.files)
+                                                        logger.info(f"Failed grab of Album: {entry.title} Artist: {entry.artist}")
                                                         del grab_list[album_id]
-                                                        if album_id > 0:
-                                                            failed_grab.append(lidarr.get_album(album_id))  # Not sure if returns an array or not
                                                         abort = True
                                                         break
                                             if abort:
@@ -1777,16 +1554,14 @@ def monitor_downloads(grab_list, failed_grab):
                                 )  # This really should be impossible to reach. But is required to round out the case statement.
                 else:
                     if album_done:
-                        album_data = grab_list[album_id]
-                        album_data["album_id"] = album_id
-                        logger.info(f"Completed download of Album: {album_data['title']} Artist: {album_data['artist']}")
-                        process_completed_album(album_data, failed_grab)
+                        logger.info(f"Completed download of Album: {entry.title} Artist: {entry.artist}")
+                        process_completed_album(entry, failed_grab)
                         del grab_list[album_id]
 
             else:
-                if "error_count" not in grab_list[album_id]:
-                    grab_list[album_id]["error_count"] = 0
-                grab_list[album_id]["error_count"] += 1
+                if entry.error_count is None:
+                    entry.error_count = 0
+                entry.error_count += 1
             # I dunno. slskd might be broken? Or the user deleted things? I've never seen this so I have no idea what we should do here. It most likely would mean SLSKD is down.
             # So we probably want to abort everything because cleanup would be impossible.
 
@@ -1805,7 +1580,7 @@ def grab_most_wanted(albums):
     enqueue download
     After that has happened for all the downloads it then shifts to monitoring the downloads:
     Monitor download and perform retries and/or requeues.
-    When all completed, call lidarr to import
+    When all completed, process the downloaded album
     """
 
     grab_list, failed_search, failed_grab = search_and_queue(albums)
@@ -1813,13 +1588,13 @@ def grab_most_wanted(albums):
     total_albums = len(grab_list)
     logger.info(f"Total Downloads added: {total_albums}")
     for album_id in grab_list:
-        logger.info(f"Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']}")
+        logger.info(f"Album: {grab_list[album_id].title} Artist: {grab_list[album_id].artist}")
     logger.info(f"Failed to grab: {len(failed_grab)}")
     for album in failed_grab:
         logger.info(f"Album: {album['title']} Artist: {album['artist']['artistName']}")
 
     logger.info("-------------------")
-    logger.info(f"Waiting for downloads... monitor at: {''.join([slskd_host_url, slskd_url_base, 'downloads'])}")
+    logger.info(f"Waiting for downloads... monitor at: {''.join([cfg.slskd_host_url, cfg.slskd_url_base, 'downloads'])}")
 
     monitor_downloads(grab_list, failed_grab)
 
@@ -1834,8 +1609,6 @@ def grab_most_wanted(albums):
         logger.info(f"Download failed for Album: {album_title} - Artist: {artist_name}")
 
     return count
-    # if enable_search_denylist:
-    #    save_search_denylist(denylist_file_path, search_denylist)
 
 
 def move_failed_import(src_path):
@@ -2041,113 +1814,15 @@ def validate_audio(folder_path, mode="normal"):
 
 
 def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
-    """Dry-run beets import with specific MBID. Returns validation result.
-
-    Uses the same decision matrix as batch_import.py to classify matches.
-    Returns: {"valid": bool, "distance": float|None, "mbid_found": bool,
-              "scenario": str, "detail": str, "error": str|None}
-    """
-    cmd = [cfg.beets_harness_path, "--pretend", "--noincremental",
-           "--search-id", mb_release_id, album_path]
-    result = {"valid": False, "distance": None, "mbid_found": False, "error": None}
-
-    logger.info(f"BEETS_VALIDATE: path={album_path}, target_mbid={mb_release_id}, "
-                f"threshold={distance_threshold}")
-    logger.info(f"BEETS_VALIDATE: cmd={' '.join(cmd)}")
-
-    try:
-        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
-    except Exception as e:
-        result["error"] = f"Failed to start harness: {e}"
-        logger.error(f"BEETS_VALIDATE: {result['error']}")
-        return result
-
-    got_choose_match = False
-    try:
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                logger.debug(f"BEETS_VALIDATE: non-JSON line: {line[:200]}")
-                continue
-
-            msg_type = msg.get("type", "")
-            logger.info(f"BEETS_VALIDATE: msg type={msg_type}")
-
-            if msg_type == "choose_match":
-                got_choose_match = True
-                candidates = msg.get("candidates", [])
-                logger.info(f"BEETS_VALIDATE: {len(candidates)} candidates, "
-                            f"looking for mbid={mb_release_id}")
-                for i, cand in enumerate(candidates):
-                    cand_mbid = cand.get("album_id", "")
-                    cand_dist = cand.get("distance", "?")
-                    cand_album = cand.get("album", "?")
-                    logger.info(f"BEETS_VALIDATE:   candidate[{i}]: "
-                                f"mbid={cand_mbid}, dist={cand_dist}, album={cand_album}")
-                # Check if target MBID was found and distance is acceptable
-                for cand in candidates:
-                    if cand.get("album_id") == mb_release_id:
-                        result["mbid_found"] = True
-                        result["distance"] = cand["distance"]
-                        extra_tracks = cand.get("extra_tracks", 0)
-                        if extra_tracks > 0:
-                            result["scenario"] = "extra_tracks"
-                            result["detail"] = f"MB has {extra_tracks} more tracks than local files"
-                        elif cand["distance"] <= distance_threshold:
-                            result["valid"] = True
-                            result["scenario"] = "strong_match"
-                            result["detail"] = f"distance={cand['distance']}"
-                        else:
-                            result["scenario"] = "high_distance"
-                            result["detail"] = f"distance={cand['distance']}"
-                        break
-                if not result["mbid_found"]:
-                    result["scenario"] = "mbid_not_found"
-                    result["detail"] = f"Target MBID {mb_release_id} not in candidates"
-                logger.info(f"BEETS_VALIDATE: valid={result['valid']}, "
-                            f"scenario={result['scenario']}, detail={result['detail']}")
-                # Always skip (dry-run)
-                proc.stdin.write('{"action":"skip"}\n')
-                proc.stdin.flush()
-
-            elif msg_type in ("choose_item", "resolve_duplicate", "should_resume"):
-                proc.stdin.write('{"action":"skip"}\n')
-                proc.stdin.flush()
-
-            elif msg_type == "session_end":
-                break
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"BEETS_VALIDATE: exception: {e}")
-    finally:
-        stderr_out = ""
-        try:
-            stderr_out = proc.stderr.read()
-        except Exception:
-            pass
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except sp.TimeoutExpired:
-            proc.kill()
-
-    if stderr_out:
-        logger.warning(f"BEETS_VALIDATE: stderr: {stderr_out[:500]}")
-    if not got_choose_match:
-        logger.warning(f"BEETS_VALIDATE: harness never sent choose_match!")
-
-    logger.info(f"BEETS_VALIDATE: result={result}")
-    return result
+    """Thin wrapper — delegates to lib.beets.beets_validate()."""
+    from lib.beets import beets_validate as _bv
+    return _bv(cfg.beets_harness_path, album_path, mb_release_id, distance_threshold)
 
 
 def stage_to_ai(album_data, source_path, staging_dir):
     """Move validated files from slskd download area to /AI/{Artist}/{Album}/."""
-    artist_dir = sanitize_folder_name(album_data["artist"])
-    album_dir = sanitize_folder_name(album_data["title"])
+    artist_dir = sanitize_folder_name(album_data.artist)
+    album_dir = sanitize_folder_name(album_data.title)
     dest = os.path.join(staging_dir, artist_dir, album_dir)
     os.makedirs(dest, exist_ok=True)
 
@@ -2158,24 +1833,6 @@ def stage_to_ai(album_data, source_path, staging_dir):
 
     shutil.rmtree(source_path, ignore_errors=True)
     return dest
-
-
-def unmonitor_album(album_id):
-    """Unmonitor album in Lidarr so Soularr doesn't re-download it."""
-    try:
-        url = f"{lidarr_host_url}/api/v1/album/monitor"
-        payload = {"albumIds": [album_id], "monitored": False}
-        logger.info(f"UNMONITOR: PUT {url} albumId={album_id}")
-        resp = requests.put(
-            url,
-            headers={"X-Api-Key": lidarr_api_key},
-            json=payload,
-        )
-        logger.info(f"UNMONITOR: response status={resp.status_code}")
-        resp.raise_for_status()
-        logger.info(f"UNMONITOR: album {album_id} unmonitored successfully")
-    except Exception:
-        logger.exception(f"Failed to unmonitor album {album_id}")
 
 
 def trigger_meelo_scan():
@@ -2210,10 +1867,10 @@ def log_validation_result(album_data, result, dest_path=None):
     """Append beets validation result to tracking JSONL."""
     entry = {
         "timestamp": datetime.now().isoformat(),
-        "artist": album_data.get("artist", ""),
-        "album": album_data.get("title", ""),
-        "mb_release_id": album_data.get("mb_release_id", ""),
-        "lidarr_album_id": album_data.get("album_id"),
+        "artist": album_data.artist,
+        "album": album_data.title,
+        "mb_release_id": album_data.mb_release_id,
+        "album_id": album_data.album_id,
         "status": "staged" if result["valid"] else "rejected",
         "scenario": result.get("scenario", ""),
         "distance": result.get("distance"),
@@ -2244,128 +1901,6 @@ def setup_logging(config):
     else:
         log_config = DEFAULT_LOGGING_CONF
     logging.basicConfig(**log_config)  # type: ignore
-
-
-def get_current_page(path: str, default_page=1) -> int:
-    if os.path.exists(path):
-        with open(path, "r") as file:
-            page_string = file.read().strip()
-
-            if page_string:
-                return int(page_string)
-            else:
-                with open(path, "w") as file:
-                    file.write(str(default_page))
-                return default_page
-    else:
-        with open(path, "w") as file:
-            file.write(str(default_page))
-        return default_page
-
-
-def update_current_page(path: str, page: str) -> None:
-    with open(path, "w") as file:
-        file.write(page)
-
-
-def get_records(missing: bool) -> list:
-    try:
-        wanted = lidarr.get_wanted(
-            page_size=cfg.page_size,
-            sort_dir="ascending",
-            sort_key="albums.title",
-            missing=missing,
-        )
-    except ConnectionError as ex:
-        logger.error(f"An error occurred when attempting to get records: {ex}")
-        return []
-
-    total_wanted = wanted["totalRecords"]
-
-    wanted_records = []
-    if cfg.search_type == "all":
-        page = 1
-        while len(wanted_records) < total_wanted:
-            try:
-                wanted = lidarr.get_wanted(
-                    page=page,
-                    page_size=cfg.page_size,
-                    sort_dir="ascending",
-                    sort_key="albums.title",
-                    missing=missing,
-                )
-            except ConnectionError as ex:
-                logger.error(f"Failed to grab record: {ex}")
-            wanted_records.extend(wanted["records"])
-            page += 1
-
-    elif cfg.search_type == "incrementing_page":
-        source_suffix = "missing" if missing else "cutoff"
-        page_file = current_page_file_path.replace(".current_page.txt", f".current_page_{source_suffix}.txt")
-        page = get_current_page(page_file)
-        try:
-            wanted_records = lidarr.get_wanted(
-                page=page,
-                page_size=cfg.page_size,
-                sort_dir="ascending",
-                sort_key="albums.title",
-                missing=missing,
-            )["records"]
-        except ConnectionError as ex:
-            logger.error(f"Failed to grab record: {ex}")
-        page = 1 if page >= math.ceil(total_wanted / cfg.page_size) else page + 1
-        update_current_page(page_file, str(page))
-
-    elif cfg.search_type == "first_page":
-        wanted_records = wanted["records"]
-
-    else:
-        if os.path.exists(lock_file_path) and not is_docker():
-            os.remove(lock_file_path)
-
-        raise ValueError(f"[Search Settings] - {cfg.search_type = } is not valid")
-
-    try:
-        queued_records = lidarr.get_queue(sort_dir="ascending", sort_key="albums.title")
-        total_queued = queued_records["totalRecords"]
-        current_queue = queued_records["records"]
-
-        if queued_records["pageSize"] < total_queued:
-            page = 2
-            while len(current_queue) < total_queued:
-                try:
-                    next_page = lidarr.get_queue(page=page, sort_key="albums.title", sort_dir="ascending")
-                except ConnectionError as ex:
-                    logger.error(f"Failed to get queue details: {ex}")
-                    break
-                current_queue.extend(next_page["records"])
-                page += 1
-
-        queued_album_ids = []
-
-        for record in current_queue:
-            if "albumId" in record:
-                queued_album_ids.append(record["albumId"])
-            else:
-                logger.warning(f"Dropping entry due to missing key in keylist: [{record.keys()}]")
-
-        wanted_records_not_queued = []
-        for record in wanted_records:
-            for release in record["releases"]:
-                if release["albumId"] in queued_album_ids:
-                    logging.info(f"Skipping record '{record['title']}' because it's already in download queue")
-                    break
-            else:  # This only runs if the loop is broken out of. Saves on all the boolean found= stuff
-                wanted_records_not_queued.append(record)
-        if len(wanted_records_not_queued) > 0:
-            wanted_records = wanted_records_not_queued
-        else:
-            logging.info("No records wanted that arent already queued")
-            wanted_records = []
-    except ConnectionError as ex:
-        logger.error(f"Failed to get queue details so not filtering based on queue: {ex}")
-
-    return wanted_records
 
 
 def load_search_denylist(file_path):
@@ -2417,66 +1952,19 @@ def update_search_denylist(denylist, album_id, success):
             }
 
 
-def load_cutoff_denylist(file_path):
-    """Load persistent cutoff denylist from JSON. Format: {album_id_str: [username, ...]}"""
-    if not os.path.exists(file_path):
-        return {}
-    try:
-        with open(file_path, "r") as f:
-            raw = json.load(f)
-            # Convert lists back to sets
-            return {int(k): set(v) for k, v in raw.items()}
-    except (json.JSONDecodeError, IOError) as ex:
-        logger.warning(f"Error loading cutoff denylist: {ex}. Starting with empty denylist.")
-        return {}
-
-
-def load_download_fail_counts(file_path):
-    """Load persistent download failure counts. Format: {"album_id:username": count}"""
-    p = file_path.replace("cutoff_denylist", "download_fail_counts")
-    if not os.path.exists(p):
-        return {}
-    try:
-        with open(p, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-
-def save_download_fail_counts(file_path, counts):
-    p = file_path.replace("cutoff_denylist", "download_fail_counts")
-    try:
-        with open(p, "w") as f:
-            json.dump(counts, f, indent=2)
-    except IOError as ex:
-        logger.error(f"Error saving download fail counts: {ex}")
-
-
-def save_cutoff_denylist(file_path, denylist):
-    """Save cutoff denylist to JSON. Converts sets to lists for serialization."""
-    try:
-        with open(file_path, "w") as f:
-            json.dump({str(k): list(v) for k, v in denylist.items()}, f, indent=2)
-    except IOError as ex:
-        logger.error(f"Error saving cutoff denylist: {ex}")
-
-
 def main():
     global \
         cfg, \
-        lidarr, \
         slskd, \
         config, \
         pipeline_db_source, \
         search_cache, \
         folder_cache, \
         user_upload_speed, \
-        broken_user, \
-        cutoff_denylist, \
-        download_fail_counts
+        broken_user
 
     # Let's allow some overrides to be passed to the script
-    parser = argparse.ArgumentParser(description="""Soularr reads all of your "wanted" albums/artists from Lidarr and downloads them using Slskd""")
+    parser = argparse.ArgumentParser(description="""Soularr downloads wanted albums from Soulseek via slskd""")
 
     default_data_directory = os.getcwd()
 
@@ -2515,10 +2003,6 @@ def main():
 
     lock_file_path = os.path.join(args.var_dir, ".soularr.lock")
     config_file_path = os.path.join(args.config_dir, "config.ini")
-    failure_file_path = os.path.join(args.var_dir, "failure_list.txt")
-    current_page_file_path = os.path.join(args.var_dir, ".current_page.txt")
-    denylist_file_path = os.path.join(args.var_dir, "search_denylist.json")
-    cutoff_denylist_file_path = os.path.join(args.var_dir, "cutoff_denylist.json")
 
     if not is_docker() and os.path.exists(lock_file_path) and args.lock_file:
         logger.info(f"Soularr instance is already running.")
@@ -2559,10 +2043,9 @@ def main():
             logger.info(f"Beets validation ENABLED: harness={cfg.beets_harness_path}, "
                         f"threshold={cfg.beets_distance_threshold}, staging={cfg.beets_staging_dir}")
 
-        if cfg.pipeline_db_enabled:
-            from album_source import DatabaseSource
-            pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
-            logger.info(f"Pipeline DB ENABLED: {cfg.pipeline_db_dsn}")
+        from album_source import DatabaseSource
+        pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
+        logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")
 
         if cfg.meelo_url:
             logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
@@ -2572,34 +2055,13 @@ def main():
         folder_cache = {}
         user_upload_speed = {}
         broken_user = []
-        cutoff_denylist = load_cutoff_denylist(cfg.cutoff_denylist_file_path)
-        if cutoff_denylist:
-            logger.info(f"Loaded cutoff denylist with {len(cutoff_denylist)} album(s) from {cfg.cutoff_denylist_file_path}")
-        download_fail_counts = load_download_fail_counts(cfg.cutoff_denylist_file_path)
 
         slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.slskd_api_key, url_base=cfg.slskd_url_base)
-        lidarr = LidarrAPI(cfg.lidarr_host_url, cfg.lidarr_api_key)
         wanted_records = []
 
-        if cfg.pipeline_db_enabled and pipeline_db_source is not None:
-            # === Pipeline DB mode: get wanted albums from DB ===
-            logger.info("Getting wanted records from pipeline DB...")
-            wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
-            logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
-        else:
-            # === Lidarr mode (original): get wanted from Lidarr API ===
-            try:
-                for source in cfg.search_sources:
-                    logging.debug(f"Getting records from {source}")
-                    missing = source == "missing"
-                    records = get_records(missing)
-                    for record in records:
-                        record["_is_cutoff"] = not missing
-                    wanted_records.extend(records)
-            except ValueError as ex:
-                logger.error(f"An error occurred: {ex}")
-                logger.error("Exiting...")
-                sys.exit(0)
+        logger.info("Getting wanted records from pipeline DB...")
+        wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
+        logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
 
         if len(wanted_records) > 0:
             try:
@@ -2619,10 +2081,7 @@ def main():
                 logger.info("Soularr finished. Exiting...")
                 slskd.transfers.remove_completed_downloads()
             else:
-                if cfg.remove_wanted_on_failure:
-                    logger.info(f'{failed}: releases failed to find a match in the search results. View "failure_list.txt" for list of failed albums.')
-                else:
-                    logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
+                logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
                 slskd.transfers.remove_completed_downloads()
         else:
             logger.info("No releases wanted. Exiting...")

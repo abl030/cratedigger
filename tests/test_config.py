@@ -30,19 +30,6 @@ class TestConfigFromIni(unittest.TestCase):
         ini = load_test_config()
         cls.cfg = SoularrConfig.from_ini(ini, config_dir="/etc/soularr", var_dir="/var/lib/soularr")
 
-    # --- Lidarr ---
-    def test_lidarr_api_key(self):
-        self.assertEqual(self.cfg.lidarr_api_key, "test-lidarr-key")
-
-    def test_lidarr_host_url(self):
-        self.assertEqual(self.cfg.lidarr_host_url, "http://localhost:8686")
-
-    def test_lidarr_download_dir(self):
-        self.assertEqual(self.cfg.lidarr_download_dir, "/mnt/virtio/music/slskd")
-
-    def test_lidarr_disable_sync(self):
-        self.assertFalse(self.cfg.lidarr_disable_sync)
-
     # --- Slskd ---
     def test_slskd_api_key(self):
         self.assertEqual(self.cfg.slskd_api_key, "test-slskd-key")
@@ -69,30 +56,11 @@ class TestConfigFromIni(unittest.TestCase):
     def test_ignored_users_empty(self):
         self.assertEqual(self.cfg.ignored_users, ())
 
-    def test_search_type(self):
-        self.assertEqual(self.cfg.search_type, "incrementing_page")
-
-    def test_search_source(self):
-        self.assertEqual(self.cfg.search_source, "all")
-
-    def test_search_sources_expanded(self):
-        # "all" expands to ("missing", "cutoff_unmet")
-        self.assertEqual(self.cfg.search_sources, ("missing", "cutoff_unmet"))
-
     def test_minimum_match_ratio(self):
         self.assertAlmostEqual(self.cfg.minimum_match_ratio, 0.6)
 
     def test_page_size(self):
         self.assertEqual(self.cfg.page_size, 5)
-
-    def test_remove_wanted_on_failure(self):
-        self.assertFalse(self.cfg.remove_wanted_on_failure)
-
-    def test_enable_search_denylist(self):
-        self.assertFalse(self.cfg.enable_search_denylist)
-
-    def test_max_search_failures(self):
-        self.assertEqual(self.cfg.max_search_failures, 3)
 
     def test_search_blacklist_empty(self):
         self.assertEqual(self.cfg.search_blacklist, ())
@@ -194,14 +162,6 @@ class TestConfigFromIni(unittest.TestCase):
     def test_config_file_path(self):
         self.assertEqual(self.cfg.config_file_path, "/etc/soularr/config.ini")
 
-    def test_failure_file_path(self):
-        self.assertEqual(self.cfg.failure_file_path, "/var/lib/soularr/failure_list.txt")
-
-    def test_denylist_file_path(self):
-        self.assertEqual(self.cfg.denylist_file_path, "/var/lib/soularr/search_denylist.json")
-
-    def test_cutoff_denylist_file_path(self):
-        self.assertEqual(self.cfg.cutoff_denylist_file_path, "/var/lib/soularr/cutoff_denylist.json")
 
 
 class TestConfigFrozen(unittest.TestCase):
@@ -220,7 +180,7 @@ class TestConfigDefaults(unittest.TestCase):
     def test_empty_config(self):
         config = configparser.ConfigParser()
         # Add empty required sections so getboolean etc. don't fail on missing section
-        for section in ["Lidarr", "Slskd", "Search Settings", "Release Settings",
+        for section in ["Slskd", "Search Settings", "Release Settings",
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo"]:
             config.add_section(section)
         cfg = SoularrConfig.from_ini(config)
@@ -232,21 +192,13 @@ class TestConfigDefaults(unittest.TestCase):
 
     def test_single_filetype(self):
         config = configparser.ConfigParser()
-        for section in ["Lidarr", "Slskd", "Search Settings", "Release Settings",
+        for section in ["Slskd", "Search Settings", "Release Settings",
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo"]:
             config.add_section(section)
         config.set("Search Settings", "allowed_filetypes", "flac")
         cfg = SoularrConfig.from_ini(config)
         self.assertEqual(cfg.allowed_filetypes, ("flac",))
 
-    def test_search_source_missing_defaults(self):
-        config = configparser.ConfigParser()
-        for section in ["Lidarr", "Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo"]:
-            config.add_section(section)
-        cfg = SoularrConfig.from_ini(config)
-        self.assertEqual(cfg.search_source, "missing")
-        self.assertEqual(cfg.search_sources, ("missing",))
 
 
 if __name__ == "__main__":

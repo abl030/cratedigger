@@ -207,7 +207,6 @@ def cmd_show(db, args):
         print(f"  Reasoning:    {req['reasoning'][:120]}...")
     print(f"  Distance:     {req['beets_distance']}")
     print(f"  Imported:     {req['imported_path']}")
-    print(f"  Lidarr:       artist={req['lidarr_artist_id']} album={req['lidarr_album_id']}")
     print(f"  Attempts:     search={req['search_attempts']} dl={req['download_attempts']} val={req['validation_attempts']}")
     print(f"  Created:      {req['created_at']}")
     print(f"  Updated:      {req['updated_at']}")

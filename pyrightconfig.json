@@ -1,0 +1,5 @@
+{
+  "extraPaths": ["lib"],
+  "pythonVersion": "3.13",
+  "reportMissingImports": "error"
+}
