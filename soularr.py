@@ -352,7 +352,7 @@ def download_filter(allowed_filetype, directory):
                     temp.append(file)  # Build the new list of files
             directory["files"] = temp
             for files in temp:
-                logger.debug(f"File in final list: {files.filename}")
+                logger.debug(f"File in final list: {files['filename']}")
             return directory  # Return the modified list
     return directory  # If we didn't find unwanted files or we aren't filtering just return the original list
 
