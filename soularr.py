@@ -44,67 +44,17 @@ DEFAULT_LOGGING_CONF = {
     "datefmt": "%Y-%m-%dT%H:%M:%S%z",
 }
 
+# === Typed Config (populated in main() via SoularrConfig.from_ini()) ===
+cfg = None  # SoularrConfig instance — the source of truth after init
+
 # === API Clients & Logging ===
 lidarr = None
 slskd = None
 config = None
 logger = logging.getLogger("soularr")
 
-# === Configuration Constants ===
-slskd_api_key = None
-lidarr_api_key = None
-lidarr_download_dir = None
-lidarr_disable_sync = None
-slskd_download_dir = None
-lidarr_host_url = None
-slskd_host_url = None
-stalled_timeout = None
-remote_queue_timeout = None
-delete_searches = None
-slskd_url_base = None
-ignored_users = []
-search_type = None
-search_source = None
-download_filtering = None
-use_extension_whitelist = None
-extensions_whitelist = []
-search_sources = []
-minimum_match_ratio = None
-page_size = None
-remove_wanted_on_failure = None
-enable_search_denylist = None
-max_search_failures = None
-use_most_common_tracknum = None
-allow_multi_disc = None
-accepted_countries = []
-skip_region_check = None
-accepted_formats = []
-allowed_filetypes = []
-lock_file_path = None
-config_file_path = None
-failure_file_path = None
-current_page_file_path = None
-denylist_file_path = None
-cutoff_denylist_file_path = None
-search_blacklist = []
-
-# === Beets Validation Config ===
-beets_validation_enabled = False
-beets_harness_path = ""
-beets_distance_threshold = 0.15
-beets_staging_dir = "/mnt/virtio/Music/AI"
-audio_check_mode = "normal"  # strict | normal | off
-beets_tracking_file = "/mnt/virtio/Music/Re-download/beets-validated.jsonl"
-
-# === Pipeline DB Config ===
-pipeline_db_enabled = False
-pipeline_db_dsn = "postgresql://soularr@localhost/soularr"
+# === API client instances (set in main()) ===
 pipeline_db_source = None  # DatabaseSource instance when enabled
-
-# === Meelo Config ===
-meelo_url = None  # e.g. "http://192.168.1.29:5001" — set via config to enable post-import scan
-meelo_username = None
-meelo_password = None
 
 # === Runtime State & Caches ===
 search_cache = {}
@@ -146,11 +96,11 @@ def album_match(lidarr_tracks, slskd_tracks, username, filetype):
             if ratio > best_match:
                 best_match = ratio
 
-        if best_match > minimum_match_ratio:
+        if best_match > cfg.minimum_match_ratio:
             counted.append(lidarr_filename)
             total_match += best_match
 
-    if len(counted) == len(lidarr_tracks) and username not in ignored_users:
+    if len(counted) == len(lidarr_tracks) and username not in cfg.ignored_users:
         logger.info(f"Found match from user: {username} for {len(counted)} tracks! Track attributes: {filetype}")
         logger.info(f"Average sequence match ratio: {total_match / len(counted)}")
         logger.info("SUCCESSFUL MATCH")
@@ -161,7 +111,7 @@ def album_match(lidarr_tracks, slskd_tracks, username, filetype):
 
 
 def check_ratio(separator, ratio, lidarr_filename, slskd_filename):
-    if ratio < minimum_match_ratio:
+    if ratio < cfg.minimum_match_ratio:
         if separator != "":
             lidarr_filename_word_count = len(lidarr_filename.split()) * -1
             truncated_slskd_filename = " ".join(slskd_filename.split(separator)[lidarr_filename_word_count:])
@@ -175,7 +125,7 @@ def check_ratio(separator, ratio, lidarr_filename, slskd_filename):
 
 def album_track_num(directory):
     files = directory["files"]
-    allowed_filetypes_no_attributes = [item.split(" ")[0] for item in allowed_filetypes]
+    allowed_filetypes_no_attributes = [item.split(" ")[0] for item in cfg.allowed_filetypes]
     count = 0
     index = -1
     filetype = ""
@@ -208,7 +158,7 @@ def cancel_and_delete(files):
         except Exception:
             logger.warning(f"Failed to cancel download {file['filename']} for {file['username']}", exc_info=True)
         delete_dir = file["file_dir"].split("\\")[-1]
-        os.chdir(slskd_download_dir)
+        os.chdir(cfg.slskd_download_dir)
 
         if os.path.exists(delete_dir):
             shutil.rmtree(delete_dir)
@@ -244,10 +194,10 @@ def choose_release(artist_name, releases):
         if not release.get("monitored", False):
             continue
         country = release["country"][0] if release["country"] else None
-        if release["format"][1] == "x" and allow_multi_disc:
-            format_accepted = release["format"].split("x", 1)[1] in accepted_formats
+        if release["format"][1] == "x" and cfg.allow_multi_disc:
+            format_accepted = release["format"].split("x", 1)[1] in cfg.accepted_formats
         else:
-            format_accepted = release["format"] in accepted_formats
+            format_accepted = release["format"] in cfg.accepted_formats
         if format_accepted:
             logger.info(
                 f"Selected monitored release for {artist_name}: {release['status']}, "
@@ -259,12 +209,12 @@ def choose_release(artist_name, releases):
     for release in releases:
         country = release["country"][0] if release["country"] else None
 
-        if release["format"][1] == "x" and allow_multi_disc:
-            format_accepted = release["format"].split("x", 1)[1] in accepted_formats
+        if release["format"][1] == "x" and cfg.allow_multi_disc:
+            format_accepted = release["format"].split("x", 1)[1] in cfg.accepted_formats
         else:
-            format_accepted = release["format"] in accepted_formats
+            format_accepted = release["format"] in cfg.accepted_formats
 
-        if use_most_common_tracknum:
+        if cfg.use_most_common_tracknum:
             if release["trackCount"] == most_common_trackcount:
                 track_count_bool = True
             else:
@@ -272,7 +222,7 @@ def choose_release(artist_name, releases):
         else:
             track_count_bool = True
 
-        if (skip_region_check or country in accepted_countries) and format_accepted and release["status"] == "Official" and track_count_bool:
+        if (cfg.skip_region_check or country in cfg.accepted_countries) and format_accepted and release["status"] == "Official" and track_count_bool:
             logger.info(
                 ", ".join(
                     [
@@ -288,7 +238,7 @@ def choose_release(artist_name, releases):
 
             return release
 
-    if use_most_common_tracknum:
+    if cfg.use_most_common_tracknum:
         for release in releases:
             if release["trackCount"] == most_common_trackcount:
                 return release
@@ -380,10 +330,10 @@ def download_filter(allowed_filetype, directory):
     the same folders as the music files.
     """
     logging.debug("download_filtering")
-    if download_filtering:
+    if cfg.download_filtering:
         whitelist = []  # Init an empty list to take just the allowed_filetype
-        if use_extension_whitelist:
-            whitelist = copy.deepcopy(extensions_whitelist)  # Copy the whitelist to allow us to append the allowed_filetype
+        if cfg.use_extension_whitelist:
+            whitelist = copy.deepcopy(cfg.extensions_whitelist)  # Copy the whitelist to allow us to append the allowed_filetype
         whitelist.append(allowed_filetype.split(" ")[0])
         unwanted = []
         logger.debug(f"Accepted extensions: {whitelist}")
@@ -462,9 +412,8 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
 
 
 def is_blacklisted(title: str) -> bool:
-    blacklist = config.get("Search Settings", "title_blacklist", fallback="").lower().split(",")
-    for word in blacklist:
-        if word != "" and word in title.lower():
+    for word in cfg.title_blacklist:
+        if word and word.lower() in title.lower():
             logger.info(f"Skipping {title} due to blacklisted word: {word}")
             return True
     return False
@@ -475,11 +424,11 @@ def filter_list(albums):
     Helper to do all the various filtering in one go and in one place. Same net effect as the previous multi-stage approach
     Just neater and easier to work on.
     """
-    if enable_search_denylist:
+    if cfg.enable_search_denylist:
         temp_list = []
         denylist = load_search_denylist(denylist_file_path)
         for album in albums:
-            if not is_search_denylisted(denylist, album["id"], max_search_failures):
+            if not is_search_denylisted(denylist, album["id"], cfg.max_search_failures):
                 temp_list.append(album)
             else:
                 logger.info(f"Skipping denylisted album: {album['artist']['artistName']} - {album['title']} (ID: {album['id']})")
@@ -506,9 +455,7 @@ def search_for_album(album):
     album_title = album["title"]
     artist_name = album["artist"]["artistName"]
     album_id = album["id"]
-    prepend = config.getboolean("Search Settings", "album_prepend_artist", fallback=False)
-
-    query = build_query(artist_name, album_title, prepend_artist=prepend)
+    query = build_query(artist_name, album_title, prepend_artist=cfg.album_prepend_artist)
 
     if not query:
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
@@ -519,10 +466,10 @@ def search_for_album(album):
     try:
         search = slskd.searches.search_text(
             searchText=query,
-            searchTimeout=config.getint("Search Settings", "search_timeout", fallback=5000),
+            searchTimeout=cfg.search_timeout,
             filterResponses=True,
-            maximumPeerQueueLength=config.getint("Search Settings", "maximum_peer_queue", fallback=50),
-            minimumPeerUploadSpeed=config.getint("Search Settings", "minimum_peer_upload_speed", fallback=0),
+            maximumPeerQueueLength=cfg.maximum_peer_queue,
+            minimumPeerUploadSpeed=cfg.minimum_peer_upload_speed,
         )
     except Exception:
         logger.exception(f"Failed to perform search via SLSKD: {query}")
@@ -535,13 +482,13 @@ def search_for_album(album):
         if slskd.searches.state(search["id"], False)["state"] != "InProgress":  # Added False here as we don't want the search results here. Just the state.
             break
         time.sleep(1)
-        if (time.time() - start_time) > config.getint("Search Settings", "search_timeout", fallback=5000):
+        if (time.time() - start_time) > cfg.search_timeout:
             logger.error("Failed to perform search via SLSKD due to timeout on search results.")
             return False
 
     search_results = slskd.searches.search_responses(search["id"])  # We use this API call twice. Let's just cache it locally.
     logger.info(f"Search returned {len(search_results)} results")
-    if delete_searches:
+    if cfg.delete_searches:
         slskd.searches.delete(search["id"])
 
     if not len(search_results) > 0:
@@ -564,7 +511,7 @@ def search_for_album(album):
         # Search the returned files and only cache files that are of the allowed_filetypes
         for file in init_files:
             file_dir = file["filename"].rsplit("\\", 1)[0]  # split dir/filenames on \
-            for allowed_filetype in allowed_filetypes:
+            for allowed_filetype in cfg.allowed_filetypes:
                 if verify_filetype(file, allowed_filetype):  # Check the filename for an allowed type
                     if allowed_filetype not in search_cache[album_id][username]:
                         search_cache[album_id][username][allowed_filetype] = []  # Init the cache for this allowed filetype
@@ -655,7 +602,7 @@ def _get_denied_users(album_id):
     """Merge file-based cutoff denylist with pipeline DB source_denylist."""
     denied = set(cutoff_denylist.get(album_id, set()))
     # In DB mode, album_id is negative; request_id is the positive counterpart
-    if pipeline_db_enabled and pipeline_db_source is not None and album_id < 0:
+    if cfg.pipeline_db_enabled and pipeline_db_source is not None and album_id < 0:
         request_id = abs(album_id)
         try:
             db = pipeline_db_source._get_db()
@@ -800,18 +747,18 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
 
 def get_existing_quality_tier(album_id):
     """
-    For cutoff_unmet albums, determine which allowed_filetypes index matches
+    For cutoff_unmet albums, determine which cfg.allowed_filetypes index matches
     the existing files' quality.  Only filetypes at a LOWER index (higher
     priority) would be a genuine upgrade.
 
-    Returns (index, quality_name) where index is into allowed_filetypes, or
-    len(allowed_filetypes) when quality can't be determined (safe fallback —
+    Returns (index, quality_name) where index is into cfg.allowed_filetypes, or
+    len(cfg.allowed_filetypes) when quality can't be determined (safe fallback —
     all filetypes are tried).  quality_name is the raw Lidarr quality string.
 
     Lidarr quality names look like "MP3-320", "MP3-192", "FLAC", "FLAC 24bit".
-    We map them to allowed_filetypes format: "mp3 320", "mp3 192", "flac", etc.
+    We map them to cfg.allowed_filetypes format: "mp3 320", "mp3 192", "flac", etc.
     """
-    fallback = (len(allowed_filetypes), "Unknown")
+    fallback = (len(cfg.allowed_filetypes), "Unknown")
     try:
         response = requests.get(
             f"{lidarr_host_url}/api/v1/trackfile",
@@ -846,7 +793,7 @@ def get_existing_quality_tier(album_id):
 
         # Exact match first (e.g. "mp3 320" in allowed_filetypes)
         matched_index = None
-        for i, ft in enumerate(allowed_filetypes):
+        for i, ft in enumerate(cfg.allowed_filetypes):
             if ft.strip().lower() == mapped:
                 matched_index = i
                 break
@@ -854,7 +801,7 @@ def get_existing_quality_tier(album_id):
         # Bare-format fallback (e.g. "mp3 192" not in list → match bare "mp3")
         if matched_index is None:
             bare_format = mapped.split()[0] if " " in mapped else mapped
-            for i, ft in enumerate(allowed_filetypes):
+            for i, ft in enumerate(cfg.allowed_filetypes):
                 if ft.strip().lower() == bare_format:
                     matched_index = i
                     break
@@ -869,7 +816,7 @@ def get_existing_quality_tier(album_id):
         # same base format, so all same-format variants are excluded.
         if " " not in mapped:
             for i in range(matched_index):
-                if allowed_filetypes[i].strip().lower().split()[0] == mapped:
+                if cfg.allowed_filetypes[i].strip().lower().split()[0] == mapped:
                     logger.info(
                         f"Bare format '{quality_name}' detected — excluding "
                         f"all '{mapped}' variants (indices {i}-{matched_index})"
@@ -890,7 +837,7 @@ def get_album_tracks(album, release_id=None):
     DB records have negative IDs. For those, fetch tracks from DatabaseSource.
     For Lidarr records (positive IDs), use lidarr.get_tracks() as before.
     """
-    if pipeline_db_enabled and pipeline_db_source is not None and album.get("_db_request_id"):
+    if cfg.pipeline_db_enabled and pipeline_db_source is not None and album.get("_db_request_id"):
         return pipeline_db_source.get_tracks(album)
     return lidarr.get_tracks(
         artistId=album["artistId"],
@@ -928,7 +875,7 @@ def find_download(album, grab_list):
     # than what Lidarr already has.  This prevents re-downloading the same
     # quality in an endless loop (e.g. mp3-192 replacing mp3-192).
     is_cutoff = album.get("_is_cutoff", False)
-    filetypes_to_try = allowed_filetypes
+    filetypes_to_try = cfg.allowed_filetypes
     if is_cutoff:
         existing_tier, lidarr_quality = get_existing_quality_tier(album_id)
         if existing_tier == 0:
@@ -937,11 +884,11 @@ def find_download(album, grab_list):
                 f"{artist_name} - {album['title']} (Lidarr quality: {lidarr_quality})"
             )
             return False
-        if existing_tier < len(allowed_filetypes):
-            filetypes_to_try = allowed_filetypes[:existing_tier]
+        if existing_tier < len(cfg.allowed_filetypes):
+            filetypes_to_try = cfg.allowed_filetypes[:existing_tier]
             logger.info(
                 f"Cutoff upgrade for {artist_name} - {album['title']}: "
-                f"Lidarr quality '{lidarr_quality}' → tier '{allowed_filetypes[existing_tier]}', "
+                f"Lidarr quality '{lidarr_quality}' → tier '{cfg.allowed_filetypes[existing_tier]}', "
                 f"only trying {len(filetypes_to_try)} higher-priority formats"
             )
 
@@ -1066,7 +1013,7 @@ from lib.quality import quality_gate_decision, QUALITY_UPGRADE_TIERS, QUALITY_MI
 def _check_quality_gate(album_data, request_id):
     """Post-import quality gate: if min track bitrate is below V0, queue for upgrade."""
     mb_id = album_data.get("mb_release_id")
-    if not mb_id or not pipeline_db_enabled or pipeline_db_source is None:
+    if not mb_id or not cfg.pipeline_db_enabled or pipeline_db_source is None:
         return
     try:
         import sqlite3 as _sqlite3
@@ -1200,10 +1147,10 @@ def _build_download_info(album_data):
 
 
 def process_completed_album(album_data, failed_grab):
-    os.chdir(slskd_download_dir)
+    os.chdir(cfg.slskd_download_dir)
     import_folder_name = sanitize_folder_name(album_data["artist"] + " - " + album_data["title"] + " (" + album_data["year"] + ")")
-    import_folder_fullpath = os.path.join(slskd_download_dir, import_folder_name)
-    lidarr_import_fullpath = os.path.join(lidarr_download_dir, import_folder_name)
+    import_folder_fullpath = os.path.join(cfg.slskd_download_dir, import_folder_name)
+    lidarr_import_fullpath = os.path.join(cfg.lidarr_download_dir, import_folder_name)
     album_data["import_folder"] = lidarr_import_fullpath
     rm_dirs = []
     moved_files_history = []
@@ -1212,7 +1159,7 @@ def process_completed_album(album_data, failed_grab):
     for file in album_data["files"]:
         file_folder = file["file_dir"].split("\\")[-1]
         filename = file["filename"].split("\\")[-1]
-        src_folder = os.path.join(slskd_download_dir, file_folder)
+        src_folder = os.path.join(cfg.slskd_download_dir, file_folder)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)  # Multi disk albums are sometimes in multiple folders. eg. CD01 CD02. So we need to clean up both
         src_file = os.path.join(src_folder, filename)
@@ -1257,19 +1204,19 @@ def process_completed_album(album_data, failed_grab):
                 song.save()
             except Exception:
                 logger.exception(f"Error writing tags for: {file['import_path']}")
-        if beets_validation_enabled and album_data.get("mb_release_id"):
+        if cfg.beets_validation_enabled and album_data.get("mb_release_id"):
             # === Beets validation path ===
             bv_result = beets_validate(import_folder_fullpath,
                                        album_data["mb_release_id"],
-                                       beets_distance_threshold)
+                                       cfg.beets_distance_threshold)
 
-            is_db_mode = pipeline_db_enabled and pipeline_db_source is not None
+            is_db_mode = cfg.pipeline_db_enabled and pipeline_db_source is not None
 
             if bv_result["valid"]:
                 # Repair MP3 headers before audio validation
                 repair_mp3_headers(import_folder_fullpath)
                 # Audio integrity check before staging
-                audio_result = validate_audio(import_folder_fullpath, audio_check_mode)
+                audio_result = validate_audio(import_folder_fullpath, cfg.audio_check_mode)
                 if not audio_result["valid"]:
                     bv_result = {
                         "valid": False,
@@ -1376,7 +1323,7 @@ def process_completed_album(album_data, failed_grab):
                         logger.exception(f"SPECTRAL: failed for {album_data['artist']} - {album_data['title']}")
 
             if bv_result["valid"]:
-                dest = stage_to_ai(album_data, import_folder_fullpath, beets_staging_dir)
+                dest = stage_to_ai(album_data, import_folder_fullpath, cfg.beets_staging_dir)
                 log_validation_result(album_data, bv_result, dest)
                 if not is_db_mode:
                     unmonitor_album(album_data["album_id"])
@@ -1397,10 +1344,10 @@ def process_completed_album(album_data, failed_grab):
                         dl_info["actual_filetype"] = dl_info.get("filetype")
                     source_type = album_data.get("_db_source", "redownload")
                     request_id = album_data.get("_db_request_id")
-                    if source_type == "request" and bv_result.get("distance", 1.0) <= beets_distance_threshold:
+                    if source_type == "request" and bv_result.get("distance", 1.0) <= cfg.beets_distance_threshold:
                         # Auto-import via import_one.py (handles convert + import + DB updates)
                         import_script = os.path.join(
-                            os.path.dirname(beets_harness_path), "import_one.py")
+                            os.path.dirname(cfg.beets_harness_path), "import_one.py")
                         mb_id = album_data.get("mb_release_id", "")
                         logger.info(f"AUTO-IMPORT: {album_data['artist']} - {album_data['title']} "
                                     f"(source=request, dist={bv_result['distance']:.4f})")
@@ -1638,7 +1585,7 @@ def process_completed_album(album_data, failed_grab):
                     failed_grab.append(lidarr.get_album(album_data["album_id"]))
                 elif album_data.get("_is_cutoff"):
                     post_tier, post_quality = get_existing_quality_tier(album_data["album_id"])
-                    pre_tier = album_data.get("_pre_tier", len(allowed_filetypes))
+                    pre_tier = album_data.get("_pre_tier", len(cfg.allowed_filetypes))
                     if post_tier >= pre_tier:
                         usernames = set(f["username"] for f in album_data.get("files", []))
                         aid = album_data["album_id"]
@@ -1673,7 +1620,7 @@ def monitor_downloads(grab_list, failed_grab):
         elapsed_min = elapsed / 60
         logger.info(f"{reason} Album: {grab_list[album_id]['title']} Artist: {grab_list[album_id]['artist']} "
                      f"({completed}/{total} files done, {elapsed_min:.1f}min elapsed, "
-                     f"stalled_timeout={stalled_timeout}s, remote_queue_timeout={remote_queue_timeout}s)")
+                     f"stalled_timeout={cfg.stalled_timeout}s, cfg.remote_queue_timeout={cfg.remote_queue_timeout}s)")
         for username in usernames:
             key = f"{album_id}:{username}"
             download_fail_counts[key] = download_fail_counts.get(key, 0) + 1
@@ -1705,11 +1652,11 @@ def monitor_downloads(grab_list, failed_grab):
                 album_done, problems, queued = downloads_all_done(grab_list[album_id]["files"])  # Lets check to see what status the files have
                 if "count_start" not in grab_list[album_id]:
                     grab_list[album_id]["count_start"] = time.time()
-                if (time.time() - grab_list[album_id]["count_start"]) >= stalled_timeout:  # Album is taking too long. Bail out regardless
+                if (time.time() - grab_list[album_id]["count_start"]) >= cfg.stalled_timeout:  # Album is taking too long. Bail out regardless
                     delete_album("Timeout waiting for download of")
                     continue
                 if queued == len(grab_list[album_id]["files"]):  # Shorter time out for whole albums in "Queued, Remotely"
-                    if (time.time() - grab_list[album_id]["count_start"]) >= remote_queue_timeout:
+                    if (time.time() - grab_list[album_id]["count_start"]) >= cfg.remote_queue_timeout:
                         delete_album("Timeout waiting for download of")
                         continue
                 # Also timeout when most files are done but some are stuck queued remotely
@@ -1718,7 +1665,7 @@ def monitor_downloads(grab_list, failed_grab):
                                     if f.get("status") and f["status"]["state"] == "Completed, Succeeded")
                     if completed + queued == len(grab_list[album_id]["files"]):
                         # All files are either done or stuck — apply remote_queue_timeout
-                        if (time.time() - grab_list[album_id]["count_start"]) >= remote_queue_timeout:
+                        if (time.time() - grab_list[album_id]["count_start"]) >= cfg.remote_queue_timeout:
                             delete_album("Timeout waiting for stuck remote queue file in")
                             continue
                 done_count += album_done
@@ -2100,7 +2047,7 @@ def beets_validate(album_path, mb_release_id, distance_threshold=0.15):
     Returns: {"valid": bool, "distance": float|None, "mbid_found": bool,
               "scenario": str, "detail": str, "error": str|None}
     """
-    cmd = [beets_harness_path, "--pretend", "--noincremental",
+    cmd = [cfg.beets_harness_path, "--pretend", "--noincremental",
            "--search-id", mb_release_id, album_path]
     result = {"valid": False, "distance": None, "mbid_found": False, "error": None}
 
@@ -2233,13 +2180,13 @@ def unmonitor_album(album_id):
 
 def trigger_meelo_scan():
     """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
-    if not meelo_url:
+    if not cfg.meelo_url:
         return
     try:
         # Get JWT
-        login_data = json.dumps({"username": meelo_username, "password": meelo_password}).encode()
+        login_data = json.dumps({"username": cfg.meelo_username, "password": cfg.meelo_password}).encode()
         login_req = urllib.request.Request(
-            f"{meelo_url}/api/auth/login",
+            f"{cfg.meelo_url}/api/auth/login",
             data=login_data,
             headers={"Content-Type": "application/json"},
         )
@@ -2248,7 +2195,7 @@ def trigger_meelo_scan():
 
         # Trigger scan of beets library only
         scan_req = urllib.request.Request(
-            f"{meelo_url}/scanner/scan?library=beets",
+            f"{cfg.meelo_url}/scanner/scan?library=beets",
             method="POST",
             headers={"Authorization": f"Bearer {jwt}"},
         )
@@ -2275,7 +2222,7 @@ def log_validation_result(album_data, result, dest_path=None):
         "error": result.get("error"),
     }
     try:
-        with open(beets_tracking_file, "a") as f:
+        with open(cfg.beets_tracking_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         logger.exception(f"Failed to write beets tracking entry")
@@ -2324,7 +2271,7 @@ def update_current_page(path: str, page: str) -> None:
 def get_records(missing: bool) -> list:
     try:
         wanted = lidarr.get_wanted(
-            page_size=page_size,
+            page_size=cfg.page_size,
             sort_dir="ascending",
             sort_key="albums.title",
             missing=missing,
@@ -2336,13 +2283,13 @@ def get_records(missing: bool) -> list:
     total_wanted = wanted["totalRecords"]
 
     wanted_records = []
-    if search_type == "all":
+    if cfg.search_type == "all":
         page = 1
         while len(wanted_records) < total_wanted:
             try:
                 wanted = lidarr.get_wanted(
                     page=page,
-                    page_size=page_size,
+                    page_size=cfg.page_size,
                     sort_dir="ascending",
                     sort_key="albums.title",
                     missing=missing,
@@ -2352,31 +2299,31 @@ def get_records(missing: bool) -> list:
             wanted_records.extend(wanted["records"])
             page += 1
 
-    elif search_type == "incrementing_page":
+    elif cfg.search_type == "incrementing_page":
         source_suffix = "missing" if missing else "cutoff"
         page_file = current_page_file_path.replace(".current_page.txt", f".current_page_{source_suffix}.txt")
         page = get_current_page(page_file)
         try:
             wanted_records = lidarr.get_wanted(
                 page=page,
-                page_size=page_size,
+                page_size=cfg.page_size,
                 sort_dir="ascending",
                 sort_key="albums.title",
                 missing=missing,
             )["records"]
         except ConnectionError as ex:
             logger.error(f"Failed to grab record: {ex}")
-        page = 1 if page >= math.ceil(total_wanted / page_size) else page + 1
+        page = 1 if page >= math.ceil(total_wanted / cfg.page_size) else page + 1
         update_current_page(page_file, str(page))
 
-    elif search_type == "first_page":
+    elif cfg.search_type == "first_page":
         wanted_records = wanted["records"]
 
     else:
         if os.path.exists(lock_file_path) and not is_docker():
             os.remove(lock_file_path)
 
-        raise ValueError(f"[Search Settings] - {search_type = } is not valid")
+        raise ValueError(f"[Search Settings] - {cfg.search_type = } is not valid")
 
     try:
         queued_records = lidarr.get_queue(sort_dir="ascending", sort_key="albums.title")
@@ -2516,64 +2463,17 @@ def save_cutoff_denylist(file_path, denylist):
 
 def main():
     global \
-        slskd_api_key, \
-        lidarr_api_key, \
-        lidarr_download_dir, \
-        lidarr_disable_sync, \
-        slskd_download_dir, \
-        lidarr_host_url, \
-        slskd_host_url, \
-        stalled_timeout, \
-        remote_queue_timeout, \
-        delete_searches, \
-        slskd_url_base, \
-        ignored_users, \
-        search_type, \
-        search_source, \
-        download_filtering, \
-        use_extension_whitelist, \
-        extensions_whitelist, \
-        search_sources, \
-        minimum_match_ratio, \
-        page_size, \
-        remove_wanted_on_failure, \
-        enable_search_denylist, \
-        max_search_failures, \
-        use_most_common_tracknum, \
-        allow_multi_disc, \
-        accepted_countries, \
-        skip_region_check, \
-        accepted_formats, \
-        allowed_filetypes, \
-        lock_file_path, \
-        config_file_path, \
-        failure_file_path, \
-        current_page_file_path, \
-        denylist_file_path, \
-        cutoff_denylist_file_path, \
-        search_blacklist, \
+        cfg, \
         lidarr, \
         slskd, \
         config, \
-        logger, \
+        pipeline_db_source, \
         search_cache, \
         folder_cache, \
         user_upload_speed, \
         broken_user, \
         cutoff_denylist, \
-        download_fail_counts, \
-        beets_validation_enabled, \
-        beets_harness_path, \
-        beets_distance_threshold, \
-        beets_staging_dir, \
-        audio_check_mode, \
-        beets_tracking_file, \
-        pipeline_db_enabled, \
-        pipeline_db_dsn, \
-        pipeline_db_source, \
-        meelo_url, \
-        meelo_username, \
-        meelo_password
+        download_fail_counts
 
     # Let's allow some overrides to be passed to the script
     parser = argparse.ArgumentParser(description="""Soularr reads all of your "wanted" albums/artists from Lidarr and downloads them using Slskd""")
@@ -2653,87 +2553,43 @@ def main():
         from lib.config import SoularrConfig
         cfg = SoularrConfig.from_ini(config, config_dir=args.config_dir, var_dir=args.var_dir)
 
-        # --- Bridge: assign old globals from cfg so existing functions work ---
-        # These will be removed once all functions are migrated to use cfg directly.
-        slskd_api_key = cfg.slskd_api_key
-        lidarr_api_key = cfg.lidarr_api_key
-        lidarr_download_dir = cfg.lidarr_download_dir
-        lidarr_disable_sync = cfg.lidarr_disable_sync
-        slskd_download_dir = cfg.slskd_download_dir
-        lidarr_host_url = cfg.lidarr_host_url
-        slskd_host_url = cfg.slskd_host_url
-        stalled_timeout = cfg.stalled_timeout
-        remote_queue_timeout = cfg.remote_queue_timeout
-        delete_searches = cfg.delete_searches
-        slskd_url_base = cfg.slskd_url_base
-        ignored_users = list(cfg.ignored_users)
-        search_blacklist = list(cfg.search_blacklist)
-        search_type = cfg.search_type
-        search_source = cfg.search_source
-        download_filtering = cfg.download_filtering
-        use_extension_whitelist = cfg.use_extension_whitelist
-        extensions_whitelist = list(cfg.extensions_whitelist)
-        search_sources = list(cfg.search_sources)
-        minimum_match_ratio = cfg.minimum_match_ratio
-        page_size = cfg.page_size
-        remove_wanted_on_failure = cfg.remove_wanted_on_failure
-        enable_search_denylist = cfg.enable_search_denylist
-        max_search_failures = cfg.max_search_failures
-        use_most_common_tracknum = cfg.use_most_common_tracknum
-        allow_multi_disc = cfg.allow_multi_disc
-        accepted_countries = list(cfg.accepted_countries)
-        skip_region_check = cfg.skip_region_check
-        accepted_formats = list(cfg.accepted_formats)
-        allowed_filetypes = list(cfg.allowed_filetypes)
-
         setup_logging(config)
 
-        beets_validation_enabled = cfg.beets_validation_enabled
-        beets_harness_path = cfg.beets_harness_path
-        beets_distance_threshold = cfg.beets_distance_threshold
-        beets_staging_dir = cfg.beets_staging_dir
-        audio_check_mode = cfg.audio_check_mode
-        beets_tracking_file = cfg.beets_tracking_file
-        if beets_validation_enabled:
-            logger.info(f"Beets validation ENABLED: harness={beets_harness_path}, "
-                        f"threshold={beets_distance_threshold}, staging={beets_staging_dir}")
+        if cfg.beets_validation_enabled:
+            logger.info(f"Beets validation ENABLED: harness={cfg.beets_harness_path}, "
+                        f"threshold={cfg.beets_distance_threshold}, staging={cfg.beets_staging_dir}")
 
-        pipeline_db_enabled = cfg.pipeline_db_enabled
-        pipeline_db_dsn = cfg.pipeline_db_dsn
-        if pipeline_db_enabled:
+        if cfg.pipeline_db_enabled:
             from album_source import DatabaseSource
-            pipeline_db_source = DatabaseSource(pipeline_db_dsn)
-            logger.info(f"Pipeline DB ENABLED: {pipeline_db_dsn}")
+            pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
+            logger.info(f"Pipeline DB ENABLED: {cfg.pipeline_db_dsn}")
 
-        meelo_url = cfg.meelo_url
-        meelo_username = cfg.meelo_username
-        meelo_password = cfg.meelo_password
-        if meelo_url:
-            logger.info(f"Meelo post-import scan ENABLED: {meelo_url}")
+        if cfg.meelo_url:
+            logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
 
         # Init directory cache. The wide search returns all the data we need. This prevents us from hammering the users on the Soulseek network
         search_cache = {}
         folder_cache = {}
         user_upload_speed = {}
         broken_user = []
-        cutoff_denylist = load_cutoff_denylist(cutoff_denylist_file_path)
+        cutoff_denylist = load_cutoff_denylist(cfg.cutoff_denylist_file_path)
         if cutoff_denylist:
-            logger.info(f"Loaded cutoff denylist with {len(cutoff_denylist)} album(s) from {cutoff_denylist_file_path}")
-        download_fail_counts = load_download_fail_counts(cutoff_denylist_file_path)
+            logger.info(f"Loaded cutoff denylist with {len(cutoff_denylist)} album(s) from {cfg.cutoff_denylist_file_path}")
+        download_fail_counts = load_download_fail_counts(cfg.cutoff_denylist_file_path)
 
-        slskd = slskd_api.SlskdClient(host=slskd_host_url, api_key=slskd_api_key, url_base=slskd_url_base)
-        lidarr = LidarrAPI(lidarr_host_url, lidarr_api_key)
+        slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.slskd_api_key, url_base=cfg.slskd_url_base)
+        lidarr = LidarrAPI(cfg.lidarr_host_url, cfg.lidarr_api_key)
         wanted_records = []
 
-        if pipeline_db_enabled and pipeline_db_source is not None:
+        if cfg.pipeline_db_enabled and pipeline_db_source is not None:
             # === Pipeline DB mode: get wanted albums from DB ===
             logger.info("Getting wanted records from pipeline DB...")
-            wanted_records = pipeline_db_source.get_wanted(limit=page_size)
+            wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
             logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
         else:
             # === Lidarr mode (original): get wanted from Lidarr API ===
             try:
-                for source in search_sources:
+                for source in cfg.search_sources:
                     logging.debug(f"Getting records from {source}")
                     missing = source == "missing"
                     records = get_records(missing)
@@ -2763,7 +2619,7 @@ def main():
                 logger.info("Soularr finished. Exiting...")
                 slskd.transfers.remove_completed_downloads()
             else:
-                if remove_wanted_on_failure:
+                if cfg.remove_wanted_on_failure:
                     logger.info(f'{failed}: releases failed to find a match in the search results. View "failure_list.txt" for list of failed albums.')
                 else:
                     logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
