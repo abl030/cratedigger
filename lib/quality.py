@@ -51,7 +51,7 @@ def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral
 # ---------------------------------------------------------------------------
 
 def import_quality_decision(new_min_bitrate, existing_min_bitrate, override_min_bitrate=None,
-                            is_transcode=False):
+                            is_transcode=False, will_be_verified_lossless=False):
     """Decide whether to import based on bitrate comparison.
 
     Called in import_one.py after FLAC→V0 conversion (if applicable)
@@ -69,7 +69,13 @@ def import_quality_decision(new_min_bitrate, existing_min_bitrate, override_min_
         existing_min_bitrate: min bitrate in beets for this MBID (kbps), or None
         override_min_bitrate: pipeline DB override (when beets value is wrong), or None
         is_transcode:         True if FLAC→V0 produced sub-210kbps output
+        will_be_verified_lossless: True if genuine FLAC was converted to V0
     """
+    # Genuine FLAC→V0 always wins — V0 bitrate is numerically lower than
+    # CBR 320 but objectively better quality (verified lossless source).
+    if will_be_verified_lossless:
+        return "import"
+
     effective_existing = override_min_bitrate if override_min_bitrate is not None else existing_min_bitrate
 
     if effective_existing is not None and new_min_bitrate is not None:
@@ -206,8 +212,10 @@ def full_pipeline_decision(
         is_transcode = transcode_detection(converted_count, post_conversion_min_bitrate)
         import_br = post_conversion_min_bitrate if post_conversion_min_bitrate else min_bitrate
 
+        will_be_verified = (converted_count > 0 and not is_transcode)
         result["stage2_import"] = import_quality_decision(
-            import_br, existing_min_bitrate, override_min_bitrate, is_transcode)
+            import_br, existing_min_bitrate, override_min_bitrate, is_transcode,
+            will_be_verified_lossless=will_be_verified)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing

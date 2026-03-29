@@ -451,7 +451,13 @@ def main():
         print(f"  prev_min_bitrate={effective_existing}")
     if new_min_br is not None:
         print(f"  new_min_bitrate={new_min_br}")
-    if effective_existing is not None and new_min_br is not None:
+    # Genuine FLAC→V0 always wins over existing — V0 bitrate is numerically
+    # lower than CBR 320 but objectively better quality (verified lossless source).
+    will_be_verified_lossless = (converted > 0 and not is_transcode)
+    if will_be_verified_lossless and effective_existing is not None:
+        print(f"  [QUALITY CHECK] genuine FLAC→V0 at {new_min_br}kbps — "
+              f"always upgrade over existing {effective_existing}kbps")
+    elif effective_existing is not None and new_min_br is not None:
         if new_min_br <= effective_existing:
             print(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing {effective_existing}kbps — skipping import",
                   file=sys.stderr)
