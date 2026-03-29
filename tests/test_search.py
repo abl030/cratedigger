@@ -157,6 +157,20 @@ class TestBuildQuery(unittest.TestCase):
         q = build_query("Prince", "Purple Rain")
         self.assertEqual(q, "*rince Purple Rain")
 
+    def test_self_titled_dedup(self):
+        q = build_query("The Castiles", "The Castiles Live (Vol. 1)")
+        # "Castiles" from title should be dropped (duplicate of artist)
+        # "The" from title also dropped (duplicate)
+        self.assertNotIn("Castiles", q.replace("*astiles", ""))
+        self.assertIn("*astiles", q)
+        self.assertIn("Live", q)
+        self.assertIn("Vol", q)
+
+    def test_self_titled_exact(self):
+        q = build_query("Weezer", "Weezer")
+        # Album title "Weezer" is duplicate of artist — only wildcarded version remains
+        self.assertEqual(q, "*eezer")
+
     def test_no_prepend(self):
         q = build_query("The Beatles", "Abbey Road", prepend_artist=False)
         self.assertEqual(q, "Abbey Road")

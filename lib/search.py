@@ -111,6 +111,13 @@ def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS
     artist_tokens = strip_short_tokens(artist_tokens)
     title_tokens = strip_short_tokens(title_tokens)
 
+    # Drop title tokens that duplicate artist tokens (case-insensitive).
+    # e.g. "The Castiles - The Castiles Live" → artist has "Castiles",
+    # title has "Castiles" + "Live" → drop duplicate, keep "Live".
+    # This avoids wasting token slots and leaking un-wildcarded artist names.
+    artist_lower = {t.lower() for t in artist_tokens}
+    title_tokens = [t for t in title_tokens if t.lower() not in artist_lower]
+
     # Wildcard artist tokens
     artist_tokens = wildcard_artist_tokens(artist_tokens)
 
