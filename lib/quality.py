@@ -319,6 +319,7 @@ class PostflightInfo:
     beets_id: Optional[int] = None
     track_count: Optional[int] = None
     imported_path: Optional[str] = None
+    bad_extensions: list[str] = field(default_factory=list)  # files with non-audio extensions
 
 
 @dataclass
@@ -337,6 +338,7 @@ class ImportResult:
     quality: QualityInfo = field(default_factory=QualityInfo)
     spectral: SpectralInfo = field(default_factory=SpectralInfo)
     postflight: PostflightInfo = field(default_factory=PostflightInfo)
+    beets_log: list[str] = field(default_factory=list)  # beets stderr lines from import
     error: Optional[str] = None
 
     def to_json(self) -> str:
@@ -359,6 +361,7 @@ class ImportResult:
             quality=QualityInfo(**d["quality"]) if "quality" in d else QualityInfo(),
             spectral=SpectralInfo(**d["spectral"]) if "spectral" in d else SpectralInfo(),
             postflight=PostflightInfo(**d["postflight"]) if "postflight" in d else PostflightInfo(),
+            beets_log=d.get("beets_log", []),
             error=d.get("error"),
         )
 

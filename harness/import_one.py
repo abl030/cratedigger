@@ -242,13 +242,14 @@ def run_import(path, mb_release_id):
         proc.wait()
 
     stderr_out = proc.stderr.read() if proc.stderr else ""
+    beets_lines: list[str] = []
     if stderr_out.strip():
-        # Only log non-trivial stderr
         for line in stderr_out.strip().split("\n"):
             if "Disabled fetchart" not in line:
                 print(f"  [BEETS] {line}", file=sys.stderr)
+                beets_lines.append(line.strip())
 
-    return 0 if applied else 2
+    return (0 if applied else 2), beets_lines
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +298,19 @@ def main():
     parser.add_argument("--request-id", type=int, help="Pipeline DB request ID for status updates")
     parser.add_argument("--override-min-bitrate", type=int, default=None,
                         help="Override existing min bitrate for downgrade check (kbps)")
+    parser.add_argument("--force", action="store_true",
+                        help="Skip distance check (for force-importing rejected albums)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     mbid = args.mb_release_id
     request_id = args.request_id
+
+    # --force: raise distance threshold so high-distance candidates are accepted
+    global MAX_DISTANCE
+    if args.force:
+        MAX_DISTANCE = 999
+        _log("[FORCE] Distance check disabled (MAX_DISTANCE=999)")
 
     # Accumulate structured result
     r = ImportResult()
@@ -450,7 +459,8 @@ def main():
 
     # --- Import ---
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
-    rc = run_import(args.path, mbid)
+    rc, beets_lines = run_import(args.path, mbid)
+    r.beets_log = beets_lines
 
     if rc != 0:
         r.exit_code = rc
@@ -475,6 +485,42 @@ def main():
     album_path = pf_info.album_path
     _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
          f"tracks={pf_info.track_count}, path={album_path}")
+
+    # --- Post-import extension check ---
+    # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)
+    VALID_AUDIO_EXT = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
+    item_paths = beets.get_item_paths(mbid)
+    bad_ext_files = []
+    for item_id, item_path in item_paths:
+        ext = os.path.splitext(item_path)[1].lower()
+        if ext not in VALID_AUDIO_EXT and os.path.isfile(item_path):
+            # Determine correct extension from actual audio format
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=format_name",
+                     "-of", "csv=p=0", item_path],
+                    capture_output=True, text=True, timeout=15)
+                fmt = probe.stdout.strip().split(",")[0] if probe.stdout.strip() else ""
+                ext_map = {"mp3": ".mp3", "flac": ".flac", "ogg": ".ogg",
+                           "opus": ".opus", "wav": ".wav", "mp4": ".m4a"}
+                correct_ext = ext_map.get(fmt, ".mp3")
+            except Exception:
+                correct_ext = ".mp3"
+            new_path = os.path.splitext(item_path)[0] + correct_ext
+            _log(f"[EXT-FIX] {os.path.basename(item_path)} → {os.path.basename(new_path)}")
+            os.rename(item_path, new_path)
+            # Update beets DB (writable connection for this fix)
+            import sqlite3 as _sqlite3
+            from beets_db import DEFAULT_BEETS_DB
+            fix_conn = _sqlite3.connect(DEFAULT_BEETS_DB)
+            fix_conn.execute("UPDATE items SET path = ? WHERE id = ?",
+                             (new_path.encode(), item_id))
+            fix_conn.commit()
+            fix_conn.close()
+            bad_ext_files.append(os.path.basename(item_path))
+    if bad_ext_files:
+        r.postflight.bad_extensions = bad_ext_files
+        _log(f"[EXT-FIX] Fixed {len(bad_ext_files)} file(s) with bad extensions")
 
     # --- Cleanup staged dir ---
     if os.path.isdir(args.path):

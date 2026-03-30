@@ -42,7 +42,7 @@ class BeetsDB:
     def __enter__(self) -> "BeetsDB":
         return self
 
-    def __exit__(self, *args: object) -> None:
+    def __exit__(self, *_args: object) -> None:
         self.close()
 
     @staticmethod
@@ -110,6 +110,18 @@ class BeetsDB:
         if not br_row or not br_row[0]:
             return None
         return int(br_row[0] / 1000)
+
+    def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
+        """Get all (item_id, path) pairs for an album. Returns empty list if not found."""
+        album_row = self._conn.execute(
+            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
+        ).fetchone()
+        if not album_row:
+            return []
+        rows = self._conn.execute(
+            "SELECT id, path FROM items WHERE album_id = ?", (album_row[0],)
+        ).fetchall()
+        return [(r[0], self._decode_path(r[1])) for r in rows]
 
     def get_album_path(self, mb_release_id: str) -> Optional[str]:
         """Get the directory path for an album's tracks. Returns None if not found."""

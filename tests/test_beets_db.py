@@ -191,5 +191,45 @@ class TestGetMinBitrate(unittest.TestCase):
             self.assertIsNone(db.get_min_bitrate("abc"))
 
 
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
+
+
+class TestGetItemPaths(unittest.TestCase):
+    """Test get_item_paths for post-import extension checking."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+
+    def test_returns_paths(self) -> None:
+        _insert_album(self.db_path, 1, "abc", [
+            (320000, "/m/a/01.mp3"),
+            (320000, "/m/a/02.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            paths = db.get_item_paths("abc")
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(paths[0][1], "/m/a/01.mp3")
+
+    def test_not_found(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            paths = db.get_item_paths("nonexistent")
+        self.assertEqual(paths, [])
+
+    def test_detects_bak_extension(self) -> None:
+        """The .bak bug: track 01 gets renamed to .bak after import."""
+        _insert_album(self.db_path, 1, "abc", [
+            (320000, "/m/a/01 Track.bak"),
+            (320000, "/m/a/02 Track.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            paths = db.get_item_paths("abc")
+        bad = [(item_id, p) for item_id, p in paths
+               if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
+        self.assertEqual(len(bad), 1)
+        self.assertIn(".bak", bad[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()
