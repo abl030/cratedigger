@@ -4,9 +4,118 @@ Pure functions — no database, no filesystem, no external dependencies.
 Used by soularr.py and import_one.py, tested directly against real audio fixtures.
 """
 
+import json
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
+
+IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
+
+
+# ---------------------------------------------------------------------------
+# Structured result from import_one.py
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConversionInfo:
+    """FLAC→V0 conversion details."""
+    converted: int = 0
+    failed: int = 0
+    was_converted: bool = False
+    original_filetype: Optional[str] = None
+    target_filetype: Optional[str] = None
+
+
+@dataclass
+class QualityInfo:
+    """Bitrate and quality decision data."""
+    new_min_bitrate: Optional[int] = None
+    prev_min_bitrate: Optional[int] = None
+    is_transcode: bool = False
+    will_be_verified_lossless: bool = False
+
+
+@dataclass
+class SpectralInfo:
+    """Spectral analysis results for new and existing files."""
+    grade: Optional[str] = None
+    bitrate: Optional[int] = None
+    cliff_freq_hz: Optional[int] = None
+    existing_grade: Optional[str] = None
+    existing_bitrate: Optional[int] = None
+
+
+@dataclass
+class PostflightInfo:
+    """Beets post-import verification data."""
+    beets_id: Optional[int] = None
+    track_count: Optional[int] = None
+    imported_path: Optional[str] = None
+
+
+@dataclass
+class ImportResult:
+    """Structured result emitted by import_one.py as JSON.
+
+    Carries every piece of data that crosses the subprocess boundary
+    from import_one.py back to soularr.py. Stored in download_log.import_result
+    for complete auditability.
+    """
+    version: int = 1
+    exit_code: int = 0
+    decision: Optional[str] = None      # from import_quality_decision() or error label
+    already_in_beets: bool = False
+    conversion: ConversionInfo = field(default_factory=ConversionInfo)
+    quality: QualityInfo = field(default_factory=QualityInfo)
+    spectral: SpectralInfo = field(default_factory=SpectralInfo)
+    postflight: PostflightInfo = field(default_factory=PostflightInfo)
+    error: Optional[str] = None
+
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(asdict(self))
+
+    def to_sentinel_line(self) -> str:
+        """Format as the stdout sentinel line for subprocess communication."""
+        return IMPORT_RESULT_SENTINEL + self.to_json()
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ImportResult":
+        """Construct from a dict (e.g. parsed JSON)."""
+        return cls(
+            version=d.get("version", 1),
+            exit_code=d.get("exit_code", 0),
+            decision=d.get("decision"),
+            already_in_beets=d.get("already_in_beets", False),
+            conversion=ConversionInfo(**d["conversion"]) if "conversion" in d else ConversionInfo(),
+            quality=QualityInfo(**d["quality"]) if "quality" in d else QualityInfo(),
+            spectral=SpectralInfo(**d["spectral"]) if "spectral" in d else SpectralInfo(),
+            postflight=PostflightInfo(**d["postflight"]) if "postflight" in d else PostflightInfo(),
+            error=d.get("error"),
+        )
+
+    @classmethod
+    def from_json(cls, s: str) -> "ImportResult":
+        """Deserialize from JSON string."""
+        return cls.from_dict(json.loads(s))
+
+
+def parse_import_result(stdout_text: str) -> Optional[ImportResult]:
+    """Extract ImportResult from import_one.py stdout.
+
+    Scans from the last line backward for the sentinel prefix.
+    Returns None if no result found (crash, old version, etc).
+    """
+    for line in reversed(stdout_text.strip().split("\n")):
+        if line.startswith(IMPORT_RESULT_SENTINEL):
+            try:
+                return ImportResult.from_json(line[len(IMPORT_RESULT_SENTINEL):])
+            except (json.JSONDecodeError, TypeError, KeyError):
+                return None
+    return None
 
 
 # ---------------------------------------------------------------------------

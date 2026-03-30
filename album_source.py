@@ -200,6 +200,7 @@ class DatabaseSource:
             spectral_bitrate=dl.get("spectral_bitrate"),
             existing_min_bitrate=dl.get("existing_min_bitrate"),
             existing_spectral_bitrate=dl.get("existing_spectral_bitrate"),
+            import_result=dl.get("import_result"),
         )
 
     def mark_failed(self, album_record, bv_result, usernames=None,
@@ -241,6 +242,7 @@ class DatabaseSource:
             spectral_bitrate=dl.get("spectral_bitrate"),
             existing_min_bitrate=dl.get("existing_min_bitrate"),
             existing_spectral_bitrate=dl.get("existing_spectral_bitrate"),
+            import_result=dl.get("import_result"),
         )
 
         # Denylist source users

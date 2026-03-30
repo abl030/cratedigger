@@ -862,7 +862,9 @@ def search_and_queue(albums):
 
 
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.quality import quality_gate_decision, QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS
+from lib.quality import (quality_gate_decision, spectral_import_decision,
+                         parse_import_result,
+                         QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS)
 
 
 def _check_quality_gate(album_data, request_id):
@@ -1125,50 +1127,49 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                                                         f"beets_min={row[2]}kbps")
                             except Exception:
                                 logger.exception("SPECTRAL: failed to check existing files")
-                        # Decision: compare spectral bitrates
+                        # Decision: use pure function from quality.py
                         new_quality = spectral_result.estimated_bitrate_kbps
                         existing_quality = album_data.existing_spectral_bitrate or 0
                         request_id = album_data.db_request_id
+                        label = f"{album_data.artist} - {album_data.title}"
 
-                        if spectral_result.grade in ("suspect", "likely_transcode"):
-                            if new_quality and existing_quality and new_quality <= existing_quality:
-                                # Not an upgrade — reject and denylist
-                                logger.warning(
-                                    f"SPECTRAL REJECT: {album_data.artist} - {album_data.title} "
-                                    f"new spectral {new_quality}kbps <= existing {existing_quality}kbps")
-                                usernames = set(f.username for f in album_data.files
-                                                if f.username)
-                                if request_id and pipeline_db_source:
-                                    db = pipeline_db_source._get_db()
-                                    for username in usernames:
-                                        db.add_denylist(request_id, username,
-                                                        f"spectral: {new_quality}kbps <= existing {existing_quality}kbps")
-                                    # Log the rejected download
-                                    dl_info_rej = _build_download_info(album_data)
-                                    dl_info_rej["spectral_grade"] = spectral_result.grade
-                                    dl_info_rej["spectral_bitrate"] = new_quality
-                                    dl_info_rej["existing_spectral_bitrate"] = existing_quality
-                                    dl_info_rej["slskd_filetype"] = dl_info_rej.get("filetype")
-                                    dl_info_rej["actual_filetype"] = dl_info_rej.get("filetype")
-                                    pipeline_db_source.mark_failed(
-                                        album_data,
-                                        {"distance": bv_result.get("distance"), "scenario": "spectral_reject",
-                                         "detail": f"spectral {new_quality}kbps <= existing {existing_quality}kbps",
-                                         "error": None},
-                                        usernames=usernames, download_info=dl_info_rej)
-                                    logger.info(f"  Denylisted {usernames} for request {request_id}")
-                                move_failed_import(import_folder_fullpath)
-                                bv_result["valid"] = False
-                            elif new_quality and (not existing_quality or new_quality > existing_quality):
-                                # Suspect but better than what we have — import as upgrade
-                                logger.info(
-                                    f"SPECTRAL UPGRADE: {album_data.artist} - {album_data.title} "
-                                    f"suspect at {new_quality}kbps but > existing {existing_quality}kbps, importing")
-                            elif not existing_quality:
-                                # Nothing on disk yet — something is better than nothing
-                                logger.info(
-                                    f"SPECTRAL: {album_data.artist} - {album_data.title} "
-                                    f"suspect at {new_quality}kbps but no existing album, importing")
+                        spectral_decision = spectral_import_decision(
+                            spectral_result.grade, new_quality, existing_quality)
+
+                        if spectral_decision == "reject":
+                            logger.warning(
+                                f"SPECTRAL REJECT: {label} "
+                                f"new spectral {new_quality}kbps <= existing {existing_quality}kbps")
+                            usernames = set(f.username for f in album_data.files
+                                            if f.username)
+                            if request_id and pipeline_db_source:
+                                db = pipeline_db_source._get_db()
+                                for username in usernames:
+                                    db.add_denylist(request_id, username,
+                                                    f"spectral: {new_quality}kbps <= existing {existing_quality}kbps")
+                                dl_info_rej = _build_download_info(album_data)
+                                dl_info_rej["spectral_grade"] = spectral_result.grade
+                                dl_info_rej["spectral_bitrate"] = new_quality
+                                dl_info_rej["existing_spectral_bitrate"] = existing_quality
+                                dl_info_rej["slskd_filetype"] = dl_info_rej.get("filetype")
+                                dl_info_rej["actual_filetype"] = dl_info_rej.get("filetype")
+                                pipeline_db_source.mark_failed(
+                                    album_data,
+                                    {"distance": bv_result.get("distance"), "scenario": "spectral_reject",
+                                     "detail": f"spectral {new_quality}kbps <= existing {existing_quality}kbps",
+                                     "error": None},
+                                    usernames=usernames, download_info=dl_info_rej)
+                                logger.info(f"  Denylisted {usernames} for request {request_id}")
+                            move_failed_import(import_folder_fullpath)
+                            bv_result["valid"] = False
+                        elif spectral_decision == "import_upgrade":
+                            logger.info(
+                                f"SPECTRAL UPGRADE: {label} "
+                                f"suspect at {new_quality}kbps but > existing {existing_quality}kbps, importing")
+                        elif spectral_decision == "import_no_exist":
+                            logger.info(
+                                f"SPECTRAL: {label} "
+                                f"suspect at {new_quality}kbps but no existing album, importing")
                     except Exception:
                         logger.exception(f"SPECTRAL: failed for {album_data.artist} - {album_data.title}")
 
@@ -1213,174 +1214,126 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                         import_env = {**os.environ, "HOME": "/home/abl030"}
                         result = sp.run(cmd, capture_output=True, text=True,
                                         timeout=1800, env=import_env)
-                        if result.returncode == 0:
-                            logger.info(f"AUTO-IMPORT OK: {album_data.artist} - {album_data.title}")
-                            # Log beets internal logging (stderr)
-                            for line in (result.stderr or "").strip().split("\n"):
-                                if line.strip():
-                                    logger.info(f"  [beets] {line}")
-                            prev_min_br = None
-                            new_min_br = None
-                            for line in result.stdout.strip().split("\n"):
-                                logger.info(f"  {line}")
-                                # Detect FLAC->V0 conversion from import_one output
-                                if line.strip().startswith("Converted ") and ", failed " in line:
-                                    try:
-                                        parts = line.strip().split()
-                                        conv_count = int(parts[1].rstrip(","))
-                                        if conv_count > 0:
-                                            dl_info["was_converted"] = True
-                                            dl_info["original_filetype"] = "flac"
-                                            dl_info["filetype"] = "mp3"
-                                            dl_info["is_vbr"] = True
-                                    except (ValueError, IndexError):
-                                        pass
-                                # Capture actual post-conversion bitrate
-                                if line.strip().startswith("min_bitrate="):
-                                    try:
-                                        actual_br = int(line.strip().split("=")[1])
-                                        dl_info["bitrate"] = actual_br * 1000
-                                    except (ValueError, IndexError):
-                                        pass
-                                # Capture upgrade delta from import_one
-                                if line.strip().startswith("prev_min_bitrate="):
-                                    try:
-                                        prev_min_br = int(line.strip().split("=")[1])
-                                    except (ValueError, IndexError):
-                                        pass
-                                if line.strip().startswith("new_min_bitrate="):
-                                    try:
-                                        new_min_br = int(line.strip().split("=")[1])
-                                    except (ValueError, IndexError):
-                                        pass
-                                # Capture spectral analysis results
-                                if line.strip().startswith("spectral_grade="):
-                                    dl_info["spectral_grade"] = line.strip().split("=")[1]
-                                if line.strip().startswith("spectral_bitrate="):
-                                    try:
-                                        dl_info["spectral_bitrate"] = int(line.strip().split("=")[1])
-                                    except (ValueError, IndexError):
-                                        pass
-                                if line.strip().startswith("existing_spectral_bitrate="):
-                                    try:
-                                        dl_info["existing_spectral_bitrate"] = int(line.strip().split("=")[1])
-                                    except (ValueError, IndexError):
-                                        pass
-                            # Set slskd-reported quality (before conversion changed it)
-                            if dl_info.get("was_converted"):
-                                dl_info["slskd_filetype"] = dl_info.get("original_filetype", "flac")
-                                dl_info["actual_filetype"] = dl_info.get("filetype", "mp3")
+                        # Log stderr (beets + human-readable import_one logging)
+                        for line in (result.stderr or "").strip().split("\n"):
+                            if line.strip():
+                                logger.info(f"  [import] {line}")
+                        # Parse structured JSON result
+                        ir = parse_import_result(result.stdout or "")
+                        if ir is None:
+                            # Crash or old import_one.py — fall back to exit code
+                            logger.error(
+                                f"AUTO-IMPORT FAILED (no JSON, rc={result.returncode}): "
+                                f"{album_data.artist} - {album_data.title}")
+                            for line in (result.stdout or "").strip().split("\n"):
+                                logger.error(f"  {line}")
+                        else:
+                            # Populate dl_info from typed ImportResult
+                            conv = ir.conversion
+                            qual = ir.quality
+                            spec = ir.spectral
+                            if conv.was_converted:
+                                dl_info["was_converted"] = True
+                                dl_info["original_filetype"] = conv.original_filetype
+                                dl_info["filetype"] = conv.target_filetype
+                                dl_info["is_vbr"] = True
+                                dl_info["slskd_filetype"] = conv.original_filetype
+                                dl_info["actual_filetype"] = conv.target_filetype
                             else:
                                 dl_info["slskd_filetype"] = dl_info.get("filetype")
                                 dl_info["actual_filetype"] = dl_info.get("filetype")
-                            # Ensure DB status is set even if import_one's DB update failed
-                            pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
-                            # Update upgrade delta on the pipeline request
-                            if request_id and (prev_min_br is not None or new_min_br is not None):
-                                try:
-                                    db = pipeline_db_source._get_db()
-                                    db.update_status(request_id, "imported",
-                                                     prev_min_bitrate=prev_min_br or db.get_request(request_id).get("min_bitrate"),
-                                                     min_bitrate=new_min_br)
-                                except Exception:
-                                    logger.exception("Failed to update upgrade delta")
-                            # Quality gate: if below V0, queue for upgrade
-                            _check_quality_gate(album_data, request_id)
-                            trigger_meelo_scan()
-                            # Clean up staged directory -- beets already moved files
-                            # to /Beets, or pre-flight found a dupe (files unneeded)
-                            if os.path.isdir(dest):
-                                shutil.rmtree(dest)
-                                logger.info(f"  Cleaned up staged dir: {dest}")
-                                parent = os.path.dirname(dest)
-                                if os.path.isdir(parent) and not os.listdir(parent):
-                                    os.rmdir(parent)
-                                    logger.info(f"  Cleaned up empty artist dir: {parent}")
-                        elif result.returncode == 5:
-                            # Quality downgrade -- not imported
-                            logger.warning(
-                                f"QUALITY DOWNGRADE PREVENTED: {album_data.artist} - {album_data.title}")
-                            for line in result.stderr.strip().split("\n"):
-                                logger.warning(f"  {line}")
-                            usernames = set(f.username for f in album_data.files
-                                            if f.username)
-                            db = pipeline_db_source._get_db()
-                            for username in usernames:
-                                db.add_denylist(request_id, username, "quality downgrade prevented")
-                            logger.info(f"  Denylisted {usernames} for request {request_id}")
-                            if os.path.isdir(dest):
-                                shutil.rmtree(dest)
-                        elif result.returncode == 6:
-                            # Transcode detected. May or may not have imported:
-                            # - "[OK] Transcode imported" = imported as upgrade, keep searching
-                            # - "[QUALITY DOWNGRADE]" = not imported, keep searching
-                            stdout_text = result.stdout or ""
-                            imported_transcode = "[OK] Transcode imported" in stdout_text
-                            actual_br = None
-                            for line in stdout_text.strip().split("\n"):
-                                logger.info(f"  {line}")
-                                if line.strip().startswith("min_bitrate="):
+                            if qual.new_min_bitrate is not None:
+                                dl_info["bitrate"] = qual.new_min_bitrate * 1000
+                            dl_info["spectral_grade"] = spec.grade
+                            dl_info["spectral_bitrate"] = spec.bitrate
+                            dl_info["existing_spectral_bitrate"] = spec.existing_bitrate
+                            # Store full JSON for audit trail
+                            dl_info["import_result"] = ir.to_json()
+
+                            label = f"{album_data.artist} - {album_data.title}"
+                            decision = ir.decision
+
+                            if decision in ("import", "preflight_existing"):
+                                logger.info(f"AUTO-IMPORT OK: {label} (decision={decision})")
+                                pipeline_db_source.mark_done(
+                                    album_data, bv_result, dest_path=dest, download_info=dl_info)
+                                # Update upgrade delta
+                                if request_id and (qual.prev_min_bitrate is not None
+                                                   or qual.new_min_bitrate is not None):
                                     try:
-                                        actual_br = int(line.strip().split("=")[1])
-                                    except (ValueError, IndexError):
-                                        pass
-                                # Capture conversion info for download log
-                                if line.strip().startswith("Converted ") and ", failed " in line:
-                                    try:
-                                        parts = line.strip().split()
-                                        conv_count = int(parts[1].rstrip(","))
-                                        if conv_count > 0:
-                                            dl_info["was_converted"] = True
-                                            dl_info["original_filetype"] = "flac"
-                                            dl_info["filetype"] = "mp3"
-                                            dl_info["is_vbr"] = True
-                                    except (ValueError, IndexError):
-                                        pass
-                            if actual_br:
-                                dl_info["bitrate"] = actual_br * 1000
-                            for line in (result.stderr or "").strip().split("\n"):
-                                if line.strip():
-                                    logger.warning(f"  {line}")
-                            if imported_transcode:
-                                logger.info(
-                                    f"TRANSCODE UPGRADE: {album_data.artist} - {album_data.title} "
-                                    f"imported at {actual_br}kbps, denylisting + continuing search")
-                                pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
+                                        db = pipeline_db_source._get_db()
+                                        db.update_status(request_id, "imported",
+                                                         prev_min_bitrate=qual.prev_min_bitrate,
+                                                         min_bitrate=qual.new_min_bitrate)
+                                    except Exception:
+                                        logger.exception("Failed to update upgrade delta")
+                                _check_quality_gate(album_data, request_id)
                                 trigger_meelo_scan()
+                                # Clean up staged dir
+                                if os.path.isdir(dest):
+                                    shutil.rmtree(dest)
+                                    logger.info(f"  Cleaned up staged dir: {dest}")
+                                    parent = os.path.dirname(dest)
+                                    if os.path.isdir(parent) and not os.listdir(parent):
+                                        os.rmdir(parent)
+                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
+
+                            elif decision == "downgrade":
+                                logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
+                                usernames = set(f.username for f in album_data.files
+                                                if f.username)
+                                db = pipeline_db_source._get_db()
+                                for username in usernames:
+                                    db.add_denylist(request_id, username,
+                                                    "quality downgrade prevented")
+                                logger.info(f"  Denylisted {usernames} for request {request_id}")
+                                if os.path.isdir(dest):
+                                    shutil.rmtree(dest)
+
+                            elif decision in ("transcode_upgrade", "transcode_first",
+                                              "transcode_downgrade"):
+                                imported_transcode = decision in ("transcode_upgrade",
+                                                                   "transcode_first")
+                                actual_br = qual.new_min_bitrate
+                                if imported_transcode:
+                                    logger.info(
+                                        f"TRANSCODE UPGRADE: {label} "
+                                        f"imported at {actual_br}kbps, denylisting + continuing search")
+                                    pipeline_db_source.mark_done(
+                                        album_data, bv_result, dest_path=dest,
+                                        download_info=dl_info)
+                                    trigger_meelo_scan()
+                                else:
+                                    logger.warning(
+                                        f"TRANSCODE REJECTED: {label} "
+                                        f"at {actual_br}kbps — not an upgrade")
+                                # Denylist + reset to wanted
+                                usernames = set(f.username for f in album_data.files
+                                                if f.username)
+                                db = pipeline_db_source._get_db()
+                                reason = (f"transcode: {actual_br}kbps"
+                                          if actual_br else "transcode detected")
+                                for username in usernames:
+                                    db.add_denylist(request_id, username, reason)
+                                logger.info(f"  Denylisted {usernames} for request {request_id}")
+                                db.reset_to_wanted(
+                                    request_id,
+                                    quality_override=QUALITY_UPGRADE_TIERS,
+                                    min_bitrate=actual_br if imported_transcode else None)
+                                if os.path.isdir(dest):
+                                    shutil.rmtree(dest)
+                                    logger.info(f"  Cleaned up staged dir: {dest}")
+                                    parent = os.path.dirname(dest)
+                                    if os.path.isdir(parent) and not os.listdir(parent):
+                                        os.rmdir(parent)
+                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
+
                             else:
-                                logger.warning(
-                                    f"TRANSCODE REJECTED: {album_data.artist} - {album_data.title} "
-                                    f"at {actual_br}kbps -- not an upgrade")
-                            # Denylist source user and reset to wanted for further searching
-                            usernames = set(f.username for f in album_data.files
-                                            if f.username)
-                            db = pipeline_db_source._get_db()
-                            reason = f"transcode: {actual_br}kbps" if actual_br else "transcode detected"
-                            for username in usernames:
-                                db.add_denylist(request_id, username, reason)
-                            logger.info(f"  Denylisted {usernames} for request {request_id}")
-                            # Reset to wanted so we keep searching for better quality
-                            # Only update min_bitrate if we actually imported -- otherwise
-                            # keep the existing on-disk value
-                            db.reset_to_wanted(request_id,
-                                               quality_override=QUALITY_UPGRADE_TIERS,
-                                               min_bitrate=actual_br if imported_transcode else None)
-                            # Clean up staged dir (beets already moved files if imported)
-                            if os.path.isdir(dest):
-                                shutil.rmtree(dest)
-                                logger.info(f"  Cleaned up staged dir: {dest}")
-                                parent = os.path.dirname(dest)
-                                if os.path.isdir(parent) and not os.listdir(parent):
-                                    os.rmdir(parent)
-                                    logger.info(f"  Cleaned up empty artist dir: {parent}")
-                        else:
-                            logger.error(f"AUTO-IMPORT FAILED (rc={result.returncode}): "
-                                         f"{album_data.artist} - {album_data.title}")
-                            for line in result.stderr.strip().split("\n"):
-                                logger.error(f"  {line}")
-                            for line in result.stdout.strip().split("\n"):
-                                logger.error(f"  {line}")
-                            # import_one.py already set DB to review_needed
+                                # Error decisions: conversion_failed, import_failed,
+                                # path_missing, mbid_missing, crash
+                                logger.error(
+                                    f"AUTO-IMPORT FAILED: {label} "
+                                    f"(decision={decision}, error={ir.error})")
                     except sp.TimeoutExpired:
                         logger.error(f"AUTO-IMPORT TIMEOUT: {album_data.artist} - {album_data.title}")
                     except Exception:

@@ -28,13 +28,19 @@ import signal
 import sqlite3
 import subprocess
 import sys
+from typing import NoReturn
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+from quality import (transcode_detection, import_quality_decision,
+                     TRANSCODE_MIN_BITRATE_KBPS,
+                     ImportResult, ConversionInfo, QualityInfo,
+                     SpectralInfo, PostflightInfo)
 
 BEETS_DB = "/mnt/virtio/Music/beets-library.db"
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
-TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 floor — converted FLAC below this is a transcode
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +175,7 @@ def convert_flac_to_v0(album_path, dry_run=False):
             continue
 
         if dry_run:
-            print(f"  [DRY] {fname} → {os.path.basename(mp3_path)}")
+            print(f"  [DRY] {fname} → {os.path.basename(mp3_path)}", file=sys.stderr)
             converted += 1
             continue
 
@@ -199,13 +205,16 @@ def convert_flac_to_v0(album_path, dry_run=False):
 def run_import(path, mb_release_id):
     """Drive the beets harness to import one album. Returns exit code."""
     cmd = [HARNESS, "--noincremental", "--search-id", mb_release_id, path]
-    print(f"  [HARNESS] {' '.join(cmd)}")
+    print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
     env = {**os.environ, "HOME": "/home/abl030"}
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid, env=env,
     )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    assert proc.stderr is not None
 
     applied = False
     timeout = HARNESS_TIMEOUT
@@ -249,12 +258,12 @@ def run_import(path, mb_release_id):
                     # Same MBID already in DB — stale/partial entry, replace it.
                     proc.stdin.write(json.dumps({"action": "remove"}) + "\n")
                     proc.stdin.flush()
-                    print(f"  [DUP] Same MBID in library, removing stale entry")
+                    print(f"  [DUP] Same MBID in library, removing stale entry", file=sys.stderr)
                 else:
                     # Different edition of same album — keep both, let %aunique{} disambiguate.
                     proc.stdin.write(json.dumps({"action": "keep"}) + "\n")
                     proc.stdin.flush()
-                    print(f"  [DUP] Different edition (existing: {dup_mbids}), keeping both")
+                    print(f"  [DUP] Different edition (existing: {dup_mbids}), keeping both", file=sys.stderr)
 
             elif msg_type in ("choose_match", "choose_item"):
                 candidates = msg.get("candidates", [])
@@ -291,7 +300,7 @@ def run_import(path, mb_release_id):
                 proc.stdin.flush()
                 applied = True
                 timeout = IMPORT_TIMEOUT
-                print(f"  [APPLY] {cand.get('artist')} - {cand.get('album')} (dist={dist:.4f})")
+                print(f"  [APPLY] {cand.get('artist')} - {cand.get('album')} (dist={dist:.4f})", file=sys.stderr)
 
     except BrokenPipeError:
         print("  [WARN] Harness pipe broken", file=sys.stderr)
@@ -337,6 +346,17 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
 # Main
 # ---------------------------------------------------------------------------
 
+def _log(msg):
+    """Human-readable log to stderr (visible in journalctl)."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _emit_and_exit(r) -> NoReturn:
+    """Emit ImportResult JSON on stdout and exit."""
+    print(r.to_sentinel_line(), flush=True)
+    sys.exit(r.exit_code)
+
+
 def main():
     parser = argparse.ArgumentParser(description="One-shot beets import for a single album")
     parser.add_argument("path", help="Path to staged album directory")
@@ -350,40 +370,49 @@ def main():
     mbid = args.mb_release_id
     request_id = args.request_id
 
+    # Accumulate structured result
+    r = ImportResult()
+
     # --- Pre-flight: already imported? ---
     already_in_beets = preflight_check(mbid)
+    r.already_in_beets = already_in_beets
     if already_in_beets:
-        print(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
+        _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
 
     # --- Path check ---
     if not os.path.isdir(args.path):
         if already_in_beets:
-            # No new files to compare — just confirm existing import
-            print(f"[PRE-FLIGHT] No new files, keeping existing import")
+            _log(f"[PRE-FLIGHT] No new files, keeping existing import")
+            r.decision = "preflight_existing"
             if request_id:
-                result = postflight_verify(mbid)
-                if result:
-                    _, track_count, album_path = result
+                pf = postflight_verify(mbid)
+                if pf:
+                    _, track_count, album_path = pf
+                    r.postflight = PostflightInfo(track_count=track_count,
+                                                   imported_path=album_path)
                     update_pipeline_db(request_id, "imported", imported_path=album_path)
-            sys.exit(0)
-        print(f"[ERROR] Path not found: {args.path}", file=sys.stderr)
-        sys.exit(3)
+            _emit_and_exit(r)
+        r.exit_code = 3
+        r.decision = "path_missing"
+        r.error = f"Path not found: {args.path}"
+        _log(f"[ERROR] {r.error}")
+        _emit_and_exit(r)
 
     # --- Spectral analysis (pre-conversion) ---
     try:
-        lib_dir = os.path.join(os.path.dirname(__file__), "..", "lib")
-        if lib_dir not in sys.path:
-            sys.path.insert(0, lib_dir)
         from spectral_check import analyze_album as spectral_analyze
         spectral_result = spectral_analyze(args.path, trim_seconds=30)
-        print(f"  spectral_grade={spectral_result.grade}")
+        r.spectral.grade = spectral_result.grade
+        r.spectral.bitrate = spectral_result.estimated_bitrate_kbps
+        _log(f"  spectral_grade={spectral_result.grade}")
         if spectral_result.estimated_bitrate_kbps is not None:
-            print(f"  spectral_bitrate={spectral_result.estimated_bitrate_kbps}")
+            _log(f"  spectral_bitrate={spectral_result.estimated_bitrate_kbps}")
         if spectral_result.grade in ("suspect", "likely_transcode"):
             cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
             if cliff_tracks:
-                print(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
-        # Spectral check on existing beets files (if album already in beets)
+                r.spectral.cliff_freq_hz = cliff_tracks[0].cliff_freq_hz
+                _log(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
+        # Spectral check on existing beets files
         if already_in_beets:
             existing_path = None
             try:
@@ -400,92 +429,115 @@ def main():
                 pass
             if existing_path and os.path.isdir(existing_path):
                 existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
+                r.spectral.existing_grade = existing_spectral.grade
+                r.spectral.existing_bitrate = existing_spectral.estimated_bitrate_kbps
+                _log(f"  existing_spectral_grade={existing_spectral.grade}")
                 if existing_spectral.estimated_bitrate_kbps is not None:
-                    print(f"  existing_spectral_bitrate={existing_spectral.estimated_bitrate_kbps}")
-                print(f"  existing_spectral_grade={existing_spectral.grade}")
+                    _log(f"  existing_spectral_bitrate={existing_spectral.estimated_bitrate_kbps}")
     except Exception as e:
-        print(f"  [SPECTRAL] error: {e}", file=sys.stderr)
+        _log(f"  [SPECTRAL] error: {e}")
 
     # --- Convert FLAC → V0 ---
-    print(f"[CONVERT] {args.path}")
+    _log(f"[CONVERT] {args.path}")
     converted, failed = convert_flac_to_v0(args.path, dry_run=args.dry_run)
-    print(f"  Converted {converted}, failed {failed}")
+    r.conversion.converted = converted
+    r.conversion.failed = failed
+    if converted > 0:
+        r.conversion.was_converted = True
+        r.conversion.original_filetype = "flac"
+        r.conversion.target_filetype = "mp3"
+    _log(f"  Converted {converted}, failed {failed}")
     if failed > 0:
-        print("[ERROR] Conversion failures — aborting", file=sys.stderr)
-        sys.exit(1)
+        r.exit_code = 1
+        r.decision = "conversion_failed"
+        r.error = f"{failed} FLAC files failed to convert"
+        _log(f"[ERROR] {r.error}")
+        _emit_and_exit(r)
 
     # --- Transcode detection ---
-    # If we converted FLACs, check the resulting MP3 bitrate.
-    # Genuine lossless→V0 produces ~220-260kbps. Sub-threshold means
-    # the FLAC was a transcode (MP3 wrapped in FLAC container).
-    is_transcode = False
-    if converted > 0:
-        post_conv_br = _get_folder_min_bitrate(args.path)
-        if post_conv_br is not None and post_conv_br < TRANSCODE_MIN_BITRATE_KBPS:
-            print(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
-                  f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
-            is_transcode = True
-        if post_conv_br is not None:
-            print(f"  min_bitrate={post_conv_br}")
+    post_conv_br = _get_folder_min_bitrate(args.path) if converted > 0 else None
+    is_transcode = transcode_detection(converted, post_conv_br)
+    r.quality.is_transcode = is_transcode
+    if is_transcode:
+        _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
+             f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
+    if post_conv_br is not None:
+        _log(f"  post_conversion_min_bitrate={post_conv_br}")
 
     if args.dry_run:
-        print("[DRY] Would import via harness")
-        sys.exit(0)
+        r.decision = "dry_run"
+        _emit_and_exit(r)
 
     # --- Quality comparison ---
-    # If this MBID is already in beets, check that new files are better.
-    # For transcodes: still import if it's an upgrade, but exit 6 so
-    # soularr denylists the user and keeps searching for real lossless.
     new_min_br = _get_folder_min_bitrate(args.path)
     existing_min_br = _get_beets_min_bitrate(mbid)
-    # Pipeline DB may override existing bitrate (e.g. when existing files are
-    # upsampled garbage — beets says 320 but spectral says 128)
-    if args.override_min_bitrate is not None:
-        effective_existing = args.override_min_bitrate
-        if existing_min_br is not None and effective_existing != existing_min_br:
-            print(f"  [OVERRIDE] pipeline says {effective_existing}kbps, beets says {existing_min_br}kbps")
-    else:
-        effective_existing = existing_min_br
-    # Output both for soularr to track upgrade delta
+    r.quality.new_min_bitrate = new_min_br
+    if args.override_min_bitrate is not None and existing_min_br is not None:
+        if args.override_min_bitrate != existing_min_br:
+            _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
+                 f"beets says {existing_min_br}kbps")
+    effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
+    r.quality.prev_min_bitrate = effective_existing
     if effective_existing is not None:
-        print(f"  prev_min_bitrate={effective_existing}")
+        _log(f"  prev_min_bitrate={effective_existing}")
     if new_min_br is not None:
-        print(f"  new_min_bitrate={new_min_br}")
-    # Genuine FLAC→V0 always wins over existing — V0 bitrate is numerically
-    # lower than CBR 320 but objectively better quality (verified lossless source).
+        _log(f"  new_min_bitrate={new_min_br}")
+
     will_be_verified_lossless = (converted > 0 and not is_transcode)
-    if will_be_verified_lossless and effective_existing is not None:
-        print(f"  [QUALITY CHECK] genuine FLAC→V0 at {new_min_br}kbps — "
-              f"always upgrade over existing {effective_existing}kbps")
-    elif effective_existing is not None and new_min_br is not None:
-        if new_min_br <= effective_existing:
-            print(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing {effective_existing}kbps — skipping import",
-                  file=sys.stderr)
-            if is_transcode:
-                sys.exit(6)  # Transcode + not an upgrade
-            sys.exit(5)
-        print(f"  [QUALITY CHECK] new {new_min_br}kbps > existing {effective_existing}kbps — upgrading")
-    elif existing_min_br is None and is_transcode:
-        # First import — no existing quality to compare against.
-        # Import the transcode (something is better than nothing).
-        print(f"  [QUALITY CHECK] no existing album in beets — importing transcode")
+    r.quality.will_be_verified_lossless = will_be_verified_lossless
+    decision = import_quality_decision(
+        new_min_br, existing_min_br, args.override_min_bitrate,
+        is_transcode=is_transcode,
+        will_be_verified_lossless=will_be_verified_lossless)
+    r.decision = decision
+
+    if decision == "import":
+        if will_be_verified_lossless and effective_existing is not None:
+            _log(f"  [QUALITY] genuine FLAC→V0 at {new_min_br}kbps — "
+                 f"always upgrade over existing {effective_existing}kbps")
+        elif effective_existing is not None:
+            _log(f"  [QUALITY] new {new_min_br}kbps > existing {effective_existing}kbps — upgrading")
+    elif decision == "downgrade":
+        r.exit_code = 5
+        _log(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing "
+             f"{effective_existing}kbps — skipping import")
+        _emit_and_exit(r)
+    elif decision == "transcode_downgrade":
+        r.exit_code = 6
+        _log(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing "
+             f"{effective_existing}kbps — skipping import (transcode)")
+        _emit_and_exit(r)
+    elif decision == "transcode_upgrade":
+        _log(f"  [QUALITY] new {new_min_br}kbps > existing "
+             f"{effective_existing}kbps — upgrading (transcode)")
+    elif decision == "transcode_first":
+        _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
     # --- Import ---
-    print(f"[IMPORT] {args.path} → beets (mbid={mbid})")
+    _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     rc = run_import(args.path, mbid)
 
     if rc != 0:
-        print(f"[ERROR] Import failed (rc={rc})", file=sys.stderr)
-        sys.exit(rc)
+        r.exit_code = rc
+        r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
+        r.error = f"Harness returned rc={rc}"
+        _log(f"[ERROR] Import failed (rc={rc})")
+        _emit_and_exit(r)
 
     # --- Post-flight verification ---
-    result = postflight_verify(mbid)
-    if not result:
-        print(f"[ERROR] Post-flight: MBID {mbid} NOT in beets DB after import", file=sys.stderr)
-        sys.exit(2)
+    pf_result = postflight_verify(mbid)
+    if not pf_result:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = f"Post-flight: MBID {mbid} NOT in beets DB after import"
+        _log(f"[ERROR] {r.error}")
+        _emit_and_exit(r)
 
-    album_id, track_count, album_path = result
-    print(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={album_id}, tracks={track_count}, path={album_path}")
+    album_id, track_count, album_path = pf_result
+    r.postflight = PostflightInfo(beets_id=album_id, track_count=track_count,
+                                   imported_path=album_path)
+    _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={album_id}, "
+         f"tracks={track_count}, path={album_path}")
 
     # --- Cleanup staged dir ---
     if os.path.isdir(args.path):
@@ -501,7 +553,6 @@ def main():
             os.rmdir(args.path)
         except OSError:
             pass
-        # Try to remove parent artist dir if empty
         parent = os.path.dirname(args.path)
         try:
             os.rmdir(parent)
@@ -512,12 +563,22 @@ def main():
     if request_id:
         update_pipeline_db(request_id, "imported", imported_path=album_path)
 
+    # --- Final exit ---
     if is_transcode:
-        print("[OK] Transcode imported (upgrade) — denylist user, keep searching")
-        sys.exit(6)
-    print("[OK] Import complete")
-    sys.exit(0)
+        r.exit_code = 6
+        _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
+    else:
+        _log("[OK] Import complete")
+    _emit_and_exit(r)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise  # _emit_and_exit uses sys.exit
+    except Exception as exc:
+        # Always emit JSON even on unexpected crash
+        r = ImportResult(exit_code=99, decision="crash",
+                         error=f"{type(exc).__name__}: {exc}")
+        _emit_and_exit(r)

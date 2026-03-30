@@ -284,12 +284,13 @@ The module:
 
 ## Running Tests
 
+**ALWAYS use `nix-shell --run` to run tests and Python commands.** The dev shell (`shell.nix`) provides psycopg2, sox, ffmpeg, music-tag, slskd-api — without it, tests will fail with missing imports. Never run `python3` directly outside `nix-shell`.
+
 ```bash
 cd ~/soularr
-nix-shell                                          # enter dev shell with dependencies
-python3 -m unittest discover tests -v              # all tests
-python3 -m unittest tests.test_pipeline_db -v      # just pipeline DB
-python3 -m unittest tests.test_track_crosscheck    # just track matching
+nix-shell --run "python3 -m unittest discover tests -v"              # all tests
+nix-shell --run "python3 -m unittest tests.test_pipeline_db -v"      # just pipeline DB
+nix-shell --run "python3 -m unittest tests.test_track_crosscheck"    # just track matching
 ```
 
 ## Playwright MCP (Web UI Testing)

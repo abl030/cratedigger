@@ -179,6 +179,8 @@ class PipelineDB:
                 ("spectral_bitrate", "INTEGER"),
                 ("existing_min_bitrate", "INTEGER"),
                 ("existing_spectral_bitrate", "INTEGER"),
+                # Full import_one.py result for audit trail
+                ("import_result", "JSONB"),
             ]:
                 cur.execute(f"""
                     DO $$ BEGIN
@@ -400,7 +402,9 @@ class PipelineDB:
                      slskd_filetype=None, slskd_bitrate=None,
                      actual_filetype=None, actual_min_bitrate=None,
                      spectral_grade=None, spectral_bitrate=None,
-                     existing_min_bitrate=None, existing_spectral_bitrate=None):
+                     existing_min_bitrate=None, existing_spectral_bitrate=None,
+                     # Full import_one.py result (JSON string)
+                     import_result=None):
         self._execute("""
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
@@ -411,9 +415,10 @@ class PipelineDB:
                 slskd_filetype, slskd_bitrate,
                 actual_filetype, actual_min_bitrate,
                 spectral_grade, spectral_bitrate,
-                existing_min_bitrate, existing_spectral_bitrate
+                existing_min_bitrate, existing_spectral_bitrate,
+                import_result
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             request_id, soulseek_username, filetype, download_path,
             beets_distance, beets_scenario, beets_detail, valid,
@@ -424,6 +429,7 @@ class PipelineDB:
             actual_filetype, actual_min_bitrate,
             spectral_grade, spectral_bitrate,
             existing_min_bitrate, existing_spectral_bitrate,
+            import_result,
         ))
         self.conn.commit()
 
