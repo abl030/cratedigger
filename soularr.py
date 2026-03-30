@@ -865,6 +865,7 @@ from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (quality_gate_decision, spectral_import_decision,
                          parse_import_result,
                          QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS)
+from lib.beets_db import BeetsDB
 
 
 def _check_quality_gate(album_data, request_id):
@@ -873,24 +874,13 @@ def _check_quality_gate(album_data, request_id):
     if not mb_id or not cfg.pipeline_db_enabled or pipeline_db_source is None:
         return
     try:
-        import sqlite3 as _sqlite3
-        beets_db = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
-        if not os.path.exists(beets_db):
+        beets = BeetsDB()
+        info = beets.get_album_info(mb_id)
+        beets.close()
+        if not info:
             return
-        conn = _sqlite3.connect(f"file:{beets_db}?mode=ro", uri=True)
-        album_row = conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_id,)
-        ).fetchone()
-        if not album_row:
-            conn.close()
-            return
-        br_row = conn.execute(
-            "SELECT MIN(bitrate) FROM items WHERE album_id = ?", (album_row[0],)
-        ).fetchone()
-        if not br_row or not br_row[0]:
-            conn.close()
-            return
-        min_br_kbps = int(br_row[0] / 1000)
+        min_br_kbps = info.min_bitrate_kbps
+        is_cbr = info.is_cbr
 
         # Gather pipeline DB state
         spectral_br = None
@@ -905,18 +895,6 @@ def _check_quality_gate(album_data, request_id):
             except Exception:
                 pass
         verified_lossless = req.get("verified_lossless") if req else False
-
-        # CBR detection
-        is_cbr = False
-        try:
-            distinct_br = conn.execute(
-                "SELECT COUNT(DISTINCT bitrate) FROM items WHERE album_id = ?",
-                (album_row[0],)
-            ).fetchone()
-            is_cbr = distinct_br and distinct_br[0] == 1
-        except Exception:
-            pass
-        conn.close()
 
         # --- Pure decision ---
         decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
@@ -1103,28 +1081,22 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                         mb_id = album_data.mb_release_id
                         if mb_id:
                             try:
-                                import sqlite3 as _sqlite3
-                                beets_db = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
-                                if os.path.exists(beets_db):
-                                    conn = _sqlite3.connect(f"file:{beets_db}?mode=ro", uri=True)
-                                    # Get existing album path + min bitrate
-                                    row = conn.execute(
-                                        "SELECT a.id, "
-                                        "  (SELECT path FROM items WHERE album_id = a.id LIMIT 1), "
-                                        "  (SELECT CAST(MIN(bitrate)/1000 AS INTEGER) FROM items WHERE album_id = a.id) "
-                                        "FROM albums a WHERE a.mb_albumid = ?", (mb_id,)
-                                    ).fetchone()
-                                    conn.close()
-                                    if row and row[1]:
-                                        existing_path = os.path.dirname(
-                                            row[1].decode() if isinstance(row[1], bytes) else row[1])
-                                        album_data.existing_min_bitrate = row[2]
-                                        if os.path.isdir(existing_path):
-                                            existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
-                                            album_data.existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
-                                            logger.info(f"SPECTRAL: existing on disk: grade={existing_spectral.grade}, "
-                                                        f"estimated_bitrate={existing_spectral.estimated_bitrate_kbps}kbps, "
-                                                        f"beets_min={row[2]}kbps")
+                                beets = BeetsDB()
+                                existing_info = beets.get_album_info(mb_id)
+                                beets.close()
+                                if existing_info:
+                                    album_data.existing_min_bitrate = existing_info.min_bitrate_kbps
+                                    if os.path.isdir(existing_info.album_path):
+                                        existing_spectral = spectral_analyze(
+                                            existing_info.album_path, trim_seconds=30)
+                                        album_data.existing_spectral_bitrate = (
+                                            existing_spectral.estimated_bitrate_kbps)
+                                        logger.info(
+                                            f"SPECTRAL: existing on disk: "
+                                            f"grade={existing_spectral.grade}, "
+                                            f"estimated_bitrate="
+                                            f"{existing_spectral.estimated_bitrate_kbps}kbps, "
+                                            f"beets_min={existing_info.min_bitrate_kbps}kbps")
                             except Exception:
                                 logger.exception("SPECTRAL: failed to check existing files")
                         # Decision: use pure function from quality.py

@@ -25,7 +25,6 @@ import json
 import os
 import select
 import signal
-import sqlite3
 import subprocess
 import sys
 from typing import NoReturn
@@ -35,8 +34,7 @@ from quality import (transcode_detection, import_quality_decision,
                      TRANSCODE_MIN_BITRATE_KBPS,
                      ImportResult, ConversionInfo, QualityInfo,
                      SpectralInfo, PostflightInfo)
-
-BEETS_DB = "/mnt/virtio/Music/beets-library.db"
+from beets_db import BeetsDB
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
@@ -44,75 +42,10 @@ MAX_DISTANCE = 0.5
 
 
 # ---------------------------------------------------------------------------
-# Pre-flight / post-flight — query beets DB directly
-# ---------------------------------------------------------------------------
-
-def preflight_check(mb_release_id):
-    """Return True if this MBID is already in the beets library."""
-    conn = sqlite3.connect(BEETS_DB)
-    row = conn.execute(
-        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-    ).fetchone()
-    conn.close()
-    return row is not None
-
-
-def postflight_verify(mb_release_id):
-    """Verify the MBID was imported. Returns (album_id, track_count, album_path) or None."""
-    conn = sqlite3.connect(BEETS_DB)
-    row = conn.execute(
-        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-    ).fetchone()
-    if not row:
-        conn.close()
-        return None
-
-    album_id = row[0]
-    track_count = conn.execute(
-        "SELECT COUNT(*) FROM items WHERE album_id = ?", (album_id,)
-    ).fetchone()[0]
-
-    path_row = conn.execute(
-        "SELECT path FROM items WHERE album_id = ? LIMIT 1", (album_id,)
-    ).fetchone()
-    album_path = None
-    if path_row:
-        # path is stored as bytes in beets DB
-        raw = path_row[0]
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", errors="replace")
-        album_path = os.path.dirname(raw)
-
-    conn.close()
-    return album_id, track_count, album_path
-
-
-# ---------------------------------------------------------------------------
 # Quality checking
 # ---------------------------------------------------------------------------
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma"}
-
-
-def _get_beets_min_bitrate(mb_release_id):
-    """Get min track bitrate (kbps) for an MBID already in beets. Returns None if not found."""
-    try:
-        conn = sqlite3.connect(BEETS_DB)
-        row = conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
-        if not row:
-            conn.close()
-            return None
-        br = conn.execute(
-            "SELECT MIN(bitrate) FROM items WHERE album_id = ?", (row[0],)
-        ).fetchone()
-        conn.close()
-        if br and br[0] and br[0] > 0:
-            return int(br[0] / 1000)
-        return None
-    except Exception:
-        return None
 
 
 def _get_folder_min_bitrate(folder_path):
@@ -374,7 +307,8 @@ def main():
     r = ImportResult()
 
     # --- Pre-flight: already imported? ---
-    already_in_beets = preflight_check(mbid)
+    beets = BeetsDB()
+    already_in_beets = beets.album_exists(mbid)
     r.already_in_beets = already_in_beets
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
@@ -385,12 +319,15 @@ def main():
             _log(f"[PRE-FLIGHT] No new files, keeping existing import")
             r.decision = "preflight_existing"
             if request_id:
-                pf = postflight_verify(mbid)
-                if pf:
-                    _, track_count, album_path = pf
-                    r.postflight = PostflightInfo(track_count=track_count,
-                                                   imported_path=album_path)
-                    update_pipeline_db(request_id, "imported", imported_path=album_path)
+                info = beets.get_album_info(mbid)
+                if info:
+                    r.postflight = PostflightInfo(
+                        beets_id=info.album_id,
+                        track_count=info.track_count,
+                        imported_path=info.album_path)
+                    update_pipeline_db(request_id, "imported",
+                                       imported_path=info.album_path)
+            beets.close()
             _emit_and_exit(r)
         r.exit_code = 3
         r.decision = "path_missing"
@@ -414,19 +351,7 @@ def main():
                 _log(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
         # Spectral check on existing beets files
         if already_in_beets:
-            existing_path = None
-            try:
-                conn = sqlite3.connect(BEETS_DB)
-                row = conn.execute(
-                    "SELECT (SELECT path FROM items WHERE album_id = a.id LIMIT 1) "
-                    "FROM albums a WHERE a.mb_albumid = ?", (mbid,)
-                ).fetchone()
-                conn.close()
-                if row and row[0]:
-                    p = row[0].decode() if isinstance(row[0], bytes) else row[0]
-                    existing_path = os.path.dirname(p)
-            except Exception:
-                pass
+            existing_path = beets.get_album_path(mbid)
             if existing_path and os.path.isdir(existing_path):
                 existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
                 r.spectral.existing_grade = existing_spectral.grade
@@ -470,7 +395,7 @@ def main():
 
     # --- Quality comparison ---
     new_min_br = _get_folder_min_bitrate(args.path)
-    existing_min_br = _get_beets_min_bitrate(mbid)
+    existing_min_br = beets.get_min_bitrate(mbid)
     r.quality.new_min_bitrate = new_min_br
     if args.override_min_bitrate is not None and existing_min_br is not None:
         if args.override_min_bitrate != existing_min_br:
@@ -525,19 +450,21 @@ def main():
         _emit_and_exit(r)
 
     # --- Post-flight verification ---
-    pf_result = postflight_verify(mbid)
-    if not pf_result:
+    pf_info = beets.get_album_info(mbid)
+    if not pf_info:
         r.exit_code = 2
         r.decision = "import_failed"
         r.error = f"Post-flight: MBID {mbid} NOT in beets DB after import"
         _log(f"[ERROR] {r.error}")
+        beets.close()
         _emit_and_exit(r)
 
-    album_id, track_count, album_path = pf_result
-    r.postflight = PostflightInfo(beets_id=album_id, track_count=track_count,
-                                   imported_path=album_path)
-    _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={album_id}, "
-         f"tracks={track_count}, path={album_path}")
+    r.postflight = PostflightInfo(beets_id=pf_info.album_id,
+                                   track_count=pf_info.track_count,
+                                   imported_path=pf_info.album_path)
+    album_path = pf_info.album_path
+    _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
+         f"tracks={pf_info.track_count}, path={album_path}")
 
     # --- Cleanup staged dir ---
     if os.path.isdir(args.path):
@@ -564,6 +491,7 @@ def main():
         update_pipeline_db(request_id, "imported", imported_path=album_path)
 
     # --- Final exit ---
+    beets.close()
     if is_transcode:
         r.exit_code = 6
         _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
