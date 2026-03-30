@@ -395,7 +395,9 @@ class Handler(BaseHTTPRequestHandler):
                 for h in history:
                     he = LogEntry.from_row(h)
                     hi = he.to_json_dict()
-                    hi["verdict"] = classify_log_entry(he).verdict
+                    classified = classify_log_entry(he)
+                    hi["verdict"] = classified.verdict
+                    hi["downloaded_label"] = classified.downloaded_label
                     history_items.append(hi)
                 result = {
                     "request": _serialize_row(req),
@@ -524,7 +526,9 @@ class Handler(BaseHTTPRequestHandler):
                         for h in history:
                             he = _LE.from_row(h)
                             hi = he.to_json_dict()
-                            hi["verdict"] = _clf(he).verdict
+                            _c = _clf(he)
+                            hi["verdict"] = _c.verdict
+                            hi["downloaded_label"] = _c.downloaded_label
                             dh.append(hi)
                         result["download_history"] = dh
                 self._json(result)

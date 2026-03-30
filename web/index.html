@@ -208,20 +208,9 @@ function renderDownloadHistoryItem(h) {
   // Structured rows — only show what has data
   const rows = [];
 
-  // Downloaded: what format/quality was downloaded
-  const actualFmt = h.actual_filetype || h.filetype || '';
-  if (actualFmt) {
-    let dlLabel;
-    if (h.was_converted) {
-      const convBr = h.actual_min_bitrate || (h.bitrate ? Math.round(h.bitrate / 1000) : 0);
-      dlLabel = h.original_filetype ? h.original_filetype.toUpperCase() : '?';
-      const convLabel = convBr ? qualityLabel('mp3', convBr) : 'MP3';
-      dlLabel += ` (converted to ${convLabel})`;
-    } else {
-      const br = h.actual_min_bitrate || (h.bitrate ? Math.round(h.bitrate / 1000) : 0);
-      dlLabel = br ? qualityLabel(actualFmt, br) : actualFmt.toUpperCase();
-    }
-    rows.push(['Downloaded', dlLabel]);
+  // Downloaded: server-computed quality label
+  if (h.downloaded_label) {
+    rows.push(['Downloaded', h.downloaded_label]);
   }
 
   // Spectral: analysis result
