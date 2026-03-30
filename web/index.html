@@ -60,6 +60,8 @@
   .badge-upgraded { background: #1a4a2a; color: #6d6; }
   .badge-rejected { background: #4a1a1a; color: #d66; }
   .badge-transcode { background: #3a3a1a; color: #da6; }
+  .badge-force { background: #1a2a4a; color: #6af; }
+  .badge-failed { background: #4a1a1a; color: #d66; }
   .badge-library { background: #1a3a5a; color: #6af; }
   .badge-wanted { background: #5a3a1a; color: #fa6; }
   .badge-imported { background: #1a4a2a; color: #6d6; }
@@ -87,7 +89,11 @@
   .p-tracks { margin-top: 8px; }
   .p-track { font-size: 0.78em; color: #888; padding: 1px 0; }
   .p-history { margin-top: 8px; }
-  .p-hist-item { font-size: 0.75em; color: #777; padding: 3px 0; border-bottom: 1px solid #222; }
+  .p-hist-item { font-size: 0.75em; color: #777; padding: 6px 0; border-bottom: 1px solid #222; }
+  .p-hist-header { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; }
+  .p-hist-row { color: #888; padding: 1px 0 1px 8px; font-size: 0.95em; }
+  .p-hist-label { color: #666; display: inline-block; min-width: 80px; }
+  .p-hist-verdict { color: #bbb; padding: 2px 0 0 8px; font-size: 0.95em; }
   .p-actions { display: flex; gap: 6px; margin-top: 8px; }
   .p-btn { padding: 4px 12px; border: 1px solid #444; background: #222; color: #aaa; border-radius: 4px; cursor: pointer; font-size: 0.78em; }
   .p-btn:hover { background: #333; color: #eee; }
@@ -188,57 +194,72 @@ function qualityLabel(formats, minBitrate) {
 
 function renderDownloadHistoryItem(h) {
   const outcome = h.outcome || '?';
-  const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88' : '#aa8';
+  const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88'
+    : outcome === 'force_import' ? '#6af' : '#aa8';
   const user = h.soulseek_username || '?';
   const date = awstDateTime(h.created_at || '');
-  const dist = h.beets_distance != null ? ` dist=${parseFloat(h.beets_distance).toFixed(3)}` : '';
-  const err = h.error_message ? ` - ${h.error_message}` : '';
-  const scenario = h.beets_scenario ? ` [${h.beets_scenario}]` : '';
 
-  // Line 1: outcome, user, date
-  let line1 = `<span style="color:${color};">${outcome}</span> ${user} ${date}${dist}${scenario}${err}`;
+  // Header line: outcome · username · date
+  let html = `<div class="p-hist-header">
+    <span style="color:${color};">${outcome === 'force_import' ? 'force imported' : outcome}</span>
+    <span style="color:#888;">${esc(user)}</span>
+    <span style="color:#555;">${date}</span>
+  </div>`;
 
-  // Line 2: quality flow — slskd reported → actual on disk → spectral analysis → existing
-  let qualityParts = [];
+  // Structured rows — only show what has data
+  const rows = [];
 
-  // What Soulseek said
-  const slskdFmt = h.slskd_filetype || h.original_filetype || h.filetype || '';
-  if (slskdFmt) {
-    const slskdBr = h.slskd_bitrate ? qualityLabel(slskdFmt, h.slskd_bitrate) : slskdFmt;
-    qualityParts.push(`slskd: ${slskdBr}`);
-  }
-
-  // What's actually on disk
+  // Downloaded: what format/quality was downloaded
   const actualFmt = h.actual_filetype || h.filetype || '';
   if (actualFmt) {
-    let actualLabel;
+    let dlLabel;
     if (h.was_converted) {
-      const convBr = h.bitrate || h.actual_min_bitrate || 0;
-      actualLabel = convBr ? qualityLabel('mp3', convBr) + ' (from ' + (h.original_filetype || '?') + ')' : 'MP3 (from ' + (h.original_filetype || '?') + ')';
+      const convBr = h.actual_min_bitrate || (h.bitrate ? Math.round(h.bitrate / 1000) : 0);
+      dlLabel = h.original_filetype ? h.original_filetype.toUpperCase() : '?';
+      const convLabel = convBr ? qualityLabel('mp3', convBr * 1000) : 'MP3';
+      dlLabel += ` (converted to ${convLabel})`;
     } else {
-      const br = h.actual_min_bitrate || h.bitrate || 0;
-      actualLabel = br ? qualityLabel(actualFmt, br) : actualFmt;
+      const br = h.actual_min_bitrate || (h.bitrate ? Math.round(h.bitrate / 1000) : 0);
+      dlLabel = br ? qualityLabel(actualFmt, br * 1000) : actualFmt.toUpperCase();
     }
-    qualityParts.push(`actual: ${actualLabel}`);
+    rows.push(['Downloaded', dlLabel]);
   }
 
-  // Spectral analysis verdict
+  // Spectral: analysis result
   if (h.spectral_grade) {
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6' : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    const sgLabel = h.spectral_bitrate && h.spectral_grade !== 'genuine' ? `${h.spectral_grade} (~${h.spectral_bitrate}kbps)` : h.spectral_grade;
-    qualityParts.push(`<span style="color:${sgColor};">spectral: ${sgLabel}</span>`);
+    let sgLabel = h.spectral_grade;
+    if (h.spectral_bitrate && h.spectral_grade !== 'genuine') {
+      sgLabel += ` (~${h.spectral_bitrate}kbps)`;
+    }
+    rows.push(['Spectral', `<span style="color:${sgColor};">${sgLabel}</span>`]);
   }
 
-  // What was on disk before this download
-  if (h.existing_min_bitrate || h.existing_spectral_bitrate) {
-    const eBr = h.existing_spectral_bitrate || h.existing_min_bitrate;
-    qualityParts.push(`<span style="color:#888;">was: ${eBr}kbps</span>`);
+  // On disk: what was already in the library
+  const existBr = h.existing_min_bitrate || h.existing_spectral_bitrate;
+  if (existBr) {
+    const existLabel = h.existing_spectral_bitrate
+      ? `~${h.existing_spectral_bitrate}kbps (spectral)`
+      : `${h.existing_min_bitrate}kbps`;
+    rows.push(['On disk', existLabel]);
   }
 
-  let line2 = qualityParts.length ? `<div style="color:#999;font-size:0.85em;padding-left:8px;">${qualityParts.join(' → ')}</div>` : '';
+  // Distance (for match-related entries)
+  if (h.beets_distance != null) {
+    rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
+  }
 
-  const detail = h.beets_detail && h.beets_detail !== `distance=${h.beets_distance}` ? `<div style="color:#666;font-size:0.9em;padding-left:8px;">${esc(h.beets_detail)}</div>` : '';
-  return `<div class="p-hist-item">${line1}${line2}</div>${detail}`;
+  for (const [label, value] of rows) {
+    html += `<div class="p-hist-row"><span class="p-hist-label">${label}</span> ${value}</div>`;
+  }
+
+  // Verdict — use server-computed if available, else build from scenario
+  const verdict = h.verdict || h.beets_scenario || '';
+  if (verdict) {
+    html += `<div class="p-hist-verdict">${esc(verdict)}</div>`;
+  }
+
+  return `<div class="p-hist-item">${html}</div>`;
 }
 
 // Convert UTC ISO string to AWST (UTC+8)
@@ -588,86 +609,14 @@ async function loadRecents() {
       <div class="r-date-header">${date}</div>
       ${byDate[date].map(item => {
         const time = awstTime(item.created_at || '');
-        const user = item.soulseek_username || '';
-        const isRejected = item.outcome === 'rejected';
-        const isSuccess = item.outcome === 'success';
-        const scenario = item.beets_scenario || '';
-        const wasConverted = item.was_converted;
-        const prevBr = item.prev_min_bitrate;
-        const hasPrev = prevBr != null;  // 0 is valid (means "had garbage")
-        const curBr = item.request_min_bitrate;
-
-        // Classify the event
-        let badge = '', badgeClass = '', borderColor = '#444';
-        if (isRejected) {
-          const reasons = {
-            'high_distance': 'Wrong match',
-            'audio_corrupt': 'Corrupt audio',
-            'no_candidates': 'No MB match',
-            'quality_downgrade': 'Quality downgrade',
-            'album_name_mismatch': 'Name mismatch',
-          };
-          badge = reasons[scenario] || 'Rejected';
-          badgeClass = 'badge-rejected';
-          borderColor = '#a33';
-        } else if (isSuccess && hasPrev && curBr && curBr > prevBr) {
-          badge = 'Upgraded';
-          badgeClass = 'badge-upgraded';
-          borderColor = '#3a6';
-        } else if (isSuccess && wasConverted && item.bitrate && item.bitrate < 210000) {
-          const accepted = item.request_status === 'imported';
-          badge = accepted ? 'Transcode - accepted' : 'Transcode';
-          badgeClass = accepted ? 'badge-new' : 'badge-transcode';
-          borderColor = accepted ? '#1a4a2a' : '#a93';
-        } else if (isSuccess) {
-          if (hasPrev && curBr && curBr <= prevBr) {
-            // Nominal bitrate went down — but if this was a quality_override
-            // upgrade (replacing garbage CBR 320 with genuine V0), it's still
-            // an upgrade. The old files were upsampled junk.
-            if (item.quality_override) {
-              badge = 'Upgraded';
-              badgeClass = 'badge-upgraded';
-              borderColor = '#3a6';
-            } else {
-              const accepted = item.request_status === 'imported';
-              badge = accepted ? 'Quality mismatch - accepted' : 'Beets quality mismatch';
-              badgeClass = accepted ? 'badge-new' : 'badge-transcode';
-              borderColor = accepted ? '#1a4a2a' : '#a93';
-            }
-          } else {
-            badge = hasPrev ? 'Upgraded' : 'New import';
-            badgeClass = 'badge-new';
-            borderColor = '#1a4a2a';
-          }
-        }
-
-        // Quality display
-        let qualityInfo = '';
-        if (isSuccess) {
-          const fmt = item.beets_format || item.filetype || '';
-          // Use DB min_bitrate (avg after accept) if set, else beets min
-          const br = (curBr ? curBr * 1000 : null) || item.beets_bitrate || item.bitrate || 0;
-          qualityInfo = qualityLabel(fmt, br);
-          if (wasConverted) qualityInfo += ' (from flac)';
-          // Upgrade delta
-          if (prevBr && curBr && prevBr !== curBr) {
-            const prevL = qualityLabel('MP3', prevBr * 1000);
-            const curL = qualityLabel('MP3', curBr * 1000);
-            const prevS = prevL !== curL ? prevL : `${prevBr}k`;
-            const curS = prevL !== curL ? curL : `${curBr}k`;
-            if (curBr > prevBr) {
-              qualityInfo += ` <span style="color:#6d6;">↑${prevS}→${curS}</span>`;
-            } else {
-              qualityInfo += ` <span style="color:#d66;">↓${prevS}→${curS}</span>`;
-            }
-          }
-        } else {
-          const dist = item.beets_distance != null ? `dist ${parseFloat(item.beets_distance).toFixed(3)}` : '';
-          qualityInfo = dist;
-        }
+        // Server provides badge, badge_class, border_color, summary
+        const badge = item.badge || '';
+        const badgeClass = item.badge_class || '';
+        const borderColor = item.border_color || '#444';
+        const summary = item.summary || '';
 
         return `
-          <div class="r-item" style="border-left-color:${borderColor}" onclick="toggleDetail(${item.request_id})">
+          <div class="r-item" style="border-left-color:${borderColor}" onclick="toggleDetail('dl-${item.id}', ${item.request_id})">
             <div class="p-top">
               <div>
                 <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
@@ -676,12 +625,10 @@ async function loadRecents() {
               <div style="font-size:0.75em;color:#666;">${time}</div>
             </div>
             <div class="p-meta">
-              ${qualityInfo ? `<span>${qualityInfo}</span>` : ''}
-              ${user ? `<span>from ${esc(user)}</span>` : ''}
-              ${isRejected && item.beets_detail ? `<span style="color:#888;">${esc(item.beets_detail)}</span>` : ''}
+              <span>${esc(summary)}</span>
             </div>
           </div>
-          <div class="p-detail" id="detail-${item.request_id}"></div>
+          <div class="p-detail" id="dl-${item.id}"></div>
         `;
       }).join('')}
     `).join('');
@@ -801,8 +748,12 @@ function renderPipelineItem(item) {
   `;
 }
 
-async function toggleDetail(id) {
-  const el = document.getElementById('detail-' + id);
+async function toggleDetail(elId, requestId) {
+  // elId: unique DOM id for the detail panel (e.g. 'dl-123' for recents, or numeric for pipeline)
+  // requestId: album_requests.id for the API fetch (optional, defaults to elId for pipeline tab)
+  const id = requestId || elId;
+  const el = document.getElementById(elId) || document.getElementById('detail-' + elId);
+  if (!el) return;
   if (el.classList.contains('open')) {
     el.classList.remove('open');
     return;
@@ -818,10 +769,6 @@ async function toggleDetail(id) {
     const history = data.history || [];
 
     let html = '';
-    // Reasoning
-    if (req.reasoning) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Reasoning</span><span class="p-detail-value">${esc(req.reasoning)}</span></div>`;
-    }
     // MB link
     if (req.mb_release_id) {
       html += `<div class="p-detail-row"><span class="p-detail-label">MusicBrainz</span><span class="p-detail-value"><a href="https://musicbrainz.org/release/${req.mb_release_id}" target="_blank" rel="noopener" style="color:#6af;">${req.mb_release_id.slice(0,8)}...</a></span></div>`;
@@ -829,14 +776,11 @@ async function toggleDetail(id) {
     if (req.imported_path) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Imported to</span><span class="p-detail-value" style="font-size:0.9em;">${esc(req.imported_path)}</span></div>`;
     }
-    // beets_scenario on album_requests is from the last successful import,
-    // not necessarily this download — per-download scenarios are shown in
-    // the download history section below instead
 
-    // Tracks — prefer beets (has bitrate) over pipeline tracks
+    // Tracks — labeled to clarify what we're looking at
     const beetsTracks = data.beets_tracks || [];
     if (beetsTracks.length > 0) {
-      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Tracks (' + beetsTracks.length + ')</div>';
+      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">In Library (' + beetsTracks.length + ' tracks)</div>';
       html += beetsTracks.map(t => {
         const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
         const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
@@ -850,7 +794,7 @@ async function toggleDetail(id) {
       }).join('');
       html += '</div>';
     } else if (tracks.length > 0) {
-      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Tracks (' + tracks.length + ')</div>';
+      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Expected Tracks from MusicBrainz (' + tracks.length + ')</div>';
       html += tracks.map(t => {
         const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
         return `<div class="p-track">${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</div>`;
@@ -866,7 +810,6 @@ async function toggleDetail(id) {
     }
 
     // Status change buttons
-    const mbid = req.mb_release_id || '';
     html += `<div class="p-actions">
       <span class="p-detail-label" style="line-height:28px;">Status:</span>
       <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'wanted')">wanted</button>
@@ -874,24 +817,6 @@ async function toggleDetail(id) {
       <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); updateStatus(${id}, 'manual')">manual</button>
       <button class="p-btn delete" onclick="event.stopPropagation(); deleteRequest(${id})">delete</button>
     </div>`;
-    // Min bitrate + Accept
-    if (mbid) {
-      html += `<div class="p-actions">
-        <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
-        <input type="number" id="det-minbr-${id}" value="" placeholder="${req.min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('det-minbr-${id}').value; if(v) setLibQuality('${mbid}', null, parseInt(v), ${id})">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); setLibQuality('${mbid}', 'imported', null, ${id})">Accept</button>
-      </div>`;
-    }
-    // Ban source buttons (one per user in history)
-    const usersToBan = [...new Set(history.filter(h => h.soulseek_username).map(h => h.soulseek_username))];
-    if (usersToBan.length > 0 && mbid) {
-      html += '<div class="p-actions">';
-      html += usersToBan.map(u =>
-        `<button class="p-btn delete" onclick="event.stopPropagation(); banSource(${id}, '${u.replace(/'/g, "\\'")}', '${mbid}')">Ban ${esc(u)}</button>`
-      ).join('');
-      html += '</div>';
-    }
 
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load details</div>'; }
