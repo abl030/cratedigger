@@ -28,18 +28,34 @@ def _candidate_from_harness(cand: dict, target_mbid: str) -> CandidateSummary:
         artist=cand.get("artist", ""),
         album=cand.get("album", ""),
         distance=cand.get("distance", 0.0),
-        track_count=cand.get("track_count", 0),
-        year=cand.get("year"),
-        country=cand.get("country"),
-        label=cand.get("label"),
-        mediums=cand.get("mediums"),
-        albumtype=cand.get("albumtype"),
-        albumstatus=cand.get("albumstatus"),
-        extra_tracks=cand.get("extra_tracks", 0),
-        extra_items=cand.get("extra_items", 0),
-        tracks=cand.get("tracks", []),
         distance_breakdown=cand.get("distance_breakdown", {}),
         is_target=(cand.get("album_id", "") == target_mbid),
+        # AlbumInfo metadata
+        albumdisambig=cand.get("albumdisambig", ""),
+        year=cand.get("year"),
+        original_year=cand.get("original_year"),
+        country=cand.get("country"),
+        label=cand.get("label"),
+        catalognum=cand.get("catalognum"),
+        media=cand.get("media"),
+        mediums=cand.get("mediums"),
+        albumtype=cand.get("albumtype"),
+        albumtypes=cand.get("albumtypes", []),
+        albumstatus=cand.get("albumstatus"),
+        releasegroup_id=cand.get("releasegroup_id", ""),
+        release_group_title=cand.get("release_group_title", ""),
+        va=cand.get("va", False),
+        language=cand.get("language"),
+        script=cand.get("script"),
+        data_source=cand.get("data_source", ""),
+        barcode=cand.get("barcode", ""),
+        asin=cand.get("asin", ""),
+        # Tracks and mapping
+        track_count=cand.get("track_count", 0),
+        tracks=cand.get("tracks", []),
+        mapping=cand.get("mapping", []),
+        extra_items=cand.get("extra_items", []),
+        extra_tracks=cand.get("extra_tracks", []),
     )
 
 
@@ -113,10 +129,12 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
                     if cand.get("album_id") == mb_release_id:
                         result.mbid_found = True
                         result.distance = cand["distance"]
-                        extra_tracks = cand.get("extra_tracks", 0)
-                        if extra_tracks > 0:
+                        extra_tracks_raw = cand.get("extra_tracks", [])
+                        # Handle both old (int) and new (list) format
+                        n_extra = len(extra_tracks_raw) if isinstance(extra_tracks_raw, list) else extra_tracks_raw
+                        if n_extra > 0:
                             result.scenario = "extra_tracks"
-                            result.detail = f"MB has {extra_tracks} more tracks than local files"
+                            result.detail = f"MB has {n_extra} more tracks than local files"
                         elif cand["distance"] <= distance_threshold:
                             result.valid = True
                             result.scenario = "strong_match"

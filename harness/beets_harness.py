@@ -40,7 +40,8 @@ logging.getLogger("musicbrainzngs").setLevel(logging.ERROR)
 
 
 def _serialize_item(item) -> dict:
-    """Serialize a beets Item to a JSON-safe dict."""
+    """Serialize a beets Item to a JSON-safe dict. Captures everything
+    useful for debugging match decisions."""
     path = item.path
     if isinstance(path, bytes):
         path = path.decode("utf-8", errors="replace")
@@ -52,45 +53,84 @@ def _serialize_item(item) -> dict:
         "track": getattr(item, "track", 0),
         "disc": getattr(item, "disc", 0),
         "length": round(getattr(item, "length", 0) or 0, 1),
+        "bitrate": getattr(item, "bitrate", None),
+        "format": getattr(item, "format", None) or "",
+        "mb_trackid": getattr(item, "mb_trackid", None) or "",
+        "data_source": getattr(item, "data_source", None) or "",
     }
 
 
 def _serialize_track_info(ti) -> dict:
-    """Serialize a TrackInfo to a JSON-safe dict."""
+    """Serialize a TrackInfo to a JSON-safe dict. Full detail for
+    debugging track matching and distance calculations."""
     return {
         "title": getattr(ti, "title", None) or "",
         "artist": getattr(ti, "artist", None) or "",
         "index": getattr(ti, "index", None),
         "medium": getattr(ti, "medium", None),
+        "medium_index": getattr(ti, "medium_index", None),
+        "medium_total": getattr(ti, "medium_total", None),
         "length": round(getattr(ti, "length", 0) or 0, 1),
         "track_id": getattr(ti, "track_id", None) or "",
+        "release_track_id": getattr(ti, "release_track_id", None) or "",
+        "track_alt": getattr(ti, "track_alt", None),
+        "disctitle": getattr(ti, "disctitle", None),
+        "data_source": getattr(ti, "data_source", None) or "",
     }
 
 
 def _serialize_album_candidate(idx: int, candidate) -> dict:
-    """Serialize an AlbumMatch to a JSON-safe dict."""
+    """Serialize an AlbumMatch to a JSON-safe dict. Captures everything
+    the harness knows: distance breakdown, full AlbumInfo metadata,
+    track mapping, extra items/tracks with detail."""
     info = candidate.info
+    # Build the item→track mapping: which local file matched which MB track
+    mapping = []
+    for item, track in candidate.mapping.items():
+        mapping.append({
+            "item": _serialize_item(item),
+            "track": _serialize_track_info(track),
+        })
+
     return {
         "index": idx,
         "distance": round(float(candidate.distance), 4),
         "distance_breakdown": {
             k: round(float(v), 4) for k, v in candidate.distance.items()
         },
+        # AlbumInfo — full metadata
         "artist": getattr(info, "artist", None) or "",
         "album": getattr(info, "album", None) or "",
         "album_id": getattr(info, "album_id", None) or "",
+        "albumdisambig": getattr(info, "albumdisambig", None) or "",
         "year": getattr(info, "year", None),
+        "original_year": getattr(info, "original_year", None),
         "country": getattr(info, "country", None) or "",
         "label": getattr(info, "label", None) or "",
+        "catalognum": getattr(info, "catalognum", None) or "",
+        "media": getattr(info, "media", None) or "",
         "mediums": getattr(info, "mediums", None),
         "albumtype": getattr(info, "albumtype", None) or "",
+        "albumtypes": getattr(info, "albumtypes", None) or [],
         "albumstatus": getattr(info, "albumstatus", None) or "",
+        "releasegroup_id": getattr(info, "releasegroup_id", None) or "",
+        "release_group_title": getattr(info, "release_group_title", None) or "",
+        "va": getattr(info, "va", False),
+        "language": getattr(info, "language", None),
+        "script": getattr(info, "script", None),
+        "data_source": getattr(info, "data_source", None) or "",
+        "barcode": getattr(info, "barcode", None) or "",
+        "asin": getattr(info, "asin", None) or "",
+        # Track/item counts and lists
         "track_count": len(getattr(info, "tracks", []) or []),
-        "extra_items": len(candidate.extra_items),
-        "extra_tracks": len(candidate.extra_tracks),
         "tracks": [
             _serialize_track_info(t) for t in (getattr(info, "tracks", []) or [])
         ],
+        # Mapping: which local item matched which MB track
+        "mapping": mapping,
+        # Extra items/tracks with full detail (not just counts)
+        "extra_items": [_serialize_item(i) for i in candidate.extra_items],
+        "extra_tracks": [_serialize_track_info(t) for t in candidate.extra_tracks],
     }
 
 

@@ -16,25 +16,43 @@ TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 class CandidateSummary:
     """Full beets candidate match data for audit logging.
 
-    Stores everything the harness sends: tracks, label, mediums, etc.
-    The tracks list contains {title, length, track_id} per track.
+    Stores everything the harness sends — every field from AlbumInfo,
+    the distance breakdown, track mapping, and extra items/tracks
+    with full detail.
     """
+    # Core identity
     mbid: str = ""
     artist: str = ""
     album: str = ""
     distance: float = 0.0
-    track_count: int = 0
-    year: Optional[int] = None
-    country: Optional[str] = None
-    label: Optional[str] = None
-    mediums: Optional[int] = None
-    albumtype: Optional[str] = None
-    albumstatus: Optional[str] = None
-    extra_tracks: int = 0
-    extra_items: int = 0
-    tracks: list[dict] = field(default_factory=list)
     distance_breakdown: dict[str, float] = field(default_factory=dict)
     is_target: bool = False
+    # AlbumInfo metadata
+    albumdisambig: str = ""
+    year: Optional[int] = None
+    original_year: Optional[int] = None
+    country: Optional[str] = None
+    label: Optional[str] = None
+    catalognum: Optional[str] = None
+    media: Optional[str] = None
+    mediums: Optional[int] = None
+    albumtype: Optional[str] = None
+    albumtypes: list[str] = field(default_factory=list)
+    albumstatus: Optional[str] = None
+    releasegroup_id: str = ""
+    release_group_title: str = ""
+    va: bool = False
+    language: Optional[str] = None
+    script: Optional[str] = None
+    data_source: str = ""
+    barcode: str = ""
+    asin: str = ""
+    # Tracks and mapping
+    track_count: int = 0
+    tracks: list[dict] = field(default_factory=list)
+    mapping: list[dict] = field(default_factory=list)       # [{item: {...}, track: {...}}, ...]
+    extra_items: list[dict] = field(default_factory=list)    # local files with no MB match
+    extra_tracks: list[dict] = field(default_factory=list)   # MB tracks with no local file
 
 
 @dataclass

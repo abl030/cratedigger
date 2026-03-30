@@ -29,30 +29,42 @@ class TestCandidateSummary(unittest.TestCase):
         self.assertEqual(c.track_count, 0)
         self.assertIsNone(c.year)
         self.assertIsNone(c.country)
-        self.assertEqual(c.extra_tracks, 0)
-        self.assertEqual(c.extra_items, 0)
+        self.assertEqual(c.extra_tracks, [])
+        self.assertEqual(c.extra_items, [])
         self.assertFalse(c.is_target)
 
     def test_full_construction(self) -> None:
         c = CandidateSummary(
             mbid="abc-123", artist="Ye", album="BULLY",
             distance=0.45, track_count=12, year=2025,
-            country="US", extra_tracks=2, extra_items=0,
+            country="US",
+            extra_tracks=[{"title": "Bonus 1"}, {"title": "Bonus 2"}],
+            extra_items=[],
             is_target=True,
         )
         self.assertEqual(c.mbid, "abc-123")
         self.assertTrue(c.is_target)
-        self.assertEqual(c.extra_tracks, 2)
+        self.assertEqual(len(c.extra_tracks), 2)
+        self.assertEqual(c.extra_tracks[0]["title"], "Bonus 1")
 
     def test_from_harness_candidate(self) -> None:
         """Simulate constructing from beets harness candidate dict."""
         harness_cand = {
             "album_id": "abc-123", "artist": "Blue Cheer",
             "album": "Vincebus Eruptum", "distance": 0.02,
+            "distance_breakdown": {"album": 0.0, "artist": 0.0, "tracks": 0.01},
             "track_count": 6, "year": 1968, "country": "US",
-            "label": "Philips", "mediums": 1,
+            "label": "Philips", "catalognum": "PHS 600-264",
+            "media": "CD", "mediums": 1,
             "albumtype": "album", "albumstatus": "Official",
-            "extra_tracks": 0, "extra_items": 0,
+            "albumdisambig": "", "releasegroup_id": "rg-123",
+            "va": False, "data_source": "MusicBrainz",
+            "extra_tracks": [],
+            "extra_items": [],
+            "mapping": [
+                {"item": {"path": "01.flac", "title": "Summertime Blues"},
+                 "track": {"title": "Summertime Blues", "track_id": "t1"}},
+            ],
             "tracks": [
                 {"title": "Summertime Blues", "length": 213.4, "track_id": "t1"},
                 {"title": "Rock Me Baby", "length": 244.1, "track_id": "t2"},
@@ -63,22 +75,35 @@ class TestCandidateSummary(unittest.TestCase):
             artist=harness_cand["artist"],
             album=harness_cand["album"],
             distance=harness_cand["distance"],
+            distance_breakdown=harness_cand["distance_breakdown"],
             track_count=harness_cand["track_count"],
             year=harness_cand["year"],
             country=harness_cand["country"],
             label=harness_cand["label"],
+            catalognum=harness_cand["catalognum"],
+            media=harness_cand["media"],
             mediums=harness_cand["mediums"],
             albumtype=harness_cand["albumtype"],
             albumstatus=harness_cand["albumstatus"],
+            albumdisambig=harness_cand["albumdisambig"],
+            releasegroup_id=harness_cand["releasegroup_id"],
+            va=harness_cand["va"],
+            data_source=harness_cand["data_source"],
             extra_tracks=harness_cand["extra_tracks"],
             extra_items=harness_cand["extra_items"],
+            mapping=harness_cand["mapping"],
             tracks=harness_cand["tracks"],
         )
         self.assertEqual(c.mbid, "abc-123")
         self.assertEqual(c.distance, 0.02)
         self.assertEqual(c.label, "Philips")
+        self.assertEqual(c.catalognum, "PHS 600-264")
+        self.assertEqual(c.media, "CD")
+        self.assertEqual(c.data_source, "MusicBrainz")
         self.assertEqual(len(c.tracks), 2)
         self.assertEqual(c.tracks[0]["title"], "Summertime Blues")
+        self.assertEqual(len(c.mapping), 1)
+        self.assertEqual(c.mapping[0]["item"]["path"], "01.flac")
 
     def test_distance_breakdown(self) -> None:
         """CandidateSummary stores per-component distance weights."""
