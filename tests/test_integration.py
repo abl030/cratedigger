@@ -307,12 +307,12 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
         info = soularr._build_download_info(entry)
 
-        self.assertEqual(info["username"], "user1")
-        self.assertIn("flac", info["filetype"])
-        self.assertEqual(info["bitrate"], 1411000)
-        self.assertEqual(info["sample_rate"], 44100)
-        self.assertEqual(info["bit_depth"], 16)
-        self.assertFalse(info["is_vbr"])
+        self.assertEqual(info.username, "user1")
+        self.assertIn("flac", info.filetype)
+        self.assertEqual(info.bitrate, 1411000)
+        self.assertEqual(info.sample_rate, 44100)
+        self.assertEqual(info.bit_depth, 16)
+        self.assertFalse(info.is_vbr)
 
     def test_handles_missing_metadata(self):
         """Audio metadata is optional — shouldn't crash when absent."""
@@ -330,9 +330,9 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
         info = soularr._build_download_info(entry)
 
-        self.assertEqual(info["username"], "user1")
-        self.assertNotIn("bitrate", info)
-        self.assertNotIn("sample_rate", info)
+        self.assertEqual(info.username, "user1")
+        self.assertIsNone(info.bitrate)
+        self.assertIsNone(info.sample_rate)
 
 
 class TestCancelAndDelete(unittest.TestCase):
