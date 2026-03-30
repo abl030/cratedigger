@@ -29,7 +29,7 @@ Beets (v2.5.1, Nix-managed on doc1) is the library's source of truth — it matc
 ## Repository Structure
 
 ```
-soularr.py              — Main Soularr script (~2100 lines)
+soularr.py              — Main Soularr script (search, download, import orchestration)
 album_source.py         — AlbumRecord, DatabaseSource abstraction
 config.ini              — Config template (not used in production — Nix generates it)
 web/
@@ -37,31 +37,41 @@ web/
   mb.py                 — MusicBrainz API helpers
   index.html            — Frontend (vanilla JS, inline CSS)
 lib/
-  beets.py              — Beets library helpers (query bitrate, check existing albums)
+  beets.py              — Beets validation (dry-run import via harness)
+  beets_db.py           — BeetsDB: read-only beets SQLite queries (AlbumInfo dataclass)
   config.py             — SoularrConfig dataclass (typed config from config.ini)
   grab_list.py          — GrabList: wanted-album selection with priority/ordering
   pipeline_db.py        — PipelineDB class (PostgreSQL CRUD, queries, schema)
-  quality.py            — Quality classification and upgrade logic
+  quality.py            — Pure decision functions + typed dataclasses:
+                           - spectral_import_decision(), import_quality_decision()
+                           - transcode_detection(), quality_gate_decision()
+                           - is_verified_lossless()
+                           - ImportResult, DownloadInfo, SpectralContext (dataclasses)
+                           - parse_import_result() (JSON sentinel parser)
   search.py             — Search query building and normalization
   spectral_check.py     — Spectral analysis (sox-based transcode detection)
 harness/
   beets_harness.py      — Beets interactive import harness (JSON protocol over stdin/stdout)
   run_beets_harness.sh  — Shell wrapper to bootstrap Nix beets Python environment
-  import_one.py         — One-shot beets import (pre-flight, convert, import, post-flight verify)
+  import_one.py         — One-shot beets import: emits ImportResult JSON on stdout
 scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, migrate
   populate_tracks.py    — Populate tracks from MusicBrainz API
 tests/
-  test_album_source.py  — 11 tests for AlbumSource
-  test_beets_validation.py — 19 tests for beets validation
-  test_config.py         — 41 tests for SoularrConfig
-  test_grab_list.py      — 60 tests for GrabList
-  test_pipeline_cli.py   — 7 tests for CLI
-  test_pipeline_db.py    — 33 tests for PipelineDB
-  test_quality_classification.py — 17 tests for quality classification
-  test_search.py         — 32 tests for search query building
-  test_spectral_check.py — 39 tests for spectral analysis
-  test_track_crosscheck.py — 15 tests (track title cross-check)
+  test_album_source.py      — 11 tests for AlbumSource
+  test_beets_db.py           — 14 tests for BeetsDB queries
+  test_beets_validation.py   — 19 tests for beets validation
+  test_config.py             — 41 tests for SoularrConfig
+  test_grab_list.py          — 60 tests for GrabList
+  test_import_result.py      — 34 tests for ImportResult, DownloadInfo, JSON parsing
+  test_pipeline_cli.py       — 7 tests for CLI
+  test_pipeline_db.py        — 33 tests for PipelineDB
+  test_quality_classification.py — 17 tests for quality classification (real audio fixtures)
+  test_quality_decisions.py  — 61 tests for pure decision functions
+  test_search.py             — 32 tests for search query building
+  test_slskd_live.py         — 12 tests for live slskd integration (ephemeral Docker)
+  test_spectral_check.py     — 39 tests for spectral analysis
+  test_track_crosscheck.py   — 15 tests (track title cross-check)
 test_soularr.py         — Isolated tests for verify_filetype (AST extraction)
 ```
 
@@ -139,6 +149,26 @@ Web UI (music.ablz.au)               CLI
 
 - **Requests** (`source='request'`): User-added via CLI or web UI. Auto-imported to beets if beets validation passes at distance ≤ 0.15. Files stage temporarily in `/Incoming`, then `import_one.py` converts (if FLAC), imports to beets (`/Beets`), and cleans up `/Incoming`.
 - **Redownloads** (`source='redownload'`): Replacing bad source material. Always staged to `/Incoming` for manual review, never auto-imported.
+
+## Decision Architecture
+
+All quality decisions are pure functions in `lib/quality.py` — no I/O, no database, fully unit-tested. The decision pipeline:
+
+1. **`spectral_import_decision()`** — Pre-import: should we import this MP3/CBR download? (genuine/suspect/reject)
+2. **`import_quality_decision()`** — Import-time: is this an upgrade or downgrade? (import/downgrade/transcode)
+3. **`transcode_detection()`** — Post-conversion: was this FLAC actually a transcode?
+4. **`quality_gate_decision()`** — Post-import: accept, or re-queue for better quality?
+5. **`is_verified_lossless()`** — Was this imported from a genuine FLAC source?
+
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout) containing every decision and measurement. soularr.py parses it with `parse_import_result()`. The full JSON is stored in `download_log.import_result` (JSONB) for debugging:
+
+```sql
+SELECT import_result->>'decision', import_result->'quality'->>'new_min_bitrate',
+       import_result->'spectral'->>'grade'
+FROM download_log ORDER BY id DESC LIMIT 10;
+```
+
+Typed dataclasses used throughout: `ImportResult`, `DownloadInfo`, `SpectralContext`, `AlbumInfo` (beets), `ConversionInfo`, `QualityInfo`, `SpectralInfo`, `PostflightInfo`.
 
 ## Quality Upgrade System
 
