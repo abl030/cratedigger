@@ -24,6 +24,7 @@ pkgs.mkShell {
     (python.withPackages (ps: [
       ps.psycopg2
       ps.music-tag
+      ps.beets
       slskd-api
     ]))
     pkgs.sox                 # spectral analysis tests
