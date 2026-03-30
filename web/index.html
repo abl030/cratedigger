@@ -777,8 +777,30 @@ async function toggleDetail(elId, requestId) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Imported to</span><span class="p-detail-value" style="font-size:0.9em;">${esc(req.imported_path)}</span></div>`;
     }
 
-    // Tracks — labeled to clarify what we're looking at
+    // Quality summary — show spectral reality if it differs from nominal
     const beetsTracks = data.beets_tracks || [];
+    if (beetsTracks.length > 0) {
+      const minBr = Math.min(...beetsTracks.filter(t => t.bitrate).map(t => t.bitrate));
+      const fmt = beetsTracks[0]?.format || '';
+      const nominal = minBr ? qualityLabel(fmt, minBr) : fmt;
+      // Spectral data: album_requests has it if set, otherwise check the
+      // most recent download_log entry's existing_spectral_bitrate (what
+      // was on disk when that download happened — if it's the latest entry,
+      // that's still what's on disk now unless a later import replaced it)
+      const spectralBr = req.spectral_bitrate
+        || (history.length > 0 && history[0].existing_spectral_bitrate)
+        || null;
+      const verified = req.verified_lossless === true || req.verified_lossless === 'True';
+      let qualitySummary = nominal;
+      if (verified) {
+        qualitySummary += ' <span style="color:#6d6;">verified lossless</span>';
+      } else if (spectralBr && minBr && spectralBr < Math.round(minBr / 1000) - 20) {
+        qualitySummary += ` <span style="color:#d88;">spectral estimate ~${spectralBr}kbps</span>`;
+      }
+      html += `<div class="p-detail-row"><span class="p-detail-label">Quality</span><span class="p-detail-value">${qualitySummary}</span></div>`;
+    }
+
+    // Tracks — labeled to clarify what we're looking at
     if (beetsTracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">In Library (' + beetsTracks.length + ' tracks)</div>';
       html += beetsTracks.map(t => {
