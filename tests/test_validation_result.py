@@ -80,6 +80,37 @@ class TestCandidateSummary(unittest.TestCase):
         self.assertEqual(len(c.tracks), 2)
         self.assertEqual(c.tracks[0]["title"], "Summertime Blues")
 
+    def test_distance_breakdown(self) -> None:
+        """CandidateSummary stores per-component distance weights."""
+        c = CandidateSummary(
+            mbid="abc-123", distance=0.49,
+            distance_breakdown={
+                "album": 0.0, "artist": 0.0, "tracks": 0.0,
+                "media": 0.25, "source": 0.15, "year": 0.09,
+            },
+        )
+        self.assertEqual(c.distance_breakdown["media"], 0.25)
+        self.assertEqual(c.distance_breakdown["source"], 0.15)
+        self.assertNotIn("missing_tracks", c.distance_breakdown)
+
+    def test_distance_breakdown_survives_json_round_trip(self) -> None:
+        """Distance breakdown serializes through ValidationResult."""
+        vr = ValidationResult(
+            candidates=[CandidateSummary(
+                mbid="abc", distance=0.49, is_target=True,
+                distance_breakdown={"album": 0.0, "media": 0.25, "tracks": 0.15},
+            )],
+        )
+        j = vr.to_json()
+        vr2 = ValidationResult.from_json(j)
+        bd = vr2.candidates[0].distance_breakdown
+        self.assertEqual(bd["media"], 0.25)
+        self.assertEqual(bd["tracks"], 0.15)
+
+    def test_distance_breakdown_default_empty(self) -> None:
+        c = CandidateSummary()
+        self.assertEqual(c.distance_breakdown, {})
+
     def test_tracks_survive_json_round_trip(self) -> None:
         """Track lists serialize and deserialize through ValidationResult."""
         vr = ValidationResult(

@@ -33,6 +33,7 @@ class CandidateSummary:
     extra_tracks: int = 0
     extra_items: int = 0
     tracks: list[dict] = field(default_factory=list)
+    distance_breakdown: dict[str, float] = field(default_factory=dict)
     is_target: bool = False
 
 

@@ -73,6 +73,9 @@ def _serialize_album_candidate(idx: int, candidate) -> dict:
     return {
         "index": idx,
         "distance": round(float(candidate.distance), 4),
+        "distance_breakdown": {
+            k: round(float(v), 4) for k, v in candidate.distance.items()
+        },
         "artist": getattr(info, "artist", None) or "",
         "album": getattr(info, "album", None) or "",
         "album_id": getattr(info, "album_id", None) or "",
