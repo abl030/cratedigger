@@ -1204,6 +1204,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                             f"distance={bv_result['distance']:.4f}) → {dest}")
 
                 dl_info = _build_download_info(album_data)
+                dl_info.validation_result = bv_result.to_json()
                 # Inject spectral analysis results from pre-staging check
                 if album_data.spectral_grade:
                     dl_info.spectral_grade = album_data.spectral_grade
