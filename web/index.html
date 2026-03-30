@@ -787,14 +787,12 @@ async function toggleDetail(elId, requestId) {
       // most recent download_log entry's existing_spectral_bitrate (what
       // was on disk when that download happened — if it's the latest entry,
       // that's still what's on disk now unless a later import replaced it)
-      // Spectral data from album_requests, or from the most recent
-      // download_log entry's existing_spectral_bitrate
-      const spectralBr = req.spectral_bitrate
-        || (history.length > 0 && history[0].existing_spectral_bitrate)
-        || null;
-      const spectralGrade = req.spectral_grade
-        || (history.length > 0 && history[0].spectral_grade)
-        || null;
+      // Spectral data from album_requests — set on successful import,
+      // describes the files currently on disk. Don't guess from
+      // download_log (those describe downloaded files, not on-disk).
+      // If NULL (e.g. force-import didn't propagate), show nothing.
+      const spectralBr = req.spectral_bitrate || null;
+      const spectralGrade = req.spectral_grade || null;
       const verified = req.verified_lossless === true || req.verified_lossless === 'True';
       let qualitySummary = nominal;
       if (verified) {

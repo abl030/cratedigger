@@ -925,7 +925,28 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
                 if result.returncode == 0:
-                    _db().update_status(request_id, "imported")
+                    update_fields: dict[str, object] = {}
+                    # Propagate spectral data from ImportResult to album_requests
+                    if import_result_json:
+                        try:
+                            ir = json.loads(import_result_json)
+                            spectral = ir.get("spectral", {})
+                            if spectral.get("grade"):
+                                update_fields["spectral_grade"] = spectral["grade"]
+                            if spectral.get("bitrate") is not None:
+                                update_fields["spectral_bitrate"] = spectral["bitrate"]
+                            # Check verified lossless
+                            conv = ir.get("conversion", {})
+                            quality = ir.get("quality", {})
+                            if (conv.get("was_converted") and
+                                    conv.get("original_filetype", "").lower() == "flac" and
+                                    spectral.get("grade") == "genuine"):
+                                update_fields["verified_lossless"] = True
+                            if quality.get("new_min_bitrate") is not None:
+                                update_fields["min_bitrate"] = quality["new_min_bitrate"]
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    _db().update_status(request_id, "imported", **update_fields)
 
                 self._json({
                     "status": "ok" if result.returncode == 0 else "error",
