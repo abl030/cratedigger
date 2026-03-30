@@ -578,6 +578,82 @@ async function toggleReleaseDetail(mbid) {
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
 }
 
+let recentsData = null;
+let recentsFilter = 'all';
+
+function setRecentsFilter(f) {
+  recentsFilter = f;
+  renderRecents();
+}
+
+function renderRecents() {
+  const el = document.getElementById('recents-content');
+  if (!recentsData || recentsData.length === 0) {
+    el.innerHTML = '<div class="loading">No pipeline activity</div>';
+    return;
+  }
+  const items = recentsFilter === 'all' ? recentsData
+    : recentsFilter === 'imported' ? recentsData.filter(i => i.outcome === 'success' || i.outcome === 'force_import')
+    : recentsData.filter(i => i.outcome === 'rejected' || i.outcome === 'failed' || i.outcome === 'timeout');
+
+  // Counts for filter buttons
+  const successCount = recentsData.filter(i => i.outcome === 'success' || i.outcome === 'force_import').length;
+  const rejectedCount = recentsData.length - successCount;
+
+  let html = `<div style="display:flex;gap:8px;margin-bottom:8px;">
+    <div class="count ${recentsFilter === 'all' ? 'active' : ''}" onclick="setRecentsFilter('all')">
+      <div class="count-num">${recentsData.length}</div><div class="count-label">all</div></div>
+    <div class="count ${recentsFilter === 'imported' ? 'active' : ''}" onclick="setRecentsFilter('imported')">
+      <div class="count-num">${successCount}</div><div class="count-label">imported</div></div>
+    <div class="count ${recentsFilter === 'rejected' ? 'active' : ''}" onclick="setRecentsFilter('rejected')">
+      <div class="count-num">${rejectedCount}</div><div class="count-label">rejected</div></div>
+  </div>`;
+
+  if (items.length === 0) {
+    html += '<div class="loading">No matching entries</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  // Group by date (AWST)
+  const byDate = {};
+  for (const item of items) {
+    const date = awstDate(item.created_at || '');
+    if (!byDate[date]) byDate[date] = [];
+    byDate[date].push(item);
+  }
+  const dates = Object.keys(byDate).sort().reverse();
+
+  html += dates.map(date => `
+    <div class="r-date-header">${date}</div>
+    ${byDate[date].map(item => {
+      const time = awstTime(item.created_at || '');
+      const badge = item.badge || '';
+      const badgeClass = item.badge_class || '';
+      const borderColor = item.border_color || '#444';
+      const summary = item.summary || '';
+
+      return `
+        <div class="r-item" style="border-left-color:${borderColor}" onclick="toggleDetail('dl-${item.id}', ${item.request_id})">
+          <div class="p-top">
+            <div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
+              <div class="p-artist">${esc(item.artist_name)}</div>
+            </div>
+            <div style="font-size:0.75em;color:#666;">${time}</div>
+          </div>
+          <div class="p-meta">
+            <span>${esc(summary)}</span>
+          </div>
+        </div>
+        <div class="p-detail" id="dl-${item.id}"></div>
+      `;
+    }).join('')}
+  `).join('');
+
+  el.innerHTML = html;
+}
+
 async function loadRecents() {
   const el = document.getElementById('recents-content');
   el.innerHTML = '<div class="loading">Loading...</div>';
@@ -585,48 +661,8 @@ async function loadRecents() {
     const r = await fetch(`${API}/api/pipeline/log`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const items = data.log || [];
-    if (items.length === 0) {
-      el.innerHTML = '<div class="loading">No pipeline activity</div>';
-      return;
-    }
-
-    // Group by date (AWST)
-    const byDate = {};
-    for (const item of items) {
-      const date = awstDate(item.created_at || '');
-      if (!byDate[date]) byDate[date] = [];
-      byDate[date].push(item);
-    }
-    const dates = Object.keys(byDate).sort().reverse();
-
-    el.innerHTML = dates.map(date => `
-      <div class="r-date-header">${date}</div>
-      ${byDate[date].map(item => {
-        const time = awstTime(item.created_at || '');
-        // Server provides badge, badge_class, border_color, summary
-        const badge = item.badge || '';
-        const badgeClass = item.badge_class || '';
-        const borderColor = item.border_color || '#444';
-        const summary = item.summary || '';
-
-        return `
-          <div class="r-item" style="border-left-color:${borderColor}" onclick="toggleDetail('dl-${item.id}', ${item.request_id})">
-            <div class="p-top">
-              <div>
-                <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
-                <div class="p-artist">${esc(item.artist_name)}</div>
-              </div>
-              <div style="font-size:0.75em;color:#666;">${time}</div>
-            </div>
-            <div class="p-meta">
-              <span>${esc(summary)}</span>
-            </div>
-          </div>
-          <div class="p-detail" id="dl-${item.id}"></div>
-        `;
-      }).join('')}
-    `).join('');
+    recentsData = data.log || [];
+    renderRecents();
   } catch (e) { el.innerHTML = '<div class="loading">Failed to load log</div>'; }
 }
 
