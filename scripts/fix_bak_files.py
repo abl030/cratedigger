@@ -6,7 +6,13 @@ renames them to the correct extension based on ffprobe format detection,
 and updates the beets DB paths.
 
 Usage:
-    python3 scripts/fix_bak_files.py [--dry-run]
+    python3 scripts/fix_bak_files.py [--dry-run] [path_filter]
+
+    path_filter: only fix items whose path contains this string
+    Examples:
+        python3 scripts/fix_bak_files.py --dry-run "PJ Harvey"
+        python3 scripts/fix_bak_files.py "PJ Harvey"
+        python3 scripts/fix_bak_files.py --dry-run
 """
 
 import os
@@ -35,6 +41,12 @@ def detect_format(path: str) -> str:
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
+    # Filter: only fix items whose path contains this string
+    path_filter = None
+    for arg in sys.argv[1:]:
+        if arg != "--dry-run":
+            path_filter = arg
+            break
 
     if not os.path.exists(BEETS_DB):
         print(f"ERROR: Beets DB not found: {BEETS_DB}")
@@ -46,6 +58,8 @@ def main() -> None:
     bad = []
     for item_id, raw_path in rows:
         path = raw_path.decode("utf-8", errors="replace") if isinstance(raw_path, bytes) else raw_path
+        if path_filter and path_filter not in path:
+            continue
         ext = os.path.splitext(path)[1].lower()
         if ext not in VALID_AUDIO_EXT:
             bad.append((item_id, path))
