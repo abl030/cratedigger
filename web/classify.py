@@ -58,8 +58,10 @@ def classify_log_entry(item: dict) -> dict:
 
     # --- Rejected ---
     if outcome == "rejected":
+        bitrate_bps = _get(item, "bitrate")
         verdict = _rejection_verdict(scenario, distance, actual_br, existing_br,
-                                     spectral_br, existing_spectral_br)
+                                     spectral_br, existing_spectral_br,
+                                     bitrate_bps=bitrate_bps)
         return {
             "badge": "Rejected",
             "badge_class": "badge-rejected",
@@ -93,9 +95,12 @@ def classify_log_entry(item: dict) -> dict:
     if outcome == "success":
         # Transcode scenarios
         if scenario in ("transcode_upgrade", "transcode_first"):
-            br_str = f"{actual_br}kbps" if actual_br else "unknown bitrate"
+            bitrate_bps = _get(item, "bitrate")
+            br = actual_br or spectral_br or (int(bitrate_bps) // 1000 if bitrate_bps else None)
+            br_str = f"{br}kbps" if br else "unknown bitrate"
             if scenario == "transcode_upgrade":
-                ex_str = f" from {existing_br}kbps" if existing_br else ""
+                ex = existing_br or existing_spectral_br
+                ex_str = f" from {ex}kbps" if ex else ""
                 verdict = f"Transcode at {br_str} — imported as upgrade{ex_str}, searching for better"
             else:
                 verdict = f"Transcode at {br_str} — imported (nothing on disk), searching for better"
@@ -171,11 +176,24 @@ def classify_log_entry(item: dict) -> dict:
 
 def _rejection_verdict(scenario: Any, distance: Any,
                        actual_br: Any, existing_br: Any,
-                       spectral_br: Any, existing_spectral_br: Any) -> str:
-    """Build human-readable verdict for a rejected entry."""
+                       spectral_br: Any, existing_spectral_br: Any,
+                       bitrate_bps: Any = None) -> str:
+    """Build human-readable verdict for a rejected entry.
+
+    Bitrate fields have gaps — actual_min_bitrate is often NULL while
+    bitrate (bps) or spectral_bitrate has the value. Fall through all
+    available sources.
+    """
+    # Best available "new" bitrate in kbps
+    new_kbps = (actual_br
+                or spectral_br
+                or (int(bitrate_bps) // 1000 if bitrate_bps else None))
+    # Best available "existing" bitrate in kbps
+    old_kbps = existing_br or existing_spectral_br
+
     if scenario == "quality_downgrade":
-        new = f"{actual_br}kbps" if actual_br else "unknown"
-        old = f"{existing_br}kbps" if existing_br else "unknown"
+        new = f"{new_kbps}kbps" if new_kbps else "unknown"
+        old = f"{old_kbps}kbps" if old_kbps else "unknown"
         return f"{new} is not better than existing {old}"
 
     if scenario == "spectral_reject":
@@ -184,8 +202,8 @@ def _rejection_verdict(scenario: Any, distance: Any,
         return f"Spectral: {new} is not better than existing {old}"
 
     if scenario == "transcode_downgrade":
-        new = f"{actual_br}kbps" if actual_br else "unknown"
-        old = f"{existing_br}kbps" if existing_br else "unknown"
+        new = f"{new_kbps}kbps" if new_kbps else "unknown"
+        old = f"{old_kbps}kbps" if old_kbps else "unknown"
         return f"Transcode at {new} — not better than existing {old}"
 
     if scenario == "high_distance":
