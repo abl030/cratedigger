@@ -40,10 +40,11 @@ def _try_reconnect_db():
     global db
     if not _db_dsn:
         return
-    try:
-        db.conn.close()
-    except Exception:
-        pass
+    if db is not None:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
     try:
         db = PipelineDB(_db_dsn, run_migrations=False)
         log.info("Reconnected to pipeline DB")
@@ -51,8 +52,15 @@ def _try_reconnect_db():
         log.exception("Failed to reconnect to pipeline DB")
 
 # Globals set in main()
-db = None
-beets_db_path = None
+db: PipelineDB | None = None
+beets_db_path: str | None = None
+
+
+def _db() -> PipelineDB:
+    """Return the pipeline DB, raising if not connected."""
+    if db is None:
+        raise RuntimeError("Pipeline DB not connected")
+    return db
 
 
 def check_beets_library(mbids):
@@ -154,8 +162,9 @@ def check_pipeline(mbids):
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
     if not mbids or not db:
         return {}
+    pdb = _db()
     placeholders = ",".join(["%s"] * len(mbids))
-    cur = db._execute(
+    cur = pdb._execute(
         f"SELECT mb_release_id, status, quality_override, min_bitrate "
         f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
         tuple(mbids),
@@ -171,14 +180,14 @@ def check_pipeline(mbids):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        log.info(fmt % args)
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        log.info(format % args)
 
     def _json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", len(body))
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -189,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
             body = f.read()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", len(body))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -247,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                 release_id = path.split("/")[-1]
                 data = mb_api.get_release(release_id)
                 data["in_library"] = bool(check_beets_library([release_id]))
-                req = db.get_request_by_mb_release_id(release_id)
+                req = _db().get_request_by_mb_release_id(release_id)
                 data["pipeline_status"] = req["status"] if req else None
                 data["pipeline_id"] = req["id"] if req else None
                 # Include beets track info if in library
@@ -272,11 +281,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(data)
 
             elif path == "/api/pipeline/log":
-                entries = db.get_log(limit=50)
+                entries = _db().get_log(limit=50)
                 # Batch-check beets for all MBIDs
                 mbids = list(set(e["mb_release_id"] for e in entries if e.get("mb_release_id")))
                 beets_info = check_beets_library_detail(mbids) if mbids else {}
                 result = []
+                from web.classify import classify_log_entry, build_summary_line
                 for e in entries:
                     item = {k: str(v) if hasattr(v, 'isoformat') else v for k, v in e.items()}
                     mbid = e.get("mb_release_id")
@@ -287,12 +297,18 @@ class Handler(BaseHTTPRequestHandler):
                         item["beets_bitrate"] = bi.get("beets_bitrate")
                     else:
                         item["in_beets"] = False
+                    classified = classify_log_entry(item)
+                    item["badge"] = classified["badge"]
+                    item["badge_class"] = classified["badge_class"]
+                    item["border_color"] = classified["border_color"]
+                    item["verdict"] = classified["verdict"]
+                    item["summary"] = build_summary_line(item, classified)
                     result.append(item)
                 self._json({"log": result})
 
             elif path == "/api/pipeline/status":
-                counts = db.count_by_status()
-                wanted = db.get_wanted(limit=50)
+                counts = _db().count_by_status()
+                wanted = _db().get_wanted(limit=50)
                 self._json({
                     "counts": counts,
                     "wanted": [
@@ -314,7 +330,7 @@ class Handler(BaseHTTPRequestHandler):
                         k: str(v) if hasattr(v, 'isoformat') else v
                         for k, v in r.items()
                     }
-                recent = db.get_recent(limit=20)
+                recent = _db().get_recent(limit=20)
                 # Check beets library for each and get track counts
                 mbids = [r["mb_release_id"] for r in recent if r.get("mb_release_id")]
                 beets_info = check_beets_library_detail(mbids) if mbids else {}
@@ -322,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
                 for r in recent:
                     item = serialize_req(r)
                     mbid = r.get("mb_release_id")
-                    pipeline_tracks = len(db.get_tracks(r["id"]))
+                    pipeline_tracks = len(_db().get_tracks(r["id"]))
                     item["pipeline_tracks"] = pipeline_tracks
                     if mbid and mbid in beets_info:
                         item["in_beets"] = True
@@ -343,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
                             item["in_beets"] = False
                             item["beets_tracks"] = 0
                     # Include latest download info (bitrate, user, etc.)
-                    history = db.get_download_history(r["id"])
+                    history = _db().get_download_history(r["id"])
                     success = next((h for h in history if h.get("outcome") == "success"), None)
                     if success:
                         for k in ("soulseek_username", "filetype", "bitrate",
@@ -361,24 +377,31 @@ class Handler(BaseHTTPRequestHandler):
                         k: str(v) if hasattr(v, 'isoformat') else v
                         for k, v in r.items()
                     }
-                counts = db.count_by_status()
-                result = {"counts": counts}
+                counts = _db().count_by_status()
+                all_data: dict[str, object] = {"counts": counts}
                 for status in ("wanted", "imported", "manual"):
-                    result[status] = [serialize_request(r) for r in db.get_by_status(status)]
-                self._json(result)
+                    all_data[status] = [serialize_request(r) for r in _db().get_by_status(status)]
+                self._json(all_data)
 
             elif re.match(r"^/api/pipeline/\d+$", path):
                 req_id = int(path.split("/")[-1])
-                req = db.get_request(req_id)
+                req = _db().get_request(req_id)
                 if not req:
                     self._error("Not found", 404)
                     return
-                tracks = db.get_tracks(req_id)
-                history = db.get_download_history(req_id)
+                tracks = _db().get_tracks(req_id)
+                history = _db().get_download_history(req_id)
+                from web.classify import classify_log_entry
+                history_items = []
+                for h in history:
+                    hi = {k: str(v) if hasattr(v, 'isoformat') else v for k, v in h.items()}
+                    classified = classify_log_entry(hi)
+                    hi["verdict"] = classified["verdict"]
+                    history_items.append(hi)
                 result = {
                     "request": {k: str(v) if hasattr(v, 'isoformat') else v for k, v in req.items()},
                     "tracks": tracks,
-                    "history": [{k: str(v) if hasattr(v, 'isoformat') else v for k, v in h.items()} for h in history],
+                    "history": history_items,
                 }
                 # Include beets tracks (with bitrate) if imported
                 mbid = req.get("mb_release_id")
@@ -487,9 +510,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Include pipeline download history if available
                 mb_id = album[4]
                 if mb_id and db:
-                    req = db.get_request_by_mb_release_id(mb_id)
+                    req = _db().get_request_by_mb_release_id(mb_id)
                     if req:
-                        history = db.get_download_history(req["id"])
+                        history = _db().get_download_history(req["id"])
                         result["pipeline_id"] = req["id"]
                         result["pipeline_status"] = req["status"]
                         result["pipeline_source"] = req["source"]
@@ -497,10 +520,13 @@ class Handler(BaseHTTPRequestHandler):
                         result["upgrade_queued"] = (
                             req["status"] == "wanted" and bool(req.get("quality_override"))
                         )
-                        result["download_history"] = [
-                            {k: str(v) if hasattr(v, 'isoformat') else v for k, v in h.items()}
-                            for h in history
-                        ]
+                        from web.classify import classify_log_entry as _clf
+                        dh = []
+                        for h in history:
+                            hi = {k: str(v) if hasattr(v, 'isoformat') else v for k, v in h.items()}
+                            hi["verdict"] = _clf(hi)["verdict"]
+                            dh.append(hi)
+                        result["download_history"] = dh
                 self._json(result)
 
             elif path == "/api/beets/recent":
@@ -563,7 +589,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # Check if already exists
-                existing = db.get_request_by_mb_release_id(mbid)
+                existing = _db().get_request_by_mb_release_id(mbid)
                 if existing:
                     self._json({
                         "status": "exists",
@@ -575,7 +601,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Fetch from MB
                 release = mb_api.get_release(mbid)
 
-                req_id = db.add_request(
+                req_id = _db().add_request(
                     mb_release_id=mbid,
                     mb_release_group_id=release.get("release_group_id"),
                     mb_artist_id=release.get("artist_id"),
@@ -588,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Populate tracks
                 if release.get("tracks"):
-                    db.set_tracks(req_id, release["tracks"])
+                    _db().set_tracks(req_id, release["tracks"])
 
                 self._json({
                     "status": "added",
@@ -611,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._error(f"Invalid status: {new_status}")
                     return
 
-                req = db.get_request(int(req_id))
+                req = _db().get_request(int(req_id))
                 if not req:
                     self._error("Not found", 404)
                     return
@@ -635,9 +661,9 @@ class Handler(BaseHTTPRequestHandler):
                             if br_row and br_row[0]:
                                 min_br = int(br_row[0] / 1000)
                         conn.close()
-                    db.reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
+                    _db().reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
                 else:
-                    db.update_status(int(req_id), new_status)
+                    _db().update_status(int(req_id), new_status)
 
                 self._json({"status": "ok", "id": req_id, "new_status": new_status})
 
@@ -668,10 +694,10 @@ class Handler(BaseHTTPRequestHandler):
                     conn.close()
 
                 # Find or create pipeline request
-                existing = db.get_request_by_mb_release_id(mbid)
+                existing = _db().get_request_by_mb_release_id(mbid)
                 if existing:
                     req_id = existing["id"]
-                    db.reset_to_wanted(req_id,
+                    _db().reset_to_wanted(req_id,
                                        quality_override=quality,
                                        min_bitrate=min_bitrate)
                     self._json({
@@ -683,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     # Album in beets but not in pipeline DB — create new request
                     release = mb_api.get_release(mbid)
-                    req_id = db.add_request(
+                    req_id = _db().add_request(
                         mb_release_id=mbid,
                         mb_artist_id=release.get("artist_id"),
                         artist_name=release["artist_name"],
@@ -693,8 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                         source="request",
                     )
                     if release.get("tracks"):
-                        db.set_tracks(req_id, release["tracks"])
-                    db.reset_to_wanted(req_id,
+                        _db().set_tracks(req_id, release["tracks"])
+                    _db().reset_to_wanted(req_id,
                                        quality_override=quality,
                                        min_bitrate=min_bitrate)
                     self._json({
@@ -716,7 +742,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._error("Missing mb_release_id")
                     return
 
-                existing = db.get_request_by_mb_release_id(mbid)
+                existing = _db().get_request_by_mb_release_id(mbid)
                 if not existing:
                     self._error("Not found in pipeline", 404)
                     return
@@ -727,7 +753,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Set min_bitrate override
                 if min_bitrate is not None:
                     min_bitrate = int(min_bitrate)
-                    db._execute(
+                    _db()._execute(
                         "UPDATE album_requests SET min_bitrate = %s WHERE id = %s",
                         (min_bitrate, req_id),
                     )
@@ -756,14 +782,14 @@ class Handler(BaseHTTPRequestHandler):
                         sets = "status = 'imported', quality_override = NULL, updated_at = NOW()"
                         if min_bitrate is not None:
                             sets += f", min_bitrate = {int(min_bitrate)}"
-                        db._execute(
+                        _db()._execute(
                             f"UPDATE album_requests SET {sets} WHERE id = %s",
                             (req_id,),
                         )
                     elif new_status == "wanted" and existing["status"] != "wanted":
-                        db.reset_to_wanted(req_id)
+                        _db().reset_to_wanted(req_id)
                     else:
-                        db.update_status(req_id, new_status)
+                        _db().update_status(req_id, new_status)
 
                 self._json({
                     "status": "ok",
@@ -784,7 +810,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # 1. Denylist the user for this album
-                db.add_denylist(int(req_id), username, "manually banned via web UI")
+                _db().add_denylist(int(req_id), username, "manually banned via web UI")
 
                 # 2. Remove from beets if present
                 beets_removed = False
@@ -805,11 +831,11 @@ class Handler(BaseHTTPRequestHandler):
                         beets_removed = result.returncode == 0
 
                 # 3. Requeue for re-download
-                req = db.get_request(int(req_id))
+                req = _db().get_request(int(req_id))
                 if req:
                     quality = req.get("quality_override") or "flac,mp3 v0,mp3 320"
                     min_br = req.get("min_bitrate")
-                    db.reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
+                    _db().reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
 
                 self._json({
                     "status": "ok",
@@ -827,7 +853,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # Look up download_log entry
-                entry = db.get_download_log_entry(int(log_id))
+                entry = _db().get_download_log_entry(int(log_id))
                 if not entry:
                     self._error(f"Download log entry {log_id} not found", 404)
                     return
@@ -846,7 +872,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # Look up album request for MBID
-                req = db.get_request(request_id)
+                req = _db().get_request(request_id)
                 if not req:
                     self._error(f"Album request {request_id} not found", 404)
                     return
@@ -891,7 +917,7 @@ class Handler(BaseHTTPRequestHandler):
                             pass
 
                 # Log to download_log
-                db.log_download(
+                _db().log_download(
                     request_id=request_id,
                     outcome="force_import",
                     import_result=import_result_json,
@@ -899,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
                 if result.returncode == 0:
-                    db.update_status(request_id, "imported")
+                    _db().update_status(request_id, "imported")
 
                 self._json({
                     "status": "ok" if result.returncode == 0 else "error",
@@ -917,11 +943,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not req_id:
                     self._error("Missing id")
                     return
-                req = db.get_request(int(req_id))
+                req = _db().get_request(int(req_id))
                 if not req:
                     self._error("Not found", 404)
                     return
-                db.delete_request(int(req_id))
+                _db().delete_request(int(req_id))
                 self._json({"status": "ok", "id": req_id})
 
             elif path == "/api/beets/delete":
@@ -1015,7 +1041,7 @@ def main():
     except KeyboardInterrupt:
         pass
     server.server_close()
-    db.close()
+    _db().close()
 
 
 if __name__ == "__main__":

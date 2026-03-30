@@ -249,15 +249,17 @@ class PipelineDB:
         ))
         row = cur.fetchone()
         self.conn.commit()
+        assert row is not None, "INSERT RETURNING should always return a row"
         return row["id"]
 
-    def get_request(self, request_id):
+    def get_request(self, request_id) -> dict[str, object] | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE id = %s", (request_id,)
         )
-        return dict(cur.fetchone()) if cur.rowcount else None
+        row = cur.fetchone()
+        return dict(row) if row else None
 
-    def get_request_by_mb_release_id(self, mb_release_id):
+    def get_request_by_mb_release_id(self, mb_release_id) -> dict[str, object] | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
         )
@@ -488,7 +490,8 @@ class PipelineDB:
 
         # Get current attempt count
         req = self.get_request(request_id)
-        current = req[col]
+        assert req is not None, f"Request {request_id} not found"
+        current: int = int(req[col] or 0)  # type: ignore[arg-type]
         new_count = current + 1
 
         # Exponential backoff: base * 2^(attempts-1), capped
