@@ -196,6 +196,7 @@ class DatabaseSource:
             existing_min_bitrate=dl.existing_min_bitrate,
             existing_spectral_bitrate=dl.existing_spectral_bitrate,
             import_result=dl.import_result,
+            validation_result=dl.validation_result,
         )
 
     def mark_failed(self, album_record, bv_result, usernames=None,
@@ -237,6 +238,7 @@ class DatabaseSource:
             existing_min_bitrate=dl.existing_min_bitrate,
             existing_spectral_bitrate=dl.existing_spectral_bitrate,
             import_result=dl.import_result,
+            validation_result=dl.validation_result,
         )
 
         # Denylist source users

@@ -13,6 +13,92 @@ QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
 @dataclass
+class CandidateSummary:
+    """Summary of a beets candidate match for audit logging."""
+    mbid: str = ""
+    artist: str = ""
+    album: str = ""
+    distance: float = 0.0
+    track_count: int = 0
+    year: Optional[int] = None
+    country: Optional[str] = None
+    extra_tracks: int = 0
+    extra_items: int = 0
+    is_target: bool = False
+
+
+@dataclass
+class ValidationResult:
+    """Structured result from beets validation + audio integrity check.
+
+    Accumulated through the validation pipeline:
+    1. beets_validate() populates candidates, distance, scenario
+    2. Audio integrity check may set scenario=audio_corrupt + corrupt_files
+    3. soularr.py populates source info (username, folder, failed_path, denylisted)
+
+    Stored in download_log.validation_result (JSONB) for complete auditability.
+    """
+    valid: bool = False
+    distance: Optional[float] = None
+    scenario: Optional[str] = None
+    detail: Optional[str] = None
+    mbid_found: bool = False
+    target_mbid: Optional[str] = None
+    candidate_count: int = 0
+    candidates: list[CandidateSummary] = field(default_factory=list)
+    local_track_count: Optional[int] = None
+    # Source info (populated by soularr.py)
+    soulseek_username: Optional[str] = None
+    download_folder: Optional[str] = None
+    failed_path: Optional[str] = None
+    denylisted_users: list[str] = field(default_factory=list)
+    # Audio integrity
+    corrupt_files: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ValidationResult":
+        """Construct from a dict (e.g. parsed JSON)."""
+        candidates = [
+            CandidateSummary(**c) for c in d.get("candidates", [])
+        ]
+        return cls(
+            valid=d.get("valid", False),
+            distance=d.get("distance"),
+            scenario=d.get("scenario"),
+            detail=d.get("detail"),
+            mbid_found=d.get("mbid_found", False),
+            target_mbid=d.get("target_mbid"),
+            candidate_count=d.get("candidate_count", 0),
+            candidates=candidates,
+            local_track_count=d.get("local_track_count"),
+            soulseek_username=d.get("soulseek_username"),
+            download_folder=d.get("download_folder"),
+            failed_path=d.get("failed_path"),
+            denylisted_users=d.get("denylisted_users", []),
+            corrupt_files=d.get("corrupt_files", []),
+            error=d.get("error"),
+        )
+
+    @classmethod
+    def from_json(cls, s: str) -> "ValidationResult":
+        """Deserialize from JSON string."""
+        return cls.from_dict(json.loads(s))
+
+    def get(self, key: str, default: object = None) -> object:
+        """Dict-style .get() for backward compatibility with bv_result dict access."""
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> object:
+        """Dict-style ["key"] access for backward compatibility."""
+        return getattr(self, key)
+
+
+@dataclass
 class SpectralContext:
     """Gathered spectral analysis data for both new and existing files.
 
@@ -64,6 +150,8 @@ class DownloadInfo:
     existing_spectral_bitrate: Optional[int] = None
     # Full import_one.py result (JSON string)
     import_result: Optional[str] = None
+    # Full validation result (JSON string)
+    validation_result: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

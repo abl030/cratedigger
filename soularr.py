@@ -1125,21 +1125,22 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
             bv_result = beets_validate(import_folder_fullpath,
                                        album_data.mb_release_id,
                                        cfg.beets_distance_threshold)
+            # Populate source info on the ValidationResult
+            usernames_pre = set(f.username for f in album_data.files if f.username)
+            bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
+            bv_result.download_folder = import_folder_fullpath
 
-            if bv_result["valid"]:
+            if bv_result.valid:
                 # Repair MP3 headers before audio validation
                 repair_mp3_headers(import_folder_fullpath)
                 # Audio integrity check before staging
                 audio_result = validate_audio(import_folder_fullpath, cfg.audio_check_mode)
                 if not audio_result["valid"]:
-                    bv_result = {
-                        "valid": False,
-                        "distance": bv_result.get("distance"),
-                        "mbid_found": bv_result.get("mbid_found"),
-                        "scenario": "audio_corrupt",
-                        "detail": audio_result["error"],
-                        "error": None,
-                    }
+                    bv_result.valid = False
+                    bv_result.scenario = "audio_corrupt"
+                    bv_result.detail = audio_result["error"]
+                    bv_result.corrupt_files = [
+                        name for name, _err in audio_result.get("failed_files", [])]
 
             # Spectral check for non-VBR MP3 downloads (CBR 320 has no other quality signal)
             if bv_result["valid"]:
@@ -1374,15 +1375,18 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                     # Redownload or high distance: stage only, user reviews manually
                     pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest, download_info=dl_info)
             else:
-                move_failed_import(import_folder_fullpath)
+                failed_dest = move_failed_import(import_folder_fullpath)
+                bv_result.failed_path = failed_dest
                 log_validation_result(album_data, bv_result)
                 usernames = set(f.username for f in album_data.files)
+                bv_result.denylisted_users = sorted(usernames)
                 dl_info = _build_download_info(album_data)
+                dl_info.validation_result = bv_result.to_json()
                 pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames, download_info=dl_info)
                 logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
-                              f"(scenario={bv_result.get('scenario')}, "
-                              f"distance={bv_result.get('distance')}, "
-                              f"detail={bv_result.get('detail')}) "
+                              f"(scenario={bv_result.scenario}, "
+                              f"distance={bv_result.distance}, "
+                              f"detail={bv_result.detail}) "
                               f"| denylisted users: {', '.join(usernames)}")
 
 
@@ -1596,7 +1600,8 @@ def grab_most_wanted(albums):
     return count
 
 
-def move_failed_import(src_path):
+def move_failed_import(src_path) -> "str | None":
+    """Move a failed import to the failed_imports directory. Returns the destination path."""
     failed_imports_dir = "failed_imports"
 
     if not os.path.exists(failed_imports_dir):
@@ -1613,6 +1618,8 @@ def move_failed_import(src_path):
     if os.path.exists(folder_name):
         shutil.move(folder_name, target_path)
         logger.info(f"Failed import moved to: {target_path}")
+        return target_path
+    return None
 
 
 def _normalize_title(s):
