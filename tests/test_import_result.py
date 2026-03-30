@@ -395,5 +395,45 @@ class TestDownloadInfo(unittest.TestCase):
         self.assertEqual(stored["decision"], "import")
 
 
+class TestPopulateDlInfoFromImportResult(unittest.TestCase):
+    """Test the _populate_dl_info_from_import_result helper."""
+
+    def setUp(self) -> None:
+        # Import from soularr (it's in sys.path from the test setup)
+        from soularr import _populate_dl_info_from_import_result
+        self.populate = _populate_dl_info_from_import_result
+
+    def test_flac_conversion(self) -> None:
+        dl = DownloadInfo(filetype="flac", bitrate=0)
+        ir = ImportResult(
+            conversion=ConversionInfo(converted=10, was_converted=True,
+                                      original_filetype="flac", target_filetype="mp3"),
+            quality=QualityInfo(new_min_bitrate=245),
+            spectral=SpectralInfo(grade="genuine", bitrate=None, existing_bitrate=128),
+        )
+        self.populate(dl, ir)
+        self.assertTrue(dl.was_converted)
+        self.assertEqual(dl.filetype, "mp3")
+        self.assertEqual(dl.slskd_filetype, "flac")
+        self.assertEqual(dl.actual_filetype, "mp3")
+        self.assertEqual(dl.bitrate, 245000)
+        self.assertEqual(dl.spectral_grade, "genuine")
+        self.assertEqual(dl.existing_spectral_bitrate, 128)
+        self.assertIsNotNone(dl.import_result)
+
+    def test_no_conversion(self) -> None:
+        dl = DownloadInfo(filetype="mp3", bitrate=320000)
+        ir = ImportResult(
+            conversion=ConversionInfo(),
+            quality=QualityInfo(new_min_bitrate=320),
+            spectral=SpectralInfo(grade="genuine"),
+        )
+        self.populate(dl, ir)
+        self.assertFalse(dl.was_converted)
+        self.assertEqual(dl.slskd_filetype, "mp3")
+        self.assertEqual(dl.actual_filetype, "mp3")
+        self.assertEqual(dl.bitrate, 320000)
+
+
 if __name__ == "__main__":
     unittest.main()

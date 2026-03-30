@@ -864,8 +864,44 @@ def search_and_queue(albums):
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (quality_gate_decision, spectral_import_decision,
                          parse_import_result, DownloadInfo, SpectralContext,
+                         ImportResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS)
 from lib.beets_db import BeetsDB
+
+
+def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
+                                         ir: ImportResult) -> None:
+    """Populate a DownloadInfo from an ImportResult (pure, no I/O)."""
+    conv = ir.conversion
+    qual = ir.quality
+    spec = ir.spectral
+    if conv.was_converted:
+        dl_info.was_converted = True
+        dl_info.original_filetype = conv.original_filetype
+        dl_info.filetype = conv.target_filetype
+        dl_info.is_vbr = True
+        dl_info.slskd_filetype = conv.original_filetype
+        dl_info.actual_filetype = conv.target_filetype
+    else:
+        dl_info.slskd_filetype = dl_info.filetype
+        dl_info.actual_filetype = dl_info.filetype
+    if qual.new_min_bitrate is not None:
+        dl_info.bitrate = qual.new_min_bitrate * 1000
+    dl_info.spectral_grade = spec.grade
+    dl_info.spectral_bitrate = spec.bitrate
+    dl_info.existing_spectral_bitrate = spec.existing_bitrate
+    dl_info.import_result = ir.to_json()
+
+
+def _cleanup_staged_dir(dest: str) -> None:
+    """Remove a staged directory and its parent if empty."""
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+        logger.info(f"  Cleaned up staged dir: {dest}")
+        parent = os.path.dirname(dest)
+        if os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+            logger.info(f"  Cleaned up empty artist dir: {parent}")
 
 
 def _gather_spectral_context(album_data, import_folder: str) -> SpectralContext:
@@ -1214,27 +1250,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                             for line in (result.stdout or "").strip().split("\n"):
                                 logger.error(f"  {line}")
                         else:
-                            # Populate dl_info from typed ImportResult
-                            conv = ir.conversion
-                            qual = ir.quality
-                            spec = ir.spectral
-                            if conv.was_converted:
-                                dl_info.was_converted = True
-                                dl_info.original_filetype = conv.original_filetype
-                                dl_info.filetype = conv.target_filetype
-                                dl_info.is_vbr = True
-                                dl_info.slskd_filetype = conv.original_filetype
-                                dl_info.actual_filetype = conv.target_filetype
-                            else:
-                                dl_info.slskd_filetype = dl_info.filetype
-                                dl_info.actual_filetype = dl_info.filetype
-                            if qual.new_min_bitrate is not None:
-                                dl_info.bitrate = qual.new_min_bitrate * 1000
-                            dl_info.spectral_grade = spec.grade
-                            dl_info.spectral_bitrate = spec.bitrate
-                            dl_info.existing_spectral_bitrate = spec.existing_bitrate
-                            # Store full JSON for audit trail
-                            dl_info.import_result = ir.to_json()
+                            _populate_dl_info_from_import_result(dl_info, ir)
 
                             label = f"{album_data.artist} - {album_data.title}"
                             decision = ir.decision
@@ -1244,25 +1260,19 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                                 pipeline_db_source.mark_done(
                                     album_data, bv_result, dest_path=dest, download_info=dl_info)
                                 # Update upgrade delta
-                                if request_id and (qual.prev_min_bitrate is not None
-                                                   or qual.new_min_bitrate is not None):
+                                if request_id and (ir.quality.prev_min_bitrate is not None
+                                                   or ir.quality.new_min_bitrate is not None):
                                     try:
                                         db = pipeline_db_source._get_db()
                                         db.update_status(request_id, "imported",
-                                                         prev_min_bitrate=qual.prev_min_bitrate,
-                                                         min_bitrate=qual.new_min_bitrate)
+                                                         prev_min_bitrate=ir.quality.prev_min_bitrate,
+                                                         min_bitrate=ir.quality.new_min_bitrate)
                                     except Exception:
                                         logger.exception("Failed to update upgrade delta")
                                 _check_quality_gate(album_data, request_id)
                                 trigger_meelo_scan()
                                 # Clean up staged dir
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
-                                    logger.info(f"  Cleaned up staged dir: {dest}")
-                                    parent = os.path.dirname(dest)
-                                    if os.path.isdir(parent) and not os.listdir(parent):
-                                        os.rmdir(parent)
-                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
+                                _cleanup_staged_dir(dest)
 
                             elif decision == "downgrade":
                                 logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
@@ -1273,14 +1283,13 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                                     db.add_denylist(request_id, username,
                                                     "quality downgrade prevented")
                                 logger.info(f"  Denylisted {usernames} for request {request_id}")
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
+                                _cleanup_staged_dir(dest)
 
                             elif decision in ("transcode_upgrade", "transcode_first",
                                               "transcode_downgrade"):
                                 imported_transcode = decision in ("transcode_upgrade",
                                                                    "transcode_first")
-                                actual_br = qual.new_min_bitrate
+                                actual_br = ir.quality.new_min_bitrate
                                 if imported_transcode:
                                     logger.info(
                                         f"TRANSCODE UPGRADE: {label} "
@@ -1306,13 +1315,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab):
                                     request_id,
                                     quality_override=QUALITY_UPGRADE_TIERS,
                                     min_bitrate=actual_br if imported_transcode else None)
-                                if os.path.isdir(dest):
-                                    shutil.rmtree(dest)
-                                    logger.info(f"  Cleaned up staged dir: {dest}")
-                                    parent = os.path.dirname(dest)
-                                    if os.path.isdir(parent) and not os.listdir(parent):
-                                        os.rmdir(parent)
-                                        logger.info(f"  Cleaned up empty artist dir: {parent}")
+                                _cleanup_staged_dir(dest)
 
                             else:
                                 # Error decisions: conversion_failed, import_failed,
