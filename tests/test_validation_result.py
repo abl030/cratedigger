@@ -11,7 +11,91 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.quality import ValidationResult, CandidateSummary
+from lib.quality import (ValidationResult, CandidateSummary,
+                         HarnessItem, HarnessTrackInfo, TrackMapping)
+
+
+# ============================================================================
+# HarnessItem, HarnessTrackInfo, TrackMapping
+# ============================================================================
+
+class TestHarnessItem(unittest.TestCase):
+
+    def test_defaults(self) -> None:
+        item = HarnessItem()
+        self.assertEqual(item.path, "")
+        self.assertEqual(item.title, "")
+        self.assertIsNone(item.bitrate)
+        self.assertEqual(item.format, "")
+
+    def test_full(self) -> None:
+        item = HarnessItem(
+            path="01 - Track.flac", title="Track", artist="Artist",
+            album="Album", track=1, disc=1, length=213.4,
+            bitrate=1411, format="FLAC", mb_trackid="tid-1",
+            data_source="MusicBrainz",
+        )
+        self.assertEqual(item.path, "01 - Track.flac")
+        self.assertEqual(item.bitrate, 1411)
+        self.assertEqual(item.format, "FLAC")
+
+    def test_attribute_error_on_typo(self) -> None:
+        item = HarnessItem()
+        with self.assertRaises(AttributeError):
+            _ = item.tilte  # type: ignore[attr-defined]
+
+
+class TestHarnessTrackInfo(unittest.TestCase):
+
+    def test_defaults(self) -> None:
+        t = HarnessTrackInfo()
+        self.assertEqual(t.title, "")
+        self.assertIsNone(t.index)
+        self.assertIsNone(t.medium)
+        self.assertEqual(t.track_id, "")
+
+    def test_full(self) -> None:
+        t = HarnessTrackInfo(
+            title="Summertime Blues", artist="Blue Cheer",
+            index=1, medium=1, medium_index=1, medium_total=6,
+            length=213.4, track_id="tid-1",
+            release_track_id="rtid-1", track_alt=None,
+            disctitle=None, data_source="MusicBrainz",
+        )
+        self.assertEqual(t.title, "Summertime Blues")
+        self.assertEqual(t.medium_total, 6)
+        self.assertEqual(t.release_track_id, "rtid-1")
+
+
+class TestTrackMapping(unittest.TestCase):
+
+    def test_construction(self) -> None:
+        m = TrackMapping(
+            item=HarnessItem(path="01.flac", title="Track 1"),
+            track=HarnessTrackInfo(title="Track 1", track_id="t1"),
+        )
+        self.assertEqual(m.item.path, "01.flac")
+        self.assertEqual(m.track.track_id, "t1")
+
+    def test_round_trip_json(self) -> None:
+        """TrackMapping survives JSON round-trip through ValidationResult."""
+        m = TrackMapping(
+            item=HarnessItem(path="01.flac", title="Track 1", bitrate=1411),
+            track=HarnessTrackInfo(title="Track 1", track_id="t1", length=213.4),
+        )
+        vr = ValidationResult(
+            candidates=[CandidateSummary(
+                mbid="abc", mapping=[m],
+            )],
+        )
+        j = vr.to_json()
+        vr2 = ValidationResult.from_json(j)
+        m2 = vr2.candidates[0].mapping[0]
+        self.assertIsInstance(m2, TrackMapping)
+        self.assertEqual(m2.item.path, "01.flac")
+        self.assertEqual(m2.item.bitrate, 1411)
+        self.assertEqual(m2.track.track_id, "t1")
+        self.assertEqual(m2.track.length, 213.4)
 
 
 # ============================================================================
@@ -38,14 +122,15 @@ class TestCandidateSummary(unittest.TestCase):
             mbid="abc-123", artist="Ye", album="BULLY",
             distance=0.45, track_count=12, year=2025,
             country="US",
-            extra_tracks=[{"title": "Bonus 1"}, {"title": "Bonus 2"}],
+            extra_tracks=[HarnessTrackInfo(title="Bonus 1"),
+                          HarnessTrackInfo(title="Bonus 2")],
             extra_items=[],
             is_target=True,
         )
         self.assertEqual(c.mbid, "abc-123")
         self.assertTrue(c.is_target)
         self.assertEqual(len(c.extra_tracks), 2)
-        self.assertEqual(c.extra_tracks[0]["title"], "Bonus 1")
+        self.assertEqual(c.extra_tracks[0].title, "Bonus 1")
 
     def test_from_harness_candidate(self) -> None:
         """Simulate constructing from beets harness candidate dict."""
@@ -70,30 +155,8 @@ class TestCandidateSummary(unittest.TestCase):
                 {"title": "Rock Me Baby", "length": 244.1, "track_id": "t2"},
             ],
         }
-        c = CandidateSummary(
-            mbid=harness_cand["album_id"],
-            artist=harness_cand["artist"],
-            album=harness_cand["album"],
-            distance=harness_cand["distance"],
-            distance_breakdown=harness_cand["distance_breakdown"],
-            track_count=harness_cand["track_count"],
-            year=harness_cand["year"],
-            country=harness_cand["country"],
-            label=harness_cand["label"],
-            catalognum=harness_cand["catalognum"],
-            media=harness_cand["media"],
-            mediums=harness_cand["mediums"],
-            albumtype=harness_cand["albumtype"],
-            albumstatus=harness_cand["albumstatus"],
-            albumdisambig=harness_cand["albumdisambig"],
-            releasegroup_id=harness_cand["releasegroup_id"],
-            va=harness_cand["va"],
-            data_source=harness_cand["data_source"],
-            extra_tracks=harness_cand["extra_tracks"],
-            extra_items=harness_cand["extra_items"],
-            mapping=harness_cand["mapping"],
-            tracks=harness_cand["tracks"],
-        )
+        # Use from_dict — same path as real code (JSON → dict → typed)
+        c = CandidateSummary.from_dict(harness_cand)
         self.assertEqual(c.mbid, "abc-123")
         self.assertEqual(c.distance, 0.02)
         self.assertEqual(c.label, "Philips")
@@ -101,9 +164,9 @@ class TestCandidateSummary(unittest.TestCase):
         self.assertEqual(c.media, "CD")
         self.assertEqual(c.data_source, "MusicBrainz")
         self.assertEqual(len(c.tracks), 2)
-        self.assertEqual(c.tracks[0]["title"], "Summertime Blues")
+        self.assertEqual(c.tracks[0].title, "Summertime Blues")
         self.assertEqual(len(c.mapping), 1)
-        self.assertEqual(c.mapping[0]["item"]["path"], "01.flac")
+        self.assertEqual(c.mapping[0].item.path, "01.flac")
 
     def test_distance_breakdown(self) -> None:
         """CandidateSummary stores per-component distance weights."""
@@ -142,15 +205,16 @@ class TestCandidateSummary(unittest.TestCase):
             candidates=[CandidateSummary(
                 mbid="abc", distance=0.02, is_target=True,
                 tracks=[
-                    {"title": "Track 1", "length": 180.0, "track_id": "t1"},
-                    {"title": "Track 2", "length": 200.0, "track_id": "t2"},
+                    HarnessTrackInfo(title="Track 1", length=180.0, track_id="t1"),
+                    HarnessTrackInfo(title="Track 2", length=200.0, track_id="t2"),
                 ],
             )],
         )
         j = vr.to_json()
         vr2 = ValidationResult.from_json(j)
         self.assertEqual(len(vr2.candidates[0].tracks), 2)
-        self.assertEqual(vr2.candidates[0].tracks[1]["title"], "Track 2")
+        self.assertIsInstance(vr2.candidates[0].tracks[1], HarnessTrackInfo)
+        self.assertEqual(vr2.candidates[0].tracks[1].title, "Track 2")
 
 
 # ============================================================================

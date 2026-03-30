@@ -13,6 +13,53 @@ QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
 @dataclass
+class HarnessItem:
+    """Local file as seen by the beets harness during matching."""
+    path: str = ""
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    track: int = 0
+    disc: int = 0
+    length: float = 0.0
+    bitrate: Optional[int] = None
+    format: str = ""
+    mb_trackid: str = ""
+    data_source: str = ""
+
+
+@dataclass
+class HarnessTrackInfo:
+    """MusicBrainz track info as seen by the beets harness."""
+    title: str = ""
+    artist: str = ""
+    index: Optional[int] = None
+    medium: Optional[int] = None
+    medium_index: Optional[int] = None
+    medium_total: Optional[int] = None
+    length: float = 0.0
+    track_id: str = ""
+    release_track_id: str = ""
+    track_alt: Optional[str] = None
+    disctitle: Optional[str] = None
+    data_source: str = ""
+
+
+@dataclass
+class TrackMapping:
+    """Which local item matched which MB track."""
+    item: HarnessItem = field(default_factory=HarnessItem)
+    track: HarnessTrackInfo = field(default_factory=HarnessTrackInfo)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TrackMapping":
+        return cls(
+            item=HarnessItem(**d["item"]) if "item" in d else HarnessItem(),
+            track=HarnessTrackInfo(**d["track"]) if "track" in d else HarnessTrackInfo(),
+        )
+
+
+@dataclass
 class CandidateSummary:
     """Full beets candidate match data for audit logging.
 
@@ -49,10 +96,50 @@ class CandidateSummary:
     asin: str = ""
     # Tracks and mapping
     track_count: int = 0
-    tracks: list[dict] = field(default_factory=list)
-    mapping: list[dict] = field(default_factory=list)       # [{item: {...}, track: {...}}, ...]
-    extra_items: list[dict] = field(default_factory=list)    # local files with no MB match
-    extra_tracks: list[dict] = field(default_factory=list)   # MB tracks with no local file
+    tracks: list[HarnessTrackInfo] = field(default_factory=list)
+    mapping: list[TrackMapping] = field(default_factory=list)
+    extra_items: list[HarnessItem] = field(default_factory=list)
+    extra_tracks: list[HarnessTrackInfo] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CandidateSummary":
+        """Deserialize from a dict, constructing typed inner objects."""
+        tracks = [HarnessTrackInfo(**t) for t in d.get("tracks", [])]
+        mapping = [TrackMapping.from_dict(m) for m in d.get("mapping", [])]
+        extra_items = [HarnessItem(**i) for i in d.get("extra_items", [])]
+        extra_tracks = [HarnessTrackInfo(**t) for t in d.get("extra_tracks", [])]
+        return cls(
+            mbid=d.get("mbid", d.get("album_id", "")),
+            artist=d.get("artist", ""),
+            album=d.get("album", ""),
+            distance=d.get("distance", 0.0),
+            distance_breakdown=d.get("distance_breakdown", {}),
+            is_target=d.get("is_target", False),
+            albumdisambig=d.get("albumdisambig", ""),
+            year=d.get("year"),
+            original_year=d.get("original_year"),
+            country=d.get("country"),
+            label=d.get("label"),
+            catalognum=d.get("catalognum"),
+            media=d.get("media"),
+            mediums=d.get("mediums"),
+            albumtype=d.get("albumtype"),
+            albumtypes=d.get("albumtypes", []),
+            albumstatus=d.get("albumstatus"),
+            releasegroup_id=d.get("releasegroup_id", ""),
+            release_group_title=d.get("release_group_title", ""),
+            va=d.get("va", False),
+            language=d.get("language"),
+            script=d.get("script"),
+            data_source=d.get("data_source", ""),
+            barcode=d.get("barcode", ""),
+            asin=d.get("asin", ""),
+            track_count=d.get("track_count", 0),
+            tracks=tracks,
+            mapping=mapping,
+            extra_items=extra_items,
+            extra_tracks=extra_tracks,
+        )
 
 
 @dataclass
@@ -96,7 +183,7 @@ class ValidationResult:
     def from_dict(cls, d: dict) -> "ValidationResult":
         """Construct from a dict (e.g. parsed JSON)."""
         candidates = [
-            CandidateSummary(**c) for c in d.get("candidates", [])
+            CandidateSummary.from_dict(c) for c in d.get("candidates", [])
         ]
         return cls(
             valid=d.get("valid", False),

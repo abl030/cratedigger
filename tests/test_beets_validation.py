@@ -242,7 +242,8 @@ class TestBeetsValidate(unittest.TestCase):
         candidates = [{
             "index": 0, "distance": 0.02, "artist": "Test Artist",
             "album": "Test Album", "album_id": mbid, "year": 2020,
-            "country": "US", "track_count": 12, "extra_tracks": 2,
+            "country": "US", "track_count": 12,
+            "extra_tracks": [{"title": "Bonus 1"}, {"title": "Bonus 2"}],
             "albumstatus": "Official",
         }]
         msg = json.dumps({

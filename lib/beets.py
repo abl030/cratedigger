@@ -23,40 +23,9 @@ logger = logging.getLogger("soularr")
 
 def _candidate_from_harness(cand: dict, target_mbid: str) -> CandidateSummary:
     """Build a CandidateSummary from a beets harness candidate dict."""
-    return CandidateSummary(
-        mbid=cand.get("album_id", ""),
-        artist=cand.get("artist", ""),
-        album=cand.get("album", ""),
-        distance=cand.get("distance", 0.0),
-        distance_breakdown=cand.get("distance_breakdown", {}),
-        is_target=(cand.get("album_id", "") == target_mbid),
-        # AlbumInfo metadata
-        albumdisambig=cand.get("albumdisambig", ""),
-        year=cand.get("year"),
-        original_year=cand.get("original_year"),
-        country=cand.get("country"),
-        label=cand.get("label"),
-        catalognum=cand.get("catalognum"),
-        media=cand.get("media"),
-        mediums=cand.get("mediums"),
-        albumtype=cand.get("albumtype"),
-        albumtypes=cand.get("albumtypes", []),
-        albumstatus=cand.get("albumstatus"),
-        releasegroup_id=cand.get("releasegroup_id", ""),
-        release_group_title=cand.get("release_group_title", ""),
-        va=cand.get("va", False),
-        language=cand.get("language"),
-        script=cand.get("script"),
-        data_source=cand.get("data_source", ""),
-        barcode=cand.get("barcode", ""),
-        asin=cand.get("asin", ""),
-        # Tracks and mapping
-        track_count=cand.get("track_count", 0),
-        tracks=cand.get("tracks", []),
-        mapping=cand.get("mapping", []),
-        extra_items=cand.get("extra_items", []),
-        extra_tracks=cand.get("extra_tracks", []),
-    )
+    # Mark the target MBID before delegating to from_dict
+    d = {**cand, "is_target": cand.get("album_id", "") == target_mbid}
+    return CandidateSummary.from_dict(d)
 
 
 def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0.15):
