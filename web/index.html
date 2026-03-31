@@ -145,29 +145,32 @@
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
 
-  /* Decision pipeline diagram */
-  .dp { font-size: 13px; }
-  .dp-title { font-size: 1.1em; color: #aaa; margin-bottom: 16px; font-weight: 600; }
-  .dp-row { display: flex; gap: 12px; margin-bottom: 2px; }
-  .dp-branch { display: flex; gap: 12px; }
-  .dp-branch > div { flex: 1; }
-  .dp-node { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 0; }
-  .dp-node-title { font-weight: 600; font-size: 0.9em; margin-bottom: 4px; }
-  .dp-node-body { color: #999; font-size: 0.85em; line-height: 1.5; }
-  .dp-node-body code { background: #252525; padding: 1px 5px; border-radius: 3px; color: #ddd; font-size: 0.95em; }
-  .dp-rule { color: #888; }
-  .dp-val { color: #6d6; font-weight: 500; }
-  .dp-outcome { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em; font-weight: 500; }
-  .dp-out-green { background: #1a3a1a; color: #6d6; }
-  .dp-out-amber { background: #3a3a1a; color: #da6; }
-  .dp-out-red { background: #3a1a1a; color: #d66; }
-  .dp-arrow { text-align: center; color: #555; font-size: 16px; line-height: 1; padding: 3px 0; }
-  .dp-arrow-label { font-size: 0.75em; color: #666; }
-  .dp-split { display: flex; gap: 12px; margin-bottom: 2px; }
-  .dp-split > div { flex: 1; }
-  .dp-split-label { text-align: center; font-size: 0.8em; color: #888; font-weight: 600; margin-bottom: 4px; }
-  .dp-section { margin-bottom: 20px; }
-  .dp-section-title { color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #2a3a2a; }
+  /* Decision simulator */
+  .ds { font-size: 13px; }
+  .ds-title { font-size: 1.1em; color: #aaa; margin-bottom: 12px; font-weight: 600; }
+  .ds-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .ds-field { display: flex; flex-direction: column; gap: 2px; }
+  .ds-field label { font-size: 0.8em; color: #888; }
+  .ds-field select, .ds-field input { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font-size: 13px; }
+  .ds-field select:focus, .ds-field input:focus { outline: none; border-color: #6a9; }
+  .ds-run { grid-column: 1 / -1; }
+  .ds-run button { width: 100%; padding: 10px; background: #2a3a2a; color: #6a9; border: 1px solid #6a9; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+  .ds-run button:hover { background: #3a4a3a; }
+  .ds-results { margin-top: 8px; }
+  .ds-stage { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; }
+  .ds-stage-title { font-weight: 600; font-size: 0.85em; color: #888; margin-bottom: 4px; }
+  .ds-stage-value { font-size: 0.95em; font-weight: 500; }
+  .ds-outcome { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.9em; font-weight: 500; }
+  .ds-green { background: #1a3a1a; color: #6d6; }
+  .ds-amber { background: #3a3a1a; color: #da6; }
+  .ds-red { background: #3a1a1a; color: #d66; }
+  .ds-skip { color: #555; font-style: italic; }
+  .ds-summary { background: #1a1a2a; border: 1px solid #335; border-radius: 6px; padding: 12px; margin-top: 12px; }
+  .ds-summary-row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .ds-summary-label { color: #888; }
+  .ds-presets { margin-bottom: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .ds-preset { padding: 4px 10px; background: #222; border: 1px solid #444; border-radius: 4px; cursor: pointer; color: #aaa; font-size: 0.8em; }
+  .ds-preset:hover { border-color: #6a9; color: #6a9; }
 </style>
 </head>
 <body>
@@ -1260,164 +1263,212 @@ async function executeBeetsDeletion(id, btn) {
   }
 }
 
-// --- Decisions tab ---
+// --- Decisions tab (simulator) ---
 
-let decisionConstants = null;
+let dsConstants = null;
+let dsLoaded = false;
 
 async function loadDecisions() {
+  if (dsLoaded) return;
   const el = document.getElementById('decisions-content');
-  if (decisionConstants) { renderDecisionDiagram(); return; }
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
     const r = await fetch(`${API}/api/pipeline/constants`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    decisionConstants = await r.json();
-    renderDecisionDiagram();
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load constants</div>'; }
+    dsConstants = await r.json();
+    dsLoaded = true;
+    renderSimulatorForm();
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
-function renderDecisionDiagram() {
+function renderSimulatorForm() {
   const el = document.getElementById('decisions-content');
-  const c = decisionConstants;
-  if (!c) return;
+  const c = dsConstants;
 
-  function node(title, body, border) {
-    const b = border || '#333';
-    return `<div class="dp-node" style="border-color:${b}"><div class="dp-node-title">${title}</div><div class="dp-node-body">${body}</div></div>`;
-  }
-  function arrow(label) {
-    return `<div class="dp-arrow">\u2502${label ? `<br><span class="dp-arrow-label">${label}</span>` : ''}</div>`;
-  }
-  function out(text, cls) { return `<span class="dp-outcome ${cls}">${text}</span>`; }
-  const g = cls => `dp-out-${cls}`;
-
-  el.innerHTML = `<div class="dp">
-    <div class="dp-title">Quality Decision Pipeline</div>
-
-    <div class="dp-section">
-      <div class="dp-section-title">Download Complete</div>
-      ${node('File Type Check', 'Is the download FLAC or MP3?')}
+  el.innerHTML = `<div class="ds">
+    <div class="ds-title">Decision Pipeline Simulator</div>
+    <div style="color:#666;font-size:0.85em;margin-bottom:12px;">
+      Calls the real decision functions with your inputs. Thresholds: transcode &lt; ${c.TRANSCODE_MIN_BITRATE_KBPS}kbps, quality gate &lt; ${c.QUALITY_MIN_BITRATE_KBPS}kbps, spectral suspect \u2265 ${c.HF_DEFICIT_SUSPECT}dB, marginal \u2265 ${c.HF_DEFICIT_MARGINAL}dB
     </div>
-
-    ${arrow()}
-
-    <div class="dp-split">
-      <div>
-        <div class="dp-split-label">FLAC path</div>
-
-        ${node('Spectral Analysis', `
-          Per-track HF deficit measured (sox bandpass 12\u201320kHz vs 1\u20134kHz ref):<br>
-          &lt; <code>${c.HF_DEFICIT_MARGINAL}dB</code> \u2192 ${out('genuine', g('green'))}<br>
-          ${c.HF_DEFICIT_MARGINAL}\u2013<code>${c.HF_DEFICIT_SUSPECT}dB</code> \u2192 ${out('marginal', g('amber'))}<br>
-          \u2265 <code>${c.HF_DEFICIT_SUSPECT}dB</code> or cliff detected \u2192 ${out('suspect', g('red'))}<br>
-          <span style="color:#666;">Cliff: ${c.MIN_CLIFF_SLICES}+ slices steeper than ${c.CLIFF_THRESHOLD_DB_PER_KHZ} dB/kHz</span>
-        `, '#335')}
-
-        ${arrow()}
-
-        ${node('Album Grade', `
-          Count tracks graded <span style="color:#d66;">suspect</span> only \u2014 marginal does NOT count:<br>
-          \u2265 75% suspect \u2192 ${out('likely_transcode', g('red'))}<br>
-          \u2265 <code>${c.ALBUM_SUSPECT_PCT}%</code> suspect \u2192 ${out('suspect', g('red'))}<br>
-          &lt; ${c.ALBUM_SUSPECT_PCT}% suspect \u2192 ${out('genuine', g('green'))}<br>
-          <span style="color:#666;">An album with 100% marginal tracks = "genuine"</span>
-        `, '#335')}
-
-        ${arrow()}
-
-        ${node('Convert FLAC \u2192 V0', `
-          ffmpeg <code>-q:a 0</code> (VBR V0)<br>
-          Measure post-conversion min bitrate across all tracks
-        `, '#335')}
-
-        ${arrow()}
-
-        ${node('Transcode Detection', `
-          post_conv_bitrate &lt; <code>${c.TRANSCODE_MIN_BITRATE_KBPS}kbps</code>?<br>
-          YES \u2192 ${out('is_transcode = true', g('red'))}<br>
-          NO \u2192 ${out('is_transcode = false', g('green'))}<br>
-          <span style="color:#666;">Lo-fi lossless (demos, live) can produce genuine V0 below this threshold</span>
-        `, '#533')}
-
-        ${arrow()}
-
-        ${node('Verified Lossless', `
-          converted AND NOT is_transcode?<br>
-          YES \u2192 ${out('will_be_verified_lossless = true', g('green'))}<br>
-          NO \u2192 ${out('will_be_verified_lossless = false', g('amber'))}
-        `, '#353')}
-
+    <div class="ds-presets">
+      <span class="ds-preset" onclick="dsPreset('virginia')">Virginia EP (lo-fi FLAC)</span>
+      <span class="ds-preset" onclick="dsPreset('mtngoats')">Mtn Goats (fake 320)</span>
+      <span class="ds-preset" onclick="dsPreset('genuine_flac')">Genuine FLAC</span>
+      <span class="ds-preset" onclick="dsPreset('cbr320')">CBR 320 (no spectral)</span>
+      <span class="ds-preset" onclick="dsPreset('vbr_v0')">VBR V0 MP3</span>
+    </div>
+    <div class="ds-form" id="ds-form">
+      <div class="ds-field">
+        <label>File type</label>
+        <select id="ds-is_flac">
+          <option value="false">MP3</option>
+          <option value="true">FLAC</option>
+        </select>
       </div>
-      <div>
-        <div class="dp-split-label">MP3 path</div>
-
-        ${node('VBR or CBR?', `
-          Count distinct bitrates across tracks:<br>
-          Multiple distinct \u2192 ${out('VBR', g('green'))} \u2192 skip to Quality Comparison<br>
-          All same \u2192 ${out('CBR', g('amber'))} \u2192 run spectral check
-        `, '#335')}
-
-        ${arrow()}
-
-        ${node('CBR Spectral Check', `
-          Same per-track analysis as FLAC path.<br>
-          Album grade ${out('suspect', g('red'))} or ${out('likely_transcode', g('red'))}:<br>
-          \u2003 New spectral_br \u2264 existing? \u2192 ${out('REJECT + denylist', g('red'))}<br>
-          \u2003 New spectral_br &gt; existing? \u2192 ${out('IMPORT + denylist', g('amber'))}<br>
-          Album grade ${out('genuine', g('green'))} / ${out('marginal', g('amber'))}:<br>
-          \u2003 \u2192 ${out('IMPORT', g('green'))}
-        `, '#335')}
-
+      <div class="ds-field">
+        <label>Min bitrate (kbps)</label>
+        <input type="number" id="ds-min_bitrate" placeholder="e.g. 256">
       </div>
+      <div class="ds-field">
+        <label>CBR?</label>
+        <select id="ds-is_cbr">
+          <option value="false">No (VBR)</option>
+          <option value="true">Yes (CBR)</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Spectral grade</label>
+        <select id="ds-spectral_grade">
+          <option value="">(none)</option>
+          <option value="genuine">genuine</option>
+          <option value="marginal">marginal</option>
+          <option value="suspect">suspect</option>
+          <option value="likely_transcode">likely_transcode</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Spectral bitrate (kbps)</label>
+        <input type="number" id="ds-spectral_bitrate" placeholder="cliff estimate">
+      </div>
+      <div class="ds-field">
+        <label>Existing min bitrate (kbps)</label>
+        <input type="number" id="ds-existing_min_bitrate" placeholder="in beets">
+      </div>
+      <div class="ds-field">
+        <label>Existing spectral bitrate</label>
+        <input type="number" id="ds-existing_spectral_bitrate" placeholder="on disk">
+      </div>
+      <div class="ds-field">
+        <label>Override min bitrate</label>
+        <input type="number" id="ds-override_min_bitrate" placeholder="pipeline DB">
+      </div>
+      <div class="ds-field">
+        <label>Post-conversion bitrate</label>
+        <input type="number" id="ds-post_conversion_min_bitrate" placeholder="after FLAC\u2192V0">
+      </div>
+      <div class="ds-field">
+        <label>Converted count</label>
+        <input type="number" id="ds-converted_count" placeholder="FLAC files" value="0">
+      </div>
+      <div class="ds-field">
+        <label>Verified lossless (existing)</label>
+        <select id="ds-verified_lossless">
+          <option value="false">No</option>
+          <option value="true">Yes</option>
+        </select>
+      </div>
+      <div class="ds-run"><button onclick="runSimulator()">Run Pipeline</button></div>
     </div>
-
-    ${arrow()}
-
-    <div class="dp-section">
-      <div class="dp-section-title">Quality Comparison (import_quality_decision)</div>
-      ${node('Quality Comparison', `
-        <code>effective_existing = override_min_bitrate ?? existing_min_bitrate</code><br>
-        <span style="color:#666;">Override comes from pipeline DB min_bitrate (can be container lie!)</span><br><br>
-        will_be_verified_lossless? \u2192 ${out('always IMPORT', g('green'))} (V0 from genuine FLAC beats everything)<br><br>
-        new_min_br &gt; effective_existing:<br>
-        \u2003 is_transcode? \u2192 ${out('transcode_upgrade', g('amber'))} (import + denylist + keep searching)<br>
-        \u2003 else \u2192 ${out('import', g('green'))}<br><br>
-        new_min_br \u2264 effective_existing:<br>
-        \u2003 is_transcode? \u2192 ${out('transcode_downgrade', g('red'))} (reject + denylist)<br>
-        \u2003 else \u2192 ${out('downgrade', g('red'))} (reject)
-      `, '#353')}
-    </div>
-
-    ${arrow('beets import runs')}
-
-    <div class="dp-section">
-      <div class="dp-section-title">Post-Import Quality Gate (quality_gate_decision)</div>
-      ${node('Quality Gate', `
-        <code>gate_br = min(beets_min_bitrate, spectral_bitrate)</code><br>
-        <span style="color:#666;">Spectral overrides container bitrate if lower (catches fake 320s)</span><br><br>
-        verified_lossless AND gate_br &lt; ${c.QUALITY_MIN_BITRATE_KBPS}?<br>
-        \u2003 \u2192 force gate_br = <code>${c.QUALITY_MIN_BITRATE_KBPS}</code> (lo-fi pass)<br><br>
-        gate_br &lt; <code>${c.QUALITY_MIN_BITRATE_KBPS}kbps</code> \u2192 ${out('REQUEUE_UPGRADE', g('amber'))}<br>
-        \u2003 Search: <code>${c.QUALITY_UPGRADE_TIERS}</code><br><br>
-        CBR + NOT verified_lossless \u2192 ${out('REQUEUE_FLAC', g('amber'))}<br>
-        \u2003 Search: <code>flac</code> only<br><br>
-        else \u2192 ${out('ACCEPT', g('green'))} \u2014 album is done
-      `, '#353')}
-    </div>
-
-    ${arrow()}
-
-    <div class="dp-section">
-      <div class="dp-section-title">Final State</div>
-      ${node('Album Status', `
-        ${out('ACCEPT', g('green'))} \u2192 status = imported, done<br>
-        ${out('REQUEUE_UPGRADE', g('amber'))} \u2192 status = wanted, quality_override = "${c.QUALITY_UPGRADE_TIERS}"<br>
-        ${out('REQUEUE_FLAC', g('amber'))} \u2192 status = wanted, quality_override = "flac"<br>
-        ${out('transcode_upgrade', g('amber'))} \u2192 imported + denylist source + reset to wanted<br>
-        ${out('REJECT / DOWNGRADE', g('red'))} \u2192 stays wanted, denylist source
-      `)}
-    </div>
+    <div id="ds-results"></div>
   </div>`;
+}
+
+const DS_PRESETS = {
+  virginia: {
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false',
+    spectral_grade: 'genuine', spectral_bitrate: '',
+    existing_min_bitrate: '192', existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '209',
+    converted_count: '12', verified_lossless: 'false',
+  },
+  mtngoats: {
+    is_flac: 'false', min_bitrate: '138', is_cbr: 'false',
+    spectral_grade: 'genuine', spectral_bitrate: '128',
+    existing_min_bitrate: '173', existing_spectral_bitrate: '128',
+    override_min_bitrate: '320', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+  },
+  genuine_flac: {
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false',
+    spectral_grade: 'genuine', spectral_bitrate: '',
+    existing_min_bitrate: '192', existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '245',
+    converted_count: '12', verified_lossless: 'false',
+  },
+  cbr320: {
+    is_flac: 'false', min_bitrate: '320', is_cbr: 'true',
+    spectral_grade: '', spectral_bitrate: '',
+    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+  },
+  vbr_v0: {
+    is_flac: 'false', min_bitrate: '245', is_cbr: 'false',
+    spectral_grade: '', spectral_bitrate: '',
+    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+  },
+};
+
+function dsPreset(name) {
+  const p = DS_PRESETS[name];
+  if (!p) return;
+  for (const [key, val] of Object.entries(p)) {
+    const el = document.getElementById('ds-' + key);
+    if (el) el.value = val;
+  }
+  runSimulator();
+}
+
+async function runSimulator() {
+  const fields = ['is_flac','min_bitrate','is_cbr','spectral_grade','spectral_bitrate',
+    'existing_min_bitrate','existing_spectral_bitrate','override_min_bitrate',
+    'post_conversion_min_bitrate','converted_count','verified_lossless'];
+  const params = new URLSearchParams();
+  for (const f of fields) {
+    const v = document.getElementById('ds-' + f)?.value;
+    if (v) params.set(f, v);
+  }
+  const el = document.getElementById('ds-results');
+  el.innerHTML = '<div class="loading">Running...</div>';
+  try {
+    const r = await fetch(`${API}/api/pipeline/simulate?${params}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    renderSimulatorResults(data);
+  } catch (e) { el.innerHTML = '<div class="loading">Failed</div>'; }
+}
+
+function renderSimulatorResults(r) {
+  const el = document.getElementById('ds-results');
+
+  function stageColor(val) {
+    if (!val) return 'ds-skip';
+    if (['import', 'import_upgrade', 'import_no_exist', 'accept',
+         'preflight_existing'].includes(val)) return 'ds-green';
+    if (['reject', 'downgrade', 'transcode_downgrade'].includes(val)) return 'ds-red';
+    return 'ds-amber';
+  }
+  function stageHtml(title, val) {
+    const cls = stageColor(val);
+    const display = val ? `<span class="ds-outcome ${cls}">${val}</span>` : '<span class="ds-skip">skipped</span>';
+    return `<div class="ds-stage"><div class="ds-stage-title">${title}</div><div class="ds-stage-value">${display}</div></div>`;
+  }
+  function boolBadge(val, trueLabel, falseLabel) {
+    return val
+      ? `<span class="ds-outcome ds-green">${trueLabel}</span>`
+      : `<span class="ds-outcome ds-red">${falseLabel}</span>`;
+  }
+
+  let html = '<div class="ds-results">';
+  html += stageHtml('Stage 1: Pre-import Spectral', r.stage1_spectral);
+  html += stageHtml('Stage 2: Import Decision', r.stage2_import);
+  html += stageHtml('Stage 3: Quality Gate', r.stage3_quality_gate);
+
+  html += `<div class="ds-summary">
+    <div class="ds-summary-row"><span class="ds-summary-label">Final status</span>
+      <span class="ds-outcome ${r.final_status === 'imported' ? 'ds-green' : 'ds-amber'}">${r.final_status || 'none'}</span></div>
+    <div class="ds-summary-row"><span class="ds-summary-label">Imported to beets?</span>
+      ${boolBadge(r.imported, 'yes', 'no')}</div>
+    <div class="ds-summary-row"><span class="ds-summary-label">Source denylisted?</span>
+      ${boolBadge(!r.denylisted, 'no', 'yes')}</div>
+    <div class="ds-summary-row"><span class="ds-summary-label">Keep searching?</span>
+      ${r.keep_searching ? '<span class="ds-outcome ds-amber">yes</span>' : '<span class="ds-outcome ds-green">no (done)</span>'}</div>
+  </div>`;
+
+  html += '</div>';
+  el.innerHTML = html;
 }
 
 function esc(s) {

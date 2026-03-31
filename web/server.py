@@ -201,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/pipeline/recent": "_get_pipeline_recent",
         "/api/pipeline/all": "_get_pipeline_all",
         "/api/pipeline/constants": "_get_pipeline_constants",
+        "/api/pipeline/simulate": "_get_pipeline_simulate",
         "/api/beets/search": "_get_beets_search",
         "/api/beets/recent": "_get_beets_recent",
     }
@@ -505,6 +506,37 @@ class Handler(BaseHTTPRequestHandler):
             "MIN_CLIFF_SLICES": MIN_CLIFF_SLICES,
             "CLIFF_THRESHOLD_DB_PER_KHZ": CLIFF_THRESHOLD_DB_PER_KHZ,
         })
+
+    def _get_pipeline_simulate(self, params: dict[str, list[str]]) -> None:
+        """Run full_pipeline_decision() with query-string inputs."""
+        from quality import full_pipeline_decision
+
+        def _str(key: str) -> str | None:
+            v = params.get(key, [None])[0]
+            return v if v else None
+
+        def _int(key: str) -> int | None:
+            v = _str(key)
+            return int(v) if v else None
+
+        def _bool(key: str) -> bool:
+            v = _str(key)
+            return v in ("true", "1", "yes") if v else False
+
+        result = full_pipeline_decision(
+            is_flac=_bool("is_flac"),
+            min_bitrate=_int("min_bitrate") or 0,
+            is_cbr=_bool("is_cbr"),
+            spectral_grade=_str("spectral_grade"),
+            spectral_bitrate=_int("spectral_bitrate"),
+            existing_min_bitrate=_int("existing_min_bitrate"),
+            existing_spectral_bitrate=_int("existing_spectral_bitrate"),
+            override_min_bitrate=_int("override_min_bitrate"),
+            post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
+            converted_count=_int("converted_count") or 0,
+            verified_lossless=_bool("verified_lossless"),
+        )
+        self._json(result)
 
     def _get_pipeline_detail(self, params: dict[str, list[str]], req_id_str: str) -> None:
         req_id = int(req_id_str)

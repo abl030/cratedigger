@@ -387,5 +387,127 @@ class TestSpectralContext(unittest.TestCase):
         self.assertIsNone(ctx.grade)
 
 
+# ============================================================================
+# full_pipeline_decision contract tests
+# ============================================================================
+# These lock the interface between full_pipeline_decision() and the web UI
+# simulator. If a stage is added/removed or the result shape changes, these
+# fail — forcing the simulator to be updated in sync.
+
+from lib.quality import full_pipeline_decision
+import inspect
+
+# The exact keys the simulator reads from the result dict
+EXPECTED_RESULT_KEYS = {
+    "stage1_spectral", "stage2_import", "stage3_quality_gate",
+    "final_status", "imported", "denylisted", "keep_searching",
+}
+
+# Valid values for each stage (None means stage was skipped)
+VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
+VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
+                "transcode_downgrade", "transcode_first",
+                "preflight_existing"}
+VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_flac"}
+VALID_FINAL_STATUS = {None, "imported", "wanted"}
+
+# The exact parameter names the simulator form submits
+EXPECTED_PARAMS = {
+    "is_flac", "min_bitrate", "is_cbr",
+    "spectral_grade", "spectral_bitrate",
+    "existing_min_bitrate", "existing_spectral_bitrate",
+    "override_min_bitrate",
+    "post_conversion_min_bitrate", "converted_count",
+    "verified_lossless",
+}
+
+
+class TestFullPipelineContract(unittest.TestCase):
+    """Contract tests for full_pipeline_decision() — the web simulator depends
+    on these exact keys, values, and parameter names."""
+
+    def test_result_keys_match_contract(self):
+        """Result dict must have exactly the keys the simulator expects."""
+        r = full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=False)
+        self.assertEqual(set(r.keys()), EXPECTED_RESULT_KEYS)
+
+    def test_parameter_names_match_contract(self):
+        """Function signature must accept exactly the params the simulator sends."""
+        sig = inspect.signature(full_pipeline_decision)
+        actual_params = set(sig.parameters.keys())
+        self.assertEqual(actual_params, EXPECTED_PARAMS)
+
+    def test_stage1_values_in_contract(self):
+        """Stage 1 spectral decisions must be from the known set."""
+        # Run several representative cases
+        cases = [
+            dict(is_flac=False, min_bitrate=320, is_cbr=True,
+                 spectral_grade="suspect", spectral_bitrate=160,
+                 existing_spectral_bitrate=160),
+            dict(is_flac=False, min_bitrate=320, is_cbr=True,
+                 spectral_grade="genuine"),
+            dict(is_flac=False, min_bitrate=256, is_cbr=False),
+            dict(is_flac=False, min_bitrate=320, is_cbr=True,
+                 spectral_grade="suspect", spectral_bitrate=200,
+                 existing_spectral_bitrate=128),
+        ]
+        for kwargs in cases:
+            r = full_pipeline_decision(**kwargs)
+            self.assertIn(r["stage1_spectral"], VALID_STAGE1,
+                          f"Unexpected stage1 value: {r['stage1_spectral']} for {kwargs}")
+
+    def test_stage2_values_in_contract(self):
+        """Stage 2 import decisions must be from the known set."""
+        cases = [
+            dict(is_flac=True, min_bitrate=0, is_cbr=False,
+                 spectral_grade="genuine", converted_count=10,
+                 post_conversion_min_bitrate=245),
+            dict(is_flac=True, min_bitrate=0, is_cbr=False,
+                 spectral_grade="genuine", converted_count=10,
+                 post_conversion_min_bitrate=190),
+            dict(is_flac=True, min_bitrate=0, is_cbr=False,
+                 spectral_grade="genuine", converted_count=10,
+                 post_conversion_min_bitrate=245, existing_min_bitrate=300),
+            dict(is_flac=False, min_bitrate=256, is_cbr=False),
+            dict(is_flac=False, min_bitrate=128, is_cbr=False,
+                 existing_min_bitrate=256),
+        ]
+        for kwargs in cases:
+            r = full_pipeline_decision(**kwargs)
+            self.assertIn(r["stage2_import"], VALID_STAGE2,
+                          f"Unexpected stage2 value: {r['stage2_import']} for {kwargs}")
+
+    def test_stage3_values_in_contract(self):
+        """Stage 3 quality gate decisions must be from the known set."""
+        cases = [
+            dict(is_flac=True, min_bitrate=0, is_cbr=False,
+                 spectral_grade="genuine", converted_count=10,
+                 post_conversion_min_bitrate=245),
+            dict(is_flac=False, min_bitrate=320, is_cbr=True),
+            dict(is_flac=False, min_bitrate=256, is_cbr=False),
+            dict(is_flac=False, min_bitrate=180, is_cbr=False),
+        ]
+        for kwargs in cases:
+            r = full_pipeline_decision(**kwargs)
+            self.assertIn(r["stage3_quality_gate"], VALID_STAGE3,
+                          f"Unexpected stage3 value: {r['stage3_quality_gate']} for {kwargs}")
+
+    def test_final_status_values_in_contract(self):
+        """final_status must be from the known set."""
+        r1 = full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=False)
+        self.assertIn(r1["final_status"], VALID_FINAL_STATUS)
+        r2 = full_pipeline_decision(is_flac=False, min_bitrate=128, is_cbr=False,
+                                    existing_min_bitrate=256)
+        self.assertIn(r2["final_status"], VALID_FINAL_STATUS)
+        r3 = full_pipeline_decision(is_flac=False, min_bitrate=320, is_cbr=True)
+        self.assertIn(r3["final_status"], VALID_FINAL_STATUS)
+
+    def test_boolean_fields_are_bool(self):
+        """imported, denylisted, keep_searching must be booleans."""
+        r = full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=False)
+        for key in ("imported", "denylisted", "keep_searching"):
+            self.assertIsInstance(r[key], bool, f"{key} should be bool")
+
+
 if __name__ == "__main__":
     unittest.main()
