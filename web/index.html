@@ -145,9 +145,24 @@
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
 
-  /* Decision simulator */
+  /* Decision diagram + simulator */
   .ds { font-size: 13px; }
   .ds-title { font-size: 1.1em; color: #aaa; margin-bottom: 12px; font-weight: 600; }
+  .dp-stage { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 4px; }
+  .dp-stage-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .dp-stage-title { font-weight: 600; font-size: 0.9em; }
+  .dp-stage-fn { color: #555; font-size: 0.75em; font-family: monospace; }
+  .dp-stage-when { color: #666; font-size: 0.8em; margin-bottom: 6px; }
+  .dp-rule { display: flex; gap: 8px; padding: 3px 0; font-size: 0.85em; align-items: baseline; }
+  .dp-rule-cond { color: #999; flex: 1; }
+  .dp-rule-result { font-weight: 500; white-space: nowrap; }
+  .dp-rule-effect { color: #666; font-size: 0.8em; font-style: italic; }
+  .dp-note { color: #665; font-size: 0.8em; margin-top: 4px; padding-top: 4px; border-top: 1px solid #252525; }
+  .dp-arrow { text-align: center; color: #444; padding: 2px 0; font-size: 14px; }
+  .dp-out-green { color: #6d6; }
+  .dp-out-amber { color: #da6; }
+  .dp-out-red { color: #d66; }
+  .dp-section-title { color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin: 16px 0 8px; }
   .ds-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
   .ds-field { display: flex; flex-direction: column; gap: 2px; }
   .ds-field label { font-size: 0.8em; color: #888; }
@@ -1281,14 +1296,42 @@ async function loadDecisions() {
   } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
+function renderDiagram(tree) {
+  const colorCls = c => c === 'green' ? 'dp-out-green' : c === 'red' ? 'dp-out-red' : 'dp-out-amber';
+  let html = '';
+  for (let i = 0; i < tree.stages.length; i++) {
+    const s = tree.stages[i];
+    if (i > 0) html += '<div class="dp-arrow">\u2502</div>';
+    html += `<div class="dp-stage">
+      <div class="dp-stage-hdr">
+        <span class="dp-stage-title">${s.title}</span>
+        <span class="dp-stage-fn">${s.function}</span>
+      </div>
+      <div class="dp-stage-when">${s.when}</div>`;
+    for (const r of s.rules) {
+      html += `<div class="dp-rule">
+        <span class="dp-rule-cond">${r.condition}</span>
+        <span class="dp-rule-result ${colorCls(r.color)}">\u2192 ${r.result}</span>
+      </div>`;
+      if (r.effect) html += `<div class="dp-rule"><span class="dp-rule-cond"></span><span class="dp-rule-effect">${r.effect}</span></div>`;
+    }
+    if (s.note) html += `<div class="dp-note">${s.note}</div>`;
+    html += '</div>';
+  }
+  return html;
+}
+
 function renderSimulatorForm() {
   const el = document.getElementById('decisions-content');
-  const c = dsConstants;
+  const c = dsConstants.constants;
+  const diagram = renderDiagram(dsConstants);
 
   el.innerHTML = `<div class="ds">
-    <div class="ds-title">Decision Pipeline Simulator</div>
+    <div class="ds-title">Decision Pipeline</div>
+    ${diagram}
+    <div class="dp-section-title" style="margin-top:24px;">Simulator</div>
     <div style="color:#666;font-size:0.85em;margin-bottom:12px;">
-      Calls the real decision functions with your inputs. Thresholds: transcode &lt; ${c.TRANSCODE_MIN_BITRATE_KBPS}kbps, quality gate &lt; ${c.QUALITY_MIN_BITRATE_KBPS}kbps, spectral suspect \u2265 ${c.HF_DEFICIT_SUSPECT}dB, marginal \u2265 ${c.HF_DEFICIT_MARGINAL}dB
+      Calls the real decision functions with your inputs.
     </div>
     <div class="ds-presets">
       <span class="ds-preset" onclick="dsPreset('virginia')">Virginia EP (lo-fi FLAC)</span>

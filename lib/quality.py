@@ -6,7 +6,7 @@ Used by soularr.py and import_one.py, tested directly against real audio fixture
 
 import json
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Any, Optional
 
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
@@ -544,6 +544,143 @@ def quality_gate_decision(min_bitrate, is_cbr, verified_lossless, spectral_bitra
         return "requeue_flac"
     else:
         return "accept"
+
+
+# ---------------------------------------------------------------------------
+# Decision tree metadata — consumed by the web UI diagram
+# ---------------------------------------------------------------------------
+
+def get_decision_tree() -> dict[str, Any]:
+    """Return the full pipeline decision structure as data.
+
+    The web UI renders this as a diagram. Contract tests verify this matches
+    the actual decision functions. When a function changes, update this too —
+    the tests will catch divergence.
+    """
+    return {
+        "constants": {
+            "QUALITY_MIN_BITRATE_KBPS": QUALITY_MIN_BITRATE_KBPS,
+            "TRANSCODE_MIN_BITRATE_KBPS": TRANSCODE_MIN_BITRATE_KBPS,
+            "QUALITY_UPGRADE_TIERS": QUALITY_UPGRADE_TIERS,
+        },
+        "stages": [
+            {
+                "id": "spectral",
+                "title": "Pre-import Spectral",
+                "function": "spectral_import_decision",
+                "when": "CBR MP3 downloads (non-FLAC, non-VBR)",
+                "inputs": ["spectral_grade", "spectral_bitrate",
+                           "existing_spectral_bitrate"],
+                "rules": [
+                    {"condition": "grade is genuine or marginal",
+                     "result": "import", "color": "green"},
+                    {"condition": "grade is suspect/likely_transcode AND new_br <= existing_br",
+                     "result": "reject", "color": "red",
+                     "effect": "denylist source"},
+                    {"condition": "grade is suspect/likely_transcode AND new_br > existing_br",
+                     "result": "import_upgrade", "color": "amber",
+                     "effect": "import + denylist source"},
+                    {"condition": "grade is suspect/likely_transcode AND no existing",
+                     "result": "import_no_exist", "color": "amber",
+                     "effect": "import (something > nothing)"},
+                ],
+                "outcomes": ["import", "import_upgrade", "import_no_exist",
+                             "reject"],
+            },
+            {
+                "id": "transcode",
+                "title": "Transcode Detection",
+                "function": "transcode_detection",
+                "when": "FLAC downloads after conversion to V0",
+                "inputs": ["converted_count", "post_conversion_min_bitrate"],
+                "rules": [
+                    {"condition": f"post_conv_br < {TRANSCODE_MIN_BITRATE_KBPS}kbps",
+                     "result": "is_transcode = true", "color": "red"},
+                    {"condition": f"post_conv_br >= {TRANSCODE_MIN_BITRATE_KBPS}kbps",
+                     "result": "is_transcode = false", "color": "green"},
+                ],
+                "note": "Lo-fi lossless (demos, live) can produce genuine "
+                        f"V0 below {TRANSCODE_MIN_BITRATE_KBPS}kbps",
+            },
+            {
+                "id": "verified_lossless",
+                "title": "Verified Lossless",
+                "function": "is_verified_lossless / will_be_verified_lossless",
+                "when": "FLAC downloads after conversion",
+                "inputs": ["converted_count", "is_transcode",
+                           "spectral_grade"],
+                "rules": [
+                    {"condition": "converted > 0 AND NOT is_transcode",
+                     "result": "will_be_verified_lossless = true",
+                     "color": "green"},
+                    {"condition": "is_transcode OR not converted",
+                     "result": "will_be_verified_lossless = false",
+                     "color": "amber"},
+                ],
+            },
+            {
+                "id": "import_decision",
+                "title": "Quality Comparison",
+                "function": "import_quality_decision",
+                "when": "All downloads before beets import",
+                "inputs": ["new_min_bitrate", "existing_min_bitrate",
+                           "override_min_bitrate", "is_transcode",
+                           "will_be_verified_lossless"],
+                "rules": [
+                    {"condition": "will_be_verified_lossless = true",
+                     "result": "import", "color": "green",
+                     "effect": "V0 from genuine FLAC always wins"},
+                    {"condition": "new > existing AND is_transcode",
+                     "result": "transcode_upgrade", "color": "amber",
+                     "effect": "import + denylist + keep searching"},
+                    {"condition": "new > existing AND NOT is_transcode",
+                     "result": "import", "color": "green"},
+                    {"condition": "new <= existing AND is_transcode",
+                     "result": "transcode_downgrade", "color": "red",
+                     "effect": "reject + denylist"},
+                    {"condition": "new <= existing",
+                     "result": "downgrade", "color": "red",
+                     "effect": "reject"},
+                    {"condition": "no existing AND is_transcode",
+                     "result": "transcode_first", "color": "amber",
+                     "effect": "import (something > nothing) + denylist"},
+                ],
+                "outcomes": ["import", "downgrade", "transcode_upgrade",
+                             "transcode_downgrade", "transcode_first",
+                             "preflight_existing"],
+                "note": "effective_existing = override_min_bitrate ?? "
+                        "existing_min_bitrate",
+            },
+            {
+                "id": "quality_gate",
+                "title": "Post-Import Quality Gate",
+                "function": "quality_gate_decision",
+                "when": "After successful beets import",
+                "inputs": ["beets_min_bitrate", "is_cbr",
+                           "verified_lossless", "spectral_bitrate"],
+                "rules": [
+                    {"condition": "gate_br = min(beets_br, spectral_br)",
+                     "result": "(computed)", "color": "green",
+                     "effect": "spectral overrides container if lower"},
+                    {"condition": f"verified_lossless AND gate_br < "
+                                  f"{QUALITY_MIN_BITRATE_KBPS}",
+                     "result": f"gate_br = {QUALITY_MIN_BITRATE_KBPS}",
+                     "color": "green",
+                     "effect": "lo-fi pass"},
+                    {"condition": f"gate_br < {QUALITY_MIN_BITRATE_KBPS}kbps",
+                     "result": "requeue_upgrade", "color": "amber",
+                     "effect": f"search {QUALITY_UPGRADE_TIERS}"},
+                    {"condition": "CBR AND NOT verified_lossless",
+                     "result": "requeue_flac", "color": "amber",
+                     "effect": "search flac only"},
+                    {"condition": "else",
+                     "result": "accept", "color": "green",
+                     "effect": "done"},
+                ],
+                "outcomes": ["accept", "requeue_upgrade", "requeue_flac"],
+            },
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -490,22 +490,18 @@ class Handler(BaseHTTPRequestHandler):
         self._json(all_data)
 
     def _get_pipeline_constants(self, params: dict[str, list[str]]) -> None:
-        """Return decision pipeline thresholds for the system diagram."""
-        from quality import (QUALITY_MIN_BITRATE_KBPS, TRANSCODE_MIN_BITRATE_KBPS,
-                             QUALITY_UPGRADE_TIERS)
+        """Return decision tree structure + thresholds for the diagram."""
+        from quality import get_decision_tree
         from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                     ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                                     CLIFF_THRESHOLD_DB_PER_KHZ)
-        self._json({
-            "QUALITY_MIN_BITRATE_KBPS": QUALITY_MIN_BITRATE_KBPS,
-            "TRANSCODE_MIN_BITRATE_KBPS": TRANSCODE_MIN_BITRATE_KBPS,
-            "QUALITY_UPGRADE_TIERS": QUALITY_UPGRADE_TIERS,
-            "HF_DEFICIT_SUSPECT": HF_DEFICIT_SUSPECT,
-            "HF_DEFICIT_MARGINAL": HF_DEFICIT_MARGINAL,
-            "ALBUM_SUSPECT_PCT": ALBUM_SUSPECT_PCT,
-            "MIN_CLIFF_SLICES": MIN_CLIFF_SLICES,
-            "CLIFF_THRESHOLD_DB_PER_KHZ": CLIFF_THRESHOLD_DB_PER_KHZ,
-        })
+        tree = get_decision_tree()
+        tree["constants"]["HF_DEFICIT_SUSPECT"] = HF_DEFICIT_SUSPECT
+        tree["constants"]["HF_DEFICIT_MARGINAL"] = HF_DEFICIT_MARGINAL
+        tree["constants"]["ALBUM_SUSPECT_PCT"] = ALBUM_SUSPECT_PCT
+        tree["constants"]["MIN_CLIFF_SLICES"] = MIN_CLIFF_SLICES
+        tree["constants"]["CLIFF_THRESHOLD_DB_PER_KHZ"] = CLIFF_THRESHOLD_DB_PER_KHZ
+        self._json(tree)
 
     def _get_pipeline_simulate(self, params: dict[str, list[str]]) -> None:
         """Run full_pipeline_decision() with query-string inputs."""

@@ -394,7 +394,7 @@ class TestSpectralContext(unittest.TestCase):
 # simulator. If a stage is added/removed or the result shape changes, these
 # fail — forcing the simulator to be updated in sync.
 
-from lib.quality import full_pipeline_decision
+from lib.quality import full_pipeline_decision, get_decision_tree
 import inspect
 
 # The exact keys the simulator reads from the result dict
@@ -507,6 +507,46 @@ class TestFullPipelineContract(unittest.TestCase):
         r = full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=False)
         for key in ("imported", "denylisted", "keep_searching"):
             self.assertIsInstance(r[key], bool, f"{key} should be bool")
+
+    def test_decision_tree_stage_ids(self):
+        """Decision tree must have the expected stages in order."""
+        tree = get_decision_tree()
+        ids = [s["id"] for s in tree["stages"]]
+        self.assertEqual(ids, ["spectral", "transcode", "verified_lossless",
+                               "import_decision", "quality_gate"])
+
+    def test_decision_tree_outcomes_match_valid_values(self):
+        """Outcomes declared in the tree must match what the contract allows."""
+        tree = get_decision_tree()
+        stage_map = {s["id"]: s for s in tree["stages"]}
+        # spectral stage outcomes must be subset of VALID_STAGE1
+        spectral_outcomes = set(stage_map["spectral"]["outcomes"])
+        self.assertTrue(spectral_outcomes <= (VALID_STAGE1 - {None}),
+                        f"Tree spectral outcomes {spectral_outcomes} not in {VALID_STAGE1}")
+        # import_decision outcomes must be subset of VALID_STAGE2
+        import_outcomes = set(stage_map["import_decision"]["outcomes"])
+        self.assertTrue(import_outcomes <= (VALID_STAGE2 - {None}),
+                        f"Tree import outcomes {import_outcomes} not in {VALID_STAGE2}")
+        # quality_gate outcomes must be subset of VALID_STAGE3
+        gate_outcomes = set(stage_map["quality_gate"]["outcomes"])
+        self.assertTrue(gate_outcomes <= (VALID_STAGE3 - {None}),
+                        f"Tree gate outcomes {gate_outcomes} not in {VALID_STAGE3}")
+
+    def test_decision_tree_constants_match_code(self):
+        """Tree constants must match the actual module constants."""
+        tree = get_decision_tree()
+        consts = tree["constants"]
+        self.assertEqual(consts["QUALITY_MIN_BITRATE_KBPS"],
+                         QUALITY_MIN_BITRATE_KBPS)
+        self.assertEqual(consts["TRANSCODE_MIN_BITRATE_KBPS"],
+                         TRANSCODE_MIN_BITRATE_KBPS)
+
+    def test_decision_tree_every_stage_has_rules(self):
+        """Every stage must have at least one rule."""
+        tree = get_decision_tree()
+        for stage in tree["stages"]:
+            self.assertTrue(len(stage["rules"]) > 0,
+                            f"Stage {stage['id']} has no rules")
 
 
 if __name__ == "__main__":
