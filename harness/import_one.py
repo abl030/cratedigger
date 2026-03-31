@@ -69,7 +69,7 @@ def _get_folder_min_bitrate(folder_path):
                  "-of", "csv=p=0", fpath],
                 capture_output=True, text=True, timeout=30,
             )
-            br_str = result.stdout.strip()
+            br_str = result.stdout.strip().rstrip(",")
             # VBR MP3s return N/A for stream bitrate — fall back to format
             if not br_str or not br_str.isdigit():
                 result = subprocess.run(
@@ -78,7 +78,7 @@ def _get_folder_min_bitrate(folder_path):
                      "-of", "csv=p=0", fpath],
                     capture_output=True, text=True, timeout=30,
                 )
-                br_str = result.stdout.strip()
+                br_str = result.stdout.strip().rstrip(",")
             if br_str and br_str.isdigit():
                 br_kbps = int(br_str) // 1000
                 if br_kbps > 0 and (min_br is None or br_kbps < min_br):
