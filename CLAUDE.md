@@ -69,7 +69,7 @@ scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, force-import, migrate
   populate_tracks.py    — Populate tracks from MusicBrainz API
   run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
-tests/                     538 tests total
+tests/                     553 tests total
   test_album_source.py      — 14 tests for AlbumSource
   test_beets_db.py           — 14 tests for BeetsDB queries
   test_beets_validation.py   — 19 tests for beets validation
@@ -87,6 +87,7 @@ tests/                     538 tests total
   test_track_crosscheck.py   — 15 tests (track title cross-check)
   test_validation_result.py  — 27 tests for ValidationResult, CandidateSummary, harness types
   test_web_recents.py        — 72 tests for recents tab classification (LogEntry, ClassifiedEntry)
+  test_web_server.py         — 15 tests for HTTP endpoints (mocked DB, real server)
 test_soularr.py         — Isolated tests for verify_filetype (AST extraction)
 .claude/
   commands/beets-docs.md — Skill: look up beets RST docs from nix store
