@@ -919,72 +919,76 @@ def search_and_queue(albums):
 
 
 def _search_and_queue_parallel(albums):
-    """Submit all searches sequentially, then collect results in parallel.
+    """Search albums in sliding-window batches of 2.
 
-    slskd has a SemaphoreSlim(1,1) on POST /searches — only one search can
-    be submitted at a time. But once submitted, searches run concurrently on
-    the Soulseek network (up to 2 at a time in Soulseek.NET). So we:
+    slskd constraints (from source code):
+    - SemaphoreSlim(1,1) on POST /searches: one submission at a time
+    - maximumConcurrentSearches=2 in Soulseek.NET: only 2 active on network
 
-    Phase 1: Submit all searches sequentially (each takes ~100ms)
-    Phase 2: Poll all search IDs for results in parallel via ThreadPoolExecutor
-    Phase 3: Process results (merge cache, find downloads) as they arrive
+    Submitting all 16 at once means 14 queue behind 2, and our timeout fires
+    before queued searches even start. Instead: submit 2, wait for both,
+    process results, submit next 2. Wall time = ceil(N/2) * search_time.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    BATCH_SIZE = 2  # matches slskd maximumConcurrentSearches
 
     grab_list: dict[Any, Any] = {}
     failed_grab: list[Any] = []
     failed_search: list[Any] = []
     total = len(albums)
 
-    logger.info(f"Parallel search: {total} albums (submit sequential, collect parallel)")
+    logger.info(f"Parallel search: {total} albums in batches of {BATCH_SIZE}")
     wall_start = time.time()
 
-    # Phase 1: Submit all searches sequentially (slskd semaphore requires this)
-    pending: list[tuple[Any, str, str, int]] = []  # (album, search_id, query, album_id)
-    for album in albums:
-        result = _submit_search(album, cfg, slskd)
-        if result is None:
-            failed_search.append(album)
-        else:
-            search_id, query, album_id = result
-            pending.append((album, search_id, query, album_id))
+    for batch_start in range(0, total, BATCH_SIZE):
+        batch = albums[batch_start:batch_start + BATCH_SIZE]
+        batch_num = batch_start // BATCH_SIZE + 1
+        total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        logger.info(f"Batch {batch_num}/{total_batches}: submitting {len(batch)} searches")
 
-    submit_elapsed = time.time() - wall_start
-    logger.info(f"Submitted {len(pending)}/{total} searches in {submit_elapsed:.1f}s "
-                f"({len(failed_search)} failed to submit)")
-
-    if not pending:
-        return grab_list, failed_search, failed_grab
-
-    # Phase 2: Collect results in parallel (polling + response fetching)
-    with ThreadPoolExecutor(max_workers=len(pending)) as pool:
-        futures: dict[Any, Any] = {}
-        for album, search_id, query, album_id in pending:
-            future = pool.submit(
-                _collect_search_results, search_id, query, album_id, cfg, slskd
-            )
-            futures[future] = album
-
-        # Phase 3: Process as they complete
-        for i, future in enumerate(as_completed(futures), 1):
-            album = futures[future]
-            try:
-                result = future.result()
-            except Exception:
-                logger.exception(f"Search collection crashed for {album['title']}")
+        # Submit this batch
+        pending: list[tuple[Any, str, str, int]] = []
+        for album in batch:
+            result = _submit_search(album, cfg, slskd)
+            if result is None:
                 failed_search.append(album)
-                continue
-
-            logger.info(
-                f"Search {i}/{len(pending)} done: {result.query} "
-                f"({result.result_count} results, {result.elapsed_s:.1f}s)"
-            )
-            if result.success:
-                _merge_search_result(result)
-                if not find_download(album, grab_list):
-                    failed_grab.append(album)
             else:
-                failed_search.append(album)
+                search_id, query, album_id = result
+                pending.append((album, search_id, query, album_id))
+
+        if not pending:
+            continue
+
+        # Collect this batch in parallel
+        with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+            futures: dict[Any, Any] = {}
+            for album, search_id, query, album_id in pending:
+                future = pool.submit(
+                    _collect_search_results, search_id, query, album_id, cfg, slskd
+                )
+                futures[future] = album
+
+            for future in as_completed(futures):
+                album = futures[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    logger.exception(f"Search collection crashed for {album['title']}")
+                    failed_search.append(album)
+                    continue
+
+                done_count = len(grab_list) + len(failed_grab) + len(failed_search)
+                logger.info(
+                    f"Search {done_count + 1}/{total} done: {result.query} "
+                    f"({result.result_count} results, {result.elapsed_s:.1f}s)"
+                )
+                if result.success:
+                    _merge_search_result(result)
+                    if not find_download(album, grab_list):
+                        failed_grab.append(album)
+                else:
+                    failed_search.append(album)
 
     wall_elapsed = time.time() - wall_start
     logger.info(f"Parallel search complete: {total} albums in {wall_elapsed:.1f}s "

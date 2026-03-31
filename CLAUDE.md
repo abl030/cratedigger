@@ -120,12 +120,21 @@ test_soularr.py         — Isolated tests for verify_filetype (AST extraction)
 
 ```bash
 ssh doc2
-sudo journalctl -u soularr -f                    # tail logs
-sudo journalctl -u soularr --since "5 min ago"    # recent logs
-sudo systemctl is-active soularr                   # check if running
-sudo systemctl start soularr &                     # trigger run (DON'T block — it's a oneshot)
-sudo cat /var/lib/soularr/config.ini               # view generated config
+sudo journalctl -u soularr -f                        # tail logs
+sudo journalctl -u soularr --since "5 min ago"        # recent logs
+sudo systemctl is-active soularr                       # check if running
+sudo systemctl start soularr --no-block                # trigger run (oneshot — without --no-block it blocks until the entire run completes)
+sudo cat /var/lib/soularr/config.ini                   # view generated config
 ```
+
+**IMPORTANT for Claude Code**: `systemctl start soularr` blocks until the oneshot service finishes (minutes). Always use `--no-block` when starting via SSH from a Bash tool call. To start + tail logs:
+```bash
+# Step 1: start (returns immediately)
+ssh doc2 'sudo systemctl start soularr --no-block'
+# Step 2: tail logs (separate command, use run_in_background or timeout)
+ssh doc2 'sudo journalctl -u soularr -f --since "5 sec ago"'
+```
+Never use `&` inside SSH quotes to background systemctl — SSH keeps the connection open waiting for all child processes regardless.
 
 ## Pipeline Flow
 
