@@ -481,6 +481,115 @@ def search_for_album(album):
     return True
 
 
+def _execute_search(album, search_cfg, slskd_client):
+    """Thread-safe search: returns SearchResult instead of writing to globals.
+
+    Takes explicit cfg/slskd args (no module global access) so it's safe
+    to call from ThreadPoolExecutor.
+    """
+    from lib.search import build_query, SearchResult
+
+    album_title = album["title"]
+    artist_name = album["artist"]["artistName"]
+    album_id = album["id"]
+    query = build_query(artist_name, album_title, prepend_artist=search_cfg.album_prepend_artist)
+
+    if not query:
+        logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
+        return SearchResult(album_id=album_id, success=False, query=query or "")
+
+    logger.info(f"Searching for album: {query} "
+                f"(from '{artist_name} - {album_title}')")
+    t0 = time.time()
+    try:
+        search = slskd_client.searches.search_text(
+            searchText=query,
+            searchTimeout=search_cfg.search_timeout,
+            filterResponses=True,
+            maximumPeerQueueLength=search_cfg.maximum_peer_queue,
+            minimumPeerUploadSpeed=search_cfg.minimum_peer_upload_speed,
+        )
+    except Exception:
+        logger.exception(f"Failed to perform search via SLSKD: {query}")
+        return SearchResult(album_id=album_id, success=False, query=query,
+                            elapsed_s=time.time() - t0)
+
+    time.sleep(5)
+    start_time = time.time()
+    while True:
+        if slskd_client.searches.state(search["id"], False)["state"] != "InProgress":
+            break
+        time.sleep(1)
+        if (time.time() - start_time) > search_cfg.search_timeout:
+            logger.error("Failed to perform search via SLSKD due to timeout on search results.")
+            return SearchResult(album_id=album_id, success=False, query=query,
+                                elapsed_s=time.time() - t0)
+
+    search_results = slskd_client.searches.search_responses(search["id"])
+    elapsed = time.time() - t0
+    logger.info(f"Search returned {len(search_results)} results in {elapsed:.1f}s")
+    if search_cfg.delete_searches:
+        slskd_client.searches.delete(search["id"])
+
+    if not len(search_results) > 0:
+        return SearchResult(album_id=album_id, success=False, query=query,
+                            result_count=0, elapsed_s=elapsed)
+
+    # Build cache entries and upload speeds without touching globals
+    cache_entries: dict[str, dict[str, list[str]]] = {}
+    upload_speeds: dict[str, int] = {}
+
+    for result in search_results:
+        username = result["username"]
+        if username not in cache_entries:
+            cache_entries[username] = {}
+        speed = result.get("uploadSpeed", 0)
+        if speed and (username not in upload_speeds or speed > upload_speeds[username]):
+            upload_speeds[username] = speed
+        for file in result["files"]:
+            file_dir = file["filename"].rsplit("\\", 1)[0]
+            for allowed_filetype in search_cfg.allowed_filetypes:
+                if verify_filetype(file, allowed_filetype):
+                    if allowed_filetype not in cache_entries[username]:
+                        cache_entries[username][allowed_filetype] = []
+                    if file_dir not in cache_entries[username][allowed_filetype]:
+                        cache_entries[username][allowed_filetype].append(file_dir)
+
+    return SearchResult(
+        album_id=album_id,
+        success=True,
+        cache_entries=cache_entries,
+        upload_speeds=upload_speeds,
+        query=query,
+        result_count=len(search_results),
+        elapsed_s=elapsed,
+    )
+
+
+def _merge_search_result(result):
+    """Merge a SearchResult into module-level search_cache and user_upload_speed.
+
+    Called only from the main thread — no locking needed.
+    """
+    album_id = result.album_id
+    if album_id not in search_cache:
+        search_cache[album_id] = {}
+
+    for username, filetypes in result.cache_entries.items():
+        if username not in search_cache[album_id]:
+            search_cache[album_id][username] = {}
+        for filetype, dirs in filetypes.items():
+            if filetype not in search_cache[album_id][username]:
+                search_cache[album_id][username][filetype] = []
+            for d in dirs:
+                if d not in search_cache[album_id][username][filetype]:
+                    search_cache[album_id][username][filetype].append(d)
+
+    for username, speed in result.upload_speeds.items():
+        if username not in user_upload_speed or speed > user_upload_speed[username]:
+            user_upload_speed[username] = speed
+
+
 def _get_denied_users(album_id):
     """Get denied users from pipeline DB source_denylist."""
     denied = set()
@@ -741,6 +850,8 @@ def find_download(album, grab_list):
 
 
 def search_and_queue(albums):
+    if cfg.parallel_searches > 1 and len(albums) > 1:
+        return _search_and_queue_parallel(albums)
     grab_list = {}
     failed_grab = []
     failed_search = []
@@ -753,6 +864,52 @@ def search_and_queue(albums):
 
         else:
             failed_search.append(album)
+    return grab_list, failed_search, failed_grab
+
+
+def _search_and_queue_parallel(albums):
+    """Fire all searches concurrently, process results as they arrive."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    grab_list: dict[Any, Any] = {}
+    failed_grab: list[Any] = []
+    failed_search: list[Any] = []
+    total = len(albums)
+    workers = min(cfg.parallel_searches, total)
+
+    logger.info(f"Parallel search: {total} albums, concurrency={workers}")
+    wall_start = time.time()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_execute_search, album, cfg, slskd): album
+            for album in albums
+        }
+        for i, future in enumerate(as_completed(futures), 1):
+            album = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                logger.exception(f"Search thread crashed for {album['title']}")
+                failed_search.append(album)
+                continue
+
+            logger.info(
+                f"Search {i}/{total} done: {result.query} "
+                f"({result.result_count} results, {result.elapsed_s:.1f}s)"
+            )
+            if result.success:
+                _merge_search_result(result)
+                if not find_download(album, grab_list):
+                    failed_grab.append(album)
+            else:
+                failed_search.append(album)
+
+    wall_elapsed = time.time() - wall_start
+    logger.info(f"Parallel search complete: {total} albums in {wall_elapsed:.1f}s "
+                f"(found={len(grab_list)}, no_match={len(failed_grab)}, "
+                f"no_results={len(failed_search)})")
+
     return grab_list, failed_search, failed_grab
 
 

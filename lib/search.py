@@ -16,6 +16,25 @@ Pure functions — no I/O, no external dependencies.
 """
 
 import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class SearchResult:
+    """Thread-safe container for one album's search results.
+
+    Returned by _execute_search() instead of writing to module globals.
+    The main thread merges these into search_cache/user_upload_speed.
+    """
+    album_id: int
+    success: bool
+    # username -> filetype -> [dirs] (same shape as search_cache[album_id])
+    cache_entries: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # username -> upload speed
+    upload_speeds: dict[str, int] = field(default_factory=dict)
+    query: str = ""
+    result_count: int = 0
+    elapsed_s: float = 0.0
 
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.

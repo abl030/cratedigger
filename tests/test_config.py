@@ -83,6 +83,9 @@ class TestConfigFromIni(unittest.TestCase):
     def test_search_for_tracks(self):
         self.assertTrue(self.cfg.search_for_tracks)
 
+    def test_parallel_searches_default(self):
+        self.assertEqual(self.cfg.parallel_searches, 8)
+
     # --- Release ---
     def test_use_most_common_tracknum(self):
         self.assertTrue(self.cfg.use_most_common_tracknum)
@@ -171,7 +174,7 @@ class TestConfigFrozen(unittest.TestCase):
         ini = load_test_config()
         cfg = SoularrConfig.from_ini(ini)
         with self.assertRaises(AttributeError):
-            cfg.page_size = 99
+            cfg.page_size = 99  # type: ignore[misc]  # intentional: testing frozen dataclass  # type: ignore[misc]
 
 
 class TestConfigDefaults(unittest.TestCase):

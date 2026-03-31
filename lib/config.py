@@ -34,6 +34,7 @@ class SoularrConfig:
     maximum_peer_queue: int = 50
     minimum_peer_upload_speed: int = 0
     search_for_tracks: bool = False
+    parallel_searches: int = 8
     title_blacklist: tuple[str, ...] = ()
 
     # --- Release ---
@@ -133,6 +134,7 @@ class SoularrConfig:
             maximum_peer_queue=getint("Search Settings", "maximum_peer_queue", 50),
             minimum_peer_upload_speed=getint("Search Settings", "minimum_peer_upload_speed", 0),
             search_for_tracks=getbool("Search Settings", "search_for_tracks", False),
+            parallel_searches=getint("Search Settings", "parallel_searches", 8),
             title_blacklist=title_blacklist,
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),

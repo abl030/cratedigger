@@ -21,10 +21,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 import conftest  # noqa: F401 — triggers ephemeral slskd startup
 
 # Import after conftest sets up env
-SLSKD_HOST = os.environ.get("SLSKD_TEST_HOST")
-SLSKD_API_KEY = os.environ.get("SLSKD_TEST_API_KEY")
-SLSKD_DOWNLOAD_DIR = os.environ.get("SLSKD_TEST_DOWNLOAD_DIR")
-FULL_PIPELINE = os.environ.get("SLSKD_TEST_FULL")
+SLSKD_HOST: str = os.environ.get("SLSKD_TEST_HOST", "")
+SLSKD_API_KEY: str = os.environ.get("SLSKD_TEST_API_KEY", "")
+SLSKD_DOWNLOAD_DIR: str = os.environ.get("SLSKD_TEST_DOWNLOAD_DIR", "")
+FULL_PIPELINE: str = os.environ.get("SLSKD_TEST_FULL", "")
 
 
 def _get_client():
@@ -263,7 +263,7 @@ class TestSlskdFullPipeline(unittest.TestCase):
             if target_file:
                 break
 
-        if not target_file:
+        if not target_file or not target_user:
             self.skipTest("No small files found in results")
 
         # Enqueue
@@ -300,6 +300,102 @@ class TestSlskdFullPipeline(unittest.TestCase):
                             username=target_user, id=f["id"])
             except Exception:
                 pass
+
+
+# ─── Tier 2: Parallel Search Timing ───────────────────────────────
+
+@unittest.skipUnless(SLSKD_HOST, "slskd not available")
+@unittest.skipUnless(FULL_PIPELINE, "set SLSKD_TEST_FULL=1 for timing tests")
+class TestParallelSearchTiming(unittest.TestCase):
+    """Compare sequential vs parallel search wall-clock time."""
+
+    QUERIES = [
+        "*eatles abbey road",
+        "*ink *loyd dark side moon",
+        "*ed *eppelin houses holy",
+        "*olling *tones exile main",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = _get_client()
+
+    def _run_search(self, query):
+        """Run one search, return (result_count, elapsed_s)."""
+        t0 = time.time()
+        search = self.client.searches.search_text(
+            searchText=query, searchTimeout=15000)
+        time.sleep(5)
+        for _ in range(20):
+            state = self.client.searches.state(search["id"], False)
+            if state.get("state") != "InProgress":
+                break
+            time.sleep(1)
+        results = self.client.searches.search_responses(search["id"]) or []
+        elapsed = time.time() - t0
+        self.client.searches.delete(search["id"])
+        return len(results), elapsed
+
+    def test_parallel_faster_than_sequential(self):
+        """Parallel searches should be at least 1.5x faster."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Sequential
+        seq_start = time.time()
+        seq_counts = []
+        for q in self.QUERIES:
+            count, _ = self._run_search(q)
+            seq_counts.append(count)
+        seq_wall = time.time() - seq_start
+
+        time.sleep(3)  # Brief pause
+
+        # Parallel
+        par_start = time.time()
+        par_counts = []
+        with ThreadPoolExecutor(max_workers=len(self.QUERIES)) as pool:
+            futures = {pool.submit(self._run_search, q): q for q in self.QUERIES}
+            for future in as_completed(futures):
+                count, _ = future.result()
+                par_counts.append(count)
+        par_wall = time.time() - par_start
+
+        speedup = seq_wall / par_wall if par_wall > 0 else 0
+        print(f"\n  Sequential: {seq_wall:.1f}s, Parallel: {par_wall:.1f}s, "
+              f"Speedup: {speedup:.1f}x")
+        print(f"  Results: seq={sum(seq_counts)}, par={sum(par_counts)}")
+
+        self.assertGreater(speedup, 1.5,
+                           f"Expected >= 1.5x speedup, got {speedup:.1f}x")
+
+    def test_parallel_result_quality(self):
+        """Parallel searches should return comparable result counts."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Sequential baseline
+        seq_counts = {}
+        for q in self.QUERIES:
+            count, _ = self._run_search(q)
+            seq_counts[q] = count
+
+        time.sleep(3)
+
+        # Parallel
+        par_counts = {}
+        with ThreadPoolExecutor(max_workers=len(self.QUERIES)) as pool:
+            futures = {pool.submit(self._run_search, q): q for q in self.QUERIES}
+            for future in as_completed(futures):
+                q = futures[future]
+                count, _ = future.result()
+                par_counts[q] = count
+
+        # Each parallel result should be within 50% of sequential
+        for q in self.QUERIES:
+            seq = seq_counts.get(q, 0)
+            par = par_counts.get(q, 0)
+            if seq > 10:  # Only check if sequential had meaningful results
+                self.assertGreater(par, seq * 0.5,
+                                   f"{q}: parallel got {par} vs sequential {seq}")
 
 
 if __name__ == "__main__":

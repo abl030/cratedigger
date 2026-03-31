@@ -81,11 +81,12 @@ All types are fully typed dataclasses with pyright enforcement and JSON round-tr
 - **Web UI** (`music.ablz.au`) for browsing MusicBrainz and adding albums
 - **Beets validation** -- every download validated against target MusicBrainz release ID
 - **Auto-import** with FLAC->V0 conversion, spectral analysis, quality gating
+- **Parallel Soulseek searches** -- `ThreadPoolExecutor` fires all searches concurrently, ~2x speedup (see `docs/parallel-search.md`)
 - **Typed decision pipeline** -- pure functions in `quality.py`, typed dataclasses throughout
 - **Full audit trail** -- every decision stored as queryable JSONB in PostgreSQL
 - **Centralized beets queries** -- `BeetsDB` class in `lib/beets_db.py`
 - **Force-import** -- manually import rejected downloads via CLI (`force-import <id>`) or web API
-- **460 tests** including spectral analysis with real audio fixtures and live slskd integration tests
+- **610+ tests** including spectral analysis with real audio fixtures and live slskd integration tests
 
 ## MusicBrainz mirror
 
