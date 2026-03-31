@@ -436,11 +436,14 @@ def search_for_album(album):
         logger.exception(f"Failed to perform search via SLSKD: {query}")
         return False
 
-    # Add timeout here to increase reliability with Slskd. Sometimes it doesn't update search status fast enough. More of an issue with lots of historical searches in slskd
+    # Wait for slskd to process the search. Searches go through:
+    #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
+    # We must wait while state is Queued OR InProgress.
     time.sleep(5)
     start_time = time.time()
     while True:
-        if slskd.searches.state(search["id"], False)["state"] != "InProgress":  # Added False here as we don't want the search results here. Just the state.
+        state = slskd.searches.state(search["id"], False)["state"]
+        if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
             break
         time.sleep(1)
         if (time.time() - start_time) > cfg.search_timeout:
@@ -540,14 +543,17 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
 
     t0 = time.time()
 
-    # Wait for search to complete (poll state)
-    time.sleep(5)  # slskd needs time to register and start getting responses
+    # Wait for search to complete. slskd search states:
+    #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
+    # We must wait while state is Queued OR InProgress.
+    time.sleep(5)
     timeout_s = search_cfg.search_timeout / 1000 if search_cfg.search_timeout > 1000 else search_cfg.search_timeout
     start_time = time.time()
     while True:
         try:
-            state = slskd_client.searches.state(search_id, False)
-            if state["state"] != "InProgress":
+            state_resp = slskd_client.searches.state(search_id, False)
+            state = state_resp["state"]
+            if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
                 break
         except Exception:
             logger.warning(f"Failed to poll search state for {query}")
