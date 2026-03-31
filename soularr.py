@@ -481,13 +481,17 @@ def search_for_album(album):
     return True
 
 
-def _execute_search(album, search_cfg, slskd_client):
-    """Thread-safe search: returns SearchResult instead of writing to globals.
+def _submit_search(album, search_cfg, slskd_client):
+    """Submit a search to slskd and return the search ID (no waiting).
 
-    Takes explicit cfg/slskd args (no module global access) so it's safe
-    to call from ThreadPoolExecutor.
+    slskd has a SemaphoreSlim(1,1) on POST /searches — only one submission
+    at a time. The semaphore releases after the search is queued (~100ms),
+    so we submit sequentially but wait for results in parallel.
+
+    Returns (search_id, query, album_id) or None on failure.
     """
-    from lib.search import build_query, SearchResult
+    from lib.search import build_query
+    import requests
 
     album_title = album["title"]
     artist_name = album["artist"]["artistName"]
@@ -496,15 +500,12 @@ def _execute_search(album, search_cfg, slskd_client):
 
     if not query:
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
-        return SearchResult(album_id=album_id, success=False, query=query or "")
+        return None
 
-    logger.info(f"Searching for album: {query} "
+    logger.info(f"Submitting search: {query} "
                 f"(from '{artist_name} - {album_title}')")
-    t0 = time.time()
 
-    # Retry on 429 (slskd rate limit) with exponential backoff
-    import requests
-    search = None
+    # Retry on 429 with backoff — slskd semaphore may still be held
     for attempt in range(4):
         try:
             search = slskd_client.searches.search_text(
@@ -514,46 +515,60 @@ def _execute_search(album, search_cfg, slskd_client):
                 maximumPeerQueueLength=search_cfg.maximum_peer_queue,
                 minimumPeerUploadSpeed=search_cfg.minimum_peer_upload_speed,
             )
-            break
+            return (search["id"], query, album_id)
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 429 and attempt < 3:
                 wait = 2 ** attempt  # 1s, 2s, 4s
-                logger.warning(f"429 rate limited on search for {query}, retrying in {wait}s")
+                logger.warning(f"429 rate limited submitting search for {query}, "
+                               f"retrying in {wait}s (attempt {attempt + 1}/4)")
                 time.sleep(wait)
             else:
-                logger.exception(f"Failed to perform search via SLSKD: {query}")
-                return SearchResult(album_id=album_id, success=False, query=query,
-                                    elapsed_s=time.time() - t0)
+                logger.exception(f"Failed to submit search via SLSKD: {query}")
+                return None
         except Exception:
-            logger.exception(f"Failed to perform search via SLSKD: {query}")
-            return SearchResult(album_id=album_id, success=False, query=query,
-                                elapsed_s=time.time() - t0)
-    if search is None:
-        return SearchResult(album_id=album_id, success=False, query=query,
-                            elapsed_s=time.time() - t0)
+            logger.exception(f"Failed to submit search via SLSKD: {query}")
+            return None
+    return None
 
-    time.sleep(5)
+
+def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client):
+    """Wait for a submitted search to complete and collect results.
+
+    This is the part that can run in parallel — it's just polling + reading.
+    """
+    from lib.search import SearchResult
+
+    t0 = time.time()
+
+    # Wait for search to complete (poll state)
+    time.sleep(5)  # slskd needs time to register and start getting responses
+    timeout_s = search_cfg.search_timeout / 1000 if search_cfg.search_timeout > 1000 else search_cfg.search_timeout
     start_time = time.time()
     while True:
-        if slskd_client.searches.state(search["id"], False)["state"] != "InProgress":
+        try:
+            state = slskd_client.searches.state(search_id, False)
+            if state["state"] != "InProgress":
+                break
+        except Exception:
+            logger.warning(f"Failed to poll search state for {query}")
             break
         time.sleep(1)
-        if (time.time() - start_time) > search_cfg.search_timeout:
-            logger.error("Failed to perform search via SLSKD due to timeout on search results.")
+        if (time.time() - start_time) > timeout_s:
+            logger.error(f"Search timed out for {query}")
             return SearchResult(album_id=album_id, success=False, query=query,
                                 elapsed_s=time.time() - t0)
 
-    search_results = slskd_client.searches.search_responses(search["id"])
+    search_results = slskd_client.searches.search_responses(search_id)
     elapsed = time.time() - t0
-    logger.info(f"Search returned {len(search_results)} results in {elapsed:.1f}s")
+    logger.info(f"Search returned {len(search_results)} results in {elapsed:.1f}s for: {query}")
     if search_cfg.delete_searches:
-        slskd_client.searches.delete(search["id"])
+        slskd_client.searches.delete(search_id)
 
     if not len(search_results) > 0:
         return SearchResult(album_id=album_id, success=False, query=query,
                             result_count=0, elapsed_s=elapsed)
 
-    # Build cache entries and upload speeds without touching globals
+    # Build cache entries and upload speeds
     cache_entries: dict[str, dict[str, list[str]]] = {}
     upload_speeds: dict[str, int] = {}
 
@@ -582,6 +597,18 @@ def _execute_search(album, search_cfg, slskd_client):
         result_count=len(search_results),
         elapsed_s=elapsed,
     )
+
+
+def _execute_search(album, search_cfg, slskd_client):
+    """Submit + wait for one search. Used by sequential path."""
+    result = _submit_search(album, search_cfg, slskd_client)
+    if result is None:
+        from lib.search import SearchResult
+        return SearchResult(album_id=album["id"], success=False,
+                            query=album.get("title", ""))
+    search_id, query, album_id = result
+    return _collect_search_results(search_id, query, album_id,
+                                   search_cfg, slskd_client)
 
 
 def _merge_search_result(result):
@@ -886,38 +913,64 @@ def search_and_queue(albums):
 
 
 def _search_and_queue_parallel(albums):
-    """Fire all searches concurrently, process results as they arrive."""
+    """Submit all searches sequentially, then collect results in parallel.
+
+    slskd has a SemaphoreSlim(1,1) on POST /searches — only one search can
+    be submitted at a time. But once submitted, searches run concurrently on
+    the Soulseek network (up to 2 at a time in Soulseek.NET). So we:
+
+    Phase 1: Submit all searches sequentially (each takes ~100ms)
+    Phase 2: Poll all search IDs for results in parallel via ThreadPoolExecutor
+    Phase 3: Process results (merge cache, find downloads) as they arrive
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     grab_list: dict[Any, Any] = {}
     failed_grab: list[Any] = []
     failed_search: list[Any] = []
     total = len(albums)
-    workers = min(cfg.parallel_searches, total)
 
-    logger.info(f"Parallel search: {total} albums, concurrency={workers}")
+    logger.info(f"Parallel search: {total} albums (submit sequential, collect parallel)")
     wall_start = time.time()
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        # Stagger submissions to avoid 429 from slskd's rate limiter.
-        # Each search sleeps 5s internally anyway, so 1s stagger between
-        # submissions is negligible vs total wall time.
+    # Phase 1: Submit all searches sequentially (slskd semaphore requires this)
+    pending: list[tuple[Any, str, str, int]] = []  # (album, search_id, query, album_id)
+    for album in albums:
+        result = _submit_search(album, cfg, slskd)
+        if result is None:
+            failed_search.append(album)
+        else:
+            search_id, query, album_id = result
+            pending.append((album, search_id, query, album_id))
+
+    submit_elapsed = time.time() - wall_start
+    logger.info(f"Submitted {len(pending)}/{total} searches in {submit_elapsed:.1f}s "
+                f"({len(failed_search)} failed to submit)")
+
+    if not pending:
+        return grab_list, failed_search, failed_grab
+
+    # Phase 2: Collect results in parallel (polling + response fetching)
+    with ThreadPoolExecutor(max_workers=len(pending)) as pool:
         futures: dict[Any, Any] = {}
-        for idx, album in enumerate(albums):
-            futures[pool.submit(_execute_search, album, cfg, slskd)] = album
-            if idx < len(albums) - 1:
-                time.sleep(1)
+        for album, search_id, query, album_id in pending:
+            future = pool.submit(
+                _collect_search_results, search_id, query, album_id, cfg, slskd
+            )
+            futures[future] = album
+
+        # Phase 3: Process as they complete
         for i, future in enumerate(as_completed(futures), 1):
             album = futures[future]
             try:
                 result = future.result()
             except Exception:
-                logger.exception(f"Search thread crashed for {album['title']}")
+                logger.exception(f"Search collection crashed for {album['title']}")
                 failed_search.append(album)
                 continue
 
             logger.info(
-                f"Search {i}/{total} done: {result.query} "
+                f"Search {i}/{len(pending)} done: {result.query} "
                 f"({result.result_count} results, {result.elapsed_s:.1f}s)"
             )
             if result.success:
