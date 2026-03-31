@@ -144,6 +144,30 @@
   .loading { color: #666; padding: 20px; text-align: center; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
+
+  /* Decision pipeline diagram */
+  .dp { font-size: 13px; }
+  .dp-title { font-size: 1.1em; color: #aaa; margin-bottom: 16px; font-weight: 600; }
+  .dp-row { display: flex; gap: 12px; margin-bottom: 2px; }
+  .dp-branch { display: flex; gap: 12px; }
+  .dp-branch > div { flex: 1; }
+  .dp-node { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 0; }
+  .dp-node-title { font-weight: 600; font-size: 0.9em; margin-bottom: 4px; }
+  .dp-node-body { color: #999; font-size: 0.85em; line-height: 1.5; }
+  .dp-node-body code { background: #252525; padding: 1px 5px; border-radius: 3px; color: #ddd; font-size: 0.95em; }
+  .dp-rule { color: #888; }
+  .dp-val { color: #6d6; font-weight: 500; }
+  .dp-outcome { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em; font-weight: 500; }
+  .dp-out-green { background: #1a3a1a; color: #6d6; }
+  .dp-out-amber { background: #3a3a1a; color: #da6; }
+  .dp-out-red { background: #3a1a1a; color: #d66; }
+  .dp-arrow { text-align: center; color: #555; font-size: 16px; line-height: 1; padding: 3px 0; }
+  .dp-arrow-label { font-size: 0.75em; color: #666; }
+  .dp-split { display: flex; gap: 12px; margin-bottom: 2px; }
+  .dp-split > div { flex: 1; }
+  .dp-split-label { text-align: center; font-size: 0.8em; color: #888; font-weight: 600; margin-bottom: 4px; }
+  .dp-section { margin-bottom: 20px; }
+  .dp-section-title { color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #2a3a2a; }
 </style>
 </head>
 <body>
@@ -153,6 +177,7 @@
   <div class="tab" onclick="showTab('recents')">Recents</div>
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
   <div class="tab" onclick="showTab('library')">Library</div>
+  <div class="tab" onclick="showTab('decisions')">Decisions</div>
 </div>
 
 <div id="search-section" class="section active">
@@ -171,6 +196,10 @@
 <div id="library-section" class="section">
   <input type="text" id="lib-q" placeholder="Search beets library...">
   <div id="library-content"></div>
+</div>
+
+<div id="decisions-section" class="section">
+  <div id="decisions-content" class="loading">Loading...</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -267,7 +296,7 @@ function awstDate(isoStr) { return toAWST(isoStr).slice(0, 10); }
 function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
-const tabOrder = ['search', 'recents', 'pipeline', 'library'];
+const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions'];
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -276,6 +305,7 @@ function showTab(name) {
   if (name === 'pipeline') loadPipeline();
   if (name === 'recents') loadRecents();
   if (name === 'library') loadLibraryRecent();
+  if (name === 'decisions') loadDecisions();
 }
 
 function toast(msg, isError) {
@@ -1228,6 +1258,166 @@ async function executeBeetsDeletion(id, btn) {
     document.querySelector('.confirm-overlay')?.remove();
     toast('Delete failed', true);
   }
+}
+
+// --- Decisions tab ---
+
+let decisionConstants = null;
+
+async function loadDecisions() {
+  const el = document.getElementById('decisions-content');
+  if (decisionConstants) { renderDecisionDiagram(); return; }
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${API}/api/pipeline/constants`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    decisionConstants = await r.json();
+    renderDecisionDiagram();
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load constants</div>'; }
+}
+
+function renderDecisionDiagram() {
+  const el = document.getElementById('decisions-content');
+  const c = decisionConstants;
+  if (!c) return;
+
+  function node(title, body, border) {
+    const b = border || '#333';
+    return `<div class="dp-node" style="border-color:${b}"><div class="dp-node-title">${title}</div><div class="dp-node-body">${body}</div></div>`;
+  }
+  function arrow(label) {
+    return `<div class="dp-arrow">\u2502${label ? `<br><span class="dp-arrow-label">${label}</span>` : ''}</div>`;
+  }
+  function out(text, cls) { return `<span class="dp-outcome ${cls}">${text}</span>`; }
+  const g = cls => `dp-out-${cls}`;
+
+  el.innerHTML = `<div class="dp">
+    <div class="dp-title">Quality Decision Pipeline</div>
+
+    <div class="dp-section">
+      <div class="dp-section-title">Download Complete</div>
+      ${node('File Type Check', 'Is the download FLAC or MP3?')}
+    </div>
+
+    ${arrow()}
+
+    <div class="dp-split">
+      <div>
+        <div class="dp-split-label">FLAC path</div>
+
+        ${node('Spectral Analysis', `
+          Per-track HF deficit measured (sox bandpass 12\u201320kHz vs 1\u20134kHz ref):<br>
+          &lt; <code>${c.HF_DEFICIT_MARGINAL}dB</code> \u2192 ${out('genuine', g('green'))}<br>
+          ${c.HF_DEFICIT_MARGINAL}\u2013<code>${c.HF_DEFICIT_SUSPECT}dB</code> \u2192 ${out('marginal', g('amber'))}<br>
+          \u2265 <code>${c.HF_DEFICIT_SUSPECT}dB</code> or cliff detected \u2192 ${out('suspect', g('red'))}<br>
+          <span style="color:#666;">Cliff: ${c.MIN_CLIFF_SLICES}+ slices steeper than ${c.CLIFF_THRESHOLD_DB_PER_KHZ} dB/kHz</span>
+        `, '#335')}
+
+        ${arrow()}
+
+        ${node('Album Grade', `
+          Count tracks graded <span style="color:#d66;">suspect</span> only \u2014 marginal does NOT count:<br>
+          \u2265 75% suspect \u2192 ${out('likely_transcode', g('red'))}<br>
+          \u2265 <code>${c.ALBUM_SUSPECT_PCT}%</code> suspect \u2192 ${out('suspect', g('red'))}<br>
+          &lt; ${c.ALBUM_SUSPECT_PCT}% suspect \u2192 ${out('genuine', g('green'))}<br>
+          <span style="color:#666;">An album with 100% marginal tracks = "genuine"</span>
+        `, '#335')}
+
+        ${arrow()}
+
+        ${node('Convert FLAC \u2192 V0', `
+          ffmpeg <code>-q:a 0</code> (VBR V0)<br>
+          Measure post-conversion min bitrate across all tracks
+        `, '#335')}
+
+        ${arrow()}
+
+        ${node('Transcode Detection', `
+          post_conv_bitrate &lt; <code>${c.TRANSCODE_MIN_BITRATE_KBPS}kbps</code>?<br>
+          YES \u2192 ${out('is_transcode = true', g('red'))}<br>
+          NO \u2192 ${out('is_transcode = false', g('green'))}<br>
+          <span style="color:#666;">Lo-fi lossless (demos, live) can produce genuine V0 below this threshold</span>
+        `, '#533')}
+
+        ${arrow()}
+
+        ${node('Verified Lossless', `
+          converted AND NOT is_transcode?<br>
+          YES \u2192 ${out('will_be_verified_lossless = true', g('green'))}<br>
+          NO \u2192 ${out('will_be_verified_lossless = false', g('amber'))}
+        `, '#353')}
+
+      </div>
+      <div>
+        <div class="dp-split-label">MP3 path</div>
+
+        ${node('VBR or CBR?', `
+          Count distinct bitrates across tracks:<br>
+          Multiple distinct \u2192 ${out('VBR', g('green'))} \u2192 skip to Quality Comparison<br>
+          All same \u2192 ${out('CBR', g('amber'))} \u2192 run spectral check
+        `, '#335')}
+
+        ${arrow()}
+
+        ${node('CBR Spectral Check', `
+          Same per-track analysis as FLAC path.<br>
+          Album grade ${out('suspect', g('red'))} or ${out('likely_transcode', g('red'))}:<br>
+          \u2003 New spectral_br \u2264 existing? \u2192 ${out('REJECT + denylist', g('red'))}<br>
+          \u2003 New spectral_br &gt; existing? \u2192 ${out('IMPORT + denylist', g('amber'))}<br>
+          Album grade ${out('genuine', g('green'))} / ${out('marginal', g('amber'))}:<br>
+          \u2003 \u2192 ${out('IMPORT', g('green'))}
+        `, '#335')}
+
+      </div>
+    </div>
+
+    ${arrow()}
+
+    <div class="dp-section">
+      <div class="dp-section-title">Quality Comparison (import_quality_decision)</div>
+      ${node('Quality Comparison', `
+        <code>effective_existing = override_min_bitrate ?? existing_min_bitrate</code><br>
+        <span style="color:#666;">Override comes from pipeline DB min_bitrate (can be container lie!)</span><br><br>
+        will_be_verified_lossless? \u2192 ${out('always IMPORT', g('green'))} (V0 from genuine FLAC beats everything)<br><br>
+        new_min_br &gt; effective_existing:<br>
+        \u2003 is_transcode? \u2192 ${out('transcode_upgrade', g('amber'))} (import + denylist + keep searching)<br>
+        \u2003 else \u2192 ${out('import', g('green'))}<br><br>
+        new_min_br \u2264 effective_existing:<br>
+        \u2003 is_transcode? \u2192 ${out('transcode_downgrade', g('red'))} (reject + denylist)<br>
+        \u2003 else \u2192 ${out('downgrade', g('red'))} (reject)
+      `, '#353')}
+    </div>
+
+    ${arrow('beets import runs')}
+
+    <div class="dp-section">
+      <div class="dp-section-title">Post-Import Quality Gate (quality_gate_decision)</div>
+      ${node('Quality Gate', `
+        <code>gate_br = min(beets_min_bitrate, spectral_bitrate)</code><br>
+        <span style="color:#666;">Spectral overrides container bitrate if lower (catches fake 320s)</span><br><br>
+        verified_lossless AND gate_br &lt; ${c.QUALITY_MIN_BITRATE_KBPS}?<br>
+        \u2003 \u2192 force gate_br = <code>${c.QUALITY_MIN_BITRATE_KBPS}</code> (lo-fi pass)<br><br>
+        gate_br &lt; <code>${c.QUALITY_MIN_BITRATE_KBPS}kbps</code> \u2192 ${out('REQUEUE_UPGRADE', g('amber'))}<br>
+        \u2003 Search: <code>${c.QUALITY_UPGRADE_TIERS}</code><br><br>
+        CBR + NOT verified_lossless \u2192 ${out('REQUEUE_FLAC', g('amber'))}<br>
+        \u2003 Search: <code>flac</code> only<br><br>
+        else \u2192 ${out('ACCEPT', g('green'))} \u2014 album is done
+      `, '#353')}
+    </div>
+
+    ${arrow()}
+
+    <div class="dp-section">
+      <div class="dp-section-title">Final State</div>
+      ${node('Album Status', `
+        ${out('ACCEPT', g('green'))} \u2192 status = imported, done<br>
+        ${out('REQUEUE_UPGRADE', g('amber'))} \u2192 status = wanted, quality_override = "${c.QUALITY_UPGRADE_TIERS}"<br>
+        ${out('REQUEUE_FLAC', g('amber'))} \u2192 status = wanted, quality_override = "flac"<br>
+        ${out('transcode_upgrade', g('amber'))} \u2192 imported + denylist source + reset to wanted<br>
+        ${out('REJECT / DOWNGRADE', g('red'))} \u2192 stays wanted, denylist source
+      `)}
+    </div>
+  </div>`;
 }
 
 function esc(s) {

@@ -200,6 +200,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/pipeline/status": "_get_pipeline_status",
         "/api/pipeline/recent": "_get_pipeline_recent",
         "/api/pipeline/all": "_get_pipeline_all",
+        "/api/pipeline/constants": "_get_pipeline_constants",
         "/api/beets/search": "_get_beets_search",
         "/api/beets/recent": "_get_beets_recent",
     }
@@ -486,6 +487,24 @@ class Handler(BaseHTTPRequestHandler):
                 items.append(item)
             all_data[status] = items
         self._json(all_data)
+
+    def _get_pipeline_constants(self, params: dict[str, list[str]]) -> None:
+        """Return decision pipeline thresholds for the system diagram."""
+        from quality import (QUALITY_MIN_BITRATE_KBPS, TRANSCODE_MIN_BITRATE_KBPS,
+                             QUALITY_UPGRADE_TIERS)
+        from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
+                                    ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
+                                    CLIFF_THRESHOLD_DB_PER_KHZ)
+        self._json({
+            "QUALITY_MIN_BITRATE_KBPS": QUALITY_MIN_BITRATE_KBPS,
+            "TRANSCODE_MIN_BITRATE_KBPS": TRANSCODE_MIN_BITRATE_KBPS,
+            "QUALITY_UPGRADE_TIERS": QUALITY_UPGRADE_TIERS,
+            "HF_DEFICIT_SUSPECT": HF_DEFICIT_SUSPECT,
+            "HF_DEFICIT_MARGINAL": HF_DEFICIT_MARGINAL,
+            "ALBUM_SUSPECT_PCT": ALBUM_SUSPECT_PCT,
+            "MIN_CLIFF_SLICES": MIN_CLIFF_SLICES,
+            "CLIFF_THRESHOLD_DB_PER_KHZ": CLIFF_THRESHOLD_DB_PER_KHZ,
+        })
 
     def _get_pipeline_detail(self, params: dict[str, list[str]], req_id_str: str) -> None:
         req_id = int(req_id_str)
