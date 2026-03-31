@@ -508,8 +508,9 @@ def _submit_search(album, search_cfg, slskd_client):
     logger.info(f"Submitting search: {query} "
                 f"(from '{artist_name} - {album_title}')")
 
-    # Retry on 429 with backoff — slskd semaphore may still be held
-    for attempt in range(4):
+    # Retry on 429 (rate limit) or 409 (semaphore busy) with backoff.
+    # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
+    for attempt in range(6):
         try:
             search = slskd_client.searches.search_text(
                 searchText=query,
@@ -520,10 +521,11 @@ def _submit_search(album, search_cfg, slskd_client):
             )
             return (search["id"], query, album_id)
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429 and attempt < 3:
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                logger.warning(f"429 rate limited submitting search for {query}, "
-                               f"retrying in {wait}s (attempt {attempt + 1}/4)")
+            status = e.response.status_code if e.response is not None else 0
+            if status in (429, 409) and attempt < 5:
+                wait = min(2 ** attempt, 8)  # 1, 2, 4, 8, 8s
+                logger.warning(f"{status} on search submit for {query}, "
+                               f"retrying in {wait}s (attempt {attempt + 1}/6)")
                 time.sleep(wait)
             else:
                 logger.exception(f"Failed to submit search via SLSKD: {query}")
