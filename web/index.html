@@ -740,6 +740,10 @@ function renderPipelineItem(item) {
   if (item.validation_attempts) attempts.push(`${item.validation_attempts} val`);
   const attemptStr = attempts.length ? attempts.join(', ') : '';
   const dist = item.beets_distance != null ? `dist ${item.beets_distance.toFixed(3)}` : '';
+  // Last download verdict for context (e.g. why a wanted album is stuck)
+  const lastVerdict = item.last_verdict || '';
+  const lastColor = item.last_outcome === 'success' || item.last_outcome === 'force_import'
+    ? '#6d6' : item.last_outcome === 'rejected' ? '#d88' : '#aa8';
 
   return `
     <div class="p-item ${srcClass}" onclick="toggleDetail(${item.id})">
@@ -758,6 +762,7 @@ function renderPipelineItem(item) {
         ${attemptStr ? `<span>${attemptStr}</span>` : ''}
         ${dist ? `<span>${dist}</span>` : ''}
       </div>
+      ${lastVerdict ? `<div class="p-meta" style="margin-top:2px;"><span style="color:${lastColor};">last: ${esc(lastVerdict)}</span>${item.download_count > 1 ? `<span>(${item.download_count} attempts)</span>` : ''}</div>` : ''}
     </div>
     <div class="p-detail" id="detail-${item.id}"></div>
   `;

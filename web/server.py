@@ -466,10 +466,25 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"recent": serialized})
 
     def _get_pipeline_all(self, params: dict[str, list[str]]) -> None:
+        from classify import classify_log_entry, LogEntry
         counts = _db().count_by_status()
         all_data: dict[str, object] = {"counts": counts}
         for status in ("wanted", "imported", "manual"):
-            all_data[status] = [_serialize_row(r) for r in _db().get_by_status(status)]
+            items = []
+            for r in _db().get_by_status(status):
+                item = _serialize_row(r)
+                # Add last download verdict for context
+                history = _db().get_download_history(r["id"])
+                if history:
+                    last = history[0]
+                    entry = LogEntry.from_row(last)
+                    classified = classify_log_entry(entry)
+                    item["last_verdict"] = classified.verdict
+                    item["last_outcome"] = last.get("outcome")
+                    item["last_username"] = last.get("soulseek_username")
+                    item["download_count"] = len(history)
+                items.append(item)
+            all_data[status] = items
         self._json(all_data)
 
     def _get_pipeline_detail(self, params: dict[str, list[str]], req_id_str: str) -> None:
