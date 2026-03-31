@@ -25,8 +25,10 @@ import json
 import os
 import select
 import signal
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import NoReturn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -36,9 +38,79 @@ from quality import (transcode_detection, import_quality_decision,
                      SpectralInfo, PostflightInfo)
 from beets_db import BeetsDB
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
+BEET_BIN = (shutil.which("beet")
+            or "/etc/profiles/per-user/abl030/bin/beet")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
+_current_result: ImportResult | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pure stage decision functions — extracted from main() for testability
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StageResult:
+    """Result of a pipeline stage decision point."""
+    decision: str = "continue"
+    exit_code: int = 0
+    error: str | None = None
+    terminal: bool = False
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.terminal
+
+
+def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
+    """Decide whether to proceed based on pre-flight checks (pure)."""
+    if not path_exists:
+        if already_in_beets:
+            return StageResult(decision="preflight_existing", exit_code=0, terminal=True)
+        return StageResult(decision="path_missing", exit_code=3,
+                           error="Path not found", terminal=True)
+    return StageResult(decision="continue")
+
+
+def conversion_decision(converted: int, failed: int) -> StageResult:
+    """Decide whether to proceed after FLAC conversion (pure)."""
+    if failed > 0:
+        return StageResult(decision="conversion_failed", exit_code=1,
+                           error=f"{failed} FLAC files failed to convert",
+                           terminal=True)
+    return StageResult(decision="continue")
+
+
+def quality_decision_stage(
+    new_min_br: int | None,
+    existing_min_br: int | None,
+    override_min_br: int | None,
+    is_transcode: bool,
+    will_be_verified_lossless: bool,
+) -> StageResult:
+    """Run quality comparison and map to exit codes (pure wrapper).
+
+    Delegates to import_quality_decision() and maps terminal decisions
+    to exit codes: downgrade→5, transcode_downgrade→6.
+    """
+    decision = import_quality_decision(
+        new_min_br, existing_min_br, override_min_br,
+        is_transcode=is_transcode,
+        will_be_verified_lossless=will_be_verified_lossless)
+
+    if decision == "downgrade":
+        return StageResult(decision="downgrade", exit_code=5, terminal=True)
+    elif decision == "transcode_downgrade":
+        return StageResult(decision="transcode_downgrade", exit_code=6, terminal=True)
+    # import, transcode_upgrade, transcode_first all proceed to import
+    return StageResult(decision=decision, exit_code=0)
+
+
+def final_exit_decision(is_transcode: bool) -> int:
+    """Determine the final exit code after a successful import."""
+    return 6 if is_transcode else 0
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +394,10 @@ def main():
         MAX_DISTANCE = 999
         _log("[FORCE] Distance check disabled (MAX_DISTANCE=999)")
 
-    # Accumulate structured result
+    # Accumulate structured result (module-level so crash handler can preserve data)
+    global _current_result  # noqa: PLW0603
     r = ImportResult()
+    _current_result = r
 
     # --- Pre-flight: already imported? ---
     beets = BeetsDB()
@@ -332,11 +406,14 @@ def main():
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
 
-    # --- Path check ---
-    if not os.path.isdir(args.path):
-        if already_in_beets:
+    # --- Path check (pure decision) ---
+    pf = preflight_decision(already_in_beets, os.path.isdir(args.path))
+    if pf.is_terminal:
+        r.decision = pf.decision
+        r.exit_code = pf.exit_code
+        r.error = pf.error
+        if pf.decision == "preflight_existing":
             _log(f"[PRE-FLIGHT] No new files, keeping existing import")
-            r.decision = "preflight_existing"
             if request_id:
                 info = beets.get_album_info(mbid)
                 if info:
@@ -346,12 +423,9 @@ def main():
                         imported_path=info.album_path)
                     update_pipeline_db(request_id, "imported",
                                        imported_path=info.album_path)
-            beets.close()
-            _emit_and_exit(r)
-        r.exit_code = 3
-        r.decision = "path_missing"
-        r.error = f"Path not found: {args.path}"
-        _log(f"[ERROR] {r.error}")
+        else:
+            _log(f"[ERROR] {r.error}")
+        beets.close()
         _emit_and_exit(r)
 
     # --- Spectral analysis (pre-conversion) ---
@@ -400,10 +474,11 @@ def main():
         r.conversion.original_filetype = "flac"
         r.conversion.target_filetype = "mp3"
     _log(f"  Converted {converted}, failed {failed}")
-    if failed > 0:
-        r.exit_code = 1
-        r.decision = "conversion_failed"
-        r.error = f"{failed} FLAC files failed to convert"
+    cd = conversion_decision(converted, failed)
+    if cd.is_terminal:
+        r.exit_code = cd.exit_code
+        r.decision = cd.decision
+        r.error = cd.error
         _log(f"[ERROR] {r.error}")
         _emit_and_exit(r)
 
@@ -440,28 +515,29 @@ def main():
 
     will_be_verified_lossless = (converted > 0 and not is_transcode)
     r.quality.will_be_verified_lossless = will_be_verified_lossless
-    decision = import_quality_decision(
+
+    # --- Quality comparison (pure decision) ---
+    qd = quality_decision_stage(
         new_min_br, existing_min_br, args.override_min_bitrate,
         is_transcode=is_transcode,
         will_be_verified_lossless=will_be_verified_lossless)
+    decision = qd.decision
     r.decision = decision
 
+    if qd.is_terminal:
+        r.exit_code = qd.exit_code
+        _log(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing "
+             f"{effective_existing}kbps — skipping import"
+             f"{' (transcode)' if decision == 'transcode_downgrade' else ''}")
+        _emit_and_exit(r)
+
+    # Non-terminal quality decisions — log and proceed to import
     if decision == "import":
         if will_be_verified_lossless and effective_existing is not None:
             _log(f"  [QUALITY] genuine FLAC→V0 at {new_min_br}kbps — "
                  f"always upgrade over existing {effective_existing}kbps")
         elif effective_existing is not None:
             _log(f"  [QUALITY] new {new_min_br}kbps > existing {effective_existing}kbps — upgrading")
-    elif decision == "downgrade":
-        r.exit_code = 5
-        _log(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing "
-             f"{effective_existing}kbps — skipping import")
-        _emit_and_exit(r)
-    elif decision == "transcode_downgrade":
-        r.exit_code = 6
-        _log(f"[QUALITY DOWNGRADE] new {new_min_br}kbps <= existing "
-             f"{effective_existing}kbps — skipping import (transcode)")
-        _emit_and_exit(r)
     elif decision == "transcode_upgrade":
         _log(f"  [QUALITY] new {new_min_br}kbps > existing "
              f"{effective_existing}kbps — upgrading (transcode)")
@@ -505,7 +581,7 @@ def main():
     if kept_duplicate:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
         move_result = subprocess.run(
-            ["beet", "move", f"mb_albumid:{mbid}"],
+            [BEET_BIN, "move", f"mb_albumid:{mbid}"],
             capture_output=True, text=True, timeout=120,
             env={**os.environ, "HOME": "/home/abl030"},
         )
@@ -587,8 +663,8 @@ def main():
 
     # --- Final exit ---
     beets.close()
+    r.exit_code = final_exit_decision(is_transcode)
     if is_transcode:
-        r.exit_code = 6
         _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
     else:
         _log("[OK] Import complete")
@@ -601,7 +677,13 @@ if __name__ == "__main__":
     except SystemExit:
         raise  # _emit_and_exit uses sys.exit
     except Exception as exc:
-        # Always emit JSON even on unexpected crash
-        r = ImportResult(exit_code=99, decision="crash",
-                         error=f"{type(exc).__name__}: {exc}")
+        # Preserve intermediate data if main() had started building a result
+        if _current_result is not None:
+            r = _current_result
+            r.exit_code = 99
+            r.decision = "crash"
+            r.error = f"{type(exc).__name__}: {exc}"
+        else:
+            r = ImportResult(exit_code=99, decision="crash",
+                             error=f"{type(exc).__name__}: {exc}")
         _emit_and_exit(r)
