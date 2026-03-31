@@ -257,6 +257,32 @@ class TestDatabaseSource(unittest.TestCase):
         assert req is not None
         self.assertTrue(req["verified_lossless"])
 
+    def test_mark_done_verified_lossless_uses_bitrate_for_spectral(self):
+        """When verified_lossless, on_disk_spectral_bitrate should be the
+        actual V0 min bitrate, not the spectral cliff estimate."""
+        from lib.quality import DownloadInfo
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="vl-bitrate-uuid", artist_name="The National",
+            album_title="Alligator", source="request")
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        dl = DownloadInfo()
+        dl.was_converted = True
+        dl.original_filetype = "flac"
+        dl.spectral_grade = "genuine"
+        dl.spectral_bitrate = 128  # bad spectral estimate
+        dl.bitrate = 245000  # actual V0 min bitrate (bps)
+        dl.verified_lossless_override = True
+        source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
+                         download_info=dl)
+        req = db.get_request(req_id)
+        assert req is not None
+        # Should use V0 bitrate (245), not spectral estimate (128)
+        self.assertEqual(req["on_disk_spectral_bitrate"], 245)
+        # spectral_bitrate (the download's raw spectral) stays as-is
+        self.assertEqual(req["spectral_bitrate"], 128)
+
     def test_mark_done_no_override_falls_back(self):
         """No override (legacy path) — derives from is_verified_lossless()."""
         from lib.quality import DownloadInfo

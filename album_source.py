@@ -177,7 +177,11 @@ class DatabaseSource:
         # After successful import, these files ARE what's on disk now
         if dl.spectral_grade:
             update_fields["on_disk_spectral_grade"] = dl.spectral_grade
-        if dl.spectral_bitrate is not None:
+        if update_fields.get("verified_lossless") and dl.bitrate:
+            # Verified lossless: V0 bitrate is the real quality fingerprint,
+            # not the spectral cliff estimate (which can miscalibrate)
+            update_fields["on_disk_spectral_bitrate"] = dl.bitrate // 1000
+        elif dl.spectral_bitrate is not None:
             update_fields["on_disk_spectral_bitrate"] = dl.spectral_bitrate
         db.update_status(request_id, "imported", **update_fields)
 
