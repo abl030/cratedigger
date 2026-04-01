@@ -153,5 +153,202 @@ class TestDenylist(unittest.TestCase):
         self.assertTrue(is_search_denylisted(dl, 1, max_failures=3))
 
 
+class TestCleanupDisambiguationOrphans(unittest.TestCase):
+    """Tests for cleanup_disambiguation_orphans().
+
+    When beets disambiguates an album (e.g. renames '2009 - Blood Bank' to
+    '2009 - Blood Bank [2009]'), it moves audio files but leaves non-audio
+    clutter (cover.jpg) in the original directory. This function removes
+    those orphaned sibling directories.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.artist_dir = os.path.join(self.tmpdir, "Bon Iver")
+        os.makedirs(self.artist_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _make_dir(self, name: str, files: list[str]) -> str:
+        d = os.path.join(self.artist_dir, name)
+        os.makedirs(d, exist_ok=True)
+        for f in files:
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write("x")
+        return d
+
+    def test_removes_orphan_with_only_cover_art(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3", "cover.jpg"])
+        orphan = self._make_dir("2009 - Blood Bank",
+                                ["cover.jpg"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertFalse(os.path.exists(orphan))
+        self.assertEqual(removed, [orphan])
+
+    def test_does_not_remove_dir_with_audio_files(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3", "cover.jpg"])
+        other = self._make_dir("2020 - Blood Bank",
+                               ["01 Blood Bank.mp3", "cover.jpg"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertTrue(os.path.exists(other))
+        self.assertEqual(removed, [])
+
+    def test_does_not_remove_imported_dir_itself(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertTrue(os.path.exists(imported))
+        self.assertEqual(removed, [])
+
+    def test_removes_multiple_orphans(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        orphan1 = self._make_dir("2009 - Blood Bank",
+                                 ["cover.jpg"])
+        orphan2 = self._make_dir("2020 - Blood Bank [2020]",
+                                 ["Thumbs.DB"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertFalse(os.path.exists(orphan1))
+        self.assertFalse(os.path.exists(orphan2))
+        self.assertEqual(sorted(removed), sorted([orphan1, orphan2]))
+
+    def test_empty_dir_is_removed(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        orphan = os.path.join(self.artist_dir, "2009 - Blood Bank")
+        os.makedirs(orphan)
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertFalse(os.path.exists(orphan))
+        self.assertEqual(removed, [orphan])
+
+    def test_preserves_dir_with_flac(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        other = self._make_dir("2009 - Blood Bank",
+                               ["01 Blood Bank.flac"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertTrue(os.path.exists(other))
+        self.assertEqual(removed, [])
+
+    def test_nonexistent_imported_path_returns_empty(self):
+        from lib.util import cleanup_disambiguation_orphans
+        removed = cleanup_disambiguation_orphans("/nonexistent/path/album")
+        self.assertEqual(removed, [])
+
+    def test_preserves_dir_with_mixed_audio_and_clutter(self):
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        other = self._make_dir("2009 - Blood Bank",
+                               ["cover.jpg", "01 Track.m4a"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertTrue(os.path.exists(other))
+        self.assertEqual(removed, [])
+
+    def test_ignores_files_in_artist_dir(self):
+        """Files directly in the artist dir should not cause errors."""
+        from lib.util import cleanup_disambiguation_orphans
+        imported = self._make_dir("2009 - Blood Bank [2009]",
+                                  ["01 Blood Bank.mp3"])
+        # Put a file directly in the artist dir
+        with open(os.path.join(self.artist_dir, "artist.nfo"), "w") as f:
+            f.write("x")
+        orphan = self._make_dir("2009 - Blood Bank", ["cover.jpg"])
+        removed = cleanup_disambiguation_orphans(imported)
+        self.assertFalse(os.path.exists(orphan))
+        self.assertEqual(removed, [orphan])
+
+
+class TestMeeloJwtLogin(unittest.TestCase):
+    """Tests for _meelo_jwt_login()."""
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_returns_jwt_on_success(self, mock_urlopen):
+        from lib.util import _meelo_jwt_login
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"access_token": "tok123"}'
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+        jwt = _meelo_jwt_login("http://meelo:5001", "user", "pass")
+        self.assertEqual(jwt, "tok123")
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_posts_correct_credentials(self, mock_urlopen):
+        from lib.util import _meelo_jwt_login
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"access_token": "x"}'
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+        _meelo_jwt_login("http://meelo:5001", "myuser", "mypass")
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        self.assertEqual(body["username"], "myuser")
+        self.assertEqual(body["password"], "mypass")
+
+
+class TestTriggerMeeloScan(unittest.TestCase):
+    """Tests for trigger_meelo_scan()."""
+
+    def _make_cfg(self, url="http://meelo:5001", user="u", pw="p"):
+        cfg = MagicMock()
+        cfg.meelo_url = url
+        cfg.meelo_username = user
+        cfg.meelo_password = pw
+        return cfg
+
+    @patch("lib.util._meelo_jwt_login", return_value="tok")
+    @patch("lib.util._meelo_scanner_post")
+    def test_calls_scan_endpoint(self, mock_post, mock_login):
+        from lib.util import trigger_meelo_scan
+        trigger_meelo_scan(self._make_cfg())
+        mock_post.assert_called_once_with(
+            "http://meelo:5001", "tok", "/scanner/scan?library=beets")
+
+    def test_noop_when_no_url(self):
+        from lib.util import trigger_meelo_scan
+        cfg = self._make_cfg(url=None)
+        trigger_meelo_scan(cfg)  # should not raise
+
+
+class TestTriggerMeeloClean(unittest.TestCase):
+    """Tests for trigger_meelo_clean()."""
+
+    def _make_cfg(self, url="http://meelo:5001", user="u", pw="p"):
+        cfg = MagicMock()
+        cfg.meelo_url = url
+        cfg.meelo_username = user
+        cfg.meelo_password = pw
+        return cfg
+
+    @patch("lib.util._meelo_jwt_login", return_value="tok")
+    @patch("lib.util._meelo_scanner_post")
+    def test_calls_clean_endpoint(self, mock_post, mock_login):
+        from lib.util import trigger_meelo_clean
+        trigger_meelo_clean(self._make_cfg())
+        mock_post.assert_called_once_with(
+            "http://meelo:5001", "tok", "/scanner/clean?library=beets")
+
+    def test_noop_when_no_url(self):
+        from lib.util import trigger_meelo_clean
+        cfg = self._make_cfg(url=None)
+        trigger_meelo_clean(cfg)  # should not raise
+
+    @patch("lib.util._meelo_jwt_login", side_effect=Exception("auth failed"))
+    def test_does_not_raise_on_failure(self, mock_login):
+        from lib.util import trigger_meelo_clean
+        trigger_meelo_clean(self._make_cfg())  # best-effort, no raise
+
+
 if __name__ == "__main__":
     unittest.main()

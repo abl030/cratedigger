@@ -17,6 +17,7 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames)
+from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
 
 if TYPE_CHECKING:
     from lib.context import SoularrContext
@@ -295,6 +296,10 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                 trigger_meelo_scan(ctx)
             if action.cleanup:
                 _cleanup_staged_dir(dest)
+            if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
+                removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
+                if removed:
+                    trigger_meelo_clean(ctx.cfg)
     except sp.TimeoutExpired:
         logger.error(f"AUTO-IMPORT TIMEOUT: {label}")
         timeout_dl = _build_download_info(album_data)

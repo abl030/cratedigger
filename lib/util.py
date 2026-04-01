@@ -87,6 +87,40 @@ def repair_mp3_headers(folder_path: str) -> None:
             logger.exception(f"MP3VAL: error on {f}")
 
 
+_AUDIO_EXTS = {"mp3", "flac", "m4a", "ogg", "opus", "wma", "aac", "alac", "wav"}
+
+
+def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
+    """Remove sibling directories that contain no audio files.
+
+    After beets disambiguates an album path (e.g. renames '2009 - Blood Bank'
+    to '2009 - Blood Bank [2009]'), the original directory may be left behind
+    containing only non-audio clutter (cover.jpg, Thumbs.DB). This function
+    scans the parent (artist) directory and removes any sibling dirs that
+    have zero audio files.
+
+    Returns the list of removed directory paths.
+    """
+    artist_dir = os.path.dirname(imported_path)
+    if not os.path.isdir(artist_dir):
+        return []
+    removed: list[str] = []
+    for entry in os.listdir(artist_dir):
+        sibling = os.path.join(artist_dir, entry)
+        if sibling == imported_path or not os.path.isdir(sibling):
+            continue
+        has_audio = any(
+            f.rsplit(".", 1)[-1].lower() in _AUDIO_EXTS
+            for f in os.listdir(sibling)
+            if os.path.isfile(os.path.join(sibling, f)) and "." in f
+        )
+        if not has_audio:
+            shutil.rmtree(sibling)
+            logger.info(f"Removed disambiguation orphan: {sibling}")
+            removed.append(sibling)
+    return removed
+
+
 def validate_audio(folder_path: str, mode: str = "normal") -> dict[str, Any]:
     """Check audio integrity of downloaded files via ffmpeg full decode.
 
@@ -244,33 +278,54 @@ def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
 
 # === Meelo integration ===
 
+import urllib.request
+
+
+def _meelo_jwt_login(url: str, username: str, password: str) -> str:
+    """Authenticate with Meelo and return a JWT token."""
+    login_data = json.dumps({"username": username, "password": password}).encode()
+    login_req = urllib.request.Request(
+        f"{url}/api/auth/login",
+        data=login_data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(login_req, timeout=10) as resp:
+        return json.loads(resp.read())["access_token"]
+
+
+def _meelo_scanner_post(url: str, jwt: str, path: str) -> None:
+    """POST to a Meelo scanner endpoint with JWT auth."""
+    req = urllib.request.Request(
+        f"{url}{path}",
+        method="POST",
+        headers={"Authorization": f"Bearer {jwt}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+
 def trigger_meelo_scan(cfg: Any) -> None:
     """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
-    import urllib.request
-    import urllib.error
-
     if not cfg.meelo_url:
         return
     try:
-        login_data = json.dumps({"username": cfg.meelo_username, "password": cfg.meelo_password}).encode()
-        login_req = urllib.request.Request(
-            f"{cfg.meelo_url}/api/auth/login",
-            data=login_data,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(login_req, timeout=10) as resp:
-            jwt = json.loads(resp.read())["access_token"]
-
-        scan_req = urllib.request.Request(
-            f"{cfg.meelo_url}/scanner/scan?library=beets",
-            method="POST",
-            headers={"Authorization": f"Bearer {jwt}"},
-        )
-        with urllib.request.urlopen(scan_req, timeout=10) as resp:
-            resp.read()
+        jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
+        _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/scan?library=beets")
         logger.info("MEELO: triggered beets library scan")
     except Exception as e:
         logger.warning(f"MEELO: scan trigger failed: {e}")
+
+
+def trigger_meelo_clean(cfg: Any) -> None:
+    """Trigger a Meelo library clean to remove orphaned entries. Best-effort."""
+    if not cfg.meelo_url:
+        return
+    try:
+        jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
+        _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/clean?library=beets")
+        logger.info("MEELO: triggered beets library clean")
+    except Exception as e:
+        logger.warning(f"MEELO: clean trigger failed: {e}")
 
 
 # === Validation logging ===
