@@ -197,6 +197,7 @@
   <div class="tab" onclick="showTab('library')">Library</div>
   <div class="tab" onclick="showTab('decisions')">Decisions</div>
   <div class="tab" onclick="showTab('disambiguate')">Disambiguate</div>
+  <div class="tab" onclick="showTab('manual')">Manual Import</div>
 </div>
 
 <div id="search-section" class="section active">
@@ -219,6 +220,10 @@
 
 <div id="decisions-section" class="section">
   <div id="decisions-content" class="loading">Loading...</div>
+</div>
+
+<div id="manual-section" class="section">
+  <div id="manual-content" class="loading">Loading...</div>
 </div>
 
 <div id="disambiguate-section" class="section">
@@ -321,7 +326,7 @@ function awstDate(isoStr) { return toAWST(isoStr).slice(0, 10); }
 function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
-const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions', 'disambiguate'];
+const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions', 'disambiguate', 'manual'];
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -332,6 +337,7 @@ function showTab(name) {
   if (name === 'library') loadLibraryRecent();
   if (name === 'decisions') loadDecisions();
   if (name === 'disambiguate') initDisambiguate();
+  if (name === 'manual') loadManualImport();
 }
 
 function toast(msg, isError) {
@@ -1712,6 +1718,85 @@ async function disambRemove(pipelineId, btn) {
   } catch (e) {
     btn.textContent = 'Error';
     toast('Remove failed', true);
+  }
+}
+
+// --- Manual Import tab ---
+async function loadManualImport() {
+  const el = document.getElementById('manual-content');
+  el.innerHTML = '<div class="loading">Scanning Complete folder...</div>';
+  try {
+    const r = await fetch(`${API}/api/manual-import/scan`);
+    const data = await r.json();
+    renderManualImport(data, el);
+  } catch (e) {
+    el.innerHTML = '<div style="color:#f66;">Failed to scan folder</div>';
+  }
+}
+
+function renderManualImport(data, el) {
+  const folders = data.folders || [];
+  if (folders.length === 0) {
+    el.innerHTML = '<div style="color:#888;padding:12px;">No audio folders found in Complete directory.</div>';
+    return;
+  }
+
+  let html = `<div style="margin:8px 0;color:#888;">${folders.length} folders with audio files, ${data.wanted_count} wanted requests</div>`;
+
+  html += folders.map(f => {
+    const match = f.match;
+    let matchHtml = '';
+    let btnHtml = '';
+
+    if (match) {
+      const pct = Math.round(match.score * 100);
+      matchHtml = `<div style="margin-top:4px;">
+        <span style="color:#6d6;">Match (${pct}%):</span>
+        <span style="color:#aaa;">${esc(match.artist)} - ${esc(match.album)}</span>
+        <span style="color:#555;font-size:0.85em;">(request #${match.request_id})</span>
+      </div>`;
+      btnHtml = `<button class="btn btn-add" style="font-size:0.8em;padding:2px 10px;" onclick="event.stopPropagation(); runManualImport(${match.request_id}, '${f.path.replace(/'/g, "\\'")}', this)">Import</button>`;
+    } else {
+      matchHtml = '<div style="margin-top:4px;color:#777;">No matching wanted request</div>';
+    }
+
+    return `<div class="release" style="margin:4px 0;">
+      <div class="release-info">
+        <div class="release-title">${esc(f.name)}</div>
+        <div class="release-meta" style="color:#777;">${f.file_count} files — parsed: ${esc(f.artist || '?')} - ${esc(f.album || '?')}</div>
+        ${matchHtml}
+      </div>
+      ${btnHtml}
+    </div>`;
+  }).join('');
+
+  el.innerHTML = html;
+}
+
+async function runManualImport(requestId, path, btn) {
+  if (!confirm(`Import folder to request #${requestId}?`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Importing...';
+  try {
+    const r = await fetch(`${API}/api/manual-import/import`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({request_id: requestId, path: path}),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      btn.textContent = 'Imported';
+      btn.style.background = '#1a4a2a';
+      toast(`Imported: ${data.artist} - ${data.album}`);
+    } else {
+      btn.textContent = 'Failed';
+      btn.style.background = '#5a2a2a';
+      btn.style.color = '#f88';
+      toast(data.message || 'Import failed', true);
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+    toast('Import request failed', true);
   }
 }
 

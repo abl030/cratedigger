@@ -10,6 +10,7 @@ Commands:
     set <id> <status>   Change status (wanted, imported, manual)
     show <id>           Show full details of a request
     force-import <dl_id> Force-import a rejected download by download_log ID
+    manual-import <id> <path> Import a local folder as a pipeline request
 
 Usage:
     python3 scripts/pipeline_cli.py status
@@ -348,6 +349,72 @@ def cmd_force_import(db, args):
         print(f"  [WARN] import_one.py exited with code {result.returncode}")
 
 
+def cmd_manual_import(db, args):
+    """Import a local folder as a pipeline request."""
+    from manual_import import run_manual_import
+
+    request_id = args.id
+    path = args.path
+
+    # 1. Look up request
+    req = db.get_request(request_id)
+    if not req:
+        print(f"  Request {request_id} not found.")
+        return
+
+    mbid = req.get("mb_release_id")
+    if not mbid:
+        print(f"  Request {request_id} has no MusicBrainz release ID.")
+        return
+
+    print(f"  Manual import: {req['artist_name']} - {req['album_title']}")
+    print(f"  Path: {path}")
+    print(f"  MBID: {mbid}")
+
+    # 2. Run import
+    result = run_manual_import(
+        request_id=request_id,
+        mb_release_id=mbid,
+        path=path,
+        import_one_path=IMPORT_ONE,
+        override_min_bitrate=req.get("min_bitrate"),
+    )
+
+    # 3. Log to download_log
+    db.log_download(
+        request_id=request_id,
+        outcome="manual_import" if result.success else "failed",
+        import_result=result.import_result_json,
+        staged_path=path,
+    )
+
+    # 4. Update status
+    if result.success:
+        update_fields: dict[str, object] = {}
+        if result.import_result_json:
+            try:
+                ir = json.loads(result.import_result_json)
+                spectral = ir.get("spectral", {})
+                quality = ir.get("quality", {})
+                conv = ir.get("conversion", {})
+                if spectral.get("grade"):
+                    update_fields["spectral_grade"] = spectral["grade"]
+                if spectral.get("bitrate") is not None:
+                    update_fields["spectral_bitrate"] = spectral["bitrate"]
+                if quality.get("new_min_bitrate") is not None:
+                    update_fields["min_bitrate"] = quality["new_min_bitrate"]
+                if (conv.get("was_converted")
+                        and conv.get("original_filetype", "").lower() == "flac"
+                        and spectral.get("grade") == "genuine"):
+                    update_fields["verified_lossless"] = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+        db.update_status(request_id, "imported", **update_fields)
+        print(f"  [OK] {result.message}")
+    else:
+        print(f"  [FAIL] {result.message}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -387,6 +454,11 @@ def main():
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
     p_force.add_argument("download_log_id", type=int, help="Download log ID")
 
+    # manual-import
+    p_manual = sub.add_parser("manual-import", help="Import a local folder as a pipeline request")
+    p_manual.add_argument("id", type=int, help="Pipeline request ID")
+    p_manual.add_argument("path", help="Path to album folder")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -403,6 +475,7 @@ def main():
         "set": cmd_set,
         "show": cmd_show,
         "force-import": cmd_force_import,
+        "manual-import": cmd_manual_import,
     }
     commands[args.command](db, args)
     db.close()
