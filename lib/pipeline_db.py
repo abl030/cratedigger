@@ -215,7 +215,7 @@ class PipelineDB:
                 DO $$ BEGIN
                     ALTER TABLE download_log DROP CONSTRAINT IF EXISTS download_log_outcome_check;
                     ALTER TABLE download_log ADD CONSTRAINT download_log_outcome_check
-                        CHECK (outcome IN ('success', 'rejected', 'failed', 'timeout', 'force_import'));
+                        CHECK (outcome IN ('success', 'rejected', 'failed', 'timeout', 'force_import', 'manual_import'));
                 END $$;
             """)
         mig_conn.close()
