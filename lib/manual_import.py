@@ -156,13 +156,21 @@ def match_folders_to_requests(
             continue
 
         best_match: FolderMatch | None = None
+        folder_album_tokens = _tokenize(folder.album)
         for req in requests:
             req_tokens = _tokenize(req.artist_name + " " + req.album_title)
+            req_album_tokens = _tokenize(req.album_title)
             if not req_tokens:
                 continue
+            # Full Jaccard (artist + album)
             overlap = folder_tokens & req_tokens
             union = folder_tokens | req_tokens
-            score = len(overlap) / len(union) if union else 0.0
+            full_score = len(overlap) / len(union) if union else 0.0
+            # Album-only Jaccard (catches folders with no artist in name)
+            album_overlap = folder_album_tokens & req_album_tokens
+            album_union = folder_album_tokens | req_album_tokens
+            album_score = len(album_overlap) / len(album_union) if album_union else 0.0
+            score = max(full_score, album_score)
             if score >= min_score and (best_match is None or score > best_match.score):
                 best_match = FolderMatch(folder=folder, request=req, score=score)
 

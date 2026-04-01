@@ -104,6 +104,16 @@ class TestMatchFoldersToRequests(unittest.TestCase):
         matches = match_folders_to_requests(folders, requests)
         self.assertEqual(len(matches), 1)
 
+    def test_album_only_folder_matches_by_album_title(self) -> None:
+        """Folder with no artist but matching album title should match."""
+        folders = [FolderInfo(name="Deserters (2022)", path="/tmp/Deserters (2022)",
+                              artist="", album="Deserters", file_count=107)]
+        requests = [self._req(1, "The Mountain Goats", "Deserters")]
+        matches = match_folders_to_requests(folders, requests)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].request.id, 1)
+        self.assertGreater(matches[0].score, 0.5)
+
     def test_empty_inputs(self) -> None:
         self.assertEqual(match_folders_to_requests([], []), [])
 
