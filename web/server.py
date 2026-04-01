@@ -176,12 +176,13 @@ def check_pipeline(mbids):
     pdb = _db()
     placeholders = ",".join(["%s"] * len(mbids))
     cur = pdb._execute(
-        f"SELECT mb_release_id, status, quality_override, min_bitrate "
+        f"SELECT id, mb_release_id, status, quality_override, min_bitrate "
         f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
         tuple(mbids),
     )
     return {
         r["mb_release_id"]: {
+            "id": r["id"],
             "status": r["status"],
             "quality_override": r["quality_override"],
             "min_bitrate": r["min_bitrate"],
@@ -363,6 +364,7 @@ class Handler(BaseHTTPRequestHandler):
             lib_status = "in_library" if ri.release_id in in_library else None
             pip = in_pipeline.get(ri.release_id)
             pip_status = pip["status"] if pip else None
+            pip_id = pip["id"] if pip else None
             releases_json.append({
                 "release_id": ri.release_id,
                 "title": ri.title,
@@ -375,6 +377,7 @@ class Handler(BaseHTTPRequestHandler):
                 "unique_track_count": ri.unique_track_count,
                 "library_status": lib_status,
                 "pipeline_status": pip_status,
+                "pipeline_id": pip_id,
                 "tracks": [
                     {
                         "recording_id": t.recording_id,
@@ -411,6 +414,7 @@ class Handler(BaseHTTPRequestHandler):
             r["in_library"] = r["id"] in in_library
             pi = in_pipeline.get(r["id"])
             r["pipeline_status"] = pi["status"] if pi else None
+            r["pipeline_id"] = pi["id"] if pi else None
         self._json(data)
 
     def _get_release(self, params: dict[str, list[str]], release_id: str) -> None:

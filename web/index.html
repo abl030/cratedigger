@@ -529,15 +529,22 @@ async function loadReleaseGroup(id, el) {
       if (rel.pipeline_status === 'imported') badges += '<span class="badge badge-imported">imported</span>';
       if (rel.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
       const canAdd = !rel.in_library && !rel.pipeline_status;
+      const canRemove = rel.pipeline_status === 'wanted' && rel.pipeline_id;
+      let btnHtml;
+      if (canAdd) {
+        btnHtml = `<button class="btn btn-add" onclick="event.stopPropagation(); addRelease('${rel.id}', this)">Add</button>`;
+      } else if (canRemove) {
+        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); disambRemove(${rel.pipeline_id}, this)">Remove</button>`;
+      } else {
+        btnHtml = `<button class="btn btn-add" disabled>${rel.in_library ? 'Owned' : rel.pipeline_status || '?'}</button>`;
+      }
       return `
         <div class="release" onclick="event.stopPropagation(); toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
           </div>
-          <button class="btn btn-add" ${canAdd ? '' : 'disabled'} onclick="event.stopPropagation(); ${canAdd ? `addRelease('${rel.id}', this)` : ''}">
-            ${canAdd ? 'Add' : (rel.in_library ? 'Owned' : rel.pipeline_status || '?')}
-          </button>
+          ${btnHtml}
         </div>
         <div class="release-detail" id="reldet-${rel.id}"></div>
       `;
@@ -1683,9 +1690,19 @@ function renderDisambRelease(r) {
   if (r.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
 
   const canAdd = !r.library_status && !r.pipeline_status;
+  const canRemove = r.pipeline_status === 'wanted' && r.pipeline_id;
   const uniqueBadge = r.unique_track_count > 0
     ? `<span style="color:#6d6;font-weight:600;margin-left:6px;">${r.unique_track_count} unique</span>`
     : '<span style="color:#555;margin-left:6px;">0 unique</span>';
+
+  let btnHtml;
+  if (canAdd) {
+    btnHtml = `<button class="btn btn-add" onclick="event.stopPropagation(); addRelease('${r.release_id}', this)">Add</button>`;
+  } else if (canRemove) {
+    btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); disambRemove(${r.pipeline_id}, this)">Remove</button>`;
+  } else {
+    btnHtml = `<button class="btn btn-add" disabled>${r.library_status ? 'Owned' : r.pipeline_status || '?'}</button>`;
+  }
 
   return `
     <div class="release" onclick="event.stopPropagation(); toggleDisambTracks('${r.release_id}')" style="cursor:pointer;">
@@ -1693,12 +1710,41 @@ function renderDisambRelease(r) {
         <div class="release-title">${esc(r.title)}${badges}${uniqueBadge}</div>
         <div class="release-meta" style="color:#777;">${r.date || '?'} — ${r.format} — ${r.track_count}t — ${esc(r.release_group_type || '?')}</div>
       </div>
-      <button class="btn btn-add" ${canAdd ? '' : 'disabled'} onclick="event.stopPropagation(); ${canAdd ? `addRelease('${r.release_id}', this)` : ''}">
-        ${canAdd ? 'Add' : (r.library_status ? 'Owned' : r.pipeline_status || '?')}
-      </button>
+      ${btnHtml}
     </div>
     <div id="disamb-tracks-${r.release_id}" style="display:none;padding:4px 0 8px 16px;"></div>
   `;
+}
+
+async function disambRemove(pipelineId, btn) {
+  if (!confirm(`Remove pipeline request #${pipelineId}?`)) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const r = await fetch(`${API}/api/pipeline/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: pipelineId}),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      btn.textContent = 'Removed';
+      btn.style.background = '#333';
+      btn.style.color = '#666';
+      toast(`Removed #${pipelineId}`);
+      // Update local data so re-render is correct
+      if (disambData) {
+        const rel = disambData.releases.find(r => r.pipeline_id === pipelineId);
+        if (rel) { rel.pipeline_status = null; rel.pipeline_id = null; }
+      }
+    } else {
+      btn.textContent = 'Error';
+      toast(data.error || 'Remove failed', true);
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+    toast('Remove failed', true);
+  }
 }
 
 function toggleDisambTracks(releaseId) {

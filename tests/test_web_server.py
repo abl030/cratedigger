@@ -241,6 +241,121 @@ class TestServerEndpoints(unittest.TestCase):
             self.assertIn("2026", created)
 
 
+    def test_disambiguate_endpoint(self):
+        """Disambiguate endpoint returns releases with unique track info."""
+        fake_releases = [
+            {
+                "id": "rel-1",
+                "title": "Album",
+                "date": "2020",
+                "status": "Official",
+                "release-group": {
+                    "id": "rg-1",
+                    "title": "Album",
+                    "primary-type": "Album",
+                    "secondary-types": [],
+                },
+                "media": [{
+                    "position": 1,
+                    "format": "CD",
+                    "track-count": 2,
+                    "tracks": [
+                        {"position": 1, "number": "1", "title": "Track A",
+                         "recording": {"id": "rec-1", "title": "Track A"}},
+                        {"position": 2, "number": "2", "title": "Track B",
+                         "recording": {"id": "rec-2", "title": "Track B"}},
+                    ],
+                }],
+            },
+            {
+                "id": "rel-2",
+                "title": "Single",
+                "date": "2020",
+                "status": "Official",
+                "release-group": {
+                    "id": "rg-2",
+                    "title": "Single",
+                    "primary-type": "Single",
+                    "secondary-types": [],
+                },
+                "media": [{
+                    "position": 1,
+                    "format": "CD",
+                    "track-count": 2,
+                    "tracks": [
+                        {"position": 1, "number": "1", "title": "Track A",
+                         "recording": {"id": "rec-1", "title": "Track A"}},
+                        {"position": 2, "number": "2", "title": "B-side",
+                         "recording": {"id": "rec-3", "title": "B-side"}},
+                    ],
+                }],
+            },
+        ]
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            status, data = self._get("/api/artist/664c3e0e-42d8-48c1-b209-1efca19c0325/disambiguate")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["artist_name"], "Test Artist")
+        self.assertEqual(len(data["releases"]), 2)
+
+        # Album has 1 unique track (Track B), Single has 1 unique (B-side)
+        album = [r for r in data["releases"] if r["release_id"] == "rel-1"][0]
+        single = [r for r in data["releases"] if r["release_id"] == "rel-2"][0]
+        self.assertEqual(album["unique_track_count"], 1)
+        self.assertEqual(single["unique_track_count"], 1)
+
+        # Check track-level uniqueness
+        bside = [t for t in single["tracks"] if t["title"] == "B-side"][0]
+        self.assertTrue(bside["unique"])
+        track_a = [t for t in single["tracks"] if t["title"] == "Track A"][0]
+        self.assertFalse(track_a["unique"])
+
+    def test_disambiguate_filters_live(self):
+        """Disambiguate endpoint filters out live releases."""
+        fake_releases = [
+            {
+                "id": "rel-1",
+                "title": "Studio",
+                "date": "2020",
+                "status": "Official",
+                "release-group": {
+                    "id": "rg-1",
+                    "title": "Studio",
+                    "primary-type": "Album",
+                    "secondary-types": [],
+                },
+                "media": [{"position": 1, "format": "CD", "track-count": 1,
+                           "tracks": [{"position": 1, "number": "1", "title": "Song",
+                                       "recording": {"id": "rec-1", "title": "Song"}}]}],
+            },
+            {
+                "id": "rel-2",
+                "title": "Live Album",
+                "date": "2020",
+                "status": "Official",
+                "release-group": {
+                    "id": "rg-2",
+                    "title": "Live",
+                    "primary-type": "Album",
+                    "secondary-types": ["Live"],
+                },
+                "media": [{"position": 1, "format": "CD", "track-count": 1,
+                           "tracks": [{"position": 1, "number": "1", "title": "Song Live",
+                                       "recording": {"id": "rec-2", "title": "Song Live"}}]}],
+            },
+        ]
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            status, data = self._get("/api/artist/664c3e0e-42d8-48c1-b209-1efca19c0325/disambiguate")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["releases"]), 1)
+        self.assertEqual(data["releases"][0]["title"], "Studio")
+
+
 class TestApplyPipelineBitrateOverride(unittest.TestCase):
     """Test the apply_pipeline_bitrate_override helper."""
 
