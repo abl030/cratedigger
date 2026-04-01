@@ -223,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
 
     _GET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         (re.compile(r"^/api/artist/([a-f0-9-]+)$"), "_get_artist"),
+        (re.compile(r"^/api/artist/([a-f0-9-]+)/disambiguate$"), "_get_artist_disambiguate"),
         (re.compile(r"^/api/release-group/([a-f0-9-]+)$"), "_get_release_group"),
         (re.compile(r"^/api/release/([a-f0-9-]+)$"), "_get_release"),
         (re.compile(r"^/api/pipeline/(\d+)$"), "_get_pipeline_detail"),
@@ -338,6 +339,72 @@ class Handler(BaseHTTPRequestHandler):
         for rg in rgs:
             rg["has_official"] = rg["id"] in official_rg_ids
         self._json({"release_groups": rgs})
+
+    def _get_artist_disambiguate(self, params: dict[str, list[str]], artist_id: str) -> None:
+        from lib.artist_releases import (
+            ArtistDisambiguation,
+            filter_non_live,
+            build_recording_map,
+            mark_unique_tracks,
+        )
+
+        raw_releases = mb_api.get_artist_releases_with_recordings(artist_id)
+        filtered = filter_non_live(raw_releases)
+        rec_map = build_recording_map(filtered)
+        release_infos = mark_unique_tracks(filtered, rec_map)
+
+        # Cross-reference library and pipeline status
+        mbids = [ri.release_id for ri in release_infos]
+        in_library = check_beets_library(mbids) if mbids else set()
+        in_pipeline = check_pipeline(mbids) if mbids else {}
+
+        releases_json: list[dict] = []
+        for ri in release_infos:
+            lib_status = "in_library" if ri.release_id in in_library else None
+            pip = in_pipeline.get(ri.release_id)
+            pip_status = pip["status"] if pip else None
+            releases_json.append({
+                "release_id": ri.release_id,
+                "title": ri.title,
+                "date": ri.date,
+                "format": ri.format,
+                "track_count": ri.track_count,
+                "release_group_id": ri.release_group_id,
+                "release_group_title": ri.release_group_title,
+                "release_group_type": ri.release_group_type,
+                "unique_track_count": ri.unique_track_count,
+                "library_status": lib_status,
+                "pipeline_status": pip_status,
+                "tracks": [
+                    {
+                        "recording_id": t.recording_id,
+                        "title": t.title,
+                        "position": t.position,
+                        "disc": t.disc,
+                        "length_seconds": t.length_seconds,
+                        "unique": t.unique,
+                    }
+                    for t in ri.tracks
+                ],
+            })
+
+        # Look up artist name from first release's credit
+        artist_name = ""
+        if raw_releases:
+            ac = raw_releases[0].get("artist-credit", [])
+            if ac:
+                artist_name = ac[0].get("name", "")
+
+        result = ArtistDisambiguation(
+            artist_id=artist_id,
+            artist_name=artist_name,
+            releases=release_infos,
+        )
+        self._json({
+            "artist_id": result.artist_id,
+            "artist_name": result.artist_name,
+            "releases": releases_json,
+        })
 
     def _get_release_group(self, params: dict[str, list[str]], rg_id: str) -> None:
         data = mb_api.get_release_group_releases(rg_id)

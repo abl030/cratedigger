@@ -196,6 +196,7 @@
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
   <div class="tab" onclick="showTab('library')">Library</div>
   <div class="tab" onclick="showTab('decisions')">Decisions</div>
+  <div class="tab" onclick="showTab('disambiguate')">Disambiguate</div>
 </div>
 
 <div id="search-section" class="section active">
@@ -218,6 +219,12 @@
 
 <div id="decisions-section" class="section">
   <div id="decisions-content" class="loading">Loading...</div>
+</div>
+
+<div id="disambiguate-section" class="section">
+  <input type="text" id="disamb-q" placeholder="Search artist to disambiguate...">
+  <div id="disamb-results"></div>
+  <div id="disamb-content"></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -314,7 +321,7 @@ function awstDate(isoStr) { return toAWST(isoStr).slice(0, 10); }
 function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
-const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions'];
+const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions', 'disambiguate'];
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -324,6 +331,7 @@ function showTab(name) {
   if (name === 'recents') loadRecents();
   if (name === 'library') loadLibraryRecent();
   if (name === 'decisions') loadDecisions();
+  if (name === 'disambiguate') initDisambiguate();
 }
 
 function toast(msg, isError) {
@@ -1558,6 +1566,157 @@ function renderSimulatorResults(r) {
 
   html += '</div>';
   el.innerHTML = html;
+}
+
+// --- Disambiguate tab ---
+let disambTimer = null;
+let disambData = null;
+let disambView = 'flat';
+
+function initDisambiguate() {
+  const input = document.getElementById('disamb-q');
+  if (input._bound) return;
+  input._bound = true;
+  input.addEventListener('input', () => {
+    clearTimeout(disambTimer);
+    disambTimer = setTimeout(() => searchDisambArtist(input.value.trim()), 300);
+  });
+}
+
+async function searchDisambArtist(q) {
+  const el = document.getElementById('disamb-results');
+  const content = document.getElementById('disamb-content');
+  if (!q) { el.innerHTML = ''; content.innerHTML = ''; return; }
+  try {
+    const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+    const data = await r.json();
+    el.innerHTML = data.artists.map(a => `
+      <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="loadDisambiguation('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}')">
+        <span class="artist-name">${esc(a.name)}</span>
+        ${a.disambiguation ? `<span class="artist-dis" style="color:#777;"> — ${esc(a.disambiguation)}</span>` : ''}
+      </div>
+    `).join('');
+  } catch (e) {
+    el.innerHTML = '<div style="color:#f66;">Search failed</div>';
+  }
+}
+
+async function loadDisambiguation(artistId, artistName) {
+  const el = document.getElementById('disamb-content');
+  const results = document.getElementById('disamb-results');
+  results.innerHTML = '';
+  el.innerHTML = '<div class="loading">Loading all releases (this may take a few seconds)...</div>';
+  try {
+    const r = await fetch(`${API}/api/artist/${artistId}/disambiguate`);
+    disambData = await r.json();
+    disambView = 'flat';
+    renderDisambiguate();
+  } catch (e) {
+    el.innerHTML = '<div style="color:#f66;">Failed to load disambiguation data</div>';
+  }
+}
+
+function renderDisambiguate() {
+  const el = document.getElementById('disamb-content');
+  if (!disambData) return;
+  const d = disambData;
+
+  const totalReleases = d.releases.length;
+  const withUnique = d.releases.filter(r => r.unique_track_count > 0).length;
+  const totalUnique = d.releases.reduce((s, r) => s + r.unique_track_count, 0);
+
+  let html = `<div style="margin:12px 0;">
+    <strong>${esc(d.artist_name)}</strong> — ${totalReleases} releases (excl. live), ${withUnique} with unique tracks, ${totalUnique} unique recordings
+    <div style="margin-top:8px;">
+      <button class="btn ${disambView === 'flat' ? 'btn-add' : ''}" onclick="disambView='flat';renderDisambiguate()">Flat</button>
+      <button class="btn ${disambView === 'grouped' ? 'btn-add' : ''}" onclick="disambView='grouped';renderDisambiguate()">Grouped</button>
+    </div>
+  </div>`;
+
+  if (disambView === 'flat') {
+    html += renderDisambFlat(d.releases);
+  } else {
+    html += renderDisambGrouped(d.releases);
+  }
+  el.innerHTML = html;
+}
+
+function renderDisambFlat(releases) {
+  const sorted = [...releases].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  return sorted.map(r => renderDisambRelease(r)).join('');
+}
+
+function renderDisambGrouped(releases) {
+  const groups = {};
+  const groupOrder = [];
+  for (const r of releases) {
+    const key = r.release_group_id || r.release_id;
+    if (!groups[key]) {
+      groups[key] = { title: r.release_group_title || r.title, type: r.release_group_type, releases: [] };
+      groupOrder.push(key);
+    }
+    groups[key].releases.push(r);
+  }
+
+  return groupOrder.map(key => {
+    const g = groups[key];
+    const totalUnique = g.releases.reduce((s, r) => s + r.unique_track_count, 0);
+    const badge = totalUnique > 0 ? `<span style="color:#6d6;margin-left:6px;">${totalUnique} unique</span>` : '';
+    return `
+      <div style="margin:8px 0;">
+        <div class="type-header" onclick="this.nextElementSibling.classList.toggle('open')" style="cursor:pointer;padding:6px;background:#1a1a2e;border-radius:4px;">
+          <strong>${esc(g.title)}</strong> <span style="color:#777;">${esc(g.type)} — ${g.releases.length} release${g.releases.length > 1 ? 's' : ''}</span>${badge}
+        </div>
+        <div class="type-body open">
+          ${g.releases.map(r => renderDisambRelease(r)).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderDisambRelease(r) {
+  let badges = '';
+  if (r.library_status) badges += '<span class="badge badge-library">in library</span>';
+  if (r.pipeline_status === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
+  if (r.pipeline_status === 'imported') badges += '<span class="badge badge-imported">imported</span>';
+  if (r.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
+
+  const canAdd = !r.library_status && !r.pipeline_status;
+  const uniqueBadge = r.unique_track_count > 0
+    ? `<span style="color:#6d6;font-weight:600;margin-left:6px;">${r.unique_track_count} unique</span>`
+    : '<span style="color:#555;margin-left:6px;">0 unique</span>';
+
+  return `
+    <div class="release" onclick="event.stopPropagation(); toggleDisambTracks('${r.release_id}')" style="cursor:pointer;">
+      <div class="release-info">
+        <div class="release-title">${esc(r.title)}${badges}${uniqueBadge}</div>
+        <div class="release-meta" style="color:#777;">${r.date || '?'} — ${r.format} — ${r.track_count}t — ${esc(r.release_group_type || '?')}</div>
+      </div>
+      <button class="btn btn-add" ${canAdd ? '' : 'disabled'} onclick="event.stopPropagation(); ${canAdd ? `addRelease('${r.release_id}', this)` : ''}">
+        ${canAdd ? 'Add' : (r.library_status ? 'Owned' : r.pipeline_status || '?')}
+      </button>
+    </div>
+    <div id="disamb-tracks-${r.release_id}" style="display:none;padding:4px 0 8px 16px;"></div>
+  `;
+}
+
+function toggleDisambTracks(releaseId) {
+  const el = document.getElementById('disamb-tracks-' + releaseId);
+  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+
+  const r = disambData.releases.find(r => r.release_id === releaseId);
+  if (!r || !r.tracks) { el.style.display = 'none'; return; }
+
+  el.innerHTML = r.tracks.map(t => {
+    const dur = t.length_seconds ? `${Math.floor(t.length_seconds / 60)}:${String(Math.round(t.length_seconds % 60)).padStart(2, '0')}` : '';
+    const star = t.unique ? '<span style="color:#6d6;font-weight:bold;">★ </span>' : '<span style="color:#333;">  </span>';
+    const discPrefix = t.disc > 1 ? `${t.disc}.` : '';
+    return `<div class="lib-track" style="opacity:${t.unique ? 1 : 0.5};">
+      ${star}<span>${discPrefix}${t.position}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
+    </div>`;
+  }).join('');
+  el.style.display = 'block';
 }
 
 function esc(s) {

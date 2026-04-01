@@ -183,5 +183,26 @@ def get_release(release_mbid):
     }
 
 
+def get_artist_releases_with_recordings(artist_mbid):
+    """Paginated fetch of all releases for an artist with recordings and release-group info.
+
+    Returns raw MB release dicts with media[].tracks[].recording and release-group fields.
+    """
+    releases = []
+    offset = 0
+    while True:
+        data = _get(
+            f"{MB_API_BASE}/release?artist={artist_mbid}"
+            f"&inc=recordings+media+release-groups&fmt=json&limit=100&offset={offset}"
+        )
+        page = data.get("releases", [])
+        releases.extend(page)
+        total = data.get("release-count", 0)
+        offset += len(page)
+        if not page or offset >= total:
+            break
+    return releases
+
+
 # Keep urllib.parse available for the quote() call above
 import urllib.parse  # noqa: E402
