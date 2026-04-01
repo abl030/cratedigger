@@ -7,6 +7,7 @@ Multiple pressings of the same release group are unioned.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -68,6 +69,21 @@ class ArtistDisambiguation:
     release_groups: list[ReleaseGroupInfo] = field(default_factory=list)
 
 
+_REMASTER_RE = re.compile(
+    r"\s*\(.*(?:remaster|deluxe|bonus|anniversary).*\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_title_for_rg_dedup(title: str) -> str:
+    """Normalize a track title for within-RG deduplication.
+
+    Strips remaster/deluxe parentheticals and lowercases.
+    Only used within the same release group — NOT across RGs.
+    """
+    return _REMASTER_RE.sub("", title).strip().lower()
+
+
 def filter_non_live(releases: list[dict]) -> list[dict]:
     """Drop releases whose release-group has 'Live' in secondary-types."""
     result: list[dict] = []
@@ -111,6 +127,7 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
                 pressings=[],
                 recordings=set(),
                 track_list=[],
+                seen_titles=set(),
             )
 
         data = rg_data[rg_id]
@@ -133,14 +150,17 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
         elif not data.first_date:
             data.first_date = r.get("date", "")
 
-        # Union recordings, keep track list from first release that has tracks
+        # Union recordings; deduplicate track list by normalized title within RG
         for medium in r.get("media", []):
             for track in medium.get("tracks", []):
                 rec_id = track.get("recording", {}).get("id")
                 if rec_id:
                     data.recordings.add(rec_id)
-                    if not any(t[0] == rec_id for t in data.track_list):
-                        data.track_list.append((rec_id, track.get("title", "")))
+                    title = track.get("title", "")
+                    norm = _normalize_title_for_rg_dedup(title)
+                    if norm not in data.seen_titles:
+                        data.seen_titles.add(norm)
+                        data.track_list.append((rec_id, title))
 
     # Step 2: For each recording, find which RGs contain it
     rec_to_rgs: dict[str, set[str]] = {}
@@ -245,3 +265,4 @@ class _RGData:
     pressings: list[PressingInfo]
     recordings: set[str]
     track_list: list[tuple[str, str]]  # (recording_id, title)
+    seen_titles: set[str]  # normalized titles for within-RG dedup

@@ -325,6 +325,76 @@ class TestAnalyseArtistReleases(unittest.TestCase):
         self.assertEqual(s3.covered_by, "So Much Wine")
 
 
+    def test_within_rg_dedup_by_title(self) -> None:
+        """Same song on different pressings within a RG should show once in track list."""
+        releases = [
+            _release("r1", "Album (CD)", [
+                {"title": "ICU", "rec_id": "rec-1"},
+                {"title": "Kyoto", "rec_id": "rec-2"},
+            ], rg_id="rg-1", rg_title="Punisher", primary_type="Album"),
+            _release("r2", "Album (Vinyl)", [
+                {"title": "ICU", "rec_id": "rec-10"},  # different recording ID!
+                {"title": "Kyoto", "rec_id": "rec-11"},
+            ], rg_id="rg-1", rg_title="Punisher", primary_type="Album"),
+        ]
+        result = analyse_artist_releases(releases)
+        rg = result[0]
+        titles = [t.title for t in rg.tracks]
+        self.assertEqual(len(titles), 2)  # ICU and Kyoto, not 4
+        self.assertIn("ICU", titles)
+        self.assertIn("Kyoto", titles)
+
+    def test_within_rg_dedup_remaster_suffix(self) -> None:
+        """'Song (Remaster)' and 'Song' within same RG should deduplicate."""
+        releases = [
+            _release("r1", "Album", [
+                {"title": "Song", "rec_id": "rec-1"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+            _release("r2", "Album (Remaster)", [
+                {"title": "Song (2024 Remaster)", "rec_id": "rec-2"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+        ]
+        result = analyse_artist_releases(releases)
+        rg = result[0]
+        self.assertEqual(len(rg.tracks), 1)
+
+    def test_within_rg_dedup_keeps_all_recording_ids(self) -> None:
+        """Even with title dedup, all recording IDs are in the coverage set."""
+        releases = [
+            _release("r1", "Album", [
+                {"title": "ICU", "rec_id": "rec-1"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+            _release("r2", "Album (Vinyl)", [
+                {"title": "ICU", "rec_id": "rec-10"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+            # Single with rec-10 should still be covered
+            _release("r3", "ICU Single", [
+                {"title": "ICU", "rec_id": "rec-10"},
+            ], rg_id="rg-single", rg_title="ICU", primary_type="Single"),
+        ]
+        result = analyse_artist_releases(releases)
+        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        self.assertEqual(single.covered_by, "Album")
+
+    def test_bonus_tracks_still_shown(self) -> None:
+        """Bonus tracks on deluxe pressings still appear in track list."""
+        releases = [
+            _release("r1", "Album", [
+                {"title": "Song A", "rec_id": "rec-1"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+            _release("r2", "Album (Deluxe)", [
+                {"title": "Song A", "rec_id": "rec-1"},
+                {"title": "Bonus Track", "rec_id": "rec-99"},
+            ], rg_id="rg-1", rg_title="Album", primary_type="Album"),
+        ]
+        result = analyse_artist_releases(releases)
+        rg = result[0]
+        titles = [t.title for t in rg.tracks]
+        self.assertEqual(len(titles), 2)
+        self.assertIn("Song A", titles)
+        self.assertIn("Bonus Track", titles)
+
+
 class TestArtistDisambiguation(unittest.TestCase):
     def test_dataclass_fields(self) -> None:
         d = ArtistDisambiguation(
