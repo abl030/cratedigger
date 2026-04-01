@@ -300,7 +300,7 @@ class TestMeeloJwtLogin(unittest.TestCase):
 class TestTriggerMeeloScan(unittest.TestCase):
     """Tests for trigger_meelo_scan()."""
 
-    def _make_cfg(self, url="http://meelo:5001", user="u", pw="p"):
+    def _make_cfg(self, url: str | None = "http://meelo:5001", user: str = "u", pw: str = "p"):
         cfg = MagicMock()
         cfg.meelo_url = url
         cfg.meelo_username = user
@@ -324,7 +324,7 @@ class TestTriggerMeeloScan(unittest.TestCase):
 class TestTriggerMeeloClean(unittest.TestCase):
     """Tests for trigger_meelo_clean()."""
 
-    def _make_cfg(self, url="http://meelo:5001", user="u", pw="p"):
+    def _make_cfg(self, url: str | None = "http://meelo:5001", user: str = "u", pw: str = "p"):
         cfg = MagicMock()
         cfg.meelo_url = url
         cfg.meelo_username = user
@@ -348,6 +348,58 @@ class TestTriggerMeeloClean(unittest.TestCase):
     def test_does_not_raise_on_failure(self, mock_login):
         from lib.util import trigger_meelo_clean
         trigger_meelo_clean(self._make_cfg())  # best-effort, no raise
+
+
+class TestTriggerPlexScan(unittest.TestCase):
+    """Tests for trigger_plex_scan()."""
+
+    def _make_cfg(self, url: str | None = "http://plex:32400",
+                  token: str | None = "tok123", section: str | None = "3"):
+        cfg = MagicMock()
+        cfg.plex_url = url
+        cfg.plex_token = token
+        cfg.plex_library_section_id = section
+        return cfg
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_calls_refresh_endpoint(self, mock_urlopen):
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_plex_scan(self._make_cfg(), "/Beets/Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("/library/sections/3/refresh", req.full_url)
+        self.assertIn("path=%2FBeets%2FArtist%2FAlbum", req.full_url)
+        self.assertIn("X-Plex-Token=tok123", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_works_without_path(self, mock_urlopen):
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_plex_scan(self._make_cfg())
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("/library/sections/3/refresh", req.full_url)
+        self.assertNotIn("path=", req.full_url)
+
+    def test_noop_when_no_url(self):
+        from lib.util import trigger_plex_scan
+        trigger_plex_scan(self._make_cfg(url=None))  # should not raise
+
+    def test_noop_when_no_token(self):
+        from lib.util import trigger_plex_scan
+        trigger_plex_scan(self._make_cfg(token=None))  # should not raise
+
+    @patch("lib.util.urllib.request.urlopen", side_effect=Exception("connection refused"))
+    def test_does_not_raise_on_failure(self, mock_urlopen):
+        from lib.util import trigger_plex_scan
+        trigger_plex_scan(self._make_cfg(), "/Beets/Artist/Album")  # best-effort
 
 
 if __name__ == "__main__":

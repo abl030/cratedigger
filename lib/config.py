@@ -70,6 +70,11 @@ class SoularrConfig:
     meelo_username: Optional[str] = None
     meelo_password: Optional[str] = None
 
+    # --- Plex ---
+    plex_url: Optional[str] = None
+    plex_token: Optional[str] = None
+    plex_library_section_id: Optional[str] = None
+
     # --- Paths (derived from args) ---
     lock_file_path: str = ""
     config_file_path: str = ""
@@ -163,6 +168,10 @@ class SoularrConfig:
             meelo_url=get("Meelo", "url") or None,
             meelo_username=get("Meelo", "username") or None,
             meelo_password=get("Meelo", "password") or None,
+            # Plex
+            plex_url=get("Plex", "url") or None,
+            plex_token=get("Plex", "token") or None,
+            plex_library_section_id=get("Plex", "library_section_id") or None,
             # Paths
             lock_file_path=os.path.join(var_dir, ".soularr.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),

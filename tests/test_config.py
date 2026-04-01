@@ -158,6 +158,16 @@ class TestConfigFromIni(unittest.TestCase):
     def test_meelo_password(self):
         self.assertEqual(self.cfg.meelo_password, "testpass")
 
+    # --- Plex ---
+    def test_plex_url(self):
+        self.assertEqual(self.cfg.plex_url, "http://192.168.1.2:32400")
+
+    def test_plex_token(self):
+        self.assertEqual(self.cfg.plex_token, "test-plex-token")
+
+    def test_plex_library_section_id(self):
+        self.assertEqual(self.cfg.plex_library_section_id, "3")
+
     # --- Paths ---
     def test_lock_file_path(self):
         self.assertEqual(self.cfg.lock_file_path, "/var/lib/soularr/.soularr.lock")
@@ -184,7 +194,7 @@ class TestConfigDefaults(unittest.TestCase):
         config = configparser.ConfigParser()
         # Add empty required sections so getboolean etc. don't fail on missing section
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
         cfg = SoularrConfig.from_ini(config)
         self.assertEqual(cfg.page_size, 10)
@@ -192,11 +202,14 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertAlmostEqual(cfg.beets_distance_threshold, 0.15)
         self.assertFalse(cfg.pipeline_db_enabled)
         self.assertIsNone(cfg.meelo_url)
+        self.assertIsNone(cfg.plex_url)
+        self.assertIsNone(cfg.plex_token)
+        self.assertIsNone(cfg.plex_library_section_id)
 
     def test_single_filetype(self):
         config = configparser.ConfigParser()
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
         config.set("Search Settings", "allowed_filetypes", "flac")
         cfg = SoularrConfig.from_ini(config)

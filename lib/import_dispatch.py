@@ -176,6 +176,12 @@ def trigger_meelo_scan(ctx: "SoularrContext") -> None:
     _trigger(ctx.cfg)
 
 
+def trigger_plex_scan(ctx: "SoularrContext", imported_path: str | None = None) -> None:
+    """Trigger Plex partial scan via lib.util — wrapper that passes cfg."""
+    from lib.util import trigger_plex_scan as _trigger
+    _trigger(ctx.cfg, imported_path)
+
+
 def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                     dl_info: DownloadInfo, request_id: int | None,
                     ctx: "SoularrContext") -> None:
@@ -294,6 +300,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                 _check_quality_gate(album_data, request_id, ctx)
             if action.trigger_meelo:
                 trigger_meelo_scan(ctx)
+                trigger_plex_scan(ctx, ir.postflight.imported_path)
             if action.cleanup:
                 _cleanup_staged_dir(dest)
             if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:

@@ -328,6 +328,34 @@ def trigger_meelo_clean(cfg: Any) -> None:
         logger.warning(f"MEELO: clean trigger failed: {e}")
 
 
+# === Plex integration ===
+
+
+def trigger_plex_scan(cfg: Any, imported_path: str | None = None) -> None:
+    """Trigger a Plex library scan after import. Best-effort — failures don't block.
+
+    If imported_path is provided, does a targeted partial scan of just that folder.
+    Otherwise triggers a full library section refresh.
+    """
+    if not cfg.plex_url or not cfg.plex_token:
+        return
+    try:
+        section = cfg.plex_library_section_id or "1"
+        url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={cfg.plex_token}"
+        if imported_path:
+            from urllib.parse import quote
+            url += f"&path={quote(imported_path, safe='')}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        if imported_path:
+            logger.info(f"PLEX: triggered partial scan for {imported_path}")
+        else:
+            logger.info("PLEX: triggered full library scan")
+    except Exception as e:
+        logger.warning(f"PLEX: scan trigger failed: {e}")
+
+
 # === Validation logging ===
 
 def log_validation_result(album_data: Any, result: Any, cfg: Any,
