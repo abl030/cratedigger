@@ -338,6 +338,7 @@ def trigger_plex_scan(cfg: Any, imported_path: str | None = None) -> None:
     Otherwise triggers a full library section refresh.
     """
     if not cfg.plex_url or not cfg.plex_token:
+        logger.debug("PLEX: skipped scan (no url or token configured)")
         return
     try:
         section = cfg.plex_library_section_id or "1"
@@ -345,13 +346,18 @@ def trigger_plex_scan(cfg: Any, imported_path: str | None = None) -> None:
         if imported_path:
             from urllib.parse import quote
             url += f"&path={quote(imported_path, safe='')}"
+        # Log the URL without the token for debugging
+        safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"
+        if "&path=" in url:
+            safe_url += "&path=" + url.split("&path=")[1]
+        logger.debug(f"PLEX: GET {safe_url}")
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+            status = resp.status
         if imported_path:
-            logger.info(f"PLEX: triggered partial scan for {imported_path}")
+            logger.info(f"PLEX: triggered partial scan for {imported_path} (HTTP {status})")
         else:
-            logger.info("PLEX: triggered full library scan")
+            logger.info(f"PLEX: triggered full library scan (HTTP {status})")
     except Exception as e:
         logger.warning(f"PLEX: scan trigger failed: {e}")
 
