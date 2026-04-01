@@ -386,6 +386,7 @@ class Handler(BaseHTTPRequestHandler):
                         "disc": t.disc,
                         "length_seconds": t.length_seconds,
                         "unique": t.unique,
+                        "also_on": t.also_on,
                     }
                     for t in ri.tracks
                 ],

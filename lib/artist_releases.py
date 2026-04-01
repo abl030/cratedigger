@@ -15,6 +15,7 @@ class TrackInfo:
     disc: int
     length_seconds: float | None
     unique: bool  # True if this recording only appears on one release
+    also_on: list[str]  # titles of other releases containing this recording
 
 
 @dataclass(frozen=True)
@@ -74,9 +75,15 @@ def mark_unique_tracks(
     releases: list[dict], recording_map: dict[str, set[str]]
 ) -> list[ReleaseInfo]:
     """Annotate each track with uniqueness, build ReleaseInfo list."""
+    # Build release_id → title map for also_on labels
+    release_titles: dict[str, str] = {}
+    for r in releases:
+        release_titles[r["id"]] = r.get("title", "")
+
     result: list[ReleaseInfo] = []
     for r in releases:
         rg = r.get("release-group", {})
+        own_id = r["id"]
         tracks: list[TrackInfo] = []
         formats: list[str] = []
 
@@ -89,7 +96,10 @@ def mark_unique_tracks(
                 rec_id = track.get("recording", {}).get("id", "")
                 length_ms = track.get("length")
                 length_seconds = round(length_ms / 1000, 1) if length_ms else None
-                is_unique = len(recording_map.get(rec_id, set())) == 1
+                rel_ids = recording_map.get(rec_id, set())
+                is_unique = len(rel_ids) == 1
+                other_ids = sorted(rel_ids - {own_id})
+                also_on = [release_titles.get(rid, rid) for rid in other_ids]
                 tracks.append(
                     TrackInfo(
                         recording_id=rec_id,
@@ -98,6 +108,7 @@ def mark_unique_tracks(
                         disc=disc,
                         length_seconds=length_seconds,
                         unique=is_unique,
+                        also_on=also_on,
                     )
                 )
 

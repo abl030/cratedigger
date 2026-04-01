@@ -159,8 +159,10 @@ class TestMarkUniqueTracks(unittest.TestCase):
         self.assertEqual(single.unique_track_count, 1)
         bside = [t for t in single.tracks if t.title == "B-side"][0]
         self.assertTrue(bside.unique)
+        self.assertEqual(bside.also_on, [])
         track_a = [t for t in single.tracks if t.title == "Track A"][0]
         self.assertFalse(track_a.unique)
+        self.assertEqual(track_a.also_on, ["Album"])
 
     def test_album_with_no_unique_tracks(self) -> None:
         """Album whose every track also appears on a compilation."""

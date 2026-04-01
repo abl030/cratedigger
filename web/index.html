@@ -1764,10 +1764,13 @@ function toggleDisambTracks(releaseId) {
 
   el.innerHTML = r.tracks.map(t => {
     const dur = t.length_seconds ? `${Math.floor(t.length_seconds / 60)}:${String(Math.round(t.length_seconds % 60)).padStart(2, '0')}` : '';
-    const star = t.unique ? '<span style="color:#6d6;font-weight:bold;">★ </span>' : '<span style="color:#333;">  </span>';
+    const star = t.unique ? '<span style="color:#6d6;font-weight:bold;">★ </span>' : '<span style="color:#555;">  </span>';
     const discPrefix = t.disc > 1 ? `${t.disc}.` : '';
-    return `<div class="lib-track" style="opacity:${t.unique ? 1 : 0.5};">
-      ${star}<span>${discPrefix}${t.position}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
+    const alsoOn = !t.unique && t.also_on && t.also_on.length > 0
+      ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
+      : '';
+    return `<div class="lib-track" style="opacity:${t.unique ? 1 : 0.6};">
+      ${star}<span>${discPrefix}${t.position}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}${alsoOn}</span>
     </div>`;
   }).join('');
   el.style.display = 'block';
