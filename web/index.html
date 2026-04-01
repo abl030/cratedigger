@@ -1715,6 +1715,8 @@ async function disambRemove(pipelineId, btn) {
   }
 }
 
+const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
+
 function toggleDisambRGTracks(rgId) {
   const el = document.getElementById('disamb-rg-' + rgId);
   if (el.style.display !== 'none') { el.style.display = 'none'; return; }
@@ -1722,12 +1724,36 @@ function toggleDisambRGTracks(rgId) {
   const rg = disambData.release_groups.find(rg => rg.release_group_id === rgId);
   if (!rg) { el.style.display = 'none'; return; }
 
+  // Build unique recording set and per-pressing coverage
+  const uniqueRecIds = new Set(rg.tracks.filter(t => t.unique).map(t => t.recording_id));
+  const pressingRecSets = (rg.pressings || []).map(p => new Set(p.recording_ids || []));
+
+  // For each unique track, find which pressing(s) contain it
+  const trackToPressings = {};
+  for (const t of rg.tracks) {
+    if (!t.unique) continue;
+    trackToPressings[t.recording_id] = [];
+    for (let i = 0; i < pressingRecSets.length; i++) {
+      if (pressingRecSets[i].has(t.recording_id)) {
+        trackToPressings[t.recording_id].push(i);
+      }
+    }
+  }
+
+  // Count unique tracks per pressing
+  const pressingUniqueCounts = pressingRecSets.map(recSet => {
+    let count = 0;
+    for (const recId of uniqueRecIds) { if (recSet.has(recId)) count++; }
+    return count;
+  });
+
   let html = '';
 
-  // Show pressings with individual Add/Remove buttons
+  // Show pressings with colour dots and unique counts
   if (rg.pressings && rg.pressings.length > 0) {
     html += '<div style="margin-bottom:8px;color:#888;font-size:0.85em;">Pressings:</div>';
-    html += rg.pressings.map(p => {
+    html += rg.pressings.map((p, i) => {
+      const color = _PRESSING_COLORS[i % _PRESSING_COLORS.length];
       let badges = '';
       if (p.in_library) badges += '<span class="badge badge-library">in library</span>';
       if (p.pipeline_status === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
@@ -1744,23 +1770,33 @@ function toggleDisambRGTracks(rgId) {
         btnHtml = `<button class="btn btn-add" disabled style="font-size:0.8em;padding:2px 8px;">${p.in_library ? 'Owned' : p.pipeline_status || '?'}</button>`;
       }
 
+      const uCount = pressingUniqueCounts[i];
+      const uLabel = uCount > 0 ? `<span style="color:${color};font-weight:600;margin-left:6px;">${uCount} unique</span>` : '';
+
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;">
-        <span>${esc(p.title)}${badges} <span style="color:#777;">${p.country || '?'} ${p.date || '?'} — ${esc(p.format)} — ${p.track_count}t</span></span>
+        <span><span style="color:${color};font-weight:bold;">●</span> ${esc(p.title)}${badges} <span style="color:#777;">${p.country || '?'} ${p.date || '?'} — ${esc(p.format)} — ${p.track_count}t</span>${uLabel}</span>
         ${btnHtml}
       </div>`;
     }).join('');
   }
 
-  // Show unique tracks
+  // Show tracks with colour dots matching which pressing(s) contain them
   if (rg.tracks && rg.tracks.length > 0) {
-    html += '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings (unioned across pressings):</div>';
+    html += '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
     html += rg.tracks.map(t => {
-      const star = t.unique ? '<span style="color:#6d6;font-weight:bold;">★ </span>' : '<span style="color:#555;">  </span>';
-      const alsoOn = !t.unique && t.also_on && t.also_on.length > 0
-        ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
-        : '';
-      return `<div class="lib-track" style="opacity:${t.unique ? 1 : 0.6};">
-        ${star}<span>${esc(t.title)}${alsoOn}</span>
+      if (!t.unique) {
+        const alsoOn = t.also_on && t.also_on.length > 0
+          ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
+          : '';
+        return `<div class="lib-track" style="opacity:0.5;">
+          <span style="color:#555;">  </span><span>${esc(t.title)}${alsoOn}</span>
+        </div>`;
+      }
+      // Colour dots for which pressings have this track
+      const pIdxs = trackToPressings[t.recording_id] || [];
+      const dots = pIdxs.map(i => `<span style="color:${_PRESSING_COLORS[i % _PRESSING_COLORS.length]};">●</span>`).join('');
+      return `<div class="lib-track">
+        <span style="margin-right:4px;">${dots || '★'}</span><span>${esc(t.title)}</span>
       </div>`;
     }).join('');
   }

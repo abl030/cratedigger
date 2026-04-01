@@ -39,6 +39,7 @@ class PressingInfo:
     format: str
     track_count: int
     country: str
+    recording_ids: list[str]  # recordings on this specific pressing
 
 
 @dataclass(frozen=True)
@@ -133,10 +134,16 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
         data = rg_data[rg_id]
         data.release_ids.append(r["id"])
 
-        # Collect pressing info
+        # Collect pressing info with recording IDs
         media = r.get("media", [])
         track_count = sum(len(m.get("tracks", [])) for m in media)
         formats = [m.get("format") or "?" for m in media]
+        pressing_rec_ids: list[str] = []
+        for m in media:
+            for t in m.get("tracks", []):
+                rec_id = t.get("recording", {}).get("id")
+                if rec_id:
+                    pressing_rec_ids.append(rec_id)
         data.pressings.append(PressingInfo(
             release_id=r["id"],
             title=r.get("title", ""),
@@ -144,6 +151,7 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
             format=", ".join(formats) if formats else "?",
             track_count=track_count,
             country=r.get("country", ""),
+            recording_ids=pressing_rec_ids,
         ))
         if data.first_date and r.get("date", "") and r["date"] < data.first_date:
             data.first_date = r["date"]

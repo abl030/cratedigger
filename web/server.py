@@ -383,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
                     "format": p.format,
                     "track_count": p.track_count,
                     "country": p.country,
+                    "recording_ids": p.recording_ids,
                     "in_library": p_lib,
                     "pipeline_status": p_pip["status"] if p_pip else None,
                     "pipeline_id": p_pip["id"] if p_pip else None,
