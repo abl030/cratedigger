@@ -12,10 +12,14 @@ from dataclasses import dataclass, field
 
 
 # Tier ordering: lower number = higher priority (Album beats EP beats Single).
+# Bootleg is always lowest regardless of primary type.
 _TIER: dict[str, int] = {"Album": 1, "EP": 2, "Single": 3, "Other": 1}
+_BOOTLEG_TIER = 4
 
 
-def _get_tier(primary_type: str) -> int:
+def _get_tier(primary_type: str, *, is_bootleg: bool = False) -> int:
+    if is_bootleg:
+        return _BOOTLEG_TIER
     return _TIER.get(primary_type, 1)
 
 
@@ -121,8 +125,9 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
             rg_data[rg_id] = _RGData(
                 rg_id=rg_id,
                 title=rg.get("title", ""),
-                primary_type=rg.get("primary-type", "Other"),
-                tier=_get_tier(rg.get("primary-type", "Other")),
+                primary_type=rg.get("primary-type") or "Other",
+                tier=_get_tier(rg.get("primary-type") or "Other"),
+                is_bootleg=r.get("status") == "Bootleg",
                 first_date=r.get("date", ""),
                 release_ids=[],
                 pressings=[],
@@ -133,6 +138,8 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
 
         data = rg_data[rg_id]
         data.release_ids.append(r["id"])
+        if r.get("status") == "Bootleg":
+            data.is_bootleg = True
 
         # Collect pressing info with recording IDs
         media = r.get("media", [])
@@ -169,6 +176,10 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
                     if norm not in data.seen_titles:
                         data.seen_titles.add(norm)
                         data.track_list.append((rec_id, title))
+
+    # Recompute tiers now that is_bootleg is finalized
+    for data in rg_data.values():
+        data.tier = _get_tier(data.primary_type, is_bootleg=data.is_bootleg)
 
     # Step 2: For each recording, find which RGs contain it
     rec_to_rgs: dict[str, set[str]] = {}
@@ -274,3 +285,4 @@ class _RGData:
     recordings: set[str]
     track_list: list[tuple[str, str]]  # (recording_id, title)
     seen_titles: set[str]  # normalized titles for within-RG dedup
+    is_bootleg: bool  # True if any pressing has status=Bootleg

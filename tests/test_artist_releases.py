@@ -326,6 +326,29 @@ class TestAnalyseArtistReleases(unittest.TestCase):
         self.assertEqual(s3.covered_by, "So Much Wine")
 
 
+    def test_bootleg_is_lowest_tier(self) -> None:
+        """Bootleg release groups are covered by official releases of any type."""
+        releases = [
+            _release("r1", "Single", [
+                {"title": "Song A", "rec_id": "rec-1"},
+            ], rg_id="rg-single", rg_title="Song A", primary_type="Single"),
+            _release("r2", "Bootleg Comp", [
+                {"title": "Song A", "rec_id": "rec-1"},
+                {"title": "Song B", "rec_id": "rec-2"},
+            ], rg_id="rg-boot", rg_title="Bootleg Comp", primary_type="Album",
+               status="Bootleg"),
+        ]
+        result = analyse_artist_releases(releases)
+        boot = [rg for rg in result if rg.release_group_id == "rg-boot"][0]
+        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        # Song A on bootleg is covered by the official single (single > bootleg)
+        song_a = [t for t in boot.tracks if t.title == "Song A"][0]
+        self.assertFalse(song_a.unique)
+        # Song B is only on bootleg — still unique
+        self.assertEqual(boot.unique_track_count, 1)
+        # Single is NOT covered by bootleg
+        self.assertIsNone(single.covered_by)
+
     def test_within_rg_dedup_by_title(self) -> None:
         """Same song on different pressings within a RG should show once in track list."""
         releases = [
