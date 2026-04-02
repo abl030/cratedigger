@@ -191,18 +191,36 @@
 <body>
 <h1>Music Pipeline</h1>
 <div class="tabs">
-  <div class="tab active" onclick="showTab('search')">Search</div>
+  <div class="tab active" onclick="showTab('browse')">Browse</div>
   <div class="tab" onclick="showTab('recents')">Recents</div>
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
-  <div class="tab" onclick="showTab('library')">Library</div>
   <div class="tab" onclick="showTab('decisions')">Decisions</div>
-  <div class="tab" onclick="showTab('disambiguate')">Disambiguate</div>
   <div class="tab" onclick="showTab('manual')">Manual Import</div>
 </div>
 
-<div id="search-section" class="section active">
-  <input type="text" id="q" placeholder="Search artists..." autofocus>
+<div id="browse-section" class="section active">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+    <input type="text" id="q" placeholder="Search artists or albums..." autofocus style="flex:1;">
+    <div style="display:flex;gap:2px;">
+      <button class="p-btn active-status" id="search-type-artist" onclick="setSearchType('artist')">Artist</button>
+      <button class="p-btn" id="search-type-release" onclick="setSearchType('release')">Album</button>
+    </div>
+  </div>
   <div id="results"></div>
+  <div id="browse-artist" style="display:none;">
+    <div id="browse-artist-header" style="margin:12px 0 8px;display:flex;align-items:center;gap:12px;">
+      <span style="cursor:pointer;font-size:18px;" onclick="closeBrowseArtist()">←</span>
+      <span id="browse-artist-name" style="font-size:18px;font-weight:bold;"></span>
+    </div>
+    <div class="browse-subnav" style="display:flex;gap:2px;margin-bottom:12px;">
+      <button class="p-btn active-status" id="subnav-discography" onclick="switchSubView('discography')">Discography</button>
+      <button class="p-btn" id="subnav-analysis" onclick="switchSubView('analysis')">Analysis</button>
+      <button class="p-btn" id="subnav-library" onclick="switchSubView('library')">Library</button>
+    </div>
+    <div id="browse-discography"></div>
+    <div id="browse-analysis" style="display:none;"></div>
+    <div id="browse-library" style="display:none;"></div>
+  </div>
 </div>
 
 <div id="recents-section" class="section">
@@ -213,10 +231,6 @@
   <div id="pipeline-content" class="loading">Loading...</div>
 </div>
 
-<div id="library-section" class="section">
-  <input type="text" id="lib-q" placeholder="Search beets library...">
-  <div id="library-content"></div>
-</div>
 
 <div id="decisions-section" class="section">
   <div id="decisions-content" class="loading">Loading...</div>
@@ -226,11 +240,6 @@
   <div id="manual-content" class="loading">Loading...</div>
 </div>
 
-<div id="disambiguate-section" class="section">
-  <input type="text" id="disamb-q" placeholder="Search artist to disambiguate...">
-  <div id="disamb-results"></div>
-  <div id="disamb-content"></div>
-</div>
 
 <div class="toast" id="toast"></div>
 
@@ -326,7 +335,7 @@ function awstDate(isoStr) { return toAWST(isoStr).slice(0, 10); }
 function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
-const tabOrder = ['search', 'recents', 'pipeline', 'library', 'decisions', 'disambiguate', 'manual'];
+const tabOrder = ['browse', 'recents', 'pipeline', 'decisions', 'manual'];
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -334,10 +343,106 @@ function showTab(name) {
   document.getElementById(name + '-section').classList.add('active');
   if (name === 'pipeline') loadPipeline();
   if (name === 'recents') loadRecents();
-  if (name === 'library') loadLibraryRecent();
   if (name === 'decisions') loadDecisions();
-  if (name === 'disambiguate') initDisambiguate();
   if (name === 'manual') loadManualImport();
+}
+
+// --- Browse tab state ---
+let browseSearchType = 'artist';
+let browseArtist = null; // {id, name}
+let browseSubView = 'discography';
+// Cache per-artist data so sub-view switches don't re-fetch
+let browseCache = {}; // { artistId: { discography, analysis, library } }
+
+function setSearchType(type) {
+  browseSearchType = type;
+  document.getElementById('search-type-artist').className = 'p-btn' + (type === 'artist' ? ' active-status' : '');
+  document.getElementById('search-type-release').className = 'p-btn' + (type === 'release' ? ' active-status' : '');
+  document.getElementById('q').placeholder = type === 'artist' ? 'Search artists or albums...' : 'Search album titles...';
+  // Re-trigger search if there's a query
+  const q = document.getElementById('q').value.trim();
+  if (q.length >= 2) searchArtists(q);
+}
+
+function openBrowseArtist(id, name) {
+  browseArtist = {id, name};
+  browseSubView = 'discography';
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('browse-artist').style.display = 'block';
+  document.getElementById('browse-artist-name').textContent = name;
+  // Reset sub-nav
+  document.getElementById('subnav-discography').className = 'p-btn active-status';
+  document.getElementById('subnav-analysis').className = 'p-btn';
+  document.getElementById('subnav-library').className = 'p-btn';
+  // Load discography (the default view)
+  switchSubView('discography');
+}
+
+function closeBrowseArtist() {
+  browseArtist = null;
+  document.getElementById('browse-artist').style.display = 'none';
+  document.getElementById('results').style.display = 'block';
+}
+
+function switchSubView(view) {
+  browseSubView = view;
+  ['discography', 'analysis', 'library'].forEach(v => {
+    document.getElementById('browse-' + v).style.display = v === view ? 'block' : 'none';
+    document.getElementById('subnav-' + v).className = 'p-btn' + (v === view ? ' active-status' : '');
+  });
+  if (!browseArtist) return;
+  const aid = browseArtist.id;
+  const name = browseArtist.name;
+  if (!browseCache[aid]) browseCache[aid] = {};
+  if (view === 'discography' && !browseCache[aid].discography) {
+    loadBrowseDiscography(aid, name);
+  }
+  if (view === 'analysis' && !browseCache[aid].analysis) {
+    loadBrowseAnalysis(aid, name);
+  }
+  if (view === 'library' && !browseCache[aid].library) {
+    loadBrowseLibrary(aid, name);
+  }
+}
+
+async function loadBrowseDiscography(aid, name) {
+  const el = document.getElementById('browse-discography');
+  el.innerHTML = '<div class="loading">Loading discography...</div>';
+  // Reuse the existing loadArtist logic but target browse-discography
+  try {
+    const [rgRes, libRes] = await Promise.all([
+      fetch(`${API}/api/artist/${aid}`).then(r => r.json()),
+      fetch(`${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`).then(r => r.json()),
+    ]);
+    if (!browseCache[aid]) browseCache[aid] = {};
+    browseCache[aid].discography = true;
+    renderArtistDiscography(el, aid, name, rgRes, libRes);
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
+}
+
+async function loadBrowseAnalysis(aid, name) {
+  const el = document.getElementById('browse-analysis');
+  el.innerHTML = '<div class="loading">Loading analysis (this may take a few seconds)...</div>';
+  try {
+    const r = await fetch(`${API}/api/artist/${aid}/disambiguate`);
+    const data = await r.json();
+    if (!browseCache[aid]) browseCache[aid] = {};
+    browseCache[aid].analysis = true;
+    disambData = data;
+    renderDisambiguateInto(el);
+  } catch (e) { el.innerHTML = '<div style="color:#f66;">Failed to load analysis</div>'; }
+}
+
+async function loadBrowseLibrary(aid, name) {
+  const el = document.getElementById('browse-library');
+  el.innerHTML = '<div class="loading">Loading library...</div>';
+  try {
+    const r = await fetch(`${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`);
+    const data = await r.json();
+    if (!browseCache[aid]) browseCache[aid] = {};
+    browseCache[aid].library = true;
+    renderLibraryResultsInto(el, data.albums || []);
+  } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
 function toast(msg, isError) {
@@ -357,37 +462,42 @@ document.getElementById('q').addEventListener('input', e => {
 
 async function searchArtists(q) {
   const el = document.getElementById('results');
+  el.style.display = 'block';
+  document.getElementById('browse-artist').style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
   try {
-    const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
-    const data = await r.json();
-    if (!data.artists || !data.artists.length) {
-      el.innerHTML = '<div class="loading">No results</div>';
-      return;
-    }
-    el.innerHTML = data.artists.map(a => `
-      <div class="artist">
-        <div class="artist-header" onclick="loadArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}', this.parentElement)">
-          <span class="artist-name">${esc(a.name)}</span>
-          ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
+    if (browseSearchType === 'release') {
+      const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&type=release`);
+      const data = await r.json();
+      const rgs = data.release_groups || [];
+      if (!rgs.length) { el.innerHTML = '<div class="loading">No results</div>'; return; }
+      el.innerHTML = rgs.map(rg => `
+        <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="openBrowseArtist('${rg.artist_id}', '${esc(rg.artist_name).replace(/'/g, "\\'")}')">
+          <span class="artist-name">${esc(rg.artist_name)}</span>
+          <span class="artist-dis"> — ${esc(rg.title)}</span>
+          ${rg.primary_type ? `<span class="artist-dis" style="color:#888;"> (${esc(rg.primary_type)})</span>` : ''}
         </div>
-        <div class="rg-list" id="rg-${a.id}"></div>
-      </div>
-    `).join('');
+      `).join('');
+    } else {
+      const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+      const data = await r.json();
+      if (!data.artists || !data.artists.length) {
+        el.innerHTML = '<div class="loading">No results</div>';
+        return;
+      }
+      el.innerHTML = data.artists.map(a => `
+        <div class="artist">
+          <div class="artist-header" onclick="openBrowseArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}')">
+            <span class="artist-name">${esc(a.name)}</span>
+            ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
+          </div>
+        </div>
+      `).join('');
+    }
   } catch (e) { el.innerHTML = '<div class="loading">Search failed</div>'; }
 }
 
-async function loadArtist(id, artistName, el) {
-  const rgEl = document.getElementById('rg-' + id);
-  if (rgEl.innerHTML) { rgEl.innerHTML = ''; return; }
-  rgEl.innerHTML = '<div class="loading">Loading discography...</div>';
-  try {
-    const [r, libR] = await Promise.all([
-      fetch(`${API}/api/artist/${id}`),
-      fetch(`${API}/api/library/artist?name=${encodeURIComponent(artistName)}&mbid=${id}`),
-    ]);
-    const data = await r.json();
-    const libData = await libR.json();
+function renderArtistDiscography(rgEl, id, artistName, data, libData) {
     const groups = data.release_groups || [];
     const libraryAlbums = libData.albums || [];
 
@@ -512,7 +622,6 @@ async function loadArtist(id, artistName, el) {
       `;
     }
     rgEl.innerHTML = html;
-  } catch (e) { rgEl.innerHTML = '<div class="loading">Failed to load</div>'; }
 }
 
 async function loadReleaseGroup(id, el) {
@@ -984,40 +1093,14 @@ async function updateStatus(id, newStatus) {
   } catch (e) { toast('Update failed', true); }
 }
 
-// --- Library tab ---
-let libSearchTimer = null;
-document.addEventListener('DOMContentLoaded', () => {
-  const libQ = document.getElementById('lib-q');
-  if (libQ) libQ.addEventListener('input', e => {
-    clearTimeout(libSearchTimer);
-    const q = e.target.value.trim();
-    if (q.length < 2) { document.getElementById('library-content').innerHTML = ''; return; }
-    libSearchTimer = setTimeout(() => searchLibrary(q), 300);
-  });
-});
+// --- Library rendering (used by Browse tab's Library sub-view) ---
 
-function loadLibraryRecent() {
-  const el = document.getElementById('library-content');
-  const q = document.getElementById('lib-q').value.trim();
-  if (q.length >= 2) return; // user has a search active
-  el.innerHTML = '<div class="loading">Loading recent additions...</div>';
-  fetch(`${API}/api/beets/recent`).then(r => r.json()).then(data => {
-    renderLibraryResults(data.albums || []);
-  }).catch(() => { el.innerHTML = '<div class="loading">Failed to load</div>'; });
+function renderLibraryResultsInto(targetEl, albums) {
+  renderLibraryResults(albums, targetEl);
 }
 
-async function searchLibrary(q) {
-  const el = document.getElementById('library-content');
-  el.innerHTML = '<div class="loading">Searching...</div>';
-  try {
-    const r = await fetch(`${API}/api/beets/search?q=${encodeURIComponent(q)}`);
-    const data = await r.json();
-    renderLibraryResults(data.albums || []);
-  } catch (e) { el.innerHTML = '<div class="loading">Search failed</div>'; }
-}
-
-function renderLibraryResults(albums) {
-  const el = document.getElementById('library-content');
+function renderLibraryResults(albums, targetEl) {
+  const el = targetEl || document.getElementById('library-content');
   if (albums.length === 0) {
     el.innerHTML = '<div class="loading">No results</div>';
     return;
@@ -1231,7 +1314,6 @@ async function setLibQuality(mbid, status, minBitrate, detailId) {
       if (activeTab) {
         const tabText = activeTab.textContent.trim();
         if (tabText === 'Recents') loadRecents();
-        else if (tabText === 'Library') loadLibraryRecent();
       }
     } else {
       toast(data.error || 'Failed', true);
@@ -1589,56 +1671,14 @@ function renderSimulatorResults(r) {
   el.innerHTML = html;
 }
 
-// --- Disambiguate tab ---
-let disambTimer = null;
+// --- Disambiguate/Analysis rendering (used by Browse tab's Analysis sub-view) ---
 let disambData = null;
-let disambView = 'flat';
-
-function initDisambiguate() {
-  const input = document.getElementById('disamb-q');
-  if (input._bound) return;
-  input._bound = true;
-  input.addEventListener('input', () => {
-    clearTimeout(disambTimer);
-    disambTimer = setTimeout(() => searchDisambArtist(input.value.trim()), 300);
-  });
 }
 
-async function searchDisambArtist(q) {
-  const el = document.getElementById('disamb-results');
-  const content = document.getElementById('disamb-content');
-  if (!q) { el.innerHTML = ''; content.innerHTML = ''; return; }
-  try {
-    const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
-    const data = await r.json();
-    el.innerHTML = data.artists.map(a => `
-      <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="loadDisambiguation('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}')">
-        <span class="artist-name">${esc(a.name)}</span>
-        ${a.disambiguation ? `<span class="artist-dis" style="color:#777;"> — ${esc(a.disambiguation)}</span>` : ''}
-      </div>
-    `).join('');
-  } catch (e) {
-    el.innerHTML = '<div style="color:#f66;">Search failed</div>';
-  }
-}
-
-async function loadDisambiguation(artistId, artistName) {
-  const el = document.getElementById('disamb-content');
-  const results = document.getElementById('disamb-results');
-  results.innerHTML = '';
-  el.innerHTML = '<div class="loading">Loading all releases (this may take a few seconds)...</div>';
-  try {
-    const r = await fetch(`${API}/api/artist/${artistId}/disambiguate`);
-    disambData = await r.json();
-    renderDisambiguate();
-  } catch (e) {
-    el.innerHTML = '<div style="color:#f66;">Failed to load disambiguation data</div>';
-  }
-}
-
-function renderDisambiguate() {
-  const el = document.getElementById('disamb-content');
+function renderDisambiguateInto(targetEl) {
   if (!disambData) return;
+  const el = targetEl || document.getElementById('disamb-content');
+  if (!el) return;
   const d = disambData;
   const rgs = d.release_groups || [];
 
