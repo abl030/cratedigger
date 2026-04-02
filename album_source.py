@@ -14,11 +14,23 @@ import urllib.error
 logger = logging.getLogger("soularr")
 
 
+_ALIASES: dict[str, str] = {
+    "_db_request_id": "db_request_id",
+    "_db_source": "db_source",
+    "_db_quality_override": "db_quality_override",
+}
+
+
 def _field(obj: object, key: str, default: object = None) -> object:
-    """Get a field from a dict or dataclass uniformly."""
+    """Get a field from a dict or dataclass uniformly.
+
+    Handles underscore-prefixed alias keys (e.g. _db_request_id → db_request_id)
+    when obj is a dataclass rather than a dict.
+    """
     if isinstance(obj, dict):
         return obj.get(key, default)
-    return getattr(obj, key, default)
+    attr = _ALIASES.get(key, key)
+    return getattr(obj, attr, default)
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 
@@ -126,7 +138,7 @@ class DatabaseSource:
 
         Returns list of dicts with keys: title, trackNumber, mediumNumber, duration.
         """
-        request_id = album_record.get("_db_request_id")
+        request_id = _field(album_record, "_db_request_id")
         if not request_id:
             return []
 
@@ -147,7 +159,7 @@ class DatabaseSource:
 
     def update_status(self, album_record, status, **extra):
         """Update album status in the pipeline DB."""
-        request_id = album_record.get("_db_request_id")
+        request_id = _field(album_record, "_db_request_id")
         if not request_id:
             return
         db = self._get_db()
@@ -157,7 +169,7 @@ class DatabaseSource:
                   download_info=None):
         """Mark album as imported."""
         from lib.quality import DownloadInfo, is_verified_lossless
-        request_id = album_record.get("_db_request_id")
+        request_id = _field(album_record, "_db_request_id")
         if not request_id:
             return
 
@@ -223,7 +235,7 @@ class DatabaseSource:
                     download_info=None):
         """Log the failure and denylist users, but keep album wanted for retry."""
         from lib.quality import DownloadInfo
-        request_id = album_record.get("_db_request_id")
+        request_id = _field(album_record, "_db_request_id")
         if not request_id:
             return
 
@@ -268,7 +280,7 @@ class DatabaseSource:
 
     def get_denylisted_users(self, album_record):
         """Get denylisted usernames for an album."""
-        request_id = album_record.get("_db_request_id")
+        request_id = _field(album_record, "_db_request_id")
         if not request_id:
             return set()
         db = self._get_db()

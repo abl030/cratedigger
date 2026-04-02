@@ -1,28 +1,15 @@
 """Typed dataclasses for the download pipeline.
 
-GrabListEntry — one album being downloaded (replaces the grab_list dict).
-DownloadFile  — one file within an album download (replaces file dicts).
+GrabListEntry — one album being downloaded.
+DownloadFile  — one file within an album download.
 
-Bridge methods (__getitem__, __setitem__, __contains__, get) allow
-existing dict-access code to keep working during incremental migration.
+Attribute-only access. No dict compatibility — use .field, not ["field"].
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-from typing import Any, Optional
-
-
-# Maps underscore-prefixed dict keys to clean field names (GrabListEntry only).
-_GRAB_ALIASES: dict[str, str] = {
-    "_db_request_id": "db_request_id",
-    "_db_source": "db_source",
-    "_db_quality_override": "db_quality_override",
-    "_spectral_grade": "spectral_grade",
-    "_spectral_bitrate": "spectral_bitrate",
-    "_existing_min_bitrate": "existing_min_bitrate",
-    "_existing_spectral_bitrate": "existing_spectral_bitrate",
-}
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -55,32 +42,6 @@ class GrabListEntry:
     existing_min_bitrate: Optional[int] = None
     existing_spectral_bitrate: Optional[int] = None
 
-    def _resolve_key(self, key: str) -> str:
-        name = _GRAB_ALIASES.get(key, key)
-        if name in _GRAB_FIELDS:
-            return name
-        raise KeyError(key)
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, self._resolve_key(key))
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        setattr(self, self._resolve_key(key), value)
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        name = _GRAB_ALIASES.get(key, key)
-        if name not in _GRAB_FIELDS:
-            return False
-        return getattr(self, name) is not None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            value = self[key]
-        except KeyError:
-            return default
-        return value if value is not None else default
 
 
 @dataclass
@@ -111,32 +72,3 @@ class DownloadFile:
     # Transient: process_completed_album
     import_path: Optional[str] = None
 
-    def _resolve_key(self, key: str) -> str:
-        if key in _FILE_FIELDS:
-            return key
-        raise KeyError(key)
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, self._resolve_key(key))
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        setattr(self, self._resolve_key(key), value)
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        if key not in _FILE_FIELDS:
-            return False
-        return getattr(self, key) is not None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            value = self[key]
-        except KeyError:
-            return default
-        return value if value is not None else default
-
-
-# Computed after both classes are defined.
-_GRAB_FIELDS: frozenset[str] = frozenset(f.name for f in fields(GrabListEntry))
-_FILE_FIELDS: frozenset[str] = frozenset(f.name for f in fields(DownloadFile))
