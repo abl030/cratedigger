@@ -1,5 +1,5 @@
 // @ts-check
-import { API, toast } from './state.js';
+import { API, toast, updatePipelineStatus } from './state.js';
 import { esc, qualityLabel } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 
@@ -275,6 +275,7 @@ export async function upgradeAlbum(mbid, btn) {
       btn.textContent = 'Queued';
       btn.style.borderColor = '#6a9';
       btn.style.color = '#6a9';
+      updatePipelineStatus(mbid, 'wanted', data.id);
       const br = data.min_bitrate ? ` from ${data.min_bitrate}kbps` : '';
       toast(`Upgrade queued${br} — searching flac, v0, 320`);
     } else {

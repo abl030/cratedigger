@@ -1,5 +1,5 @@
 // @ts-check
-import { state, API, toast } from './state.js';
+import { state, API, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc } from './util.js';
 import { invalidateBrowseArtist } from './browse.js';
 
@@ -112,23 +112,27 @@ export function toggleDisambRGTracks(rgId) {
     html += '<div style="margin-bottom:8px;color:#888;font-size:0.85em;">Pressings:</div>';
     html += rg.pressings.map((p, i) => {
       const color = _PRESSING_COLORS[i % _PRESSING_COLORS.length];
+      // Overlay local pipeline store (captures mutations since last API fetch)
+      const stored = pipelineStore.get(p.release_id);
+      const pStatus = stored ? stored.status : p.pipeline_status;
+      const pId = stored ? stored.id : p.pipeline_id;
       let badges = '';
       if (p.in_library) badges += '<span class="badge badge-library">in library</span>';
-      if (p.pipeline_status === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
-      if (p.pipeline_status === 'imported') badges += '<span class="badge badge-imported">imported</span>';
+      if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
+      if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
 
-      const canAdd = !p.in_library && !p.pipeline_status;
-      const canRemove = p.pipeline_status === 'wanted' && p.pipeline_id;
+      const canAdd = !p.in_library && !pStatus;
+      const canRemove = pStatus === 'wanted' && pId;
       const canDeleteLib = p.in_library && p.beets_album_id;
       let btnHtml;
       if (canAdd) {
         btnHtml = `<button class="btn btn-add" style="font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.addRelease('${p.release_id}', this)">Add</button>`;
       } else if (canRemove) {
-        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambRemove(${p.pipeline_id}, this)">Remove</button>`;
+        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove</button>`;
       } else if (canDeleteLib) {
-        btnHtml = `<button class="btn" style="background:#3a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambDeleteFromLibrary(${p.beets_album_id}, ${p.pipeline_id || 'null'}, this)">Delete from library</button>`;
+        btnHtml = `<button class="btn" style="background:#3a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambDeleteFromLibrary(${p.beets_album_id}, ${pId || 'null'}, this)">Delete from library</button>`;
       } else {
-        btnHtml = `<button class="btn btn-add" disabled style="font-size:0.8em;padding:2px 8px;">${p.in_library ? 'Owned' : p.pipeline_status || '?'}</button>`;
+        btnHtml = `<button class="btn btn-add" disabled style="font-size:0.8em;padding:2px 8px;">${p.in_library ? 'Owned' : pStatus || '?'}</button>`;
       }
 
       const exCount = pressingExclusiveCounts[i];
@@ -195,11 +199,14 @@ export async function disambRemove(pipelineId, btn) {
       btn.style.color = '#666';
       invalidateBrowseArtist();
       toast(`Removed #${pipelineId}`);
+      // Find the mbid for this pipeline ID so we can update the central store
       if (state.disambData) {
         for (const rg of state.disambData.release_groups) {
-          if (rg.pipeline_id === pipelineId) { rg.pipeline_status = null; rg.pipeline_id = null; }
           for (const p of (rg.pressings || [])) {
-            if (p.pipeline_id === pipelineId) { p.pipeline_status = null; p.pipeline_id = null; }
+            if (p.pipeline_id === pipelineId) {
+              updatePipelineStatus(p.release_id, null, null);
+              break;
+            }
           }
         }
       }

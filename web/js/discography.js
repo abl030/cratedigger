@@ -1,5 +1,5 @@
 // @ts-check
-import { API, toast } from './state.js';
+import { API, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc } from './util.js';
 import { invalidateBrowseArtist } from './browse.js';
 
@@ -157,20 +157,24 @@ export async function loadReleaseGroup(id, el) {
     const bootleg = all.filter(r => r.status && r.status !== 'Official');
 
     function renderRelease(rel) {
+      // Overlay local pipeline store (captures mutations since last API fetch)
+      const stored = pipelineStore.get(rel.id);
+      const pStatus = stored ? stored.status : rel.pipeline_status;
+      const pId = stored ? stored.id : rel.pipeline_id;
       let badges = '';
       if (rel.in_library) badges += '<span class="badge badge-library">in library</span>';
-      if (rel.pipeline_status === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
-      if (rel.pipeline_status === 'imported') badges += '<span class="badge badge-imported">imported</span>';
-      if (rel.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
-      const canAdd = !rel.in_library && !rel.pipeline_status;
-      const canRemove = rel.pipeline_status === 'wanted' && rel.pipeline_id;
+      if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
+      if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
+      if (pStatus === 'manual') badges += '<span class="badge badge-manual">manual</span>';
+      const canAdd = !rel.in_library && !pStatus;
+      const canRemove = pStatus === 'wanted' && pId;
       let btnHtml;
       if (canAdd) {
         btnHtml = `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${rel.id}', this)">Add</button>`;
       } else if (canRemove) {
-        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${rel.pipeline_id}, this)">Remove</button>`;
+        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove</button>`;
       } else {
-        btnHtml = `<button class="btn btn-add" disabled>${rel.in_library ? 'Owned' : rel.pipeline_status || '?'}</button>`;
+        btnHtml = `<button class="btn btn-add" disabled>${rel.in_library ? 'Owned' : pStatus || '?'}</button>`;
       }
       return `
         <div class="release" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
@@ -217,13 +221,7 @@ export async function addRelease(mbid, btn) {
     if (data.status === 'added') {
       btn.textContent = 'Added';
       invalidateBrowseArtist();
-      // Update in-memory disambData so analysis tab reflects the change immediately
-      if (state.disambData) {
-        for (const rg of state.disambData.release_groups) {
-          const p = (rg.pressings || []).find(p => p.release_id === mbid);
-          if (p) { p.pipeline_status = 'wanted'; p.pipeline_id = data.id; break; }
-        }
-      }
+      updatePipelineStatus(mbid, 'wanted', data.id);
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {
       if (data.current_status === 'wanted' && data.id) {
@@ -290,7 +288,8 @@ export async function toggleReleaseDetail(mbid) {
     // Links and actions
     html += '<div class="release-links">';
     html += `<a href="https://musicbrainz.org/release/${mbid}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">MusicBrainz</a>`;
-    const canAdd = !data.in_library && !data.pipeline_status;
+    const detStored = pipelineStore.get(mbid);
+    const canAdd = !data.in_library && !(detStored ? detStored.status : data.pipeline_status);
     if (canAdd) {
       html += `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${mbid}', this)">Add to pipeline</button>`;
     }
