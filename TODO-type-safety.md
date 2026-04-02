@@ -14,19 +14,9 @@ This applies to every remaining untyped boundary below.
 
 ## Remaining untyped boundaries
 
-### 1. `AlbumRecord.from_db_row()` returns `dict` (album_source.py:32-92)
+### 1. ~~`AlbumRecord.from_db_row()` returns `dict`~~ ✅ DONE
 
-**Impact**: Root cause of most remaining `Any` types in soularr.py. Every consumer does `album["title"]`, `album["artist"]["artistName"]`, `album["releases"][0]["trackCount"]` with zero type safety.
-
-**Fix**: Replace with a typed `AlbumRecord` dataclass. This touches soularr.py's search code extensively (find_download, choose_release, get_album_tracks all consume this dict shape).
-
-**Risk**: Large blast radius — soularr.py has ~50 access sites on this dict.
-
-**Approach**: 
-1. Define `AlbumRecord` dataclass with typed fields (title, artist_name, mb_release_id, releases, db_request_id, etc.)
-2. Update `from_db_row()` to return it
-3. Fix all consumers in soularr.py 
-4. Remove `_get_request_id()` from album_source.py (no longer needed)
+Replaced with typed `AlbumRecord`, `ReleaseRecord`, `MediaRecord` dataclasses. All ~50 access sites in soularr.py and lib/download.py updated. `_get_request_id()` deleted. Tests fixed to use real constructors.
 
 ### 2. `PipelineDB.get_request()` returns `dict[str, Any]` (lib/pipeline_db.py)
 
@@ -49,7 +39,7 @@ result = {"valid": True, ...}  # should be ValidationResult(valid=True, ...)
 album_data = {"artist": ...}   # should be GrabListEntry(artist=...)
 ```
 
-### 5. Stale comments
+### 5. ~~Stale comments~~ ✅ DONE
 
-- `soularr.py:964` — "bridge during migration" comment on context builder
-- `lib/pipeline_db.py:69` — "Lidarr bridge" SQL comment
+- Fixed "bridge during migration" → removed from soularr.py
+- Fixed "Lidarr bridge" → clarified as legacy columns in pipeline_db.py

@@ -59,8 +59,8 @@ def album_match(expected_tracks, slskd_tracks, username, filetype):
     total_match = 0.0
 
     album_info = get_album_by_id(expected_tracks[0]["albumId"])
-    album_name = album_info["title"]
-    artist_name = album_info["artist"]["artistName"]
+    album_name = album_info.title
+    artist_name = album_info.artist_name
 
     for expected_track in expected_tracks:
         expected_filename = expected_track["title"] + "." + filetype.split(" ")[0]
@@ -139,7 +139,7 @@ def release_trackcount_mode(releases):
     track_count = {}
 
     for release in releases:
-        trackcount = release["trackCount"]
+        trackcount = release.track_count
         if trackcount in track_count:
             track_count[trackcount] += 1
         else:
@@ -162,47 +162,47 @@ def choose_release(artist_name, releases):
     # Prefer the release marked as monitored — this is the one the
     # user explicitly selected in the UI and represents the edition they want.
     for release in releases:
-        if not release.get("monitored", False):
+        if not release.monitored:
             continue
-        country = release["country"][0] if release["country"] else None
-        if release["format"][1] == "x" and cfg.allow_multi_disc:
-            format_accepted = release["format"].split("x", 1)[1] in cfg.accepted_formats
+        country = release.country[0] if release.country else None
+        if release.format[1] == "x" and cfg.allow_multi_disc:
+            format_accepted = release.format.split("x", 1)[1] in cfg.accepted_formats
         else:
-            format_accepted = release["format"] in cfg.accepted_formats
+            format_accepted = release.format in cfg.accepted_formats
         if format_accepted:
             logger.info(
-                f"Selected monitored release for {artist_name}: {release['status']}, "
-                f"{country}, {release['format']}, Mediums: {release['mediumCount']}, "
-                f"Tracks: {release['trackCount']}, ID: {release['id']}"
+                f"Selected monitored release for {artist_name}: {release.status}, "
+                f"{country}, {release.format}, Mediums: {release.medium_count}, "
+                f"Tracks: {release.track_count}, ID: {release.id}"
             )
             return release
 
     for release in releases:
-        country = release["country"][0] if release["country"] else None
+        country = release.country[0] if release.country else None
 
-        if release["format"][1] == "x" and cfg.allow_multi_disc:
-            format_accepted = release["format"].split("x", 1)[1] in cfg.accepted_formats
+        if release.format[1] == "x" and cfg.allow_multi_disc:
+            format_accepted = release.format.split("x", 1)[1] in cfg.accepted_formats
         else:
-            format_accepted = release["format"] in cfg.accepted_formats
+            format_accepted = release.format in cfg.accepted_formats
 
         if cfg.use_most_common_tracknum:
-            if release["trackCount"] == most_common_trackcount:
+            if release.track_count == most_common_trackcount:
                 track_count_bool = True
             else:
                 track_count_bool = False
         else:
             track_count_bool = True
 
-        if (cfg.skip_region_check or country in cfg.accepted_countries) and format_accepted and release["status"] == "Official" and track_count_bool:
+        if (cfg.skip_region_check or country in cfg.accepted_countries) and format_accepted and release.status == "Official" and track_count_bool:
             logger.info(
                 ", ".join(
                     [
-                        f"Selected release for {artist_name}: {release['status']}",
+                        f"Selected release for {artist_name}: {release.status}",
                         str(country),
-                        release["format"],
-                        f"Mediums: {release['mediumCount']}",
-                        f"Tracks: {release['trackCount']}",
-                        f"ID: {release['id']}",
+                        release.format,
+                        f"Mediums: {release.medium_count}",
+                        f"Tracks: {release.track_count}",
+                        f"ID: {release.id}",
                     ]
                 )
             )
@@ -211,7 +211,7 @@ def choose_release(artist_name, releases):
 
     if cfg.use_most_common_tracknum:
         for release in releases:
-            if release["trackCount"] == most_common_trackcount:
+            if release.track_count == most_common_trackcount:
                 return release
         else:
             default_release = releases[0]
@@ -329,8 +329,8 @@ def filter_list(albums):
     """
     list_to_download = []
     for album in albums:
-        if is_blacklisted(album["title"]):
-            logger.info(f"Skipping blacklisted album: {album['artist']['artistName']} - {album['title']} (ID: {album['id']}")
+        if is_blacklisted(album.title):
+            logger.info(f"Skipping blacklisted album: {album.artist_name} - {album.title} (ID: {album.id}")
             continue
         else:
             list_to_download.append(album)
@@ -344,9 +344,9 @@ def filter_list(albums):
 def search_for_album(album):
     from lib.search import build_query
 
-    album_title = album["title"]
-    artist_name = album["artist"]["artistName"]
-    album_id = album["id"]
+    album_title = album.title
+    artist_name = album.artist_name
+    album_id = album.id
     query = build_query(artist_name, album_title, prepend_artist=cfg.album_prepend_artist)
 
     if not query:
@@ -431,9 +431,9 @@ def _submit_search(album, search_cfg, slskd_client):
     from lib.search import build_query
     import requests
 
-    album_title = album["title"]
-    artist_name = album["artist"]["artistName"]
-    album_id = album["id"]
+    album_title = album.title
+    artist_name = album.artist_name
+    album_id = album.id
     query = build_query(artist_name, album_title, prepend_artist=search_cfg.album_prepend_artist)
 
     if not query:
@@ -551,8 +551,8 @@ def _execute_search(album, search_cfg, slskd_client):
     result = _submit_search(album, search_cfg, slskd_client)
     if result is None:
         from lib.search import SearchResult
-        return SearchResult(album_id=album["id"], success=False,
-                            query=album.get("title", ""))
+        return SearchResult(album_id=album.id, success=False,
+                            query=album.title)
     search_id, query, album_id = result
     return _collect_search_results(search_id, query, album_id,
                                    search_cfg, slskd_client)
@@ -622,19 +622,19 @@ def try_enqueue(all_tracks, results, allowed_filetype):
                     return True, downloads
                 else:
                     album = get_album_by_id(all_tracks[0]["albumId"])
-                    album_name = album["title"]
-                    artist_name = album["artist"]["artistName"]
+                    album_name = album.title
+                    artist_name = album.artist_name
                     logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
             except Exception as e:
                 album = get_album_by_id(all_tracks[0]["albumId"])
-                album_name = album["title"]
-                artist_name = album["artist"]["artistName"]
+                album_name = album.title
+                artist_name = album.artist_name
 
                 logger.warning(f"Exception enqueueing tracks: {e}")
                 logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
     album = get_album_by_id(all_tracks[0]["albumId"])
-    album_name = album["title"]
-    artist_name = album["artist"]["artistName"]
+    album_name = album.title
+    artist_name = album.artist_name
     logger.info(f"Failed to enqueue {artist_name} - {album_name}")
     return False, None
 
@@ -647,14 +647,14 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
     """
     split_release = []
     tmp_results = copy.deepcopy(results)
-    for media in release["media"]:
+    for media in release.media:
         disk = {}
         disk["source"] = None
         disk["tracks"] = []
-        disk["disk_no"] = media["mediumNumber"]
-        disk["disk_count"] = len(release["media"])
+        disk["disk_no"] = media.medium_number
+        disk["disk_count"] = len(release.media)
         for track in all_tracks:
-            if track["mediumNumber"] == media["mediumNumber"]:
+            if track["mediumNumber"] == media.medium_number:
                 disk["tracks"].append(track)
         split_release.append(disk)
     total = len(split_release)
@@ -697,8 +697,8 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
                     enqueued += 1
                 else:
                     album = get_album_by_id(all_tracks[0]["albumId"])
-                    album_name = album["title"]
-                    artist_name = album["artist"]["artistName"]
+                    album_name = album.title
+                    artist_name = album.artist_name
                     logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
                     # Delete ALL other downloads in all_downloads list
                     if len(all_downloads) > 0:
@@ -706,8 +706,8 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
                         return False, None
             except Exception:
                 album = get_album_by_id(all_tracks[0]["albumId"])
-                album_name = album["title"]
-                artist_name = album["artist"]["artistName"]
+                album_name = album.title
+                artist_name = album.artist_name
 
                 logger.exception("Exception enqueueing tracks")
                 logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
@@ -749,9 +749,9 @@ def find_download(album, grab_list):
     It has two paths it can take. One is the "single album" path
     The other is the multi-media path.
     """
-    album_id = album["id"]
-    artist_name = album["artist"]["artistName"]
-    artist_id = album["artistId"]
+    album_id = album.id
+    artist_name = album.artist_name
+    artist_id = album.artist_id
     results = search_cache[album_id]
 
     # Cache album so get_album_by_id() works during matching
@@ -760,20 +760,20 @@ def find_download(album, grab_list):
     filetypes_to_try = cfg.allowed_filetypes
 
     # Per-album quality override from pipeline DB (e.g. upgrade requests)
-    quality_override = album.get("db_quality_override")
+    quality_override = album.db_quality_override
     if quality_override:
         filetypes_to_try = [ft.strip() for ft in quality_override.split(",")]
         logger.info(
-            f"Quality override for {artist_name} - {album['title']}: "
+            f"Quality override for {artist_name} - {album.title}: "
             f"searching only {filetypes_to_try}"
         )
 
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        releases = list(album.get("releases", []))
+        releases = list(album.releases)
 
         # Check if any release is explicitly monitored by the user.
-        has_monitored = any(r.get("monitored", False) for r in releases)
+        has_monitored = any(r.monitored for r in releases)
 
         num_releases = len(releases)
         for _ in range(0, num_releases):
@@ -781,10 +781,10 @@ def find_download(album, grab_list):
                 break
             release = choose_release(artist_name, releases)
             releases.remove(release)
-            release_id = release["id"]
+            release_id = release.id
             all_tracks = get_album_tracks(album, release_id=release_id)
             if not all_tracks:
-                logger.warning(f"No tracks for {artist_name} - {album['title']} (release {release_id}) — skipping")
+                logger.warning(f"No tracks for {artist_name} - {album.title} (release {release_id}) — skipping")
                 continue
             found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
 
@@ -794,17 +794,17 @@ def find_download(album, grab_list):
                     album_id=album_id,
                     files=downloads,
                     filetype=allowed_filetype,
-                    title=album["title"],
+                    title=album.title,
                     artist=artist_name,
-                    year=album["releaseDate"][0:4],
-                    mb_release_id=release.get("foreignReleaseId", ""),
+                    year=album.release_date[0:4],
+                    mb_release_id=release.foreign_release_id,
 
-                    db_request_id=album.get("db_request_id"),
-                    db_source=album.get("db_source"),
-                    db_quality_override=album.get("db_quality_override"),
+                    db_request_id=album.db_request_id,
+                    db_source=album.db_source,
+                    db_quality_override=album.db_quality_override,
                 )
                 return True
-            elif len(release["media"]) > 1:
+            elif len(release.media) > 1:
                 found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
                 if found:
                     assert downloads is not None
@@ -812,29 +812,29 @@ def find_download(album, grab_list):
                         album_id=album_id,
                         files=downloads,
                         filetype=allowed_filetype,
-                        title=album["title"],
+                        title=album.title,
                         artist=artist_name,
-                        year=album["releaseDate"][0:4],
-                        mb_release_id=release.get("foreignReleaseId", ""),
-                        db_request_id=album.get("db_request_id"),
-                        db_source=album.get("db_source"),
-                        db_quality_override=album.get("db_quality_override"),
+                        year=album.release_date[0:4],
+                        mb_release_id=release.foreign_release_id,
+                        db_request_id=album.db_request_id,
+                        db_source=album.db_source,
+                        db_quality_override=album.db_quality_override,
                     )
                     return True
 
             # If a monitored release was tried and didn't match, stop here.
-            if has_monitored and not release.get("monitored", False):
+            if has_monitored and not release.monitored:
                 # We already tried the monitored release (choose_release
                 # returns it first) and we're now on a non-monitored one.
                 # This shouldn't happen because we break below, but guard
                 # against it defensively.
                 break
-            if has_monitored and release.get("monitored", False):
+            if has_monitored and release.monitored:
                 # The monitored release was tried and didn't match.
                 # Skip remaining releases for this quality tier.
                 logger.info(
-                    f"Monitored release ({release['trackCount']} tracks) not found on "
-                    f"Soulseek for {artist_name} - {album['title']} at quality "
+                    f"Monitored release ({release.track_count} tracks) not found on "
+                    f"Soulseek for {artist_name} - {album.title} at quality "
                     f"{allowed_filetype}, skipping non-monitored releases"
                 )
                 break
@@ -849,7 +849,7 @@ def search_and_queue(albums):
     failed_search = []
     total = len(albums)
     for i, album in enumerate(albums, 1):
-        logger.info(f"Album {i}/{total}: {album['artist']['artistName']} - {album['title']}")
+        logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
         if search_for_album(album):
             if not find_download(album, grab_list):
                 failed_grab.append(album)
@@ -920,7 +920,7 @@ def _search_and_queue_parallel(albums):
                 try:
                     result = future.result()
                 except Exception:
-                    logger.exception(f"Search collection crashed for {album['title']}")
+                    logger.exception(f"Search collection crashed for {album.title}")
                     failed_search.append(album)
                 else:
                     done_count = len(grab_list) + len(failed_grab) + len(failed_search)
@@ -961,7 +961,7 @@ from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
 
 
 def _make_ctx():
-    """Build a SoularrContext from module globals (bridge during migration)."""
+    """Build a SoularrContext from module globals."""
     from lib.context import SoularrContext
     return SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 

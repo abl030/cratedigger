@@ -54,18 +54,18 @@ SAMPLE_TRACKS = [
 class TestAlbumRecordFromDbRow(unittest.TestCase):
     def test_basic_shape(self):
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
-        self.assertEqual(record["title"], "Riposte")
-        self.assertEqual(record["artist"]["artistName"], "Buke and Gase")
-        self.assertIn("releaseDate", record)
-        self.assertEqual(len(record["releases"]), 1)
+        self.assertEqual(record.title, "Riposte")
+        self.assertEqual(record.artist_name, "Buke and Gase")
+        self.assertIsNotNone(record.release_date)
+        self.assertEqual(len(record.releases), 1)
 
     def test_release_has_correct_fields(self):
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
-        release = record["releases"][0]
-        self.assertEqual(release["foreignReleaseId"], "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
-        self.assertEqual(release["trackCount"], 3)
-        self.assertTrue(release["monitored"])
-        self.assertEqual(len(release["media"]), 1)  # single disc
+        release = record.releases[0]
+        self.assertEqual(release.foreign_release_id, "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        self.assertEqual(release.track_count, 3)
+        self.assertTrue(release.monitored)
+        self.assertEqual(len(release.media), 1)  # single disc
 
     def test_multi_disc(self):
         tracks = [
@@ -74,20 +74,20 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
             {"disc_number": 2, "track_number": 1, "title": "D2T1", "length_seconds": 200},
         ]
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, tracks)
-        release = record["releases"][0]
-        self.assertEqual(release["trackCount"], 3)
-        self.assertEqual(len(release["media"]), 2)  # two discs
+        release = record.releases[0]
+        self.assertEqual(release.track_count, 3)
+        self.assertEqual(len(release.media), 2)  # two discs
 
     def test_db_metadata_preserved(self):
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
-        self.assertEqual(record["db_request_id"], 42)
-        self.assertEqual(record["db_source"], "request")
-        self.assertEqual(record["db_mb_release_id"], "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        self.assertEqual(record.db_request_id, 42)
+        self.assertEqual(record.db_source, "request")
+        self.assertEqual(record.db_mb_release_id, "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
 
     def test_negative_id_space(self):
         """DB records use negative IDs."""
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
-        self.assertLess(record["id"], 0)
+        self.assertLess(record.id, 0)
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set — skipping PostgreSQL tests")
@@ -115,8 +115,8 @@ class TestDatabaseSource(unittest.TestCase):
 
         records = source.get_wanted()
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["title"], "Album")
-        self.assertEqual(records[0]["artist"]["artistName"], "Test")
+        self.assertEqual(records[0].title, "Album")
+        self.assertEqual(records[0].artist_name, "Test")
 
     def test_get_tracks_lidarr_format(self):
         source, db = self._make_source()

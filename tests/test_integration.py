@@ -360,20 +360,25 @@ class TestCancelAndDelete(unittest.TestCase):
         )
 
 
-class TestAlbumRecordDictCompat(unittest.TestCase):
-    """Verify album_source methods work with both raw dicts and GrabListEntry."""
+class TestAlbumRecordAttrAccess(unittest.TestCase):
+    """Verify album_source methods work with AlbumRecord and GrabListEntry."""
 
-    def test_get_tracks_with_raw_dict(self):
-        """get_tracks receives raw from_db_row() dicts — must use .get()."""
-        raw = {"db_request_id": None, "title": "T"}
-        from album_source import DatabaseSource
+    def test_get_tracks_with_album_record(self):
+        """get_tracks receives AlbumRecord — uses .db_request_id attribute."""
+        from album_source import AlbumRecord, DatabaseSource, ReleaseRecord
+        record = AlbumRecord(
+            id=-1, title="T", release_date="2024-01-01T00:00:00Z",
+            artist_id=0, artist_name="A", foreign_artist_id="",
+            releases=[], db_request_id=0, db_source="request",
+            db_mb_release_id="", db_quality_override=None,
+        )
         source = DatabaseSource.__new__(DatabaseSource)
-        # Should return empty list for None request_id, not crash
-        result = source.get_tracks(raw)
+        # db_request_id=0 is falsy, should return empty list
+        result = source.get_tracks(record)
         self.assertEqual(result, [])
 
     def test_get_tracks_with_grab_list_entry(self):
-        """get_tracks also works with GrabListEntry via bridge."""
+        """get_tracks also works with GrabListEntry via getattr."""
         entry = GrabListEntry(
             album_id=-1, files=[], filetype="mp3", title="T", artist="A",
             year="2024", mb_release_id="x", db_request_id=None,

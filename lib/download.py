@@ -573,7 +573,7 @@ def grab_most_wanted(albums: list[Any],
         logger.info(f"Album: {grab_list[album_id].title} Artist: {grab_list[album_id].artist}")
     logger.info(f"Failed to grab: {len(failed_grab)}")
     for album in failed_grab:
-        logger.info(f"Album: {album['title']} Artist: {album['artist']['artistName']}")
+        logger.info(f"Album: {album.title} Artist: {album.artist_name}")
 
     logger.info("-------------------")
     logger.info(f"Waiting for downloads... monitor at: "
@@ -583,12 +583,8 @@ def grab_most_wanted(albums: list[Any],
 
     count = len(failed_search) + len(failed_grab)
     for album in failed_search:
-        album_title = album["title"]
-        artist_name = album["artist"]["artistName"]
-        logger.info(f"Search failed for Album: {album_title} - Artist: {artist_name}")
+        logger.info(f"Search failed for Album: {album.title} - Artist: {album.artist_name}")
     for album in failed_grab:
-        album_title = album["title"]
-        artist_name = album["artist"]["artistName"]
-        logger.info(f"Download failed for Album: {album_title} - Artist: {artist_name}")
+        logger.info(f"Download failed for Album: {album.title} - Artist: {album.artist_name}")
 
     return count

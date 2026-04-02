@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS album_requests (
     min_bitrate INTEGER,
     prev_min_bitrate INTEGER,
 
-    -- Lidarr bridge
+    -- Legacy Lidarr columns (unused, kept for schema compat)
     lidarr_album_id INTEGER,
     lidarr_artist_id INTEGER,
 

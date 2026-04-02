@@ -398,8 +398,14 @@ class TestGrabMostWanted(unittest.TestCase):
 
     def test_failed_search_counted(self):
         from lib.download import grab_most_wanted
+        from album_source import AlbumRecord
         ctx = _make_ctx()
-        failed_album = {"title": "Album", "artist": {"artistName": "Artist"}}
+        failed_album = AlbumRecord(
+            id=-1, title="Album", release_date="2024-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[], db_request_id=1, db_source="request",
+            db_mb_release_id="", db_quality_override=None,
+        )
         search_fn = MagicMock(return_value=({}, [failed_album], []))
         with patch("time.sleep"):
             count = grab_most_wanted([], search_fn, ctx)
@@ -407,8 +413,14 @@ class TestGrabMostWanted(unittest.TestCase):
 
     def test_failed_grab_counted(self):
         from lib.download import grab_most_wanted
+        from album_source import AlbumRecord
         ctx = _make_ctx()
-        failed_album = {"title": "Album", "artist": {"artistName": "Artist"}}
+        failed_album = AlbumRecord(
+            id=-1, title="Album", release_date="2024-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[], db_request_id=1, db_source="request",
+            db_mb_release_id="", db_quality_override=None,
+        )
         search_fn = MagicMock(return_value=({}, [], [failed_album]))
         with patch("time.sleep"):
             count = grab_most_wanted([], search_fn, ctx)

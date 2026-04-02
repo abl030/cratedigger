@@ -1,44 +1,69 @@
 """Album source — Pipeline DB as the source of wanted albums.
 
 Provides the interface soularr.py uses to get wanted albums, fetch tracks,
-and report completion. Records are returned in a normalized dict shape that
-the search/download/matching code expects.
+and report completion. AlbumRecord is a typed dataclass returned by from_db_row().
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
 import urllib.request
-import urllib.error
+from dataclasses import dataclass
 
 logger = logging.getLogger("soularr")
-
-
-def _get_request_id(record: object) -> int | None:
-    """Extract db_request_id from a dict (from_db_row) or GrabListEntry."""
-    if isinstance(record, dict):
-        return record.get("db_request_id")  # type: ignore[return-value]
-    return getattr(record, "db_request_id", None)
-
 
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 
 
+@dataclass
+class MediaRecord:
+    """One disc/medium within a release."""
+    medium_number: int
+    medium_format: str
+    track_count: int
+
+
+@dataclass
+class ReleaseRecord:
+    """One release (pressing/edition) of an album."""
+    id: int
+    foreign_release_id: str
+    title: str
+    track_count: int
+    medium_count: int
+    format: str
+    media: list[MediaRecord]
+    monitored: bool
+    country: list[str]
+    status: str
+
+
+@dataclass
 class AlbumRecord:
     """Normalized album record from a pipeline DB row."""
+    id: int
+    title: str
+    release_date: str
+    artist_id: int
+    artist_name: str
+    foreign_artist_id: str
+    releases: list[ReleaseRecord]
+    db_request_id: int
+    db_source: str
+    db_mb_release_id: str
+    db_quality_override: str | None
 
     @staticmethod
-    def from_db_row(row, tracks):
-        """Build a normalized album record from a pipeline DB row + tracks.
-
-        The returned dict has the same keys that soularr.py's search_and_queue(),
-        find_download(), and choose_release() expect.
-        """
+    def from_db_row(row: dict[str, object], tracks: list[dict[str, object]]) -> AlbumRecord:
+        """Build a typed AlbumRecord from a pipeline DB row + tracks."""
         # Build media structure from tracks (grouped by disc)
-        discs = {}
+        discs: dict[int, list[dict[str, object]]] = {}
         for t in tracks:
             d = t["disc_number"]
+            assert isinstance(d, int)
             if d not in discs:
                 discs[d] = []
             discs[d].append(t)
@@ -46,50 +71,67 @@ class AlbumRecord:
         media = []
         for disc_num in sorted(discs.keys()):
             disc_tracks = discs[disc_num]
-            media.append({
-                "mediumNumber": disc_num,
-                "mediumFormat": row.get("format") or "Digital Media",
-                "trackCount": len(disc_tracks),
-            })
+            base_fmt = row.get("format") or "Digital Media"
+            assert isinstance(base_fmt, str)
+            media.append(MediaRecord(
+                medium_number=disc_num,
+                medium_format=base_fmt,
+                track_count=len(disc_tracks),
+            ))
 
         total_tracks = sum(len(dt) for dt in discs.values())
         num_discs = len(discs)
 
         # Build format string: "CD", "2xCD", "Digital Media"
         base_format = row.get("format") or "Digital Media"
+        assert isinstance(base_format, str)
         format_str = f"{num_discs}x{base_format}" if num_discs > 1 else base_format
 
-        # Build a single release entry (one per DB request — the pinned edition)
-        release = {
-            "id": row["id"] * -1,  # Negative ID space for DB records
-            "foreignReleaseId": row["mb_release_id"] or "",
-            "title": row["album_title"],
-            "trackCount": total_tracks,
-            "mediumCount": num_discs,
-            "format": format_str,
-            "media": media,
-            "monitored": True,  # Always monitored — it's explicitly wanted
-            "country": [row.get("country") or "US"],
-            "status": "Official",
-        }
+        row_id = row["id"]
+        assert isinstance(row_id, int)
+        mb_release_id = row["mb_release_id"]
+        assert isinstance(mb_release_id, str) or mb_release_id is None
+        album_title = row["album_title"]
+        assert isinstance(album_title, str)
+        artist_name = row["artist_name"]
+        assert isinstance(artist_name, str)
+        country_val = row.get("country") or "US"
+        assert isinstance(country_val, str)
+        source = row["source"]
+        assert isinstance(source, str)
 
-        # Build the normalized album record
-        return {
-            "id": row["id"] * -1,  # Negative ID space for DB records
-            "title": row["album_title"],
-            "releaseDate": f"{row.get('year') or '0000'}-01-01T00:00:00Z",
-            "artistId": 0,  # Not used for search
-            "artist": {
-                "artistName": row["artist_name"],
-                "foreignArtistId": row.get("mb_artist_id") or "",
-            },
-            "releases": [release],
-            # Pipeline DB metadata
-            "db_request_id": row["id"],
-            "db_source": row["source"],
-            "db_mb_release_id": row["mb_release_id"],
-            "db_quality_override": row.get("quality_override"),
-        }
+        release = ReleaseRecord(
+            id=row_id * -1,
+            foreign_release_id=mb_release_id or "",
+            title=album_title,
+            track_count=total_tracks,
+            medium_count=num_discs,
+            format=format_str,
+            media=media,
+            monitored=True,
+            country=[country_val],
+            status="Official",
+        )
+
+        year = row.get("year") or "0000"
+        mb_artist_id = row.get("mb_artist_id") or ""
+        assert isinstance(mb_artist_id, str)
+        quality_override = row.get("quality_override")
+        assert isinstance(quality_override, (str, type(None)))
+
+        return AlbumRecord(
+            id=row_id * -1,
+            title=album_title,
+            release_date=f"{year}-01-01T00:00:00Z",
+            artist_id=0,
+            artist_name=artist_name,
+            foreign_artist_id=mb_artist_id,
+            releases=[release],
+            db_request_id=row_id,
+            db_source=source,
+            db_mb_release_id=mb_release_id or "",
+            db_quality_override=quality_override,
+        )
 
 
 class DatabaseSource:
@@ -123,12 +165,12 @@ class DatabaseSource:
             records.append(record)
         return records
 
-    def get_tracks(self, album_record):
+    def get_tracks(self, album_record: AlbumRecord | object) -> list[dict[str, object]]:
         """Get tracks for an album in normalized track format.
 
         Returns list of dicts with keys: title, trackNumber, mediumNumber, duration.
         """
-        request_id = _get_request_id(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return []
 
@@ -149,7 +191,7 @@ class DatabaseSource:
 
     def update_status(self, album_record, status, **extra):
         """Update album status in the pipeline DB."""
-        request_id = _get_request_id(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
         db = self._get_db()
@@ -159,7 +201,7 @@ class DatabaseSource:
                   download_info=None):
         """Mark album as imported."""
         from lib.quality import DownloadInfo, is_verified_lossless
-        request_id = _get_request_id(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
 
@@ -225,7 +267,7 @@ class DatabaseSource:
                     download_info=None):
         """Log the failure and denylist users, but keep album wanted for retry."""
         from lib.quality import DownloadInfo
-        request_id = _get_request_id(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
 
@@ -270,7 +312,7 @@ class DatabaseSource:
 
     def get_denylisted_users(self, album_record):
         """Get denylisted usernames for an album."""
-        request_id = _get_request_id(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return set()
         db = self._get_db()
