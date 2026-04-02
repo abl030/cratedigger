@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-
 
 from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry, DownloadFile
+from lib.quality import ValidationResult
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -79,9 +80,9 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
 
     def test_db_metadata_preserved(self):
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
-        self.assertEqual(record["_db_request_id"], 42)
-        self.assertEqual(record["_db_source"], "request")
-        self.assertEqual(record["_db_mb_release_id"], "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        self.assertEqual(record["db_request_id"], 42)
+        self.assertEqual(record["db_source"], "request")
+        self.assertEqual(record["db_mb_release_id"], "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
 
     def test_negative_id_space(self):
         """DB records use negative IDs."""
@@ -144,7 +145,7 @@ class TestDatabaseSource(unittest.TestCase):
             source="redownload",
         )
         record = _make_record(db_request_id=req_id, db_source="redownload")
-        bv_result = {"valid": True, "distance": 0.08, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.08, scenario="strong_match")
 
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B")
 
@@ -162,7 +163,7 @@ class TestDatabaseSource(unittest.TestCase):
             source="request",
         )
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
 
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B")
 
@@ -179,7 +180,7 @@ class TestDatabaseSource(unittest.TestCase):
             source="request",
         )
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": False, "distance": 0.35, "scenario": "high_distance"}
+        bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
         source.mark_failed(record, bv_result, usernames={"bad_user1", "bad_user2"})
 
@@ -203,7 +204,7 @@ class TestDatabaseSource(unittest.TestCase):
             source="request",
         )
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
         dl = DownloadInfo()
         dl.spectral_grade = "suspect"
         dl.spectral_bitrate = 160
@@ -225,7 +226,7 @@ class TestDatabaseSource(unittest.TestCase):
             mb_release_id="vl-override-uuid", artist_name="The National",
             album_title="The Virginia EP", source="request")
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.025, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.025, scenario="strong_match")
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
@@ -245,7 +246,7 @@ class TestDatabaseSource(unittest.TestCase):
             mb_release_id="vl-true-uuid", artist_name="A",
             album_title="B", source="request")
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
@@ -266,7 +267,7 @@ class TestDatabaseSource(unittest.TestCase):
             mb_release_id="vl-bitrate-uuid", artist_name="The National",
             album_title="Alligator", source="request")
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
@@ -291,7 +292,7 @@ class TestDatabaseSource(unittest.TestCase):
             mb_release_id="vl-fallback-uuid", artist_name="A",
             album_title="B", source="request")
         record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = {"valid": True, "distance": 0.05, "scenario": "strong_match"}
+        bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"

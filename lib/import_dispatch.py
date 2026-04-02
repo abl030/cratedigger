@@ -14,6 +14,7 @@ import sys
 from typing import Any, TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
+                         ValidationResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames)
@@ -223,10 +224,10 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                 logger.error(f"  {line}")
             ctx.pipeline_db_source.mark_failed(
                 album_data,
-                {"distance": bv_result.distance,
-                 "scenario": "no_json_result",
-                 "detail": f"import_one.py rc={result.returncode}, no JSON",
-                 "error": f"rc={result.returncode}"},
+                ValidationResult(distance=bv_result.distance,
+                                 scenario="no_json_result",
+                                 detail=f"import_one.py rc={result.returncode}, no JSON",
+                                 error=f"rc={result.returncode}"),
                 download_info=dl_info)
         else:
             _populate_dl_info_from_import_result(dl_info, ir)
@@ -268,9 +269,10 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                                  f"(decision={decision}, error={ir.error})")
                 ctx.pipeline_db_source.mark_failed(
                     album_data,
-                    {"distance": bv_result.distance,
-                     "scenario": scenario, "detail": detail,
-                     "error": ir.error if decision not in ("downgrade", "transcode_downgrade") else None},
+                    ValidationResult(
+                        distance=bv_result.distance, scenario=scenario,
+                        detail=detail,
+                        error=ir.error if decision not in ("downgrade", "transcode_downgrade") else None),
                     usernames=usernames if action.denylist else None,
                     download_info=dl_info)
 
@@ -311,16 +313,17 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
         timeout_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
-            {"distance": bv_result.distance,
-             "scenario": "timeout", "detail": "import_one.py timed out",
-             "error": "timeout"},
+            ValidationResult(distance=bv_result.distance,
+                             scenario="timeout", detail="import_one.py timed out",
+                             error="timeout"),
             download_info=timeout_dl)
     except Exception:
         logger.exception(f"AUTO-IMPORT ERROR: {label}")
         err_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
-            {"distance": bv_result.distance,
-             "scenario": "exception", "detail": "unhandled exception in auto-import",
-             "error": "exception"},
+            ValidationResult(distance=bv_result.distance,
+                             scenario="exception",
+                             detail="unhandled exception in auto-import",
+                             error="exception"),
             download_info=err_dl)

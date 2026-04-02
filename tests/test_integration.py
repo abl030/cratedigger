@@ -365,7 +365,7 @@ class TestAlbumRecordDictCompat(unittest.TestCase):
 
     def test_get_tracks_with_raw_dict(self):
         """get_tracks receives raw from_db_row() dicts — must use .get()."""
-        raw = {"_db_request_id": None, "title": "T"}
+        raw = {"db_request_id": None, "title": "T"}
         from album_source import DatabaseSource
         source = DatabaseSource.__new__(DatabaseSource)
         # Should return empty list for None request_id, not crash

@@ -760,7 +760,7 @@ def find_download(album, grab_list):
     filetypes_to_try = cfg.allowed_filetypes
 
     # Per-album quality override from pipeline DB (e.g. upgrade requests)
-    quality_override = album.get("_db_quality_override")
+    quality_override = album.get("db_quality_override")
     if quality_override:
         filetypes_to_try = [ft.strip() for ft in quality_override.split(",")]
         logger.info(
@@ -799,9 +799,9 @@ def find_download(album, grab_list):
                     year=album["releaseDate"][0:4],
                     mb_release_id=release.get("foreignReleaseId", ""),
 
-                    db_request_id=album.get("_db_request_id"),
-                    db_source=album.get("_db_source"),
-                    db_quality_override=album.get("_db_quality_override"),
+                    db_request_id=album.get("db_request_id"),
+                    db_source=album.get("db_source"),
+                    db_quality_override=album.get("db_quality_override"),
                 )
                 return True
             elif len(release["media"]) > 1:
@@ -816,9 +816,9 @@ def find_download(album, grab_list):
                         artist=artist_name,
                         year=album["releaseDate"][0:4],
                         mb_release_id=release.get("foreignReleaseId", ""),
-                        db_request_id=album.get("_db_request_id"),
-                        db_source=album.get("_db_source"),
-                        db_quality_override=album.get("_db_quality_override"),
+                        db_request_id=album.get("db_request_id"),
+                        db_source=album.get("db_source"),
+                        db_quality_override=album.get("db_quality_override"),
                     )
                     return True
 
