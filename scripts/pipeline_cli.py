@@ -221,14 +221,14 @@ def cmd_show(db, args):
             dur = f"{t['length_seconds']:.0f}s" if t['length_seconds'] else "?"
             print(f"    {t['disc_number']}.{t['track_number']:02d} {t['title']} ({dur})")
 
-    history = db.get_download_history(req['id'])
+    history = db.get_download_history(req.id)
     if history:
         print(f"\n  Download History ({len(history)}):")
         for h in history:
             print(f"    [{h['created_at']}] {h['outcome']} from {h['soulseek_username']} "
                   f"(dist={h['beets_distance']})")
 
-    denied = db.get_denylisted_users(req['id'])
+    denied = db.get_denylisted_users(req.id)
     if denied:
         print(f"\n  Denylisted Users ({len(denied)}):")
         for d in denied:

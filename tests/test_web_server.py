@@ -208,17 +208,7 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._get("/api/pipeline/999")
         self.assertEqual(status, 404)
         # Restore
-        self.mock_db.get_request.return_value = {
-            "id": 100, "album_title": "Test Album", "artist_name": "Test Artist",
-            "mb_release_id": "abc-123", "status": "imported",
-            "imported_path": "/mnt/virtio/Music/Beets/Test",
-            "reasoning": None, "min_bitrate": 320,
-            "spectral_grade": None, "spectral_bitrate": None,
-            "on_disk_spectral_grade": None, "on_disk_spectral_bitrate": None,
-            "verified_lossless": False,
-            "created_at": "2026-03-30T12:00:00+00:00",
-            "updated_at": "2026-03-30T12:00:00+00:00",
-        }
+        self.mock_db.get_request.return_value = _mock_pipeline_request()
 
     def test_unknown_get_returns_404(self):
         status, data = self._get("/api/nonexistent")
