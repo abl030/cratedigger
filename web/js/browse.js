@@ -48,6 +48,16 @@ export function closeBrowseArtist() {
 }
 
 /**
+ * Clear cached data for the current browse artist so sub-views re-fetch.
+ * Call after any mutation (add to pipeline, delete, ban, etc.).
+ */
+export function invalidateBrowseArtist() {
+  if (state.browseArtist) {
+    delete state.browseCache[state.browseArtist.id];
+  }
+}
+
+/**
  * Switch between sub-views (discography, analysis, library) in the browse artist view.
  * @param {string} view - 'discography', 'analysis', or 'library'
  */
@@ -58,6 +68,7 @@ export function switchSubView(view) {
     document.getElementById('subnav-' + v).className = 'p-btn' + (v === view ? ' active-status' : '');
   });
   if (!state.browseArtist) return;
+  /** @type {string} */
   const aid = state.browseArtist.id;
   const name = state.browseArtist.name;
   if (!state.browseCache[aid]) state.browseCache[aid] = {};
@@ -143,7 +154,7 @@ export async function searchArtists(q) {
       const rgs = data.release_groups || [];
       if (!rgs.length) { el.innerHTML = '<div class="loading">No results</div>'; return; }
       el.innerHTML = rgs.map(rg => `
-        <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="window.openBrowseArtist('${rg.artist_id}', '${esc(rg.artist_name).replace(/'/g, "\\'")}')">
+        <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="window.openBrowseArtist('${rg.artist_id}', '${esc(rg.artist_name)}')">
           <span class="artist-name">${esc(rg.artist_name)}</span>
           <span class="artist-dis"> — ${esc(rg.title)}</span>
           ${rg.primary_type ? `<span class="artist-dis" style="color:#888;"> (${esc(rg.primary_type)})</span>` : ''}
@@ -158,7 +169,7 @@ export async function searchArtists(q) {
       }
       el.innerHTML = data.artists.map(a => `
         <div class="artist">
-          <div class="artist-header" onclick="window.openBrowseArtist('${a.id}', '${esc(a.name).replace(/'/g, "\\'")}')">
+          <div class="artist-header" onclick="window.openBrowseArtist('${a.id}', '${esc(a.name)}')">
             <span class="artist-name">${esc(a.name)}</span>
             ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
           </div>

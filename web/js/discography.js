@@ -1,6 +1,7 @@
 // @ts-check
 import { API, toast } from './state.js';
 import { esc } from './util.js';
+import { invalidateBrowseArtist } from './browse.js';
 
 /**
  * Render the artist discography into a target element.
@@ -215,6 +216,7 @@ export async function addRelease(mbid, btn) {
     const data = await r.json();
     if (data.status === 'added') {
       btn.textContent = 'Added';
+      invalidateBrowseArtist();
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {
       if (data.current_status === 'wanted' && data.id) {

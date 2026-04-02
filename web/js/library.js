@@ -192,7 +192,7 @@ export async function toggleLibDetail(id) {
         html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${data.mb_albumid}', this)">Upgrade${brLabel}</button>`;
       }
     }
-    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, '${esc(data.artist).replace(/'/g, "\\'")}', '${esc(data.album).replace(/'/g, "\\'")}', ${data.tracks ? data.tracks.length : 0})">Delete from beets</button>`;
+    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, '${esc(data.artist)}', '${esc(data.album)}', ${data.tracks ? data.tracks.length : 0})">Delete from beets</button>`;
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }

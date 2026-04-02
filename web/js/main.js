@@ -6,7 +6,7 @@
  */
 
 import { state } from './state.js';
-import { searchArtists, setSearchType, openBrowseArtist, closeBrowseArtist, switchSubView } from './browse.js';
+import { searchArtists, setSearchType, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist } from './browse.js';
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, renderRecentsItems } from './recents.js';
 import { loadPipeline, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';

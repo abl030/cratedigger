@@ -1,6 +1,7 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc } from './util.js';
+import { invalidateBrowseArtist } from './browse.js';
 
 /** @type {string[]} */
 export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
@@ -24,7 +25,7 @@ export function renderDisambiguateInto(targetEl) {
   </div>`;
 
   // Sort: albums first, then EPs, then singles, then by date
-  const tierOrder = {Album: 1, EP: 2, Single: 3, Other: 1};
+  const tierOrder = {Album: 1, EP: 2, Single: 3, Other: 4};
   const sorted = [...rgs].sort((a, b) => {
     const ta = tierOrder[a.primary_type] || 4;
     const tb = tierOrder[b.primary_type] || 4;
@@ -192,6 +193,7 @@ export async function disambRemove(pipelineId, btn) {
       btn.textContent = 'Removed';
       btn.style.background = '#333';
       btn.style.color = '#666';
+      invalidateBrowseArtist();
       toast(`Removed #${pipelineId}`);
       if (state.disambData) {
         const rg = state.disambData.release_groups.find(rg => rg.pipeline_id === pipelineId);
@@ -236,6 +238,7 @@ export async function disambDeleteFromLibrary(beetsId, pipelineId, btn) {
       btn.textContent = 'Deleted';
       btn.style.background = '#333';
       btn.style.color = '#666';
+      invalidateBrowseArtist();
       toast(`Deleted: ${data.artist} - ${data.album} (${data.deleted_files} files)`);
     } else {
       btn.textContent = 'Error';
