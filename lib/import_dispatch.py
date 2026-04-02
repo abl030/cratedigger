@@ -194,7 +194,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
     mb_id = album_data.mb_release_id or ""
     label = f"{album_data.artist} - {album_data.title}"
     logger.info(f"AUTO-IMPORT: {label} "
-                f"(source=request, dist={bv_result['distance']:.4f})")
+                f"(source=request, dist={bv_result.distance:.4f})")
     try:
         cmd = [sys.executable, import_script, dest, mb_id]
         if request_id:
@@ -223,7 +223,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                 logger.error(f"  {line}")
             ctx.pipeline_db_source.mark_failed(
                 album_data,
-                {"distance": bv_result.get("distance"),
+                {"distance": bv_result.distance,
                  "scenario": "no_json_result",
                  "detail": f"import_one.py rc={result.returncode}, no JSON",
                  "error": f"rc={result.returncode}"},
@@ -268,7 +268,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
                                  f"(decision={decision}, error={ir.error})")
                 ctx.pipeline_db_source.mark_failed(
                     album_data,
-                    {"distance": bv_result.get("distance"),
+                    {"distance": bv_result.distance,
                      "scenario": scenario, "detail": detail,
                      "error": ir.error if decision not in ("downgrade", "transcode_downgrade") else None},
                     usernames=usernames if action.denylist else None,
@@ -311,7 +311,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
         timeout_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
-            {"distance": bv_result.get("distance"),
+            {"distance": bv_result.distance,
              "scenario": "timeout", "detail": "import_one.py timed out",
              "error": "timeout"},
             download_info=timeout_dl)
@@ -320,7 +320,7 @@ def dispatch_import(album_data: Any, bv_result: Any, dest: str,
         err_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
-            {"distance": bv_result.get("distance"),
+            {"distance": bv_result.distance,
              "scenario": "exception", "detail": "unhandled exception in auto-import",
              "error": "exception"},
             download_info=err_dl)

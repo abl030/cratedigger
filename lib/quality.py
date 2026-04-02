@@ -214,18 +214,6 @@ class ValidationResult:
         """Deserialize from JSON string."""
         return cls.from_dict(json.loads(s))
 
-    def get(self, key: str, default: object = None) -> object:
-        """Dict-style .get() for backward compatibility with bv_result dict access."""
-        return getattr(self, key, default)
-
-    def __getitem__(self, key: str) -> object:
-        """Dict-style ["key"] access for backward compatibility."""
-        return getattr(self, key)
-
-    def __setitem__(self, key: str, value: object) -> None:
-        """Dict-style ["key"] = value for backward compatibility."""
-        setattr(self, key, value)
-
 
 @dataclass
 class SpectralContext:

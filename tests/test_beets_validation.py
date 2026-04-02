@@ -83,10 +83,10 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
 
-        self.assertTrue(result["valid"])
-        self.assertTrue(result["mbid_found"])
-        self.assertAlmostEqual(result["distance"], 0.05)
-        self.assertIsNone(result["error"])
+        self.assertTrue(result.valid)
+        self.assertTrue(result.mbid_found)
+        self.assertAlmostEqual(result.distance, 0.05)
+        self.assertIsNone(result.error)
         # Verify skip was sent (dry-run)
         proc.stdin.write.assert_called_with('{"action":"skip"}\n')
 
@@ -105,9 +105,9 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertTrue(result["mbid_found"])
-        self.assertAlmostEqual(result["distance"], 0.30)
+        self.assertFalse(result.valid)
+        self.assertTrue(result.mbid_found)
+        self.assertAlmostEqual(result.distance, 0.30)
 
     @patch("lib.beets.sp.Popen")
     def test_mbid_not_found(self, mock_popen):
@@ -125,9 +125,9 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", target_mbid, 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertFalse(result["mbid_found"])
-        self.assertIsNone(result["distance"])
+        self.assertFalse(result.valid)
+        self.assertFalse(result.mbid_found)
+        self.assertIsNone(result.distance)
 
     @patch("lib.beets.sp.Popen")
     def test_no_candidates(self, mock_popen):
@@ -148,8 +148,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertFalse(result["mbid_found"])
+        self.assertFalse(result.valid)
+        self.assertFalse(result.mbid_found)
 
     @patch("lib.beets.sp.Popen")
     def test_subprocess_start_failure(self, mock_popen):
@@ -158,8 +158,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertIn("Failed to start harness", result["error"])
+        self.assertFalse(result.valid)
+        self.assertIn("Failed to start harness", result.error)
 
     @patch("lib.beets.sp.Popen")
     def test_handles_should_resume_then_choose_match(self, mock_popen):
@@ -177,7 +177,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertTrue(result["valid"])
+        self.assertTrue(result.valid)
         # Two skip calls: one for should_resume, one for choose_match
         self.assertEqual(proc.stdin.write.call_count, 2)
 
@@ -196,7 +196,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertTrue(result["valid"])  # <= threshold
+        self.assertTrue(result.valid)  # <= threshold
 
     @patch("lib.beets.sp.Popen")
     def test_just_above_threshold(self, mock_popen):
@@ -213,8 +213,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertEqual(result["scenario"], "high_distance")
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "high_distance")
 
     @patch("lib.beets.sp.Popen")
     def test_above_hard_limit(self, mock_popen):
@@ -231,8 +231,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertEqual(result["scenario"], "high_distance")
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "high_distance")
 
 
     @patch("lib.beets.sp.Popen")
@@ -259,8 +259,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertFalse(result["valid"])
-        self.assertEqual(result["scenario"], "extra_tracks")
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "extra_tracks")
 
     @patch("lib.beets.sp.Popen")
     def test_non_official_accepted_if_match(self, mock_popen):
@@ -284,7 +284,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertTrue(result["valid"])
+        self.assertTrue(result.valid)
 
     @patch("lib.beets.sp.Popen")
     def test_artist_collab_match(self, mock_popen):
@@ -308,8 +308,8 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
 
-        self.assertTrue(result["valid"])
-        self.assertEqual(result["scenario"], "strong_match")
+        self.assertTrue(result.valid)
+        self.assertEqual(result.scenario, "strong_match")
 
 
 def _make_album_data(**overrides):

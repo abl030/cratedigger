@@ -69,10 +69,13 @@ def _make_ctx():
 
 
 def _make_bv_result(distance=0.05):
-    """Build a mock beets validation result."""
+    """Build a mock beets validation result with attribute access."""
     mock = MagicMock()
-    mock.get.side_effect = lambda k, d=None: {"distance": distance, "scenario": "strong_match"}.get(k, d)
-    mock.__getitem__ = lambda self, k: {"distance": distance, "scenario": "strong_match"}[k]
+    mock.distance = distance
+    mock.scenario = "strong_match"
+    mock.detail = None
+    mock.error = None
+    mock.to_json.return_value = '{"valid": true}'
     return mock
 
 

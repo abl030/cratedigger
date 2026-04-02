@@ -13,6 +13,13 @@ import urllib.error
 
 logger = logging.getLogger("soularr")
 
+
+def _field(obj: object, key: str, default: object = None) -> object:
+    """Get a field from a dict or dataclass uniformly."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 
 
@@ -155,12 +162,12 @@ class DatabaseSource:
             return
 
         db = self._get_db()
-        distance = bv_result.get("distance")
+        distance = _field(bv_result, "distance")
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
 
         update_fields = dict(
             beets_distance=distance,
-            beets_scenario=bv_result.get("scenario"),
+            beets_scenario=_field(bv_result, "scenario"),
             imported_path=dest_path,
         )
         if dl.spectral_bitrate is not None:
@@ -190,8 +197,8 @@ class DatabaseSource:
             soulseek_username=dl.username,
             filetype=dl.filetype,
             beets_distance=distance,
-            beets_scenario=bv_result.get("scenario"),
-            beets_detail=bv_result.get("detail"),
+            beets_scenario=_field(bv_result, "scenario"),
+            beets_detail=_field(bv_result, "detail"),
             outcome="success",
             staged_path=dest_path,
             bitrate=dl.bitrate,
@@ -223,19 +230,19 @@ class DatabaseSource:
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
         db.update_status(request_id, "wanted",
-                         beets_distance=bv_result.get("distance"),
-                         beets_scenario=bv_result.get("scenario"))
+                         beets_distance=_field(bv_result, "distance"),
+                         beets_scenario=_field(bv_result, "scenario"))
         db.record_attempt(request_id, "validation")
 
         db.log_download(
             request_id=request_id,
             soulseek_username=dl.username,
             filetype=dl.filetype,
-            beets_distance=bv_result.get("distance"),
-            beets_scenario=bv_result.get("scenario"),
-            beets_detail=bv_result.get("detail"),
+            beets_distance=_field(bv_result, "distance"),
+            beets_scenario=_field(bv_result, "scenario"),
+            beets_detail=_field(bv_result, "detail"),
             outcome="rejected",
-            error_message=bv_result.get("error"),
+            error_message=_field(bv_result, "error"),
             bitrate=dl.bitrate,
             sample_rate=dl.sample_rate,
             bit_depth=dl.bit_depth,

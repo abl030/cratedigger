@@ -261,13 +261,13 @@ def _process_beets_validation(album_data: Any, import_folder_fullpath: str,
                 name for name, _err in audio_result.get("failed_files", [])]
 
     # Spectral check for non-VBR MP3 downloads
-    if bv_result["valid"]:
+    if bv_result.valid:
         spec_ctx = _gather_spectral_context(album_data, import_folder_fullpath, ctx)
         if spec_ctx.needs_check and spec_ctx.grade:
             _apply_spectral_decision(album_data, bv_result, spec_ctx,
                                      import_folder_fullpath, ctx)
 
-    if bv_result["valid"]:
+    if bv_result.valid:
         _handle_valid_result(album_data, bv_result, import_folder_fullpath, ctx)
     else:
         _handle_rejected_result(album_data, bv_result, import_folder_fullpath, ctx)
@@ -321,21 +321,15 @@ def _apply_spectral_decision(album_data: Any, bv_result: Any,
             for username in usernames:
                 db.add_denylist(request_id, username,
                                 f"spectral: {new_quality}kbps <= existing {existing_quality}kbps")
-            dl_info_rej = _build_download_info(album_data)
-            dl_info_rej.spectral_grade = spec_ctx.grade
-            dl_info_rej.spectral_bitrate = new_quality
-            dl_info_rej.existing_spectral_bitrate = existing_quality
-            dl_info_rej.slskd_filetype = dl_info_rej.filetype
-            dl_info_rej.actual_filetype = dl_info_rej.filetype
-            ctx.pipeline_db_source.mark_failed(
-                album_data,
-                {"distance": bv_result.get("distance"), "scenario": "spectral_reject",
-                 "detail": f"spectral {new_quality}kbps <= existing {existing_quality}kbps",
-                 "error": None},
-                usernames=usernames, download_info=dl_info_rej)
             logger.info(f"  Denylisted {usernames} for request {request_id}")
-        # Don't move here — _handle_rejected_result will do it
-        bv_result["valid"] = False
+        # Set bv_result fields so _handle_rejected_result logs one row with spectral detail
+        bv_result.valid = False
+        bv_result.scenario = "spectral_reject"
+        bv_result.detail = f"spectral {new_quality}kbps <= existing {existing_quality}kbps"
+        # Attach spectral info to album_data so _handle_rejected_result picks it up
+        album_data.spectral_grade = spec_ctx.grade
+        album_data.spectral_bitrate = new_quality
+        album_data.existing_spectral_bitrate = existing_quality
     elif spectral_decision == "import_upgrade":
         logger.info(
             f"SPECTRAL UPGRADE: {label} "
@@ -353,8 +347,8 @@ def _handle_valid_result(album_data: Any, bv_result: Any,
     dest = stage_to_ai(album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
     log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
     logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
-                f"(scenario={bv_result.get('scenario')}, "
-                f"distance={bv_result['distance']:.4f}) → {dest}")
+                f"(scenario={bv_result.scenario}, "
+                f"distance={bv_result.distance:.4f}) → {dest}")
 
     dl_info = _build_download_info(album_data)
     dl_info.validation_result = bv_result.to_json()
@@ -367,7 +361,8 @@ def _handle_valid_result(album_data: Any, bv_result: Any,
         dl_info.actual_filetype = dl_info.filetype
     source_type = album_data.db_source or "redownload"
     request_id = album_data.db_request_id
-    if source_type == "request" and bv_result.get("distance", 1.0) <= ctx.cfg.beets_distance_threshold:
+    dist = bv_result.distance if bv_result.distance is not None else 1.0
+    if source_type == "request" and dist <= ctx.cfg.beets_distance_threshold:
         dispatch_import(album_data, bv_result, dest, dl_info, request_id, ctx)
     else:
         ctx.pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest,
@@ -385,6 +380,12 @@ def _handle_rejected_result(album_data: Any, bv_result: Any,
     bv_result.denylisted_users = sorted(usernames)
     dl_info = _build_download_info(album_data)
     dl_info.validation_result = bv_result.to_json()
+    if album_data.spectral_grade:
+        dl_info.spectral_grade = album_data.spectral_grade
+        dl_info.spectral_bitrate = album_data.spectral_bitrate
+        dl_info.existing_spectral_bitrate = album_data.existing_spectral_bitrate
+        dl_info.slskd_filetype = dl_info.filetype
+        dl_info.actual_filetype = dl_info.filetype
     ctx.pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames,
                                        download_info=dl_info)
     logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "

@@ -374,42 +374,34 @@ class TestValidationResultSerialization(unittest.TestCase):
 
 
 # ============================================================================
-# Dict compatibility (for mark_done/mark_failed transition)
+# Attribute access (dict compat removed — verify attributes work correctly)
 # ============================================================================
 
-class TestValidationResultDictCompat(unittest.TestCase):
-    """ValidationResult must work with existing code that calls .get() on bv_result."""
+class TestValidationResultAttributeAccess(unittest.TestCase):
+    """ValidationResult fields are accessed via attributes, not dict syntax."""
 
-    def test_get_method(self) -> None:
-        """ValidationResult supports .get() for backward compat during transition."""
+    def test_attribute_read(self) -> None:
         vr = ValidationResult(
             valid=True, distance=0.02, scenario="strong_match",
             detail="distance=0.02",
         )
-        self.assertEqual(vr.get("distance"), 0.02)
-        self.assertEqual(vr.get("scenario"), "strong_match")
-        self.assertIsNone(vr.get("nonexistent"))
-        self.assertEqual(vr.get("nonexistent", "default"), "default")
+        self.assertEqual(vr.distance, 0.02)
+        self.assertEqual(vr.scenario, "strong_match")
 
-    def test_getitem(self) -> None:
-        """ValidationResult supports ["key"] access for backward compat."""
-        vr = ValidationResult(valid=True, distance=0.02, scenario="strong_match")
-        self.assertEqual(vr["distance"], 0.02)
-        self.assertEqual(vr["valid"], True)
-
-
-class TestValidationResultSetItem(unittest.TestCase):
-    """Bug fix: bv_result["valid"] = False must work (dict-style assignment)."""
-
-    def test_setitem_sets_attribute(self) -> None:
+    def test_attribute_write(self) -> None:
         vr = ValidationResult(valid=True)
-        vr["valid"] = False
+        vr.valid = False
         self.assertFalse(vr.valid)
-
-    def test_setitem_sets_scenario(self) -> None:
-        vr = ValidationResult()
-        vr["scenario"] = "spectral_reject"
+        vr.scenario = "spectral_reject"
         self.assertEqual(vr.scenario, "spectral_reject")
+
+    def test_no_dict_access(self) -> None:
+        """Dict-style access must raise TypeError — no more dual interface."""
+        vr = ValidationResult(valid=True)
+        with self.assertRaises(TypeError):
+            _ = vr["valid"]  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            vr["valid"] = False  # type: ignore[index]
 
 
 if __name__ == "__main__":
