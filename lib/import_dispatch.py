@@ -13,6 +13,8 @@ import subprocess as sp
 import sys
 from typing import TYPE_CHECKING
 
+import psycopg2
+
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          ValidationResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS,
@@ -115,8 +117,8 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
                 if effective is not None and effective < min_br_kbps:
                     logger.info(f"QUALITY GATE: using spectral_bitrate={spectral_br}kbps "
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
-            except Exception:
-                pass
+            except (OSError, psycopg2.Error):
+                logger.debug("QUALITY GATE: DB lookup failed for spectral override")
         verified_lossless = req.verified_lossless if req else False
 
         decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
@@ -207,8 +209,8 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                         req.min_bitrate, req.on_disk_spectral_bitrate)
                     if effective_br is not None:
                         cmd.extend(["--override-min-bitrate", str(effective_br)])
-            except Exception:
-                pass
+            except (OSError, psycopg2.Error):
+                logger.debug("DB lookup failed for override-min-bitrate")
         import_env = {**os.environ, "HOME": "/home/abl030"}
         result = sp.run(cmd, capture_output=True, text=True,
                         timeout=1800, env=import_env)
@@ -248,7 +250,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                             db.update_status(request_id, "imported",
                                              prev_min_bitrate=ir.quality.prev_min_bitrate,
                                              min_bitrate=ir.quality.new_min_bitrate)
-                        except Exception:
+                        except (OSError, psycopg2.Error):
                             logger.exception("Failed to update upgrade delta")
             elif action.mark_failed:
                 if decision == "downgrade":
