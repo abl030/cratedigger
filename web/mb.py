@@ -28,22 +28,32 @@ def _get(url):
 
 
 def search_release_groups(query):
-    """Search for release groups by title. Returns list with artist info."""
+    """Search releases by title, deduplicate by release group. Returns list with artist info.
+
+    Uses /release search (not /release-group) because the local MB mirror's
+    search index only covers releases.
+    """
     q = urllib.parse.quote(query)
-    data = _get(f"{MB_API_BASE}/release-group?query={q}&fmt=json&limit=20")
+    data = _get(f"{MB_API_BASE}/release?query={q}&fmt=json&limit=25")
+    seen_rg: set[str] = set()
     results = []
-    for rg in data.get("release-groups", []):
-        artist_credit = rg.get("artist-credit", [{}])
+    for r in data.get("releases", []):
+        rg = r.get("release-group", {})
+        rg_id = rg.get("id", "")
+        if not rg_id or rg_id in seen_rg:
+            continue
+        seen_rg.add(rg_id)
+        artist_credit = r.get("artist-credit", [{}])
         artist = artist_credit[0].get("artist", {}) if artist_credit else {}
         results.append({
-            "id": rg["id"],
-            "title": rg.get("title", ""),
+            "id": rg_id,
+            "title": rg.get("title", r.get("title", "")),
             "primary_type": rg.get("primary-type", ""),
-            "first_release_date": rg.get("first-release-date", ""),
+            "first_release_date": rg.get("first-release-date", r.get("date", "")),
             "artist_id": artist.get("id", ""),
             "artist_name": artist.get("name", ""),
             "artist_disambiguation": artist.get("disambiguation", ""),
-            "score": rg.get("score", 0),
+            "score": r.get("score", 0),
         })
     return results
 
