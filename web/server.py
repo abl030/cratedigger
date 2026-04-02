@@ -271,15 +271,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # POST routes and which cache groups they invalidate.
     _POST_INVALIDATIONS: dict[str, tuple[str, ...]] = {
-        "/api/pipeline/add": ("pipeline",),
-        "/api/pipeline/update": ("pipeline",),
-        "/api/pipeline/upgrade": ("pipeline", "library"),
+        "/api/pipeline/add": ("pipeline", "mb"),
+        "/api/pipeline/update": ("pipeline", "mb"),
+        "/api/pipeline/upgrade": ("pipeline", "library", "mb"),
         "/api/pipeline/set-quality": ("pipeline",),
-        "/api/pipeline/ban-source": ("pipeline", "library"),
-        "/api/pipeline/force-import": ("pipeline", "library"),
-        "/api/pipeline/delete": ("pipeline",),
-        "/api/beets/delete": ("library",),
-        "/api/manual-import/import": ("pipeline", "library"),
+        "/api/pipeline/ban-source": ("pipeline", "library", "mb"),
+        "/api/pipeline/force-import": ("pipeline", "library", "mb"),
+        "/api/pipeline/delete": ("pipeline", "mb"),
+        "/api/beets/delete": ("library", "mb"),
+        "/api/manual-import/import": ("pipeline", "library", "mb"),
     }
 
     def _cache_ttl_for_path(self, path: str) -> int | None:

@@ -217,6 +217,13 @@ export async function addRelease(mbid, btn) {
     if (data.status === 'added') {
       btn.textContent = 'Added';
       invalidateBrowseArtist();
+      // Update in-memory disambData so analysis tab reflects the change immediately
+      if (state.disambData) {
+        for (const rg of state.disambData.release_groups) {
+          const p = (rg.pressings || []).find(p => p.release_id === mbid);
+          if (p) { p.pipeline_status = 'wanted'; p.pipeline_id = data.id; break; }
+        }
+      }
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {
       if (data.current_status === 'wanted' && data.id) {

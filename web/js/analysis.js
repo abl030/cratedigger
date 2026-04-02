@@ -196,8 +196,12 @@ export async function disambRemove(pipelineId, btn) {
       invalidateBrowseArtist();
       toast(`Removed #${pipelineId}`);
       if (state.disambData) {
-        const rg = state.disambData.release_groups.find(rg => rg.pipeline_id === pipelineId);
-        if (rg) { rg.pipeline_status = null; rg.pipeline_id = null; }
+        for (const rg of state.disambData.release_groups) {
+          if (rg.pipeline_id === pipelineId) { rg.pipeline_status = null; rg.pipeline_id = null; }
+          for (const p of (rg.pressings || [])) {
+            if (p.pipeline_id === pipelineId) { p.pipeline_status = null; p.pipeline_id = null; }
+          }
+        }
       }
     } else {
       btn.textContent = 'Error';
