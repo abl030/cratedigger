@@ -28,6 +28,11 @@ log = logging.getLogger("soularr-web")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Ensure this module is importable as 'web.server' even when run as __main__,
+# so route modules can `from web import server` and get the same instance.
+if __name__ == "__main__" or "web.server" not in sys.modules:
+    sys.modules["web.server"] = sys.modules[__name__]
+
 import cache
 import mb as mb_api
 from beets_db import BeetsDB

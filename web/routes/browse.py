@@ -22,7 +22,7 @@ def _server():
     check_beets_library(), check_pipeline() goes through this so that
     test mocks on web.server.* are respected.
     """
-    from web import server
+    from web import server  # type: ignore[import-not-found]
     return server
 
 

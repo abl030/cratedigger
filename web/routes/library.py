@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def _server():
-    from web import server
+    from web import server  # type: ignore[import-not-found]
     return server
 
 
