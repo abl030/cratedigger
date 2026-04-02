@@ -347,7 +347,12 @@ def trigger_plex_scan(cfg: Any, imported_path: str | None = None) -> None:
         url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={cfg.plex_token}"
         if imported_path:
             from urllib.parse import quote
-            url += f"&path={quote(imported_path, safe='')}"
+            scan_path = imported_path
+            if cfg.plex_path_map:
+                local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
+                if scan_path.startswith(local_prefix):
+                    scan_path = container_prefix + scan_path[len(local_prefix):]
+            url += f"&path={quote(scan_path, safe='')}"
         # Log the URL without the token for debugging
         safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"
         if "&path=" in url:
