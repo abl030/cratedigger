@@ -412,11 +412,13 @@ class TestTriggerPlexScan(unittest.TestCase):
     """Tests for trigger_plex_scan()."""
 
     def _make_cfg(self, url: str | None = "http://plex:32400",
-                  token: str | None = "tok123", section: str | None = "3"):
+                  token: str | None = "tok123", section: str | None = "3",
+                  path_map: str | None = None):
         cfg = MagicMock()
         cfg.plex_url = url
         cfg.plex_token = token
         cfg.plex_library_section_id = section
+        cfg.plex_path_map = path_map
         return cfg
 
     @patch("lib.util.urllib.request.urlopen")

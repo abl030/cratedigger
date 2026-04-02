@@ -5,11 +5,8 @@ Used by soularr.py and import_one.py, tested directly against real audio fixture
 """
 
 import json
-import logging
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
-
-_logger = logging.getLogger("soularr")
 
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
@@ -648,7 +645,6 @@ def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
                 try:
                     selected_samplerate = str(int(float(selected_attributes.split("/")[1]) * 1000))
                 except (ValueError, IndexError):
-                    _logger.warning("Invalid samplerate in selected_attributes")
                     return False
 
                 if bitdepth and samplerate:
@@ -674,7 +670,6 @@ def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
                 try:
                     min_bitrate = int(selected_attributes[:-1])
                 except ValueError:
-                    _logger.warning(f"Invalid minimum bitrate in allowed_filetype: {allowed_filetype}")
                     return False
                 if bitrate:
                     return bitrate >= min_bitrate

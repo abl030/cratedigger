@@ -327,7 +327,7 @@ def _meelo_scanner_post(url: str, jwt: str, path: str) -> None:
 
 def trigger_meelo_scan(cfg: SoularrConfig) -> None:
     """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
-    if not cfg.meelo_url:
+    if not cfg.meelo_url or not cfg.meelo_username or not cfg.meelo_password:
         return
     try:
         jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
@@ -339,7 +339,7 @@ def trigger_meelo_scan(cfg: SoularrConfig) -> None:
 
 def trigger_meelo_clean(cfg: SoularrConfig) -> None:
     """Trigger a Meelo library clean to remove orphaned entries. Best-effort."""
-    if not cfg.meelo_url:
+    if not cfg.meelo_url or not cfg.meelo_username or not cfg.meelo_password:
         return
     try:
         jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
