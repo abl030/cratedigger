@@ -144,7 +144,8 @@ def validate_audio(folder_path: str, mode: str = "normal") -> dict[str, Any]:
     for filepath in files:
         try:
             result = sp.run(
-                ["ffmpeg", "-v", "error", "-i", filepath, "-f", "null", "-"],
+                ["ffmpeg", "-v", "error", "-i", filepath,
+                 "-map", "0:a", "-f", "null", "-"],
                 capture_output=True, text=True, timeout=300
             )
             if result.returncode != 0 or result.stderr.strip():
@@ -158,7 +159,8 @@ def validate_audio(folder_path: str, mode: str = "normal") -> dict[str, Any]:
                     )
                     if fix.returncode == 0:
                         retest = sp.run(
-                            ["ffmpeg", "-v", "error", "-i", filepath, "-f", "null", "-"],
+                            ["ffmpeg", "-v", "error", "-i", filepath,
+                             "-map", "0:a", "-f", "null", "-"],
                             capture_output=True, text=True, timeout=300,
                         )
                         if retest.returncode == 0 and not retest.stderr.strip():

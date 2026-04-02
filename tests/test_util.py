@@ -125,6 +125,47 @@ class TestRepairMp3Headers(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestValidateAudio(unittest.TestCase):
+
+    def test_ffmpeg_uses_audio_only_map(self):
+        """Ensure ffmpeg decodes only audio streams, ignoring embedded art."""
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                validate_audio(tmpdir)
+                call_args = mock_run.call_args[0][0]
+                # Must have -map 0:a to skip non-audio streams
+                self.assertIn("-map", call_args)
+                map_idx = call_args.index("-map")
+                self.assertEqual(call_args[map_idx + 1], "0:a")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ffmpeg_retest_after_md5_fix_uses_audio_only(self):
+        """The MD5-fix retest path should also use -map 0:a."""
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            first_call = MagicMock(returncode=1, stderr="cannot check MD5 signature")
+            fix_call = MagicMock(returncode=0, stderr="")
+            retest_call = MagicMock(returncode=0, stderr="")
+            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]):
+                validate_audio(tmpdir)
+            # Third call is the retest — check it has -map 0:a
+            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]) as mock_run:
+                validate_audio(tmpdir)
+                retest_args = mock_run.call_args_list[2][0][0]
+                self.assertIn("-map", retest_args)
+                map_idx = retest_args.index("-map")
+                self.assertEqual(retest_args[map_idx + 1], "0:a")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class TestDenylist(unittest.TestCase):
 
     def test_round_trip(self):
