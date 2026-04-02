@@ -15,7 +15,6 @@ import re
 import shutil
 import sqlite3
 import sys
-import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -163,6 +162,39 @@ def check_pipeline(mbids):
         }
         for r in cur.fetchall()
     }
+
+
+def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
+    """Add pipeline_status/upgrade_queued to album dicts. Mutates in place."""
+    if not db:
+        return
+    mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
+    if not mbids:
+        return
+    pipeline_info = check_pipeline(mbids)
+    for a in albums:
+        pi = pipeline_info.get(a.get("mb_albumid"))
+        if pi:
+            apply_pipeline_bitrate_override(a, pi)
+
+
+def _extract_import_fields(ir: dict) -> dict[str, object]:
+    """Extract spectral/quality/conversion fields from ImportResult JSON."""
+    fields: dict[str, object] = {}
+    spectral = ir.get("spectral") or {}
+    if spectral.get("grade"):
+        fields["spectral_grade"] = spectral["grade"]
+    if spectral.get("bitrate") is not None:
+        fields["spectral_bitrate"] = spectral["bitrate"]
+    quality = ir.get("quality") or {}
+    if quality.get("new_min_bitrate") is not None:
+        fields["min_bitrate"] = quality["new_min_bitrate"]
+    conv = ir.get("conversion") or {}
+    if (conv.get("was_converted")
+            and conv.get("original_filetype", "").lower() == "flac"
+            and spectral.get("grade") == "genuine"):
+        fields["verified_lossless"] = True
+    return fields
 
 
 def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
@@ -767,14 +799,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error("Beets DB not available")
             return
         albums = b.search_albums(q)
-        # Add pipeline status for upgrade queue awareness
-        if db:
-            mbids = [a["mb_albumid"] for a in albums if a.get("mb_albumid")]
-            pipeline_info = check_pipeline(mbids) if mbids else {}
-            for a in albums:
-                pi = pipeline_info.get(a.get("mb_albumid"))
-                if pi:
-                    apply_pipeline_bitrate_override(a, pi)
+        _enrich_with_pipeline(albums)
         self._json({"albums": albums})
 
     def _get_beets_album(self, params: dict[str, list[str]], album_id_str: str) -> None:
@@ -828,13 +853,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error("Beets DB not available")
             return
         albums = b.get_recent()
-        if db:
-            mbids = [a["mb_albumid"] for a in albums if a.get("mb_albumid")]
-            pipeline_info = check_pipeline(mbids) if mbids else {}
-            for a in albums:
-                pi = pipeline_info.get(a.get("mb_albumid"))
-                if pi:
-                    apply_pipeline_bitrate_override(a, pi)
+        _enrich_with_pipeline(albums)
         self._json({"albums": albums})
 
     # ── POST handlers ────────────────────────────────────────────────
@@ -1143,24 +1162,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if result.returncode == 0:
             update_fields: dict[str, object] = {}
-            # Propagate spectral data from ImportResult to album_requests
             if import_result_json:
                 try:
-                    ir = json.loads(import_result_json)
-                    spectral = ir.get("spectral", {})
-                    if spectral.get("grade"):
-                        update_fields["spectral_grade"] = spectral["grade"]
-                    if spectral.get("bitrate") is not None:
-                        update_fields["spectral_bitrate"] = spectral["bitrate"]
-                    # Check verified lossless
-                    conv = ir.get("conversion", {})
-                    quality = ir.get("quality", {})
-                    if (conv.get("was_converted") and
-                            conv.get("original_filetype", "").lower() == "flac" and
-                            spectral.get("grade") == "genuine"):
-                        update_fields["verified_lossless"] = True
-                    if quality.get("new_min_bitrate") is not None:
-                        update_fields["min_bitrate"] = quality["new_min_bitrate"]
+                    update_fields = _extract_import_fields(json.loads(import_result_json))
                 except (json.JSONDecodeError, TypeError):
                     pass
             _db().update_status(request_id, "imported", **update_fields)
@@ -1260,20 +1264,7 @@ class Handler(BaseHTTPRequestHandler):
             update_fields: dict[str, object] = {}
             if result.import_result_json:
                 try:
-                    ir = json.loads(result.import_result_json)
-                    spectral = ir.get("spectral", {})
-                    quality = ir.get("quality", {})
-                    conv = ir.get("conversion", {})
-                    if spectral.get("grade"):
-                        update_fields["spectral_grade"] = spectral["grade"]
-                    if spectral.get("bitrate") is not None:
-                        update_fields["spectral_bitrate"] = spectral["bitrate"]
-                    if quality.get("new_min_bitrate") is not None:
-                        update_fields["min_bitrate"] = quality["new_min_bitrate"]
-                    if (conv.get("was_converted")
-                            and conv.get("original_filetype", "").lower() == "flac"
-                            and spectral.get("grade") == "genuine"):
-                        update_fields["verified_lossless"] = True
+                    update_fields = _extract_import_fields(json.loads(result.import_result_json))
                 except (json.JSONDecodeError, TypeError):
                     pass
             _db().update_status(int(request_id), "imported", **update_fields)
