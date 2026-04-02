@@ -29,6 +29,7 @@ log = logging.getLogger("soularr-web")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.dirname(__file__))
 
+import cache
 import mb as mb_api
 from pipeline_db import PipelineDB
 
@@ -255,6 +256,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+        # Capture for routing-level cache (set by do_GET)
+        key = getattr(self, "_cache_capture_key", None)
+        ttl = getattr(self, "_cache_capture_ttl", None)
+        if status == 200 and key is not None and ttl is not None:
+            cache.cache_set(key, data, ttl)
 
     def _html(self, path):
         html_path = os.path.join(os.path.dirname(__file__), path)
@@ -269,10 +275,59 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, msg, status=400):
         self._json({"error": msg}, status)
 
+    # Routes that should be cached, mapped to their TTL.
+    # Prefix-matched: "/api/artist" matches "/api/artist/<id>" etc.
+    _CACHE_TTLS: dict[str, int] = {
+        "/api/search": cache.TTL_MB,
+        "/api/artist": cache.TTL_MB,
+        "/api/release-group": cache.TTL_MB,
+        "/api/release": cache.TTL_MB,
+        "/api/library": cache.TTL_LIBRARY,
+        "/api/beets": cache.TTL_LIBRARY,
+        "/api/pipeline/status": cache.TTL_LIBRARY,
+        "/api/pipeline/all": cache.TTL_LIBRARY,
+        "/api/pipeline/recent": cache.TTL_LIBRARY,
+        "/api/pipeline/log": cache.TTL_LIBRARY,
+    }
+
+    # POST routes and which cache groups they invalidate.
+    _POST_INVALIDATIONS: dict[str, tuple[str, ...]] = {
+        "/api/pipeline/add": ("pipeline",),
+        "/api/pipeline/update": ("pipeline",),
+        "/api/pipeline/upgrade": ("pipeline", "library"),
+        "/api/pipeline/set-quality": ("pipeline",),
+        "/api/pipeline/ban-source": ("pipeline", "library"),
+        "/api/pipeline/force-import": ("pipeline", "library"),
+        "/api/pipeline/delete": ("pipeline",),
+        "/api/beets/delete": ("library",),
+        "/api/manual-import/import": ("pipeline", "library"),
+    }
+
+    def _cache_ttl_for_path(self, path: str) -> int | None:
+        """Return TTL if this path should be cached, None otherwise."""
+        for prefix, ttl in self._CACHE_TTLS.items():
+            if path == prefix or path.startswith(prefix + "/"):
+                return ttl
+        return None
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
+
+        # Cache check: use full URL (path + query) as key
+        cache_key = f"web:{path}"
+        if parsed.query:
+            cache_key += f"?{parsed.query}"
+        ttl = self._cache_ttl_for_path(path)
+        if ttl is not None:
+            cached = cache.cache_get(cache_key)
+            if cached is not None:
+                self._json(cached)
+                return
+            # Set up capture so _json() stores the response
+            self._cache_capture_key = cache_key
+            self._cache_capture_ttl = ttl
 
         try:
             method_name = self._GET_ROUTES.get(path)
@@ -289,17 +344,33 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("GET %s failed", path)
             _try_reconnect_db()
             self._error(str(e), 500)
+        finally:
+            self._cache_capture_key = None
+            self._cache_capture_ttl = None
 
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
         try:
+            # Cache invalidation endpoint (for soularr main loop)
+            if path == "/api/cache/invalidate":
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                groups = body.get("groups", [])
+                cache.invalidate_groups(*groups)
+                self._json({"status": "ok", "invalidated": groups})
+                return
+
             method_name = self._POST_ROUTES.get(path)
             if method_name:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
                 getattr(self, method_name)(body)
+                # Invalidate cache groups after successful mutation
+                groups = self._POST_INVALIDATIONS.get(path)
+                if groups:
+                    cache.invalidate_groups(*groups)
                 return
             self._error("Not found", 404)
         except Exception as e:
@@ -324,8 +395,13 @@ class Handler(BaseHTTPRequestHandler):
         if not q:
             self._error("Missing query parameter 'q'")
             return
-        artists = mb_api.search_artists(q)
-        self._json({"artists": artists})
+        search_type = params.get("type", ["artist"])[0]
+        if search_type == "release":
+            results = mb_api.search_release_groups(q)
+            self._json({"release_groups": results})
+        else:
+            artists = mb_api.search_artists(q)
+            self._json({"artists": artists})
 
     def _get_library_artist(self, params: dict[str, list[str]]) -> None:
         name = params.get("name", [""])[0].strip()
@@ -1370,7 +1446,12 @@ def main():
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr"))
     parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db")
     parser.add_argument("--mb-api", default=None, help="MusicBrainz API base URL")
+    parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
+    parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+
+    if args.redis_host:
+        cache.init(args.redis_host, args.redis_port)
 
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
@@ -1385,6 +1466,7 @@ def main():
     print(f"  Pipeline DB: {args.dsn}")
     print(f"  Beets DB: {beets_db_path}")
     print(f"  MB API: {mb_api.MB_API_BASE}")
+    print(f"  Redis: {args.redis_host or 'disabled'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

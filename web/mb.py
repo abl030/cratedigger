@@ -27,6 +27,27 @@ def _get(url):
             return json.loads(resp.read())
 
 
+def search_release_groups(query):
+    """Search for release groups by title. Returns list with artist info."""
+    q = urllib.parse.quote(query)
+    data = _get(f"{MB_API_BASE}/release-group?query={q}&fmt=json&limit=20")
+    results = []
+    for rg in data.get("release-groups", []):
+        artist_credit = rg.get("artist-credit", [{}])
+        artist = artist_credit[0].get("artist", {}) if artist_credit else {}
+        results.append({
+            "id": rg["id"],
+            "title": rg.get("title", ""),
+            "primary_type": rg.get("primary-type", ""),
+            "first_release_date": rg.get("first-release-date", ""),
+            "artist_id": artist.get("id", ""),
+            "artist_name": artist.get("name", ""),
+            "artist_disambiguation": artist.get("disambiguation", ""),
+            "score": rg.get("score", 0),
+        })
+    return results
+
+
 def search_artists(query):
     """Search for artists by name. Returns list of {id, name, disambiguation, score}."""
     q = urllib.parse.quote(query)
