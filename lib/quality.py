@@ -618,7 +618,7 @@ def extract_usernames(files: Any) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def verify_filetype(file: Any, allowed_filetype: str) -> bool:
+def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
     """Check whether a slskd file dict matches an allowed filetype specification.
 
     Handles: bare extension ("mp3"), exact bitrate ("mp3 320"),

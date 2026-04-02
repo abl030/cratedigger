@@ -18,26 +18,17 @@ This applies to every remaining untyped boundary below.
 
 Replaced with typed `AlbumRecord`, `ReleaseRecord`, `MediaRecord` dataclasses. All ~50 access sites in soularr.py and lib/download.py updated. `_get_request_id()` deleted. Tests fixed to use real constructors.
 
-### 2. `PipelineDB.get_request()` returns `dict[str, Any]` (lib/pipeline_db.py)
+### 2. ~~`PipelineDB.get_request()` returns `dict[str, Any]`~~ ✅ DONE
 
-**Impact**: Callers do `req.get("min_bitrate")`, `req.get("verified_lossless")` etc. with no key validation. Misspelled keys silently return None.
+Replaced with typed `PipelineRequest` dataclass in `lib/pipeline_db.py`. All ~100 access sites across 15 files updated from `req["field"]` to `req.field`. Tests fixed to use `PipelineRequest` or `MagicMock` with typed attributes.
 
-**Fix**: Return a typed `PipelineRequest` dataclass.
+### 3. ~~`verify_filetype()` takes `file: Any`~~ ✅ DONE
 
-### 3. `verify_filetype()` takes `file: Any` (lib/quality.py:611)
+Typed as `dict[str, Any]` (raw slskd API dicts with mixed value types — `Any` is the honest annotation).
 
-**Impact**: Receives slskd file dicts. No type checking on the dict shape.
+### 4. ~~Test quality: stop passing dicts where dataclasses are expected~~ ✅ DONE
 
-**Fix**: Type as `dict[str, object]` (can't be a dataclass — these are raw API responses from slskd).
-
-### 4. Test quality: stop passing dicts where dataclasses are expected
-
-Grep for any test that constructs a dict and passes it to a function typed with a dataclass. These are the tests that won't catch boundary mismatches. Key pattern to find:
-
-```
-result = {"valid": True, ...}  # should be ValidationResult(valid=True, ...)
-album_data = {"artist": ...}   # should be GrabListEntry(artist=...)
-```
+Audited all tests. Fixed `test_download.py` (2 tests passing dicts → `AlbumRecord`), `test_import_dispatch.py` (4 tests passing dicts → `MagicMock` with typed attrs), `test_web_server.py` (mock → `PipelineRequest`). Remaining `{"valid": ...}` patterns are JSON strings stored in JSONB, not typed function args.
 
 ### 5. ~~Stale comments~~ ✅ DONE
 

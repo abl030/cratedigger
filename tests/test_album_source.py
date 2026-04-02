@@ -151,8 +151,9 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "imported")
-        self.assertAlmostEqual(req["beets_distance"], 0.08)
+        self.assertEqual(req.status, "imported")
+        assert req.beets_distance is not None
+        self.assertAlmostEqual(req.beets_distance, 0.08)
 
     def test_mark_done_request_stages(self):
         source, db = self._make_source()
@@ -169,7 +170,7 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "imported")
+        self.assertEqual(req.status, "imported")
 
     def test_mark_failed_updates_status_and_denylists(self):
         source, db = self._make_source()
@@ -186,8 +187,8 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "wanted")
-        self.assertEqual(req["validation_attempts"], 1)
+        self.assertEqual(req.status, "wanted")
+        self.assertEqual(req.validation_attempts, 1)
 
         denied = db.get_denylisted_users(req_id)
         usernames = {d["username"] for d in denied}
@@ -214,8 +215,8 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["on_disk_spectral_grade"], "suspect")
-        self.assertEqual(req["on_disk_spectral_bitrate"], 160)
+        self.assertEqual(req.on_disk_spectral_grade, "suspect")
+        self.assertEqual(req.on_disk_spectral_bitrate, 160)
 
     def test_mark_done_override_false_prevents_verified_lossless(self):
         """import_one says will_be_verified_lossless=False — mark_done must not
@@ -236,7 +237,7 @@ class TestDatabaseSource(unittest.TestCase):
                          download_info=dl)
         req = db.get_request(req_id)
         assert req is not None
-        self.assertFalse(req.get("verified_lossless", False))
+        self.assertFalse(req.verified_lossless)
 
     def test_mark_done_override_true_sets_verified_lossless(self):
         """import_one says will_be_verified_lossless=True — sets it."""
@@ -256,7 +257,7 @@ class TestDatabaseSource(unittest.TestCase):
                          download_info=dl)
         req = db.get_request(req_id)
         assert req is not None
-        self.assertTrue(req["verified_lossless"])
+        self.assertTrue(req.verified_lossless)
 
     def test_mark_done_verified_lossless_uses_bitrate_for_spectral(self):
         """When verified_lossless, on_disk_spectral_bitrate should be the
@@ -280,9 +281,9 @@ class TestDatabaseSource(unittest.TestCase):
         req = db.get_request(req_id)
         assert req is not None
         # Should use V0 bitrate (245), not spectral estimate (128)
-        self.assertEqual(req["on_disk_spectral_bitrate"], 245)
+        self.assertEqual(req.on_disk_spectral_bitrate, 245)
         # spectral_bitrate (the download's raw spectral) stays as-is
-        self.assertEqual(req["spectral_bitrate"], 128)
+        self.assertEqual(req.spectral_bitrate, 128)
 
     def test_mark_done_no_override_falls_back(self):
         """No override (legacy path) — derives from is_verified_lossless()."""
@@ -302,7 +303,7 @@ class TestDatabaseSource(unittest.TestCase):
                          download_info=dl)
         req = db.get_request(req_id)
         assert req is not None
-        self.assertTrue(req["verified_lossless"])
+        self.assertTrue(req.verified_lossless)
 
     def test_get_denylisted_users(self):
         source, db = self._make_source()

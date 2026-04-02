@@ -40,15 +40,15 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
     mb_id = detail.get("mb_albumid")
     srv = _server()
     if mb_id and srv.db:
-        req = srv._db().get_request_by_mb_release_id(mb_id)
+        req = srv._db().get_request_by_mb_release_id(str(mb_id))
         if req:
-            history = srv._db().get_download_history(req["id"])
-            result["pipeline_id"] = req["id"]
-            result["pipeline_status"] = req["status"]
-            result["pipeline_source"] = req["source"]
-            result["pipeline_min_bitrate"] = req.get("min_bitrate")
+            history = srv._db().get_download_history(req.id)
+            result["pipeline_id"] = req.id
+            result["pipeline_status"] = req.status
+            result["pipeline_source"] = req.source
+            result["pipeline_min_bitrate"] = req.min_bitrate
             result["upgrade_queued"] = (
-                req["status"] == "wanted" and bool(req.get("quality_override"))
+                req.status == "wanted" and bool(req.quality_override)
             )
             from classify import classify_log_entry as _clf, LogEntry as _LE
             dh = []

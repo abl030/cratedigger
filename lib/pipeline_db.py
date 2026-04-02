@@ -10,12 +10,95 @@ Usage:
     db.add_request(mb_release_id="...", artist_name="...", album_title="...", source="redownload")
 """
 
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
+
+
+@dataclass
+class PipelineRequest:
+    """Typed representation of an album_requests row."""
+    id: int
+    mb_release_id: str | None
+    mb_release_group_id: str | None
+    mb_artist_id: str | None
+    discogs_release_id: str | None
+    artist_name: str
+    album_title: str
+    year: int | None
+    country: str | None
+    format: str | None
+    source: str
+    source_path: str | None
+    reasoning: str | None
+    status: str
+    search_attempts: int
+    download_attempts: int
+    validation_attempts: int
+    last_attempt_at: datetime | None
+    next_retry_after: datetime | None
+    beets_distance: float | None
+    beets_scenario: str | None
+    imported_path: str | None
+    quality_override: str | None
+    min_bitrate: int | None
+    prev_min_bitrate: int | None
+    lidarr_album_id: int | None
+    lidarr_artist_id: int | None
+    created_at: datetime
+    updated_at: datetime
+    # Migration-added columns (may not exist in old DBs)
+    spectral_bitrate: int | None = None
+    spectral_grade: str | None = None
+    verified_lossless: bool = False
+    on_disk_spectral_grade: str | None = None
+    on_disk_spectral_bitrate: int | None = None
+
+    @staticmethod
+    def from_row(row: dict[str, Any]) -> PipelineRequest:
+        """Build from a RealDictCursor row."""
+        return PipelineRequest(
+            id=row["id"],
+            mb_release_id=row.get("mb_release_id"),
+            mb_release_group_id=row.get("mb_release_group_id"),
+            mb_artist_id=row.get("mb_artist_id"),
+            discogs_release_id=row.get("discogs_release_id"),
+            artist_name=row["artist_name"],
+            album_title=row["album_title"],
+            year=row.get("year"),
+            country=row.get("country"),
+            format=row.get("format"),
+            source=row["source"],
+            source_path=row.get("source_path"),
+            reasoning=row.get("reasoning"),
+            status=row["status"],
+            search_attempts=row.get("search_attempts", 0),
+            download_attempts=row.get("download_attempts", 0),
+            validation_attempts=row.get("validation_attempts", 0),
+            last_attempt_at=row.get("last_attempt_at"),
+            next_retry_after=row.get("next_retry_after"),
+            beets_distance=row.get("beets_distance"),
+            beets_scenario=row.get("beets_scenario"),
+            imported_path=row.get("imported_path"),
+            quality_override=row.get("quality_override"),
+            min_bitrate=row.get("min_bitrate"),
+            prev_min_bitrate=row.get("prev_min_bitrate"),
+            lidarr_album_id=row.get("lidarr_album_id"),
+            lidarr_artist_id=row.get("lidarr_artist_id"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            spectral_bitrate=row.get("spectral_bitrate"),
+            spectral_grade=row.get("spectral_grade"),
+            verified_lossless=row.get("verified_lossless", False),
+            on_disk_spectral_grade=row.get("on_disk_spectral_grade"),
+            on_disk_spectral_bitrate=row.get("on_disk_spectral_bitrate"),
+        )
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
 
@@ -257,19 +340,19 @@ class PipelineDB:
         assert row is not None, "INSERT RETURNING should always return a row"
         return row["id"]
 
-    def get_request(self, request_id) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> PipelineRequest | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE id = %s", (request_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return PipelineRequest.from_row(dict(row)) if row else None
 
-    def get_request_by_mb_release_id(self, mb_release_id) -> dict[str, Any] | None:
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> PipelineRequest | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return PipelineRequest.from_row(dict(row)) if row else None
 
     def delete_request(self, request_id):
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))

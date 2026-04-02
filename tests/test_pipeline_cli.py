@@ -62,12 +62,12 @@ class TestCmdAdd(unittest.TestCase):
 
         req = self.db.get_request_by_mb_release_id("44438bf9-26d9-4460-9b4f-1a1b015e37a1")
         assert req is not None
-        self.assertEqual(req["artist_name"], "Buke and Gase")
-        self.assertEqual(req["album_title"], "Riposte")
-        self.assertEqual(req["year"], 2014)
-        self.assertEqual(req["source"], "request")
+        self.assertEqual(req.artist_name, "Buke and Gase")
+        self.assertEqual(req.album_title, "Riposte")
+        self.assertEqual(req.year, 2014)
+        self.assertEqual(req.source, "request")
 
-        tracks = self.db.get_tracks(req["id"])
+        tracks = self.db.get_tracks(req.id)
         self.assertEqual(len(tracks), 3)
 
     @patch("pipeline_cli.fetch_mb_release")
@@ -118,7 +118,7 @@ class TestCmdRetry(unittest.TestCase):
         pipeline_cli.cmd_retry(self.db, args)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req.status, "wanted")
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
@@ -135,7 +135,7 @@ class TestCmdCancel(unittest.TestCase):
         pipeline_cli.cmd_cancel(self.db, args)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "manual")
+        self.assertEqual(req.status, "manual")
 
 
 class TestTracksFromMbRelease(unittest.TestCase):

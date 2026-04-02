@@ -70,7 +70,7 @@ def post_manual_import(h, body: dict) -> None:
     if not req:
         h._error(f"Request {request_id} not found", 404)
         return
-    mbid = req.get("mb_release_id")
+    mbid = req.mb_release_id
     if not mbid:
         h._error("Request has no MusicBrainz release ID")
         return
@@ -83,7 +83,7 @@ def post_manual_import(h, body: dict) -> None:
         mb_release_id=mbid,
         path=path,
         import_one_path=import_one_path,
-        override_min_bitrate=req.get("min_bitrate"),
+        override_min_bitrate=req.min_bitrate,
     )
 
     # Log to download_log
@@ -109,8 +109,8 @@ def post_manual_import(h, body: dict) -> None:
         "message": result.message,
         "exit_code": result.exit_code,
         "request_id": request_id,
-        "artist": req["artist_name"],
-        "album": req["album_title"],
+        "artist": req.artist_name,
+        "album": req.album_title,
     })
 
 

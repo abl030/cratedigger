@@ -168,8 +168,8 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
     data = srv.mb_api.get_release(release_id)
     data["in_library"] = bool(srv.check_beets_library([release_id]))
     req = srv._db().get_request_by_mb_release_id(release_id)
-    data["pipeline_status"] = req["status"] if req else None
-    data["pipeline_id"] = req["id"] if req else None
+    data["pipeline_status"] = req.status if req else None
+    data["pipeline_id"] = req.id if req else None
     # Include beets track info if in library
     b = srv._beets_db()
     if data["in_library"] and b:

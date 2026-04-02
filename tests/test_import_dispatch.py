@@ -270,13 +270,18 @@ class TestDispatchImport(unittest.TestCase):
 class TestOverrideMinBitrate(unittest.TestCase):
     """Test that --override-min-bitrate uses spectral when lower than container."""
 
-    def _get_override_value(self, db_request):
+    def _get_override_value(self, db_fields):
         """Run dispatch_import with a mock DB request, return the override passed."""
         from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         ctx = _make_ctx()
         db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.get_request.return_value = db_request
+        mock_req = MagicMock()
+        mock_req.min_bitrate = db_fields.get("min_bitrate")
+        mock_req.on_disk_spectral_bitrate = db_fields.get("on_disk_spectral_bitrate")
+        mock_req.spectral_bitrate = db_fields.get("spectral_bitrate")
+        mock_req.verified_lossless = db_fields.get("verified_lossless", False)
+        db_mock.get_request.return_value = mock_req
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="mp3")
         ir = _make_import_result(decision="import")

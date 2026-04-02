@@ -79,13 +79,13 @@ class TestAddAndGetRequest(unittest.TestCase):
 
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["mb_release_id"], "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
-        self.assertEqual(req["artist_name"], "Buke and Gase")
-        self.assertEqual(req["album_title"], "Riposte")
-        self.assertEqual(req["source"], "redownload")
-        self.assertEqual(req["status"], "wanted")
-        self.assertEqual(req["year"], 2014)
-        self.assertEqual(req["country"], "US")
+        self.assertEqual(req.mb_release_id, "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        self.assertEqual(req.artist_name, "Buke and Gase")
+        self.assertEqual(req.album_title, "Riposte")
+        self.assertEqual(req.source, "redownload")
+        self.assertEqual(req.status, "wanted")
+        self.assertEqual(req.year, 2014)
+        self.assertEqual(req.country, "US")
 
     def test_add_minimal_fields(self):
         req_id = self.db.add_request(
@@ -96,8 +96,8 @@ class TestAddAndGetRequest(unittest.TestCase):
         )
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "wanted")
-        self.assertIsNone(req["year"])
+        self.assertEqual(req.status, "wanted")
+        self.assertIsNone(req.year)
 
     def test_duplicate_mb_release_id_raises(self):
         self.db.add_request(
@@ -127,7 +127,7 @@ class TestAddAndGetRequest(unittest.TestCase):
         )
         req = self.db.get_request_by_mb_release_id("find-me-uuid")
         assert req is not None
-        self.assertEqual(req["artist_name"], "A")
+        self.assertEqual(req.artist_name, "A")
 
     def test_get_by_mb_release_id_not_found(self):
         self.assertIsNone(self.db.get_request_by_mb_release_id("nope"))
@@ -141,8 +141,8 @@ class TestAddAndGetRequest(unittest.TestCase):
         )
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["discogs_release_id"], "12345")
-        self.assertIsNone(req["mb_release_id"])
+        self.assertEqual(req.discogs_release_id, "12345")
+        self.assertIsNone(req.mb_release_id)
 
     def test_delete_request(self):
         req_id = self.db.add_request(
@@ -174,7 +174,7 @@ class TestUpdateStatus(unittest.TestCase):
             self.db.update_status(self.req_id, s)
             req = self.db.get_request(self.req_id)
             assert req is not None
-            self.assertEqual(req["status"], s)
+            self.assertEqual(req.status, s)
 
     def test_update_status_with_extra_fields(self):
         self.db.update_status(self.req_id, "imported",
@@ -182,9 +182,10 @@ class TestUpdateStatus(unittest.TestCase):
                               imported_path="/Beets/A/2020 - B")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["status"], "imported")
-        self.assertAlmostEqual(req["beets_distance"], 0.05)
-        self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
+        self.assertEqual(req.status, "imported")
+        assert req.beets_distance is not None
+        self.assertAlmostEqual(req.beets_distance, 0.05)
+        self.assertEqual(req.imported_path, "/Beets/A/2020 - B")
 
 
 @requires_postgres
@@ -387,32 +388,34 @@ class TestRetryLogic(unittest.TestCase):
         self.db.record_attempt(self.req_id, "search")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["search_attempts"], 1)
+        self.assertEqual(req.search_attempts, 1)
 
         self.db.record_attempt(self.req_id, "search")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["search_attempts"], 2)
+        self.assertEqual(req.search_attempts, 2)
 
     def test_record_attempt_sets_backoff(self):
         self.db.record_attempt(self.req_id, "download")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["download_attempts"], 1)
-        self.assertIsNotNone(req["last_attempt_at"])
-        self.assertIsNotNone(req["next_retry_after"])
-        self.assertGreater(req["next_retry_after"], datetime.now(timezone.utc))
+        self.assertEqual(req.download_attempts, 1)
+        self.assertIsNotNone(req.last_attempt_at)
+        assert req.next_retry_after is not None
+        self.assertGreater(req.next_retry_after, datetime.now(timezone.utc))
 
     def test_exponential_backoff(self):
         self.db.record_attempt(self.req_id, "search")
         req1 = self.db.get_request(self.req_id)
         assert req1 is not None
-        retry1 = req1["next_retry_after"]
+        assert req1.next_retry_after is not None
+        retry1 = req1.next_retry_after
 
         self.db.record_attempt(self.req_id, "search")
         req2 = self.db.get_request(self.req_id)
         assert req2 is not None
-        retry2 = req2["next_retry_after"]
+        assert req2.next_retry_after is not None
+        retry2 = req2.next_retry_after
 
         now = datetime.now(timezone.utc)
         delta1 = (retry1 - now).total_seconds()
@@ -438,7 +441,7 @@ class TestSourcePreservation(unittest.TestCase):
         self.db.update_status(req_id, "imported")
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["source"], "request")
+        self.assertEqual(req.source, "request")
 
     def test_redownload_source_preserved(self):
         req_id = self.db.add_request(
@@ -450,7 +453,7 @@ class TestSourcePreservation(unittest.TestCase):
         self.db.update_status(req_id, "imported")
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["source"], "redownload")
+        self.assertEqual(req.source, "redownload")
 
 
 @requires_postgres
@@ -472,11 +475,11 @@ class TestResetToWanted(unittest.TestCase):
         self.db.reset_to_wanted(req_id)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "wanted")
-        self.assertIsNone(req["next_retry_after"])
-        self.assertEqual(req["search_attempts"], 0)
-        self.assertEqual(req["download_attempts"], 0)
-        self.assertEqual(req["validation_attempts"], 0)
+        self.assertEqual(req.status, "wanted")
+        self.assertIsNone(req.next_retry_after)
+        self.assertEqual(req.search_attempts, 0)
+        self.assertEqual(req.download_attempts, 0)
+        self.assertEqual(req.validation_attempts, 0)
 
 
 @requires_postgres
@@ -540,8 +543,8 @@ class TestSpectralColumns(unittest.TestCase):
                               spectral_grade="suspect")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["spectral_bitrate"], 128)
-        self.assertEqual(req["spectral_grade"], "suspect")
+        self.assertEqual(req.spectral_bitrate, 128)
+        self.assertEqual(req.spectral_grade, "suspect")
 
     def test_on_disk_spectral_columns(self):
         """on_disk_spectral_grade/bitrate describe files currently in beets."""
@@ -550,15 +553,15 @@ class TestSpectralColumns(unittest.TestCase):
                               on_disk_spectral_bitrate=160)
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["on_disk_spectral_grade"], "suspect")
-        self.assertEqual(req["on_disk_spectral_bitrate"], 160)
+        self.assertEqual(req.on_disk_spectral_grade, "suspect")
+        self.assertEqual(req.on_disk_spectral_bitrate, 160)
 
     def test_on_disk_spectral_null_by_default(self):
         """on_disk_spectral columns are NULL for pre-existing albums."""
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertIsNone(req.get("on_disk_spectral_grade"))
-        self.assertIsNone(req.get("on_disk_spectral_bitrate"))
+        self.assertIsNone(req.on_disk_spectral_grade)
+        self.assertIsNone(req.on_disk_spectral_bitrate)
 
 
 @requires_postgres

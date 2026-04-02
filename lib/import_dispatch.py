@@ -109,7 +109,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
         if request_id:
             try:
                 req = ctx.pipeline_db_source._get_db().get_request(request_id)
-                raw_br = req.get("spectral_bitrate") if req else None
+                raw_br = req.spectral_bitrate if req else None
                 spectral_br = raw_br if isinstance(raw_br, int) else None
                 effective = compute_effective_override_bitrate(min_br_kbps, spectral_br)
                 if effective is not None and effective < min_br_kbps:
@@ -117,7 +117,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
             except Exception:
                 pass
-        verified_lossless = req.get("verified_lossless") if req else False
+        verified_lossless = req.verified_lossless if req else False
 
         decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
 
@@ -204,7 +204,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 req = ctx.pipeline_db_source._get_db().get_request(request_id)
                 if req:
                     effective_br = compute_effective_override_bitrate(
-                        req.get("min_bitrate"), req.get("on_disk_spectral_bitrate"))
+                        req.min_bitrate, req.on_disk_spectral_bitrate)
                     if effective_br is not None:
                         cmd.extend(["--override-min-bitrate", str(effective_br)])
             except Exception:
