@@ -180,8 +180,47 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._get("/api/pipeline/all")
         self.assertEqual(status, 200)
         self.assertIn("counts", data)
-        for key in ("wanted", "imported", "manual"):
+        for key in ("wanted", "downloading", "imported", "manual"):
             self.assertIn(key, data)
+
+    def test_pipeline_status_includes_downloading(self):
+        """count_by_status includes downloading when albums are downloading."""
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 3, "downloading": 2, "imported": 10, "manual": 1}
+        status, data = self._get("/api/pipeline/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["counts"]["downloading"], 2)
+        # Restore
+        self.mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
+
+    def test_pipeline_all_includes_downloading(self):
+        """get_pipeline_all returns downloading albums in the response."""
+        downloading_row = {
+            "id": 200, "album_title": "Downloading Album", "artist_name": "DL Artist",
+            "mb_release_id": "dl-uuid", "status": "downloading",
+            "year": 2024, "country": "US", "format": None,
+            "source": "request", "quality_override": None,
+            "created_at": "2026-04-03T12:00:00+00:00",
+            "updated_at": "2026-04-03T12:00:00+00:00",
+            "min_bitrate": None, "prev_min_bitrate": None,
+            "verified_lossless": False, "spectral_grade": None,
+            "spectral_bitrate": None, "on_disk_spectral_grade": None,
+            "on_disk_spectral_bitrate": None,
+            "imported_path": None, "reasoning": None,
+            "active_download_state": {"filetype": "flac", "enqueued_at": "now", "files": []},
+        }
+        self.mock_db.get_by_status.side_effect = lambda s: [downloading_row] if s == "downloading" else []
+        self.mock_db.count_by_status.return_value = {"downloading": 1}
+        self.mock_db.get_download_history_batch.return_value = {}
+        status, data = self._get("/api/pipeline/all")
+        self.assertEqual(status, 200)
+        self.assertIn("downloading", data)
+        self.assertEqual(len(data["downloading"]), 1)
+        self.assertEqual(data["downloading"][0]["album_title"], "Downloading Album")
+        # Restore
+        self.mock_db.get_by_status.side_effect = None
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
 
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")

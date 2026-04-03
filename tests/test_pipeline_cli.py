@@ -147,5 +147,43 @@ class TestTracksFromMbRelease(unittest.TestCase):
         self.assertAlmostEqual(tracks[0]["length_seconds"], 200.0)
 
 
+@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
+class TestCmdStatusShowsDownloading(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_status_shows_downloading_count(self):
+        """pipeline-cli status includes downloading in the count display."""
+        import json
+        id1 = self.db.add_request(mb_release_id="dl-1", artist_name="A",
+                                  album_title="B", source="request")
+        state_json = json.dumps({"filetype": "flac", "enqueued_at": "now", "files": []})
+        self.db.set_downloading(id1, state_json)
+
+        counts = self.db.count_by_status()
+        self.assertIn("downloading", counts)
+        self.assertEqual(counts["downloading"], 1)
+
+    def test_show_displays_active_download_state(self):
+        """pipeline-cli show renders active_download_state for downloading albums."""
+        import json
+        id1 = self.db.add_request(mb_release_id="show-dl", artist_name="A",
+                                  album_title="B", source="request")
+        state = {"filetype": "flac", "enqueued_at": "2026-04-03T12:00:00+00:00",
+                 "files": [{"username": "user1", "filename": "f.flac",
+                            "file_dir": "d", "size": 1000}]}
+        self.db.set_downloading(id1, json.dumps(state))
+
+        req = self.db.get_request(id1)
+        assert req is not None
+        ads = req.get("active_download_state")
+        assert ads is not None
+        self.assertEqual(ads["filetype"], "flac")
+        self.assertEqual(len(ads["files"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

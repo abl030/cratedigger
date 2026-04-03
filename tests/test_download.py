@@ -912,6 +912,101 @@ class TestPollActiveDownloads(unittest.TestCase):
         mock_db.clear_download_state.assert_not_called()
 
 
+    @patch("lib.download.process_completed_album")
+    def test_poll_active_partial_errors_with_retry(self, mock_process):
+        """Some files errored, retries available → re-enqueue those files."""
+        from lib.download import poll_active_downloads
+        # 3 files: 2 complete, 1 errored
+        state_dict = {
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+                {"username": "user1", "filename": "user1\\Music\\02.flac",
+                 "file_dir": "user1\\Music", "size": 25000000},
+                {"username": "user1", "filename": "user1\\Music\\03.flac",
+                 "file_dir": "user1\\Music", "size": 20000000},
+            ],
+        }
+        row = self._make_downloading_row(state_dict=state_dict)
+        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+
+        # All 3 files have transfers in slskd
+        ctx.slskd.transfers.get_downloads.return_value = {
+            "directories": [{"directory": "user1\\Music", "files": [
+                {"filename": "user1\\Music\\01.flac", "id": "tid-1"},
+                {"filename": "user1\\Music\\02.flac", "id": "tid-2"},
+                {"filename": "user1\\Music\\03.flac", "id": "tid-3"},
+            ]}],
+        }
+
+        def mock_status(downloads, ctx_arg):
+            for f in downloads:
+                if f.filename.endswith("03.flac"):
+                    f.status = {"state": "Completed, Errored"}
+                else:
+                    f.status = {"state": "Completed, Succeeded"}
+            return True
+
+        mock_requeue_file = MagicMock()
+        mock_requeue_file.id = "new-tid-3"
+        with patch("lib.download.slskd_download_status", side_effect=mock_status):
+            with patch("lib.download.slskd_do_enqueue", return_value=[mock_requeue_file]) as mock_enqueue:
+                poll_active_downloads(ctx)
+
+        # Should NOT process (not all done) and NOT timeout
+        mock_process.assert_not_called()
+        mock_db.log_download.assert_not_called()
+        # Should re-enqueue the errored file
+        mock_enqueue.assert_called_once()
+        call_args = mock_enqueue.call_args
+        self.assertEqual(call_args[0][0], "user1")  # username
+        self.assertEqual(call_args[0][1][0]["filename"], "user1\\Music\\03.flac")
+
+    @patch("lib.download.process_completed_album")
+    def test_poll_no_redownload_window(self, mock_process):
+        """Album stays 'downloading' during process_completed_album — no redownload window."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row()
+        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+
+        def mock_status(downloads, ctx_arg):
+            for f in downloads:
+                f.status = {"state": "Completed, Succeeded"}
+            return True
+
+        # After process_completed_album, mark_done set status to 'imported'
+        mock_db.get_request.return_value = {"id": 1, "status": "imported"}
+
+        # Track all update_status and _reset_to_wanted calls to verify
+        # album was never set to 'wanted' during processing
+        status_updates = []
+        original_update = mock_db.update_status.side_effect
+        def track_update(*args, **kwargs):
+            status_updates.append(args)
+        mock_db.update_status.side_effect = track_update
+
+        with patch("lib.download.slskd_download_status", side_effect=mock_status):
+            mock_process.return_value = True
+            poll_active_downloads(ctx)
+
+        # clear_download_state was called (state cleared while still 'downloading')
+        mock_db.clear_download_state.assert_called_once_with(1)
+        # process_completed_album ran
+        mock_process.assert_called_once()
+        # The album was NEVER set to 'wanted' before processing
+        for args in status_updates:
+            if len(args) >= 2:
+                self.assertNotEqual(args[1], "wanted",
+                                  "Album should never be set to 'wanted' during processing")
+        # _reset_to_wanted uses _execute, not update_status — check no 'wanted' SQL
+        for call in mock_db._execute.call_args_list:
+            sql = str(call[0][0]) if call[0] else ""
+            if "wanted" in sql:
+                self.fail("Album was reset to 'wanted' during processing — redownload window!")
+
+
 class TestBuildActiveDownloadState(unittest.TestCase):
     """Test build_active_download_state() — GrabListEntry → ActiveDownloadState."""
 

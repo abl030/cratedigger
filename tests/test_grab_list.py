@@ -1,7 +1,7 @@
 """Tests for GrabListEntry and DownloadFile dataclasses.
 
 Covers construction, attribute access, defaults, and lifecycle simulation
-matching the find_download -> monitor_downloads -> process_completed_album flow.
+matching the find_download -> poll_active_downloads -> process_completed_album flow.
 """
 
 import os
@@ -48,12 +48,6 @@ class TestConstruction(unittest.TestCase):
         self.assertIsNone(e.db_source)
         self.assertIsNone(e.db_quality_override)
 
-    def test_monitoring_defaults(self):
-        e = _make_entry()
-        self.assertIsNone(e.count_start)
-        self.assertIsNone(e.rejected_retries)
-        self.assertIsNone(e.error_count)
-
     def test_processing_defaults(self):
         e = _make_entry()
         self.assertIsNone(e.import_folder)
@@ -67,7 +61,6 @@ class TestConstruction(unittest.TestCase):
             album_id=-5, files=[], filetype="flac", title="T", artist="A",
             year="2020", mb_release_id="x",
             db_request_id=99, db_source="request", db_quality_override="flac",
-            count_start=100.0, rejected_retries=3, error_count=1,
             import_folder="/tmp/test", spectral_grade="genuine",
             spectral_bitrate=320, existing_min_bitrate=240,
             existing_spectral_bitrate=310,
@@ -106,26 +99,17 @@ class TestAttributeAccess(unittest.TestCase):
         self.assertEqual(e.existing_min_bitrate, 192)
         self.assertEqual(e.existing_spectral_bitrate, 310)
 
-    def test_write_monitoring(self):
-        e = _make_entry()
-        e.count_start = 12345.0
-        e.rejected_retries = 0
-        e.error_count = 0
-        self.assertEqual(e.count_start, 12345.0)
-        self.assertEqual(e.rejected_retries, 0)
-        self.assertEqual(e.error_count, 0)
-
     def test_no_dict_access(self):
         """Dict-style access must raise TypeError — no dual interface."""
         e = _make_entry()
         with self.assertRaises(TypeError):
             _ = e["artist"]  # type: ignore[index]
         with self.assertRaises(TypeError):
-            e["count_start"] = 100.0  # type: ignore[index]
+            e["artist"] = "X"  # type: ignore[index]
 
 
 class TestLifecycle(unittest.TestCase):
-    """Simulate the full find_download -> monitor -> process lifecycle."""
+    """Simulate the full find_download -> poll -> process lifecycle."""
 
     def test_find_download_shape(self):
         """Entry as constructed by find_download (DB mode)."""
@@ -145,24 +129,6 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(e.title, "Blue Album")
         self.assertEqual(e.filetype, "mp3 v0")
         self.assertEqual(e.db_request_id, 42)
-        self.assertIsNone(e.count_start)
-
-    def test_monitor_downloads_mutations(self):
-        """monitor_downloads adds transient fields."""
-        e = _make_entry()
-        self.assertIsNone(e.count_start)
-        e.count_start = 1000.0
-        self.assertEqual(e.count_start, 1000.0)
-
-        self.assertIsNone(e.rejected_retries)
-        e.rejected_retries = 0
-        e.rejected_retries += 1
-        self.assertEqual(e.rejected_retries, 1)
-
-        self.assertIsNone(e.error_count)
-        e.error_count = 0
-        e.error_count += 1
-        self.assertEqual(e.error_count, 1)
 
     def test_process_completed_album_mutations(self):
         """process_completed_album mutates spectral and import fields."""
@@ -279,7 +245,7 @@ class TestDownloadFileAttributeAccess(unittest.TestCase):
 
 
 class TestDownloadFileLifecycle(unittest.TestCase):
-    """Simulate the enqueue -> monitor -> process lifecycle."""
+    """Simulate the enqueue -> poll -> process lifecycle."""
 
     def test_enqueue_to_monitor(self):
         """Created in slskd_do_enqueue, then status set by polling."""

@@ -30,11 +30,6 @@ class GrabListEntry:
     db_source: Optional[str] = None           # "request" or "redownload"
     db_quality_override: Optional[str] = None
 
-    # Transient: monitor_downloads
-    count_start: Optional[float] = None
-    rejected_retries: Optional[int] = None
-    error_count: Optional[int] = None
-
     # Transient: process_completed_album
     import_folder: Optional[str] = None
     spectral_grade: Optional[str] = None
@@ -65,7 +60,7 @@ class DownloadFile:
     disk_no: Optional[int] = None
     disk_count: Optional[int] = None
 
-    # Transient: monitor_downloads
+    # Transient: poll_active_downloads
     status: Optional[dict] = None   # slskd status object with "state" key
     retry: Optional[int] = None     # retry counter, initialized on error
 
