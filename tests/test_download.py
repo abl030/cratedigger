@@ -152,32 +152,24 @@ class TestCheckQualityGateDecision(unittest.TestCase):
     """Test that quality gate calls the pure decision function correctly."""
 
     def test_verified_lossless_accepts(self):
-        from lib.quality import quality_gate_decision
-        result = quality_gate_decision(
-            min_bitrate=207, is_cbr=False,
-            verified_lossless=True, spectral_bitrate=None)
-        self.assertEqual(result, "accept")
+        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+        m = AudioQualityMeasurement(min_bitrate_kbps=207, verified_lossless=True)
+        self.assertEqual(quality_gate_decision(m), "accept")
 
     def test_low_bitrate_requeues(self):
-        from lib.quality import quality_gate_decision
-        result = quality_gate_decision(
-            min_bitrate=190, is_cbr=False,
-            verified_lossless=False, spectral_bitrate=None)
-        self.assertEqual(result, "requeue_upgrade")
+        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+        m = AudioQualityMeasurement(min_bitrate_kbps=190)
+        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
 
     def test_cbr_requeues_flac(self):
-        from lib.quality import quality_gate_decision
-        result = quality_gate_decision(
-            min_bitrate=320, is_cbr=True,
-            verified_lossless=False, spectral_bitrate=None)
-        self.assertEqual(result, "requeue_flac")
+        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+        m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True)
+        self.assertEqual(quality_gate_decision(m), "requeue_flac")
 
     def test_vbr_above_threshold_accepts(self):
-        from lib.quality import quality_gate_decision
-        result = quality_gate_decision(
-            min_bitrate=245, is_cbr=False,
-            verified_lossless=False, spectral_bitrate=None)
-        self.assertEqual(result, "accept")
+        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+        m = AudioQualityMeasurement(min_bitrate_kbps=245)
+        self.assertEqual(quality_gate_decision(m), "accept")
 
 
 # === NEW tests for functions moving to lib/download.py ===

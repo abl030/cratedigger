@@ -272,6 +272,34 @@ class DownloadInfo:
 
 
 # ---------------------------------------------------------------------------
+# Audio quality measurement — ground truth from ffprobe + spectral
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AudioQualityMeasurement:
+    """What we actually measured about a set of audio files.
+
+    Ground truth from ffprobe and spectral analysis. Used by decision functions
+    to compare new downloads against existing files and determine quality gate
+    outcomes.
+
+    Fields:
+        min_bitrate_kbps:      min track bitrate (kbps), None if unmeasurable
+        is_cbr:                True if all tracks have the same bitrate
+        spectral_grade:        spectral analysis result (genuine/marginal/suspect)
+        spectral_bitrate_kbps: estimated original bitrate from spectral cliff
+        verified_lossless:     True if imported from spectral-verified genuine lossless
+        was_converted_from:    source format before conversion (flac/m4a/wav), None if MP3
+    """
+    min_bitrate_kbps: Optional[int] = None
+    is_cbr: bool = False
+    spectral_grade: Optional[str] = None
+    spectral_bitrate_kbps: Optional[int] = None
+    verified_lossless: bool = False
+    was_converted_from: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Structured result from import_one.py
 # ---------------------------------------------------------------------------
 
@@ -428,8 +456,9 @@ def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral
 # import_one.py decisions (FLAC conversion path)
 # ---------------------------------------------------------------------------
 
-def import_quality_decision(new_min_bitrate, existing_min_bitrate, override_min_bitrate=None,
-                            is_transcode=False, will_be_verified_lossless=False):
+def import_quality_decision(new: AudioQualityMeasurement,
+                            existing: "AudioQualityMeasurement | None",
+                            is_transcode: bool = False) -> str:
     """Decide whether to import based on bitrate comparison.
 
     Called in import_one.py after FLAC→V0 conversion (if applicable)
@@ -443,21 +472,20 @@ def import_quality_decision(new_min_bitrate, existing_min_bitrate, override_min_
         "transcode_first"     — transcode but nothing on disk yet, import (exit 6)
 
     Inputs:
-        new_min_bitrate:      min bitrate of new files (kbps)
-        existing_min_bitrate: min bitrate in beets for this MBID (kbps), or None
-        override_min_bitrate: pipeline DB override (when beets value is wrong), or None
-        is_transcode:         True if FLAC→V0 produced sub-210kbps output
-        will_be_verified_lossless: True if genuine FLAC was converted to V0
+        new:           measurement of the new download
+        existing:      measurement of what's already in beets, or None
+                       (caller resolves override_min_bitrate into existing.min_bitrate_kbps)
+        is_transcode:  True if FLAC→V0 produced a transcode (from transcode_detection)
     """
     # Genuine FLAC→V0 always wins — V0 bitrate is numerically lower than
     # CBR 320 but objectively better quality (verified lossless source).
-    if will_be_verified_lossless:
+    if new.verified_lossless:
         return "import"
 
-    effective_existing = override_min_bitrate if override_min_bitrate is not None else existing_min_bitrate
+    existing_br = existing.min_bitrate_kbps if existing is not None else None
 
-    if effective_existing is not None and new_min_bitrate is not None:
-        if new_min_bitrate <= effective_existing:
+    if existing_br is not None and new.min_bitrate_kbps is not None:
+        if new.min_bitrate_kbps <= existing_br:
             if is_transcode:
                 return "transcode_downgrade"
             return "downgrade"
@@ -465,7 +493,7 @@ def import_quality_decision(new_min_bitrate, existing_min_bitrate, override_min_
             if is_transcode:
                 return "transcode_upgrade"
             return "import"
-    elif existing_min_bitrate is None and is_transcode:
+    elif existing is None and is_transcode:
         return "transcode_first"
     else:
         return "import"
@@ -529,30 +557,29 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
 # Post-import quality gate (runs after successful import in soularr.py)
 # ---------------------------------------------------------------------------
 
-def quality_gate_decision(min_bitrate, is_cbr, verified_lossless, spectral_bitrate=None):
+def quality_gate_decision(current: AudioQualityMeasurement) -> str:
     """Pure decision logic for the post-import quality gate.
 
     Returns one of: "accept", "requeue_upgrade", "requeue_flac".
 
-    Inputs:
-        min_bitrate:      min track bitrate in kbps (from beets DB)
-        is_cbr:           True if all tracks have the same bitrate
-        verified_lossless: True if imported from spectral-verified genuine FLAC
-        spectral_bitrate: estimated original bitrate from spectral cliff detection (kbps)
+    Input:
+        current: measurement of the files now on disk (from beets DB + spectral)
     """
-    gate_br = min_bitrate
+    gate_br = current.min_bitrate_kbps
+    if gate_br is None:
+        return "requeue_upgrade"
 
     # Spectral bitrate overrides if lower (catches fake 320s)
-    if spectral_bitrate is not None and spectral_bitrate < gate_br:
-        gate_br = spectral_bitrate
+    if current.spectral_bitrate_kbps is not None and current.spectral_bitrate_kbps < gate_br:
+        gate_br = current.spectral_bitrate_kbps
 
     # Verified lossless overrides low bitrate (quiet/simple music is fine)
-    if verified_lossless and gate_br < QUALITY_MIN_BITRATE_KBPS:
+    if current.verified_lossless and gate_br < QUALITY_MIN_BITRATE_KBPS:
         gate_br = QUALITY_MIN_BITRATE_KBPS  # force pass
 
     if gate_br < QUALITY_MIN_BITRATE_KBPS:
         return "requeue_upgrade"
-    elif not verified_lossless and is_cbr:
+    elif not current.verified_lossless and current.is_cbr:
         return "requeue_flac"
     else:
         return "accept"
@@ -976,11 +1003,11 @@ def get_decision_tree() -> dict[str, Any]:
                 "path": "shared",
                 "function": "import_quality_decision",
                 "when": "All downloads before beets import",
-                "inputs": ["new_min_bitrate", "existing_min_bitrate",
-                           "override_min_bitrate", "is_transcode",
-                           "will_be_verified_lossless"],
+                "inputs": ["new: AudioQualityMeasurement",
+                           "existing: AudioQualityMeasurement | None",
+                           "is_transcode"],
                 "rules": [
-                    {"condition": "will_be_verified_lossless = true",
+                    {"condition": "new.verified_lossless = true",
                      "result": "import", "color": "green",
                      "effect": "V0 from genuine FLAC always wins"},
                     {"condition": "new > existing AND is_transcode",
@@ -994,15 +1021,15 @@ def get_decision_tree() -> dict[str, Any]:
                     {"condition": "new <= existing",
                      "result": "downgrade", "color": "red",
                      "effect": "reject"},
-                    {"condition": "no existing AND is_transcode",
+                    {"condition": "existing is None AND is_transcode",
                      "result": "transcode_first", "color": "amber",
                      "effect": "import (something > nothing) + denylist"},
                 ],
                 "outcomes": ["import", "downgrade", "transcode_upgrade",
                              "transcode_downgrade", "transcode_first",
                              "preflight_existing"],
-                "note": "effective_existing = override_min_bitrate ?? "
-                        "existing_min_bitrate",
+                "note": "Caller resolves override_min_bitrate into "
+                        "existing.min_bitrate_kbps",
             },
             {
                 "id": "quality_gate",
@@ -1010,13 +1037,12 @@ def get_decision_tree() -> dict[str, Any]:
                 "path": "shared",
                 "function": "quality_gate_decision",
                 "when": "After successful beets import",
-                "inputs": ["beets_min_bitrate", "is_cbr",
-                           "verified_lossless", "spectral_bitrate"],
+                "inputs": ["current: AudioQualityMeasurement"],
                 "rules": [
-                    {"condition": "gate_br = min(beets_br, spectral_br)",
+                    {"condition": "gate_br = min(current.min_bitrate_kbps, current.spectral_bitrate_kbps)",
                      "result": "(computed)", "color": "green",
                      "effect": "spectral overrides container if lower"},
-                    {"condition": f"verified_lossless AND gate_br < "
+                    {"condition": f"current.verified_lossless AND gate_br < "
                                   f"{QUALITY_MIN_BITRATE_KBPS}",
                      "result": f"gate_br = {QUALITY_MIN_BITRATE_KBPS}",
                      "color": "green",
@@ -1024,7 +1050,7 @@ def get_decision_tree() -> dict[str, Any]:
                     {"condition": f"gate_br < {QUALITY_MIN_BITRATE_KBPS}kbps",
                      "result": "requeue_upgrade", "color": "amber",
                      "effect": f"search {QUALITY_UPGRADE_TIERS}"},
-                    {"condition": "CBR AND NOT verified_lossless",
+                    {"condition": "current.is_cbr AND NOT current.verified_lossless",
                      "result": "requeue_flac", "color": "amber",
                      "effect": "search flac only"},
                     {"condition": "else",
@@ -1128,6 +1154,12 @@ def full_pipeline_decision(
             return result
 
     # --- Stage 2: Import decision ---
+    existing_m = (AudioQualityMeasurement(
+                      min_bitrate_kbps=override_min_bitrate
+                      if override_min_bitrate is not None
+                      else existing_min_bitrate)
+                  if existing_min_bitrate is not None else None)
+
     if is_flac:
         # FLAC path: convert first, then decide
         is_transcode = transcode_detection(converted_count, post_conversion_min_bitrate,
@@ -1135,9 +1167,10 @@ def full_pipeline_decision(
         import_br = post_conversion_min_bitrate if post_conversion_min_bitrate else min_bitrate
 
         will_be_verified = (converted_count > 0 and not is_transcode)
+        new_m = AudioQualityMeasurement(min_bitrate_kbps=import_br,
+                                        verified_lossless=will_be_verified)
         result["stage2_import"] = import_quality_decision(
-            import_br, existing_min_bitrate, override_min_bitrate, is_transcode,
-            will_be_verified_lossless=will_be_verified)
+            new_m, existing_m, is_transcode)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
@@ -1166,8 +1199,8 @@ def full_pipeline_decision(
         gate_cbr = False  # V0 conversion always produces VBR
     else:
         # MP3 path: import directly
-        result["stage2_import"] = import_quality_decision(
-            min_bitrate, existing_min_bitrate, override_min_bitrate)
+        new_m = AudioQualityMeasurement(min_bitrate_kbps=min_bitrate)
+        result["stage2_import"] = import_quality_decision(new_m, existing_m)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
@@ -1179,8 +1212,10 @@ def full_pipeline_decision(
         gate_cbr = is_cbr
 
     # --- Stage 3: Post-import quality gate ---
-    result["stage3_quality_gate"] = quality_gate_decision(
-        gate_bitrate, gate_cbr, verified_lossless, spectral_bitrate)
+    gate_m = AudioQualityMeasurement(min_bitrate_kbps=gate_bitrate, is_cbr=gate_cbr,
+                                     verified_lossless=verified_lossless,
+                                     spectral_bitrate_kbps=spectral_bitrate)
+    result["stage3_quality_gate"] = quality_gate_decision(gate_m)
 
     if result["stage3_quality_gate"] == "accept":
         result["final_status"] = "imported"

@@ -90,7 +90,7 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
 def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
                         ctx: "SoularrContext") -> None:
     """Post-import quality gate: if min track bitrate is below V0, queue for upgrade."""
-    from lib.quality import quality_gate_decision
+    from lib.quality import quality_gate_decision, AudioQualityMeasurement
     from lib.beets_db import BeetsDB
 
     mb_id = album_data.mb_release_id
@@ -117,9 +117,13 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
                                 f"(lower than beets min_bitrate={min_br_kbps}kbps)")
             except Exception:
                 logger.debug("QUALITY GATE: DB lookup failed for spectral override")
-        verified_lossless = req.get("verified_lossless") if req else False
+        verified_lossless = bool(req.get("verified_lossless")) if req else False
 
-        decision = quality_gate_decision(min_br_kbps, is_cbr, verified_lossless, spectral_br)
+        current = AudioQualityMeasurement(
+            min_bitrate_kbps=min_br_kbps, is_cbr=is_cbr,
+            verified_lossless=verified_lossless,
+            spectral_bitrate_kbps=spectral_br)
+        decision = quality_gate_decision(current)
 
         label = f"{album_data.artist} - {album_data.title}"
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""

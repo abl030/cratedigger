@@ -103,60 +103,69 @@ class TestConversionDecision(unittest.TestCase):
 # ============================================================================
 
 class TestQualityDecisionStage(unittest.TestCase):
-    """Test the quality comparison stage wrapper (combines pure functions)."""
+    """Test the quality comparison stage wrapper (combines pure functions).
+
+    Uses AudioQualityMeasurement objects for new/existing.
+    """
 
     def test_downgrade_exit_5(self):
         from import_one import quality_decision_stage
-        r = quality_decision_stage(
-            new_min_br=192, existing_min_br=320, override_min_br=None,
-            is_transcode=False, will_be_verified_lossless=False)
+        from quality import AudioQualityMeasurement
+        new = AudioQualityMeasurement(min_bitrate_kbps=192)
+        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
+        r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "downgrade")
         self.assertEqual(r.exit_code, 5)
         self.assertTrue(r.is_terminal)
 
     def test_transcode_downgrade_exit_6(self):
         from import_one import quality_decision_stage
-        r = quality_decision_stage(
-            new_min_br=128, existing_min_br=192, override_min_br=None,
-            is_transcode=True, will_be_verified_lossless=False)
+        from quality import AudioQualityMeasurement
+        new = AudioQualityMeasurement(min_bitrate_kbps=128)
+        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
+        r = quality_decision_stage(new, existing, is_transcode=True)
         self.assertEqual(r.decision, "transcode_downgrade")
         self.assertEqual(r.exit_code, 6)
         self.assertTrue(r.is_terminal)
 
     def test_import_continues(self):
         from import_one import quality_decision_stage
-        r = quality_decision_stage(
-            new_min_br=245, existing_min_br=192, override_min_br=None,
-            is_transcode=False, will_be_verified_lossless=True)
+        from quality import AudioQualityMeasurement
+        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
+        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
+        r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.exit_code, 0)
         self.assertFalse(r.is_terminal)
 
     def test_transcode_upgrade_continues(self):
         from import_one import quality_decision_stage
-        r = quality_decision_stage(
-            new_min_br=245, existing_min_br=128, override_min_br=None,
-            is_transcode=True, will_be_verified_lossless=False)
+        from quality import AudioQualityMeasurement
+        new = AudioQualityMeasurement(min_bitrate_kbps=245)
+        existing = AudioQualityMeasurement(min_bitrate_kbps=128)
+        r = quality_decision_stage(new, existing, is_transcode=True)
         self.assertEqual(r.decision, "transcode_upgrade")
         self.assertEqual(r.exit_code, 0)
         self.assertFalse(r.is_terminal)
 
     def test_first_import_no_existing(self):
         from import_one import quality_decision_stage
-        r = quality_decision_stage(
-            new_min_br=245, existing_min_br=None, override_min_br=None,
-            is_transcode=False, will_be_verified_lossless=True)
+        from quality import AudioQualityMeasurement
+        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
+        r = quality_decision_stage(new, None, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertFalse(r.is_terminal)
 
     def test_override_used_for_comparison(self):
-        """Override bitrate should be used instead of existing when provided."""
+        """Override bitrate should be used instead of existing when provided.
+        Caller constructs existing with override bitrate already resolved."""
         from import_one import quality_decision_stage
-        # existing=320 but override=128 (spectral detected fake 320)
-        # new=245 > override 128, so it's an upgrade
-        r = quality_decision_stage(
-            new_min_br=245, existing_min_br=320, override_min_br=128,
-            is_transcode=False, will_be_verified_lossless=True)
+        from quality import AudioQualityMeasurement
+        # existing beets=320 but override=128 (spectral detected fake 320)
+        # Caller resolves: existing gets 128. new=245 > 128, so upgrade.
+        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
+        existing = AudioQualityMeasurement(min_bitrate_kbps=128)  # override applied by caller
+        r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertFalse(r.is_terminal)
 

@@ -33,9 +33,9 @@ from typing import NoReturn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from quality import (transcode_detection, import_quality_decision,
+                     AudioQualityMeasurement,
                      TRANSCODE_MIN_BITRATE_KBPS,
-                     ImportResult, ConversionInfo, QualityInfo,
-                     SpectralInfo, PostflightInfo)
+                     ImportResult, PostflightInfo)
 from beets_db import BeetsDB
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
@@ -84,21 +84,16 @@ def conversion_decision(converted: int, failed: int) -> StageResult:
 
 
 def quality_decision_stage(
-    new_min_br: int | None,
-    existing_min_br: int | None,
-    override_min_br: int | None,
+    new: AudioQualityMeasurement,
+    existing: AudioQualityMeasurement | None,
     is_transcode: bool,
-    will_be_verified_lossless: bool,
 ) -> StageResult:
     """Run quality comparison and map to exit codes (pure wrapper).
 
     Delegates to import_quality_decision() and maps terminal decisions
     to exit codes: downgrade→5, transcode_downgrade→6.
     """
-    decision = import_quality_decision(
-        new_min_br, existing_min_br, override_min_br,
-        is_transcode=is_transcode,
-        will_be_verified_lossless=will_be_verified_lossless)
+    decision = import_quality_decision(new, existing, is_transcode)
 
     if decision == "downgrade":
         return StageResult(decision="downgrade", exit_code=5, terminal=True)
@@ -560,10 +555,13 @@ def main():
     r.quality.will_be_verified_lossless = will_be_verified_lossless
 
     # --- Quality comparison (pure decision) ---
-    qd = quality_decision_stage(
-        new_min_br, existing_min_br, args.override_min_bitrate,
-        is_transcode=is_transcode,
-        will_be_verified_lossless=will_be_verified_lossless)
+    new_m = AudioQualityMeasurement(min_bitrate_kbps=new_min_br,
+                                    verified_lossless=will_be_verified_lossless)
+    existing_m = (AudioQualityMeasurement(min_bitrate_kbps=args.override_min_bitrate
+                                          if args.override_min_bitrate is not None
+                                          else existing_min_br)
+                  if existing_min_br is not None else None)
+    qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode)
     decision = qd.decision
     r.decision = decision
 

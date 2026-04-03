@@ -235,7 +235,11 @@ def load_or_analyze_all():
 def _call_quality_gate(min_bitrate, is_cbr, verified_lossless, spectral_bitrate=None):
     """Wrapper: call the real quality_gate_decision() from soularr.py
     and convert its string return to a QualityDecision enum for test assertions."""
-    result = quality_gate_decision(min_bitrate, is_cbr, verified_lossless, spectral_bitrate)
+    from lib.quality import AudioQualityMeasurement
+    m = AudioQualityMeasurement(min_bitrate_kbps=min_bitrate, is_cbr=is_cbr,
+                                verified_lossless=verified_lossless,
+                                spectral_bitrate_kbps=spectral_bitrate)
+    result = quality_gate_decision(m)
     return QualityDecision(result)
 
 
