@@ -858,26 +858,30 @@ def _handle_download_problems(problems: list[Any], entry: GrabListEntry,
 def grab_most_wanted(albums: list[Any],
                      search_and_queue: Callable[..., tuple[dict, list, list]],
                      ctx: SoularrContext) -> int:
-    """Search, enqueue, monitor, and process wanted albums.
+    """Search, enqueue, persist download state, return immediately.
 
-    search_and_queue is injected to avoid circular imports with soularr.py's
-    search logic.
+    Does NOT block waiting for downloads. Download monitoring happens
+    in poll_active_downloads() on subsequent runs.
     """
     grab_list, failed_search, failed_grab = search_and_queue(albums)
 
     total_albums = len(grab_list)
     logger.info(f"Total Downloads added: {total_albums}")
     for album_id in grab_list:
-        logger.info(f"Album: {grab_list[album_id].title} Artist: {grab_list[album_id].artist}")
+        entry = grab_list[album_id]
+        logger.info(f"Album: {entry.title} Artist: {entry.artist}")
+
+        # Persist download state to DB
+        request_id = entry.db_request_id
+        if request_id:
+            state = build_active_download_state(entry)
+            db = ctx.pipeline_db_source._get_db()
+            db.set_downloading(request_id, state.to_json())
+            logger.info(f"  Set status=downloading, {len(entry.files)} files tracked")
+
     logger.info(f"Failed to grab: {len(failed_grab)}")
     for album in failed_grab:
         logger.info(f"Album: {album.title} Artist: {album.artist_name}")
-
-    logger.info("-------------------")
-    logger.info(f"Waiting for downloads... monitor at: "
-                f"{''.join([ctx.cfg.slskd_host_url, ctx.cfg.slskd_url_base, 'downloads'])}")
-
-    monitor_downloads(grab_list, failed_grab, ctx)
 
     count = len(failed_search) + len(failed_grab)
     for album in failed_search:

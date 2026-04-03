@@ -378,14 +378,13 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
 
 
 class TestGrabMostWanted(unittest.TestCase):
-    """grab_most_wanted receives search_and_queue as callable."""
+    """grab_most_wanted enqueues and persists state, no blocking monitor."""
 
     def test_no_albums_returns_zero(self):
         from lib.download import grab_most_wanted
         ctx = _make_ctx()
         search_fn = MagicMock(return_value=({}, [], []))
-        with patch("time.sleep"):
-            count = grab_most_wanted([], search_fn, ctx)
+        count = grab_most_wanted([], search_fn, ctx)
         self.assertEqual(count, 0)
 
     def test_failed_search_counted(self):
@@ -399,8 +398,7 @@ class TestGrabMostWanted(unittest.TestCase):
             db_mb_release_id="", db_quality_override=None,
         )
         search_fn = MagicMock(return_value=({}, [failed_album], []))
-        with patch("time.sleep"):
-            count = grab_most_wanted([], search_fn, ctx)
+        count = grab_most_wanted([], search_fn, ctx)
         self.assertEqual(count, 1)
 
     def test_failed_grab_counted(self):
@@ -414,9 +412,72 @@ class TestGrabMostWanted(unittest.TestCase):
             db_mb_release_id="", db_quality_override=None,
         )
         search_fn = MagicMock(return_value=({}, [], [failed_album]))
-        with patch("time.sleep"):
-            count = grab_most_wanted([], search_fn, ctx)
+        count = grab_most_wanted([], search_fn, ctx)
         self.assertEqual(count, 1)
+
+    def test_sets_downloading_status(self):
+        """After enqueue, album_requests.status = 'downloading'."""
+        from lib.download import grab_most_wanted
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid", db_request_id=42, db_source="request",
+            files=[
+                DownloadFile(filename="u\\M\\01.flac", id="tid-1",
+                             file_dir="u\\M", username="user1", size=30000000),
+            ],
+        )
+        ctx = _make_ctx()
+        mock_db = MagicMock()
+        ctx.pipeline_db_source._get_db.return_value = mock_db
+        search_fn = MagicMock(return_value=({1: entry}, [], []))
+        grab_most_wanted([], search_fn, ctx)
+        mock_db.set_downloading.assert_called_once()
+        call_args = mock_db.set_downloading.call_args
+        self.assertEqual(call_args[0][0], 42)  # request_id
+
+    def test_writes_active_download_state(self):
+        """JSONB written with correct structure."""
+        from lib.download import grab_most_wanted
+        from lib.grab_list import GrabListEntry, DownloadFile
+        import json
+        entry = GrabListEntry(
+            album_id=1, filetype="mp3 v0", title="T", artist="A", year="2020",
+            mb_release_id="mbid", db_request_id=42, db_source="request",
+            files=[
+                DownloadFile(filename="u\\M\\01.mp3", id="tid-1",
+                             file_dir="u\\M", username="user1", size=5000000),
+            ],
+        )
+        ctx = _make_ctx()
+        mock_db = MagicMock()
+        ctx.pipeline_db_source._get_db.return_value = mock_db
+        search_fn = MagicMock(return_value=({1: entry}, [], []))
+        grab_most_wanted([], search_fn, ctx)
+        state_json = mock_db.set_downloading.call_args[0][1]
+        state = json.loads(state_json)
+        self.assertEqual(state["filetype"], "mp3 v0")
+        self.assertEqual(len(state["files"]), 1)
+
+    def test_no_blocking_monitor(self):
+        """verify monitor_downloads is NOT called."""
+        from lib.download import grab_most_wanted
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid", db_request_id=42, db_source="request",
+            files=[
+                DownloadFile(filename="u\\M\\01.flac", id="tid-1",
+                             file_dir="u\\M", username="user1", size=30000000),
+            ],
+        )
+        ctx = _make_ctx()
+        mock_db = MagicMock()
+        ctx.pipeline_db_source._get_db.return_value = mock_db
+        search_fn = MagicMock(return_value=({1: entry}, [], []))
+        with patch("lib.download.monitor_downloads") as mock_monitor:
+            grab_most_wanted([], search_fn, ctx)
+            mock_monitor.assert_not_called()
 
 
 class TestMatchTransferId(unittest.TestCase):
