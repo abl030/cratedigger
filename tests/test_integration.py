@@ -147,9 +147,11 @@ class TestRawDictBoundary(unittest.TestCase):
 
     def test_album_track_num_with_raw_dicts(self):
         """album_track_num receives raw directory dicts."""
+        from lib.quality import parse_filetype_config
         orig_cfg = soularr.cfg
         mock_cfg = MagicMock()
         mock_cfg.allowed_filetypes = ("flac", "mp3")
+        mock_cfg.allowed_specs = tuple(parse_filetype_config(s) for s in mock_cfg.allowed_filetypes)
         soularr.cfg = mock_cfg
         try:
             directory = make_directory("Music\\Album", [

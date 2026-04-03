@@ -106,7 +106,7 @@ def repair_mp3_headers(folder_path: str) -> None:
             logger.exception(f"MP3VAL: error on {f}")
 
 
-_AUDIO_EXTS = {"mp3", "flac", "m4a", "ogg", "opus", "wma", "aac", "alac", "wav"}
+from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
 
 
 def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
@@ -149,11 +149,10 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
     if mode == "off":
         return AudioValidationResult()
 
-    audio_exts = {"mp3", "flac", "m4a", "ogg", "opus", "wma", "aac", "alac", "wav"}
     files = []
     for f in os.listdir(folder_path):
         ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
-        if ext in audio_exts:
+        if ext in _AUDIO_EXTS:
             files.append(os.path.join(folder_path, f))
 
     if not files:

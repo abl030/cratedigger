@@ -7,7 +7,10 @@ frozen dataclass. Constructed once from config.ini via from_ini().
 import configparser
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib.quality import AudioFileSpec
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,12 @@ class SoularrConfig:
     # --- Paths (derived from args) ---
     lock_file_path: str = ""
     config_file_path: str = ""
+
+    @property
+    def allowed_specs(self) -> "tuple[AudioFileSpec, ...]":
+        """Parsed AudioFileSpec filters from allowed_filetypes config."""
+        from lib.quality import parse_filetype_config
+        return tuple(parse_filetype_config(s) for s in self.allowed_filetypes)
 
     @classmethod
     def from_ini(cls, config: configparser.ConfigParser,

@@ -13,7 +13,8 @@ import os
 import shutil
 import sys
 
-_AUDIO_EXTS = {"mp3", "flac", "m4a", "ogg", "opus", "wma", "aac", "alac", "wav"}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
 
 
 def _has_audio(directory: str) -> bool:

@@ -394,6 +394,18 @@ class TestIsVerifiedLossless(unittest.TestCase):
     def test_all_none(self):
         self.assertFalse(is_verified_lossless(False, None, None))
 
+    def test_alac_m4a_verified(self):
+        """Converted ALAC (m4a) + genuine spectral = verified lossless."""
+        self.assertTrue(is_verified_lossless(True, "m4a", "genuine"))
+
+    def test_wav_verified(self):
+        """Converted WAV + genuine spectral = verified lossless."""
+        self.assertTrue(is_verified_lossless(True, "wav", "genuine"))
+
+    def test_alac_suspect_not_verified(self):
+        """ALAC converted but spectral suspect — not verified."""
+        self.assertFalse(is_verified_lossless(True, "m4a", "suspect"))
+
 
 # ============================================================================
 # SpectralContext

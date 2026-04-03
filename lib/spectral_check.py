@@ -36,7 +36,7 @@ LAME_LOWPASS = [
     (20500, 320),
 ]
 
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".opus"}
+from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
 
 # --- Data classes ---

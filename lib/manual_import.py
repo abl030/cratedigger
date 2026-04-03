@@ -17,7 +17,7 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 # Audio file extensions we expect in a download folder
-_AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".wma", ".aac"}
+from lib.quality import AUDIO_EXTENSIONS_DOTTED as _AUDIO_EXTS
 
 # Patterns for stripping noise from folder names
 _YEAR_PAREN_RE = re.compile(r"\s*[\(\[]\s*\d{4}\s*[\)\]]")  # (2022) or [2012]

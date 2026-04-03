@@ -102,7 +102,7 @@ def get_bitrate_stats(folder_path):
 
     Uses audio stream bitrate (not format bitrate) to match beets behavior
     and correctly detect CBR (all tracks same audio bitrate)."""
-    audio_exts = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac"}
+    from lib.quality import AUDIO_EXTENSIONS_DOTTED as audio_exts
     bitrates = []
     for fname in sorted(os.listdir(folder_path)):
         ext = os.path.splitext(fname)[1].lower()

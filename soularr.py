@@ -62,11 +62,20 @@ def album_match(expected_tracks, slskd_tracks, username, filetype):
     album_name = album_info.title
     artist_name = album_info.artist_name
 
+    from lib.quality import parse_filetype_config
+    spec = parse_filetype_config(filetype)
+    is_catch_all = spec.extension == "*"
     for expected_track in expected_tracks:
-        expected_filename = expected_track["title"] + "." + filetype.split(" ")[0]
         best_match = 0.0
+        expected_filename = expected_track["title"]  # fallback for empty slskd_tracks
 
         for slskd_track in slskd_tracks:
+            # For catch-all, use the actual extension from the slskd track
+            if is_catch_all:
+                slskd_ext = slskd_track["filename"].rsplit(".", 1)[-1].lower() if "." in slskd_track["filename"] else ""
+                expected_filename = expected_track["title"] + "." + slskd_ext
+            else:
+                expected_filename = expected_track["title"] + "." + spec.extension
             slskd_filename = slskd_track["filename"]
 
             # Try to match the ratio with the exact filenames
@@ -113,23 +122,32 @@ def check_ratio(separator, ratio, expected_filename, slskd_filename):
 
 
 def album_track_num(directory):
+    from lib.quality import AUDIO_EXTENSIONS as _all_audio_exts
     files = directory["files"]
-    allowed_filetypes_no_attributes = [item.split(" ")[0] for item in cfg.allowed_filetypes]
+    specs = cfg.allowed_specs
+    # Check if any spec is catch-all ("*")
+    has_catch_all = any(s.extension == "*" for s in specs)
+    allowed_exts = list(_all_audio_exts) if has_catch_all else [s.extension for s in specs]
     count = 0
     index = -1
     filetype = ""
     for file in files:
-        if file["filename"].split(".")[-1] in allowed_filetypes_no_attributes:
-            new_index = allowed_filetypes_no_attributes.index(file["filename"].split(".")[-1])
-
-            if index == -1:
-                index = new_index
-                filetype = allowed_filetypes_no_attributes[index]
-            elif new_index != index:
-                filetype = ""
-                break
-
-            count += 1
+        ext = file["filename"].split(".")[-1].lower()
+        if ext in allowed_exts:
+            if has_catch_all:
+                # Catch-all: count all audio files, track majority extension
+                if index == -1:
+                    filetype = ext
+                count += 1
+            else:
+                new_index = allowed_exts.index(ext)
+                if index == -1:
+                    index = new_index
+                    filetype = allowed_exts[index]
+                elif new_index != index:
+                    filetype = ""
+                    break
+                count += 1
 
     return_data = {"count": count, "filetype": filetype}
     return return_data
@@ -233,10 +251,15 @@ def download_filter(allowed_filetype, directory: Any):
     """
     logging.debug("download_filtering")
     if cfg.download_filtering:
+        from lib.quality import parse_filetype_config, AUDIO_EXTENSIONS as _all_audio
+        spec = parse_filetype_config(allowed_filetype)
         whitelist = []  # Init an empty list to take just the allowed_filetype
         if cfg.use_extension_whitelist:
             whitelist = list(cfg.extensions_whitelist)
-        whitelist.append(allowed_filetype.split(" ")[0])
+        if spec.extension == "*":
+            whitelist.extend(_all_audio)
+        else:
+            whitelist.append(spec.extension)
         unwanted = []
         logger.debug(f"Accepted extensions: {whitelist}")
         for file in directory["files"]:

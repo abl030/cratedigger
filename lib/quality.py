@@ -508,17 +508,21 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
                          spectral_grade: Optional[str]) -> bool:
     """Determine if an import should be marked as verified lossless.
 
-    True only when we converted a genuine FLAC to V0 — the gold standard.
+    True when we converted a genuine lossless source to V0 — the gold standard.
+    Accepts any lossless format: flac, m4a (ALAC), wav.
 
     Inputs:
-        was_converted:     True if FLAC files were converted to MP3 V0
-        original_filetype: filetype before conversion (e.g. "flac")
+        was_converted:     True if lossless files were converted to MP3 V0
+        original_filetype: filetype before conversion (e.g. "flac", "m4a", "wav")
         spectral_grade:    spectral analysis grade of the source files
     """
-    return (bool(was_converted)
-            and original_filetype is not None
-            and original_filetype.lower() == "flac"
-            and spectral_grade == "genuine")
+    if not was_converted or original_filetype is None or spectral_grade != "genuine":
+        return False
+    ext = original_filetype.lower()
+    # Extensions that are lossless — includes m4a (ALAC) since the pipeline
+    # only converts m4a files that were downloaded as ALAC
+    lossless_exts = {"flac", "m4a", "wav", "alac"}
+    return ext in lossless_exts
 
 
 # ---------------------------------------------------------------------------
@@ -616,81 +620,228 @@ def extract_usernames(files: Any) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Filetype verification — moved from soularr.py for testability
+# AudioFileSpec — single source of truth for filetype identity
+# ---------------------------------------------------------------------------
+
+# Extension → default codec. Most are 1:1; .m4a is ambiguous (resolved by heuristic).
+_EXT_TO_CODEC: dict[str, str] = {
+    "mp3": "mp3",
+    "flac": "flac",
+    "ogg": "ogg",
+    "opus": "opus",
+    "aac": "aac",
+    "m4a": "aac",   # default; override to "alac" via heuristic
+    "wma": "wma",
+    "wav": "wav",
+}
+
+# Config DSL name → (codec, canonical extension)
+_CONFIG_NAME_TO_CODEC: dict[str, tuple[str, str]] = {
+    "mp3": ("mp3", "mp3"),
+    "flac": ("flac", "flac"),
+    "ogg": ("ogg", "ogg"),
+    "opus": ("opus", "opus"),
+    "aac": ("aac", "aac"),
+    "alac": ("alac", "m4a"),
+    "wma": ("wma", "wma"),
+    "wav": ("wav", "wav"),
+    "m4a": ("aac", "m4a"),
+}
+
+# Codec → canonical extension (for filename construction)
+CODEC_TO_EXT: dict[str, str] = {
+    "mp3": "mp3",
+    "flac": "flac",
+    "ogg": "ogg",
+    "opus": "opus",
+    "aac": "aac",
+    "alac": "m4a",
+    "wma": "wma",
+    "wav": "wav",
+}
+
+# Canonical set of audio extensions (bare: "mp3", "flac", "m4a", ...)
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(_EXT_TO_CODEC.keys())
+
+# Same but dotted (".mp3", ".flac", ".m4a", ...) for os.path.splitext consumers
+AUDIO_EXTENSIONS_DOTTED: frozenset[str] = frozenset(f".{e}" for e in AUDIO_EXTENSIONS)
+
+# Codecs that are lossless by definition
+LOSSLESS_CODECS: frozenset[str] = frozenset({"flac", "alac", "wav"})
+
+# Sentinel: matches any audio file (used for catch-all "download anything" mode)
+# Assigned after AudioFileSpec class definition below
+CATCH_ALL_SPEC: "AudioFileSpec"
+
+
+def _m4a_codec_heuristic(
+    bitrate: Optional[int],
+    bit_depth: Optional[int],
+    sample_rate: Optional[int],
+) -> str:
+    """Guess whether a .m4a file is ALAC or AAC from slskd metadata.
+
+    ALAC (lossless): bitRate > 700kbps, or bitDepth present.
+    AAC (lossy): typically 64-320kbps.
+    """
+    if bit_depth is not None and bit_depth > 0:
+        return "alac"
+    if bitrate is not None and bitrate >= 700:
+        return "alac"
+    return "aac"
+
+
+@dataclass(frozen=True)
+class AudioFileSpec:
+    """Single source of truth for filetype identity.
+
+    Two forms:
+    A. Filter (from config): codec + quality set, audio metadata None.
+       Created via parse_filetype_config("mp3 v0").
+    B. Identity (from slskd): codec + audio metadata set, quality None.
+       Created via file_identity(slskd_file_dict).
+
+    filetype_matches(identity, filter) replaces verify_filetype().
+    """
+    codec: str
+    extension: str
+    quality: Optional[str] = None
+    bitrate: Optional[int] = None
+    sample_rate: Optional[int] = None
+    bit_depth: Optional[int] = None
+    is_variable_bitrate: Optional[bool] = None
+
+    @property
+    def lossless(self) -> bool:
+        """True for codecs that are lossless by definition."""
+        return self.codec in LOSSLESS_CODECS
+
+    @property
+    def config_string(self) -> str:
+        """Reconstruct the config DSL string, e.g. 'mp3 v0', 'alac'."""
+        if self.quality:
+            return f"{self.codec} {self.quality}"
+        return self.codec
+
+
+# Now that AudioFileSpec is defined, create the sentinel
+CATCH_ALL_SPEC = AudioFileSpec(codec="*", extension="*")
+
+
+def parse_filetype_config(config_str: str) -> AudioFileSpec:
+    """Parse a config DSL string like 'mp3 v0' or 'alac' into AudioFileSpec.
+
+    This is the FILTER form — quality is set, audio metadata is not.
+    Use '*' or 'any' for catch-all mode (matches any audio file).
+    """
+    parts = config_str.strip().split(" ", 1)
+    name = parts[0].lower()
+
+    if name in ("*", "any"):
+        return CATCH_ALL_SPEC
+
+    quality = parts[1].strip() if len(parts) > 1 else None
+    codec, extension = _CONFIG_NAME_TO_CODEC.get(name, (name, name))
+    return AudioFileSpec(codec=codec, extension=extension, quality=quality)
+
+
+def file_identity(file: dict[str, Any]) -> AudioFileSpec:
+    """Construct an AudioFileSpec from a raw slskd file dict.
+
+    This is the IDENTITY form — audio metadata is set, quality is not.
+    """
+    filename = file["filename"]
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    bitrate = file.get("bitRate")
+    sample_rate = file.get("sampleRate")
+    bit_depth = file.get("bitDepth")
+    is_vbr = file.get("isVariableBitRate")
+
+    codec = _EXT_TO_CODEC.get(ext, ext)
+
+    if ext == "m4a":
+        codec = _m4a_codec_heuristic(bitrate, bit_depth, sample_rate)
+
+    return AudioFileSpec(
+        codec=codec,
+        extension=ext,
+        bitrate=bitrate,
+        sample_rate=sample_rate,
+        bit_depth=bit_depth,
+        is_variable_bitrate=is_vbr,
+    )
+
+
+def filetype_matches(identity: AudioFileSpec, filter_spec: AudioFileSpec) -> bool:
+    """Does a file identity match a filetype filter?
+
+    Replaces the old verify_filetype() internals.  Pure function.
+    """
+    if filter_spec.codec == "*":
+        return True
+
+    if identity.codec != filter_spec.codec:
+        return False
+
+    if filter_spec.quality is None:
+        return True
+
+    quality = filter_spec.quality
+
+    # Bitdepth/samplerate pair (e.g. "24/96")
+    if "/" in quality:
+        parts = quality.split("/")
+        try:
+            req_depth = parts[0]
+            req_rate = str(int(float(parts[1]) * 1000))
+        except (ValueError, IndexError):
+            return False
+        if identity.bit_depth is not None and identity.sample_rate is not None:
+            return (str(identity.bit_depth) == req_depth and
+                    str(identity.sample_rate) == req_rate)
+        return False
+
+    # VBR preset (e.g. "v0", "v2")
+    if quality.lower() in ("v0", "v2"):
+        if identity.bitrate is None:
+            return False
+        cbr_values = {128, 160, 192, 224, 256, 320}
+        is_vbr = identity.bitrate not in cbr_values
+        if identity.is_variable_bitrate is not None:
+            is_vbr = identity.is_variable_bitrate
+        if not is_vbr:
+            return False
+        if quality.lower() == "v0":
+            return 220 <= identity.bitrate <= 280
+        else:
+            return 170 <= identity.bitrate <= 220
+
+    # Minimum bitrate (e.g. "256+")
+    if quality.endswith("+"):
+        try:
+            min_bitrate = int(quality[:-1])
+        except ValueError:
+            return False
+        return identity.bitrate is not None and identity.bitrate >= min_bitrate
+
+    # Exact bitrate (e.g. "320")
+    return identity.bitrate is not None and str(identity.bitrate) == quality
+
+
+# ---------------------------------------------------------------------------
+# Filetype verification — legacy bridge
 # ---------------------------------------------------------------------------
 
 
 def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
     """Check whether a slskd file dict matches an allowed filetype specification.
 
-    Handles: bare extension ("mp3"), exact bitrate ("mp3 320"),
-    bitdepth/samplerate ("flac 24/96"), VBR presets ("mp3 v0", "mp3 v2"),
-    and minimum bitrate ("aac 256+").
+    Legacy bridge — delegates to filetype_matches(file_identity(), parse_filetype_config()).
     """
-    current_filetype = file["filename"].split(".")[-1]
-    bitdepth = None
-    samplerate = None
-    bitrate = None
-
-    if "bitRate" in file:
-        bitrate = file["bitRate"]
-    if "sampleRate" in file:
-        samplerate = file["sampleRate"]
-    if "bitDepth" in file:
-        bitdepth = file["bitDepth"]
-
-    # Check if the types match up for the current files type and the current type from the config
-    if current_filetype == allowed_filetype.split(" ")[0]:
-        # Check if the current type from the config specifies other attributes than the filetype (bitrate etc)
-        if " " in allowed_filetype:
-            selected_attributes = allowed_filetype.split(" ")[1]
-            # If it is a bitdepth/samplerate pair instead of a simple bitrate
-            if "/" in selected_attributes:
-                selected_bitdepth = selected_attributes.split("/")[0]
-                try:
-                    selected_samplerate = str(int(float(selected_attributes.split("/")[1]) * 1000))
-                except (ValueError, IndexError):
-                    return False
-
-                if bitdepth and samplerate:
-                    return str(bitdepth) == str(selected_bitdepth) and str(samplerate) == str(selected_samplerate)
-                return False
-            # If it is a VBR quality preset (e.g. "mp3 v0", "mp3 v2")
-            elif selected_attributes.lower() in ("v0", "v2"):
-                if bitrate:
-                    cbr_values = {128, 160, 192, 224, 256, 320}
-                    is_vbr = bitrate not in cbr_values
-                    # Prefer isVariableBitRate flag from slskd if available
-                    if "isVariableBitRate" in file:
-                        is_vbr = file["isVariableBitRate"]
-                    if not is_vbr:
-                        return False
-                    if selected_attributes.lower() == "v0":
-                        return 220 <= bitrate <= 280
-                    else:  # v2
-                        return 170 <= bitrate <= 220
-                return False
-            # If it is a minimum bitrate (e.g. "aac 256+", "ogg 256+", "opus 192+")
-            elif selected_attributes.endswith("+"):
-                try:
-                    min_bitrate = int(selected_attributes[:-1])
-                except ValueError:
-                    return False
-                if bitrate:
-                    return bitrate >= min_bitrate
-                return False
-            # If it is an exact bitrate
-            else:
-                selected_bitrate = selected_attributes
-                if bitrate:
-                    if str(bitrate) == str(selected_bitrate):
-                        return True
-                return False
-        # If no bitrate or other info then it is a match so return true
-        else:
-            return True
-    else:
-        return False
+    identity = file_identity(file)
+    filter_spec = parse_filetype_config(allowed_filetype)
+    return filetype_matches(identity, filter_spec)
 
 
 # ---------------------------------------------------------------------------

@@ -251,7 +251,7 @@ class TestGetMinBitrate(unittest.TestCase):
             self.assertIsNone(db.get_min_bitrate("abc"))
 
 
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
+from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
 
 class TestGetItemPaths(unittest.TestCase):

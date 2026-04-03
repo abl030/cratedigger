@@ -117,7 +117,7 @@ def final_exit_decision(is_transcode: bool) -> int:
 # Quality checking
 # ---------------------------------------------------------------------------
 
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma"}
+from quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
 
 def _get_folder_min_bitrate(folder_path):
@@ -161,20 +161,40 @@ def _get_folder_min_bitrate(folder_path):
 
 
 # ---------------------------------------------------------------------------
-# FLAC → MP3 VBR V0 conversion
+# Lossless → MP3 VBR V0 conversion
 # ---------------------------------------------------------------------------
 
-def convert_flac_to_v0(album_path, dry_run=False):
-    """Convert all FLAC files to MP3 VBR V0. Returns (converted, failed)."""
-    flac_files = sorted(f for f in os.listdir(album_path) if f.lower().endswith(".flac"))
-    if not flac_files:
-        return 0, 0
+# Extensions that are lossless and should be converted to V0
+_LOSSLESS_EXTS = {".flac", ".m4a", ".wav"}
+
+
+def _is_lossless_file(fname: str) -> bool:
+    """Check if a file has a lossless extension.
+
+    For .m4a, we assume lossless (ALAC) since the pipeline only downloads
+    .m4a files when they matched the 'alac' config (high bitrate heuristic).
+    """
+    return os.path.splitext(fname)[1].lower() in _LOSSLESS_EXTS
+
+
+def convert_lossless_to_v0(album_path, dry_run=False):
+    """Convert all lossless files (FLAC, ALAC/m4a, WAV) to MP3 VBR V0.
+
+    Returns (converted, failed, original_filetype) where original_filetype
+    is the extension of the source files (e.g. "flac", "m4a", "wav").
+    """
+    lossless_files = sorted(f for f in os.listdir(album_path) if _is_lossless_file(f))
+    if not lossless_files:
+        return 0, 0, None
+
+    # Track the original filetype from the first file
+    original_ext = os.path.splitext(lossless_files[0])[1].lstrip(".").lower()
 
     converted = 0
     failed = 0
-    for fname in flac_files:
-        flac_path = os.path.join(album_path, fname)
-        mp3_path = os.path.splitext(flac_path)[0] + ".mp3"
+    for fname in lossless_files:
+        src_path = os.path.join(album_path, fname)
+        mp3_path = os.path.splitext(src_path)[0] + ".mp3"
 
         if os.path.exists(mp3_path):
             continue
@@ -186,7 +206,7 @@ def convert_flac_to_v0(album_path, dry_run=False):
 
         try:
             result = subprocess.run([
-                "ffmpeg", "-i", flac_path,
+                "ffmpeg", "-i", src_path,
                 "-codec:a", "libmp3lame", "-q:a", "0",
                 "-map_metadata", "0", "-id3v2_version", "3",
                 "-y", mp3_path,
@@ -204,9 +224,15 @@ def convert_flac_to_v0(album_path, dry_run=False):
                 os.remove(mp3_path)
             failed += 1
         else:
-            os.remove(flac_path)
+            os.remove(src_path)
             converted += 1
 
+    return converted, failed, original_ext
+
+
+def convert_flac_to_v0(album_path, dry_run=False):
+    """Legacy wrapper — delegates to convert_lossless_to_v0."""
+    converted, failed, _ext = convert_lossless_to_v0(album_path, dry_run)
     return converted, failed
 
 
@@ -473,14 +499,14 @@ def main():
     except Exception as e:
         _log(f"  [SPECTRAL] error: {e}")
 
-    # --- Convert FLAC → V0 ---
+    # --- Convert lossless → V0 ---
     _log(f"[CONVERT] {args.path}")
-    converted, failed = convert_flac_to_v0(args.path, dry_run=args.dry_run)
+    converted, failed, original_ext = convert_lossless_to_v0(args.path, dry_run=args.dry_run)
     r.conversion.converted = converted
     r.conversion.failed = failed
     if converted > 0:
         r.conversion.was_converted = True
-        r.conversion.original_filetype = "flac"
+        r.conversion.original_filetype = original_ext or "flac"
         r.conversion.target_filetype = "mp3"
     _log(f"  Converted {converted}, failed {failed}")
     cd = conversion_decision(converted, failed)
