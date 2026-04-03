@@ -153,21 +153,38 @@ def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
 
 
 def _extract_import_fields(ir: dict) -> dict[str, object]:
-    """Extract spectral/quality/conversion fields from ImportResult JSON."""
+    """Extract spectral/quality/conversion fields from ImportResult JSON.
+
+    Handles both v2 (new_measurement/existing_measurement) and v1
+    (quality/spectral sub-objects) formats for backward compat with
+    existing download_log JSONB rows.
+    """
     fields: dict[str, object] = {}
-    spectral = ir.get("spectral") or {}
-    if spectral.get("grade"):
-        fields["spectral_grade"] = spectral["grade"]
-    if spectral.get("bitrate") is not None:
-        fields["spectral_bitrate"] = spectral["bitrate"]
-    quality = ir.get("quality") or {}
-    if quality.get("new_min_bitrate") is not None:
-        fields["min_bitrate"] = quality["new_min_bitrate"]
-    conv = ir.get("conversion") or {}
-    if (conv.get("was_converted")
-            and conv.get("original_filetype", "").lower() == "flac"
-            and spectral.get("grade") == "genuine"):
-        fields["verified_lossless"] = True
+    new_m = ir.get("new_measurement") or {}
+    if new_m:
+        if new_m.get("spectral_grade"):
+            fields["spectral_grade"] = new_m["spectral_grade"]
+        if new_m.get("spectral_bitrate_kbps") is not None:
+            fields["spectral_bitrate"] = new_m["spectral_bitrate_kbps"]
+        if new_m.get("min_bitrate_kbps") is not None:
+            fields["min_bitrate"] = new_m["min_bitrate_kbps"]
+        if new_m.get("verified_lossless"):
+            fields["verified_lossless"] = True
+    else:
+        # v1 fallback
+        spectral = ir.get("spectral") or {}
+        if spectral.get("grade"):
+            fields["spectral_grade"] = spectral["grade"]
+        if spectral.get("bitrate") is not None:
+            fields["spectral_bitrate"] = spectral["bitrate"]
+        quality = ir.get("quality") or {}
+        if quality.get("new_min_bitrate") is not None:
+            fields["min_bitrate"] = quality["new_min_bitrate"]
+        conv = ir.get("conversion") or {}
+        if (conv.get("was_converted")
+                and conv.get("original_filetype", "").lower() == "flac"
+                and spectral.get("grade") == "genuine"):
+            fields["verified_lossless"] = True
     return fields
 
 

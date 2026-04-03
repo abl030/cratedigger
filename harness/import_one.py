@@ -467,11 +467,15 @@ def main():
         _emit_and_exit(r)
 
     # --- Spectral analysis (pre-conversion) ---
+    spectral_grade: str | None = None
+    spectral_bitrate: int | None = None
+    existing_spectral_grade: str | None = None
+    existing_spectral_bitrate: int | None = None
     try:
         from spectral_check import analyze_album as spectral_analyze
         spectral_result = spectral_analyze(args.path, trim_seconds=30)
-        r.spectral.grade = spectral_result.grade
-        r.spectral.bitrate = spectral_result.estimated_bitrate_kbps
+        spectral_grade = spectral_result.grade
+        spectral_bitrate = spectral_result.estimated_bitrate_kbps
         r.spectral.suspect_pct = spectral_result.suspect_pct
         r.spectral.per_track = [
             {"grade": t.grade, "hf_deficit_db": round(t.hf_deficit_db, 1),
@@ -480,10 +484,10 @@ def main():
              "estimated_bitrate_kbps": t.estimated_bitrate_kbps}
             for t in spectral_result.tracks
         ]
-        _log(f"  spectral_grade={spectral_result.grade}")
-        if spectral_result.estimated_bitrate_kbps is not None:
-            _log(f"  spectral_bitrate={spectral_result.estimated_bitrate_kbps}")
-        if spectral_result.grade in ("suspect", "likely_transcode"):
+        _log(f"  spectral_grade={spectral_grade}")
+        if spectral_bitrate is not None:
+            _log(f"  spectral_bitrate={spectral_bitrate}")
+        if spectral_grade in ("suspect", "likely_transcode"):
             cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
             if cliff_tracks:
                 r.spectral.cliff_freq_hz = cliff_tracks[0].cliff_freq_hz
@@ -493,12 +497,12 @@ def main():
             existing_path = beets.get_album_path(mbid)
             if existing_path and os.path.isdir(existing_path):
                 existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
-                r.spectral.existing_grade = existing_spectral.grade
-                r.spectral.existing_bitrate = existing_spectral.estimated_bitrate_kbps
+                existing_spectral_grade = existing_spectral.grade
+                existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
                 r.spectral.existing_suspect_pct = existing_spectral.suspect_pct
-                _log(f"  existing_spectral_grade={existing_spectral.grade}")
-                if existing_spectral.estimated_bitrate_kbps is not None:
-                    _log(f"  existing_spectral_bitrate={existing_spectral.estimated_bitrate_kbps}")
+                _log(f"  existing_spectral_grade={existing_spectral_grade}")
+                if existing_spectral_bitrate is not None:
+                    _log(f"  existing_spectral_bitrate={existing_spectral_bitrate}")
     except Exception as e:
         _log(f"  [SPECTRAL] error: {e}")
 
@@ -522,10 +526,10 @@ def main():
 
     # --- Transcode detection ---
     post_conv_br = _get_folder_min_bitrate(args.path) if converted > 0 else None
-    r.quality.post_conversion_min_bitrate = post_conv_br
+    r.conversion.post_conversion_min_bitrate = post_conv_br
     is_transcode = transcode_detection(converted, post_conv_br,
-                                       spectral_grade=r.spectral.grade)
-    r.quality.is_transcode = is_transcode
+                                       spectral_grade=spectral_grade)
+    r.conversion.is_transcode = is_transcode
     if is_transcode:
         _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
              f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
@@ -539,28 +543,35 @@ def main():
     # --- Quality comparison ---
     new_min_br = _get_folder_min_bitrate(args.path)
     existing_min_br = beets.get_min_bitrate(mbid)
-    r.quality.new_min_bitrate = new_min_br
     if args.override_min_bitrate is not None and existing_min_br is not None:
         if args.override_min_bitrate != existing_min_br:
             _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
                  f"beets says {existing_min_br}kbps")
     effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
-    r.quality.prev_min_bitrate = effective_existing
     if effective_existing is not None:
         _log(f"  prev_min_bitrate={effective_existing}")
     if new_min_br is not None:
         _log(f"  new_min_bitrate={new_min_br}")
 
     will_be_verified_lossless = (converted > 0 and not is_transcode)
-    r.quality.will_be_verified_lossless = will_be_verified_lossless
+
+    # --- Build measurements ---
+    new_m = AudioQualityMeasurement(
+        min_bitrate_kbps=new_min_br,
+        spectral_grade=spectral_grade,
+        spectral_bitrate_kbps=spectral_bitrate,
+        verified_lossless=will_be_verified_lossless,
+        was_converted_from=(original_ext or "flac") if converted > 0 else None,
+    )
+    existing_m = (AudioQualityMeasurement(
+        min_bitrate_kbps=effective_existing,
+        spectral_grade=existing_spectral_grade,
+        spectral_bitrate_kbps=existing_spectral_bitrate,
+    ) if existing_min_br is not None else None)
+    r.new_measurement = new_m
+    r.existing_measurement = existing_m
 
     # --- Quality comparison (pure decision) ---
-    new_m = AudioQualityMeasurement(min_bitrate_kbps=new_min_br,
-                                    verified_lossless=will_be_verified_lossless)
-    existing_m = (AudioQualityMeasurement(min_bitrate_kbps=args.override_min_bitrate
-                                          if args.override_min_bitrate is not None
-                                          else existing_min_br)
-                  if existing_min_br is not None else None)
     qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode)
     decision = qd.decision
     r.decision = decision

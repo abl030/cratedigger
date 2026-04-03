@@ -305,34 +305,27 @@ class AudioQualityMeasurement:
 
 @dataclass
 class ConversionInfo:
-    """FLAC→V0 conversion details."""
+    """FLAC→V0 conversion details and process artifacts."""
     converted: int = 0
     failed: int = 0
     was_converted: bool = False
     original_filetype: Optional[str] = None
     target_filetype: Optional[str] = None
+    post_conversion_min_bitrate: Optional[int] = None  # min bitrate after lossless→V0
+    is_transcode: bool = False  # True if FLAC was actually a transcode
 
 
 @dataclass
-class QualityInfo:
-    """Bitrate and quality decision data."""
-    new_min_bitrate: Optional[int] = None
-    prev_min_bitrate: Optional[int] = None
-    post_conversion_min_bitrate: Optional[int] = None
-    is_transcode: bool = False
-    will_be_verified_lossless: bool = False
+class SpectralDetail:
+    """Per-track spectral analysis detail.
 
-
-@dataclass
-class SpectralInfo:
-    """Spectral analysis results for new and existing files."""
-    grade: Optional[str] = None
-    bitrate: Optional[int] = None
+    The album-level spectral grades and bitrates now live on
+    AudioQualityMeasurement (new_measurement/existing_measurement on ImportResult).
+    This carries the per-track detail data that doesn't fit on a measurement.
+    """
     cliff_freq_hz: Optional[int] = None
     suspect_pct: float = 0.0
     per_track: list[dict] = field(default_factory=list)  # per-track grade/hf_deficit/cliff
-    existing_grade: Optional[str] = None
-    existing_bitrate: Optional[int] = None
     existing_suspect_pct: float = 0.0
 
 
@@ -353,14 +346,19 @@ class ImportResult:
     Carries every piece of data that crosses the subprocess boundary
     from import_one.py back to soularr.py. Stored in download_log.import_result
     for complete auditability.
+
+    new_measurement / existing_measurement carry the coherent quality state
+    for the download and what was on disk. The same AudioQualityMeasurement
+    type flows through decision functions and the audit trail.
     """
-    version: int = 1
+    version: int = 2
     exit_code: int = 0
     decision: Optional[str] = None      # from import_quality_decision() or error label
     already_in_beets: bool = False
+    new_measurement: Optional[AudioQualityMeasurement] = None
+    existing_measurement: Optional[AudioQualityMeasurement] = None
     conversion: ConversionInfo = field(default_factory=ConversionInfo)
-    quality: QualityInfo = field(default_factory=QualityInfo)
-    spectral: SpectralInfo = field(default_factory=SpectralInfo)
+    spectral: SpectralDetail = field(default_factory=SpectralDetail)
     postflight: PostflightInfo = field(default_factory=PostflightInfo)
     beets_log: list[str] = field(default_factory=list)  # beets stderr lines from import
     error: Optional[str] = None
@@ -374,17 +372,84 @@ class ImportResult:
         return IMPORT_RESULT_SENTINEL + self.to_json()
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ImportResult":
-        """Construct from a dict (e.g. parsed JSON)."""
+    def _migrate_v1(cls, d: dict) -> "ImportResult":
+        """Migrate version 1 (QualityInfo + SpectralInfo) to version 2 (measurements)."""
+        quality = d.get("quality") or {}
+        spectral = d.get("spectral") or {}
+        conv_d = dict(d.get("conversion") or {})
+
+        # Migrate process fields from QualityInfo → ConversionInfo
+        conv_d.setdefault("post_conversion_min_bitrate",
+                          quality.get("post_conversion_min_bitrate"))
+        conv_d.setdefault("is_transcode", quality.get("is_transcode", False))
+
+        # Build measurements from scattered fields
+        new_m = AudioQualityMeasurement(
+            min_bitrate_kbps=quality.get("new_min_bitrate"),
+            spectral_grade=spectral.get("grade"),
+            spectral_bitrate_kbps=spectral.get("bitrate"),
+            verified_lossless=quality.get("will_be_verified_lossless", False),
+            was_converted_from=(conv_d.get("original_filetype")
+                                if conv_d.get("was_converted") else None),
+        )
+        existing_m: Optional[AudioQualityMeasurement] = None
+        if quality.get("prev_min_bitrate") is not None:
+            existing_m = AudioQualityMeasurement(
+                min_bitrate_kbps=quality.get("prev_min_bitrate"),
+                spectral_grade=spectral.get("existing_grade"),
+                spectral_bitrate_kbps=spectral.get("existing_bitrate"),
+            )
+
         return cls(
-            version=d.get("version", 1),
+            version=2,
             exit_code=d.get("exit_code", 0),
             decision=d.get("decision"),
             already_in_beets=d.get("already_in_beets", False),
-            conversion=ConversionInfo(**d["conversion"]) if "conversion" in d else ConversionInfo(),
-            quality=QualityInfo(**d["quality"]) if "quality" in d else QualityInfo(),
-            spectral=SpectralInfo(**d["spectral"]) if "spectral" in d else SpectralInfo(),
-            postflight=PostflightInfo(**d["postflight"]) if "postflight" in d else PostflightInfo(),
+            new_measurement=new_m,
+            existing_measurement=existing_m,
+            conversion=ConversionInfo(**conv_d),
+            spectral=SpectralDetail(
+                cliff_freq_hz=spectral.get("cliff_freq_hz"),
+                suspect_pct=spectral.get("suspect_pct", 0.0),
+                per_track=spectral.get("per_track", []),
+                existing_suspect_pct=spectral.get("existing_suspect_pct", 0.0),
+            ),
+            postflight=(PostflightInfo(**d["postflight"])
+                        if "postflight" in d else PostflightInfo()),
+            beets_log=d.get("beets_log", []),
+            error=d.get("error"),
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ImportResult":
+        """Construct from a dict (e.g. parsed JSON).
+
+        Handles both old (v1 with quality/spectral sub-objects) and new
+        (v2 with measurements) formats for backward compat with existing
+        download_log JSONB rows.
+        """
+        # Old format: has "quality" key, no "new_measurement"
+        if "quality" in d and "new_measurement" not in d:
+            return cls._migrate_v1(d)
+
+        new_m_d = d.get("new_measurement")
+        new_m = AudioQualityMeasurement(**new_m_d) if new_m_d else None
+        ex_m_d = d.get("existing_measurement")
+        ex_m = AudioQualityMeasurement(**ex_m_d) if ex_m_d else None
+
+        return cls(
+            version=d.get("version", 2),
+            exit_code=d.get("exit_code", 0),
+            decision=d.get("decision"),
+            already_in_beets=d.get("already_in_beets", False),
+            new_measurement=new_m,
+            existing_measurement=ex_m,
+            conversion=(ConversionInfo(**d["conversion"])
+                        if "conversion" in d else ConversionInfo()),
+            spectral=(SpectralDetail(**d["spectral"])
+                      if "spectral" in d else SpectralDetail()),
+            postflight=(PostflightInfo(**d["postflight"])
+                        if "postflight" in d else PostflightInfo()),
             beets_log=d.get("beets_log", []),
             error=d.get("error"),
         )

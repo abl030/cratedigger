@@ -12,7 +12,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
-    ImportResult, ConversionInfo, QualityInfo, SpectralInfo, PostflightInfo,
+    ImportResult, ConversionInfo, SpectralDetail, PostflightInfo,
+    AudioQualityMeasurement,
     DownloadInfo,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
@@ -23,14 +24,15 @@ class TestImportResultConstruction(unittest.TestCase):
 
     def test_default_construction(self):
         r = ImportResult()
-        self.assertEqual(r.version, 1)
+        self.assertEqual(r.version, 2)
         self.assertEqual(r.exit_code, 0)
         self.assertIsNone(r.decision)
         self.assertFalse(r.already_in_beets)
         self.assertIsNone(r.error)
+        self.assertIsNone(r.new_measurement)
+        self.assertIsNone(r.existing_measurement)
         self.assertIsInstance(r.conversion, ConversionInfo)
-        self.assertIsInstance(r.quality, QualityInfo)
-        self.assertIsInstance(r.spectral, SpectralInfo)
+        self.assertIsInstance(r.spectral, SpectralDetail)
         self.assertIsInstance(r.postflight, PostflightInfo)
 
     def test_conversion_defaults(self):
@@ -40,21 +42,24 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertFalse(c.was_converted)
         self.assertIsNone(c.original_filetype)
         self.assertIsNone(c.target_filetype)
+        self.assertIsNone(c.post_conversion_min_bitrate)
+        self.assertFalse(c.is_transcode)
 
-    def test_quality_defaults(self):
-        q = QualityInfo()
-        self.assertIsNone(q.new_min_bitrate)
-        self.assertIsNone(q.prev_min_bitrate)
-        self.assertFalse(q.is_transcode)
-        self.assertFalse(q.will_be_verified_lossless)
-
-    def test_spectral_defaults(self):
-        s = SpectralInfo()
-        self.assertIsNone(s.grade)
-        self.assertIsNone(s.bitrate)
+    def test_spectral_detail_defaults(self):
+        s = SpectralDetail()
         self.assertIsNone(s.cliff_freq_hz)
-        self.assertIsNone(s.existing_grade)
-        self.assertIsNone(s.existing_bitrate)
+        self.assertEqual(s.suspect_pct, 0.0)
+        self.assertEqual(s.per_track, [])
+        self.assertEqual(s.existing_suspect_pct, 0.0)
+
+    def test_measurement_defaults(self):
+        m = AudioQualityMeasurement()
+        self.assertIsNone(m.min_bitrate_kbps)
+        self.assertFalse(m.is_cbr)
+        self.assertIsNone(m.spectral_grade)
+        self.assertIsNone(m.spectral_bitrate_kbps)
+        self.assertFalse(m.verified_lossless)
+        self.assertIsNone(m.was_converted_from)
 
     def test_postflight_defaults(self):
         p = PostflightInfo()
@@ -80,23 +85,25 @@ class TestImportResultConstruction(unittest.TestCase):
             exit_code=0,
             decision="import",
             already_in_beets=True,
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245, spectral_grade="genuine",
+                verified_lossless=True, was_converted_from="flac"),
+            existing_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=192, spectral_grade="suspect",
+                spectral_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, failed=0, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(
-                new_min_bitrate=245, prev_min_bitrate=192,
-                is_transcode=False, will_be_verified_lossless=True),
-            spectral=SpectralInfo(
-                grade="genuine", bitrate=None, cliff_freq_hz=None,
-                existing_grade="suspect", existing_bitrate=128),
             postflight=PostflightInfo(
                 beets_id=1234, track_count=12,
                 imported_path="/mnt/virtio/Music/Beets/Artist/Album"),
         )
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.conversion.converted, 10)
-        self.assertTrue(r.quality.will_be_verified_lossless)
-        self.assertEqual(r.spectral.existing_bitrate, 128)
+        assert r.new_measurement is not None
+        self.assertTrue(r.new_measurement.verified_lossless)
+        assert r.existing_measurement is not None
+        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 128)
         self.assertEqual(r.postflight.track_count, 12)
 
 
@@ -113,12 +120,16 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_upgrade",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=180, spectral_grade="suspect",
+                spectral_bitrate_kbps=128),
+            existing_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128, spectral_grade="suspect",
+                spectral_bitrate_kbps=96),
             conversion=ConversionInfo(converted=8, failed=0, was_converted=True,
-                                      original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(new_min_bitrate=180, prev_min_bitrate=128,
-                                is_transcode=True, will_be_verified_lossless=False),
-            spectral=SpectralInfo(grade="suspect", bitrate=128, cliff_freq_hz=16500,
-                                  existing_grade="suspect", existing_bitrate=96),
+                                      original_filetype="flac", target_filetype="mp3",
+                                      is_transcode=True),
+            spectral=SpectralDetail(cliff_freq_hz=16500),
             postflight=PostflightInfo(beets_id=42, track_count=8,
                                       imported_path="/Beets/Artist/Album"),
         )
@@ -130,26 +141,99 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult(decision="import", exit_code=0)
         parsed = json.loads(r.to_json())
         self.assertEqual(parsed["decision"], "import")
-        self.assertEqual(parsed["version"], 1)
+        self.assertEqual(parsed["version"], 2)
 
     def test_from_dict_missing_optional_sections(self):
         """from_dict should handle missing sub-dicts gracefully."""
-        d = {"version": 1, "exit_code": 0, "decision": "import"}
+        d = {"version": 2, "exit_code": 0, "decision": "import"}
         r = ImportResult.from_dict(d)
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.conversion.converted, 0)
-        self.assertIsNone(r.spectral.grade)
+        self.assertIsNone(r.new_measurement)
 
     def test_from_dict_with_extra_fields_in_sub(self):
         """Unknown fields in sub-dicts should raise (strict typing)."""
         d = {
-            "version": 1, "exit_code": 0, "decision": "import",
+            "version": 2, "exit_code": 0, "decision": "import",
             "conversion": {"converted": 5, "failed": 0, "was_converted": True,
                            "original_filetype": "flac", "target_filetype": "mp3",
+                           "post_conversion_min_bitrate": None,
+                           "is_transcode": False,
                            "bogus_field": 999},
         }
         with self.assertRaises(TypeError):
             ImportResult.from_dict(d)
+
+    def test_v1_migration(self):
+        """Old format (with quality/spectral sub-objects) migrates to v2."""
+        v1_dict = {
+            "version": 1,
+            "exit_code": 0,
+            "decision": "import",
+            "quality": {
+                "new_min_bitrate": 245,
+                "prev_min_bitrate": 192,
+                "post_conversion_min_bitrate": 240,
+                "is_transcode": False,
+                "will_be_verified_lossless": True,
+            },
+            "spectral": {
+                "grade": "genuine",
+                "bitrate": None,
+                "cliff_freq_hz": None,
+                "suspect_pct": 0.1,
+                "per_track": [{"grade": "genuine", "hf_deficit_db": 25.0}],
+                "existing_grade": "suspect",
+                "existing_bitrate": 128,
+                "existing_suspect_pct": 0.8,
+            },
+            "conversion": {
+                "converted": 10,
+                "failed": 0,
+                "was_converted": True,
+                "original_filetype": "flac",
+                "target_filetype": "mp3",
+            },
+            "postflight": {
+                "beets_id": 100,
+                "track_count": 10,
+                "imported_path": "/Beets/Artist/Album",
+                "bad_extensions": [],
+                "disambiguated": False,
+            },
+        }
+        r = ImportResult.from_dict(v1_dict)
+        self.assertEqual(r.version, 2)
+        assert r.new_measurement is not None
+        self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
+        self.assertEqual(r.new_measurement.spectral_grade, "genuine")
+        self.assertTrue(r.new_measurement.verified_lossless)
+        self.assertEqual(r.new_measurement.was_converted_from, "flac")
+        assert r.existing_measurement is not None
+        self.assertEqual(r.existing_measurement.min_bitrate_kbps, 192)
+        self.assertEqual(r.existing_measurement.spectral_grade, "suspect")
+        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 128)
+        # Process data migrated to ConversionInfo
+        self.assertEqual(r.conversion.post_conversion_min_bitrate, 240)
+        self.assertFalse(r.conversion.is_transcode)
+        # SpectralDetail has per-track only
+        self.assertEqual(r.spectral.suspect_pct, 0.1)
+        self.assertEqual(len(r.spectral.per_track), 1)
+        self.assertEqual(r.spectral.existing_suspect_pct, 0.8)
+
+    def test_v1_migration_no_existing(self):
+        """Old format with no prev_min_bitrate → existing_measurement is None."""
+        v1_dict = {
+            "version": 1,
+            "decision": "import",
+            "quality": {"new_min_bitrate": 245},
+            "spectral": {"grade": "genuine"},
+            "conversion": {},
+        }
+        r = ImportResult.from_dict(v1_dict)
+        assert r.new_measurement is not None
+        self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
+        self.assertIsNone(r.existing_measurement)
 
 
 class TestSentinelLine(unittest.TestCase):
@@ -181,8 +265,9 @@ class TestParseImportResult(unittest.TestCase):
 
     def test_parse_from_mixed_stdout(self):
         """JSON on last line, human text before it."""
-        r = ImportResult(decision="transcode_upgrade", exit_code=6,
-                         quality=QualityInfo(new_min_bitrate=180))
+        r = ImportResult(
+            decision="transcode_upgrade", exit_code=6,
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=180))
         stdout = (
             "[CONVERT] /tmp/album\n"
             "  Converted 10, failed 0\n"
@@ -194,7 +279,8 @@ class TestParseImportResult(unittest.TestCase):
         parsed = parse_import_result(stdout)
         assert parsed is not None
         self.assertEqual(parsed.decision, "transcode_upgrade")
-        self.assertEqual(parsed.quality.new_min_bitrate, 180)
+        assert parsed.new_measurement is not None
+        self.assertEqual(parsed.new_measurement.min_bitrate_kbps, 180)
 
     def test_parse_no_sentinel(self):
         """Old import_one.py or crash — no JSON emitted."""
@@ -219,8 +305,6 @@ class TestParseImportResult(unittest.TestCase):
             + r.to_sentinel_line() + "\n"
             + "trailing beets log line\n"
         )
-        # The trailing line is NOT a sentinel, so reverse scan skips it
-        # and finds the sentinel on the second-to-last line
         parsed = parse_import_result(stdout)
         assert parsed is not None
         self.assertEqual(parsed.decision, "import")
@@ -234,21 +318,21 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=0,
             decision="import",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245, spectral_grade="genuine",
+                verified_lossless=True, was_converted_from="flac"),
             conversion=ConversionInfo(
                 converted=12, failed=0, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(
-                new_min_bitrate=245, prev_min_bitrate=None,
-                is_transcode=False, will_be_verified_lossless=True),
-            spectral=SpectralInfo(grade="genuine"),
             postflight=PostflightInfo(
                 beets_id=100, track_count=12,
                 imported_path="/Beets/Artist/Album"),
         )
         self.assertEqual(r.exit_code, 0)
         self.assertTrue(r.conversion.was_converted)
-        self.assertTrue(r.quality.will_be_verified_lossless)
-        self.assertFalse(r.quality.is_transcode)
+        assert r.new_measurement is not None
+        self.assertTrue(r.new_measurement.verified_lossless)
+        self.assertFalse(r.conversion.is_transcode)
         self.assertIsNone(r.error)
 
     def test_downgrade_prevented(self):
@@ -256,8 +340,8 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=5,
             decision="downgrade",
-            quality=QualityInfo(
-                new_min_bitrate=192, prev_min_bitrate=320),
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=192),
+            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=320),
         )
         self.assertEqual(r.exit_code, 5)
         self.assertEqual(r.decision, "downgrade")
@@ -268,18 +352,20 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_upgrade",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=180, spectral_grade="suspect",
+                spectral_bitrate_kbps=128),
+            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, failed=0, was_converted=True,
-                original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(
-                new_min_bitrate=180, prev_min_bitrate=128,
-                is_transcode=True, will_be_verified_lossless=False),
-            spectral=SpectralInfo(grade="suspect", bitrate=128, cliff_freq_hz=16500),
+                original_filetype="flac", target_filetype="mp3",
+                is_transcode=True),
+            spectral=SpectralDetail(cliff_freq_hz=16500),
             postflight=PostflightInfo(beets_id=42, track_count=10,
                                       imported_path="/Beets/Artist/Album"),
         )
         self.assertEqual(r.exit_code, 6)
-        self.assertTrue(r.quality.is_transcode)
+        self.assertTrue(r.conversion.is_transcode)
         self.assertIsNotNone(r.postflight.beets_id)  # was imported
 
     def test_transcode_downgrade(self):
@@ -287,9 +373,9 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_downgrade",
-            quality=QualityInfo(
-                new_min_bitrate=128, prev_min_bitrate=180,
-                is_transcode=True),
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
+            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=180),
+            conversion=ConversionInfo(is_transcode=True),
         )
         self.assertEqual(r.exit_code, 6)
         self.assertEqual(r.decision, "transcode_downgrade")
@@ -379,13 +465,19 @@ class TestDownloadInfo(unittest.TestCase):
         """Verify the contract: ImportResult fields map to DownloadInfo fields."""
         ir = ImportResult(
             decision="import",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245, spectral_grade="genuine",
+                verified_lossless=True, was_converted_from="flac"),
+            existing_measurement=AudioQualityMeasurement(
+                spectral_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(new_min_bitrate=245),
-            spectral=SpectralInfo(grade="genuine", bitrate=None,
-                                  existing_bitrate=128),
         )
+        new_m = ir.new_measurement
+        assert new_m is not None
+        existing_m = ir.existing_measurement
+        assert existing_m is not None
         dl = DownloadInfo(
             was_converted=ir.conversion.was_converted,
             original_filetype=ir.conversion.original_filetype,
@@ -393,11 +485,11 @@ class TestDownloadInfo(unittest.TestCase):
             is_vbr=True,
             slskd_filetype=ir.conversion.original_filetype,
             actual_filetype=ir.conversion.target_filetype,
-            bitrate=(ir.quality.new_min_bitrate * 1000
-                     if ir.quality.new_min_bitrate else None),
-            spectral_grade=ir.spectral.grade,
-            spectral_bitrate=ir.spectral.bitrate,
-            existing_spectral_bitrate=ir.spectral.existing_bitrate,
+            bitrate=(new_m.min_bitrate_kbps * 1000
+                     if new_m.min_bitrate_kbps else None),
+            spectral_grade=new_m.spectral_grade,
+            spectral_bitrate=new_m.spectral_bitrate_kbps,
+            existing_spectral_bitrate=existing_m.spectral_bitrate_kbps,
             import_result=ir.to_json(),
         )
         self.assertTrue(dl.was_converted)
@@ -418,10 +510,13 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_flac_conversion(self) -> None:
         dl = DownloadInfo(filetype="flac", bitrate=0)
         ir = ImportResult(
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245, spectral_grade="genuine",
+                verified_lossless=True, was_converted_from="flac"),
+            existing_measurement=AudioQualityMeasurement(
+                spectral_bitrate_kbps=128),
             conversion=ConversionInfo(converted=10, was_converted=True,
                                       original_filetype="flac", target_filetype="mp3"),
-            quality=QualityInfo(new_min_bitrate=245),
-            spectral=SpectralInfo(grade="genuine", bitrate=None, existing_bitrate=128),
         )
         self.populate(dl, ir)
         self.assertTrue(dl.was_converted)
@@ -431,14 +526,15 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.bitrate, 245000)
         self.assertEqual(dl.spectral_grade, "genuine")
         self.assertEqual(dl.existing_spectral_bitrate, 128)
+        self.assertTrue(dl.verified_lossless_override)
         self.assertIsNotNone(dl.import_result)
 
     def test_no_conversion(self) -> None:
         dl = DownloadInfo(filetype="mp3", bitrate=320000)
         ir = ImportResult(
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, spectral_grade="genuine"),
             conversion=ConversionInfo(),
-            quality=QualityInfo(new_min_bitrate=320),
-            spectral=SpectralInfo(grade="genuine"),
         )
         self.populate(dl, ir)
         self.assertFalse(dl.was_converted)

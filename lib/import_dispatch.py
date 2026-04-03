@@ -31,8 +31,8 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
                                          ir: ImportResult) -> None:
     """Populate a DownloadInfo from an ImportResult (pure, no I/O)."""
     conv = ir.conversion
-    qual = ir.quality
-    spec = ir.spectral
+    new_m = ir.new_measurement
+    existing_m = ir.existing_measurement
     if conv.was_converted:
         dl_info.was_converted = True
         dl_info.original_filetype = conv.original_filetype
@@ -43,14 +43,16 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     else:
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
-    if qual.new_min_bitrate is not None:
-        dl_info.bitrate = qual.new_min_bitrate * 1000
-    dl_info.spectral_grade = spec.grade
-    dl_info.spectral_bitrate = spec.bitrate
-    dl_info.existing_spectral_bitrate = spec.existing_bitrate
-    if qual.prev_min_bitrate is not None:
-        dl_info.existing_min_bitrate = qual.prev_min_bitrate
-    dl_info.verified_lossless_override = ir.quality.will_be_verified_lossless
+    if new_m:
+        if new_m.min_bitrate_kbps is not None:
+            dl_info.bitrate = new_m.min_bitrate_kbps * 1000
+        dl_info.spectral_grade = new_m.spectral_grade
+        dl_info.spectral_bitrate = new_m.spectral_bitrate_kbps
+        dl_info.verified_lossless_override = new_m.verified_lossless
+    if existing_m:
+        dl_info.existing_spectral_bitrate = existing_m.spectral_bitrate_kbps
+        if existing_m.min_bitrate_kbps is not None:
+            dl_info.existing_min_bitrate = existing_m.min_bitrate_kbps
     dl_info.import_result = ir.to_json()
 
 
@@ -239,33 +241,35 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             action = dispatch_action(decision)
             usernames = extract_usernames(album_data.files) if action.denylist else set()
 
+            new_br = ir.new_measurement.min_bitrate_kbps if ir.new_measurement else None
+            prev_br = ir.existing_measurement.min_bitrate_kbps if ir.existing_measurement else None
+
             # --- Mark done or failed with decision-specific details ---
             if action.mark_done:
                 logger.info(f"AUTO-IMPORT OK: {label} (decision={decision})")
                 ctx.pipeline_db_source.mark_done(
                     album_data, bv_result, dest_path=dest, download_info=dl_info)
                 if decision in ("import", "preflight_existing"):
-                    if request_id and (ir.quality.prev_min_bitrate is not None
-                                       or ir.quality.new_min_bitrate is not None):
+                    if request_id and (prev_br is not None or new_br is not None):
                         try:
                             db = ctx.pipeline_db_source._get_db()
                             db.update_status(request_id, "imported",
-                                             prev_min_bitrate=ir.quality.prev_min_bitrate,
-                                             min_bitrate=ir.quality.new_min_bitrate)
+                                             prev_min_bitrate=prev_br,
+                                             min_bitrate=new_br)
                         except Exception:
                             logger.exception("Failed to update upgrade delta")
             elif action.mark_failed:
                 if decision == "downgrade":
                     scenario = "quality_downgrade"
-                    detail = (f"new {ir.quality.new_min_bitrate}kbps "
-                              f"<= existing {ir.quality.prev_min_bitrate}kbps")
+                    detail = (f"new {new_br}kbps "
+                              f"<= existing {prev_br}kbps")
                     logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
                 elif decision == "transcode_downgrade":
                     scenario = "transcode_downgrade"
-                    detail = (f"transcode {ir.quality.new_min_bitrate}kbps "
-                              f"<= existing {ir.quality.prev_min_bitrate}kbps")
+                    detail = (f"transcode {new_br}kbps "
+                              f"<= existing {prev_br}kbps")
                     logger.warning(f"TRANSCODE REJECTED: {label} "
-                                   f"at {ir.quality.new_min_bitrate}kbps — not an upgrade")
+                                   f"at {new_br}kbps — not an upgrade")
                 else:
                     scenario = decision or "import_error"
                     detail = ir.error
@@ -286,8 +290,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 if decision == "downgrade":
                     reason = "quality downgrade prevented"
                 elif decision.startswith("transcode"):
-                    actual_br = ir.quality.new_min_bitrate
-                    reason = f"transcode: {actual_br}kbps" if actual_br else "transcode detected"
+                    reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
                 else:
                     reason = f"rejected: {decision}"
                 for username in usernames:
@@ -299,7 +302,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 db.reset_to_wanted(
                     request_id,
                     quality_override=QUALITY_UPGRADE_TIERS,
-                    min_bitrate=ir.quality.new_min_bitrate if action.mark_done else None)
+                    min_bitrate=new_br if action.mark_done else None)
 
             if action.run_quality_gate:
                 _check_quality_gate(album_data, request_id, ctx)

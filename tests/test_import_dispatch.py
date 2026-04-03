@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
-                         QualityInfo, SpectralInfo, PostflightInfo,
+                         AudioQualityMeasurement, PostflightInfo,
                          QUALITY_UPGRADE_TIERS)
 
 
@@ -24,19 +24,19 @@ def _make_import_result(decision="import", new_min_bitrate=245,
     return ImportResult(
         decision=decision,
         error=error,
+        new_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=new_min_bitrate,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+            verified_lossless=was_converted and spectral_grade == "genuine",
+            was_converted_from=original_filetype if was_converted else None,
+        ),
+        existing_measurement=(AudioQualityMeasurement(min_bitrate_kbps=prev_min_bitrate)
+                              if prev_min_bitrate is not None else None),
         conversion=ConversionInfo(
             was_converted=was_converted,
             original_filetype=original_filetype or "",
             target_filetype=target_filetype or "",
-        ),
-        quality=QualityInfo(
-            new_min_bitrate=new_min_bitrate,
-            prev_min_bitrate=prev_min_bitrate,
-            will_be_verified_lossless=was_converted and spectral_grade == "genuine",
-        ),
-        spectral=SpectralInfo(
-            grade=spectral_grade,
-            bitrate=spectral_bitrate,
         ),
         postflight=PostflightInfo(),
     )

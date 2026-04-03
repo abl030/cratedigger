@@ -394,19 +394,32 @@ def cmd_manual_import(db, args):
         if result.import_result_json:
             try:
                 ir = json.loads(result.import_result_json)
-                spectral = ir.get("spectral", {})
-                quality = ir.get("quality", {})
-                conv = ir.get("conversion", {})
-                if spectral.get("grade"):
-                    update_fields["spectral_grade"] = spectral["grade"]
-                if spectral.get("bitrate") is not None:
-                    update_fields["spectral_bitrate"] = spectral["bitrate"]
-                if quality.get("new_min_bitrate") is not None:
-                    update_fields["min_bitrate"] = quality["new_min_bitrate"]
-                if (conv.get("was_converted")
-                        and conv.get("original_filetype", "").lower() == "flac"
-                        and spectral.get("grade") == "genuine"):
-                    update_fields["verified_lossless"] = True
+                new_m = ir.get("new_measurement") or {}
+                if new_m:
+                    # v2 format
+                    if new_m.get("spectral_grade"):
+                        update_fields["spectral_grade"] = new_m["spectral_grade"]
+                    if new_m.get("spectral_bitrate_kbps") is not None:
+                        update_fields["spectral_bitrate"] = new_m["spectral_bitrate_kbps"]
+                    if new_m.get("min_bitrate_kbps") is not None:
+                        update_fields["min_bitrate"] = new_m["min_bitrate_kbps"]
+                    if new_m.get("verified_lossless"):
+                        update_fields["verified_lossless"] = True
+                else:
+                    # v1 fallback
+                    spectral = ir.get("spectral", {})
+                    quality = ir.get("quality", {})
+                    conv = ir.get("conversion", {})
+                    if spectral.get("grade"):
+                        update_fields["spectral_grade"] = spectral["grade"]
+                    if spectral.get("bitrate") is not None:
+                        update_fields["spectral_bitrate"] = spectral["bitrate"]
+                    if quality.get("new_min_bitrate") is not None:
+                        update_fields["min_bitrate"] = quality["new_min_bitrate"]
+                    if (conv.get("was_converted")
+                            and conv.get("original_filetype", "").lower() == "flac"
+                            and spectral.get("grade") == "genuine"):
+                        update_fields["verified_lossless"] = True
             except (json.JSONDecodeError, TypeError):
                 pass
         db.update_status(request_id, "imported", **update_fields)
