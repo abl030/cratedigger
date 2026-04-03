@@ -626,14 +626,23 @@ def try_enqueue(all_tracks, results, allowed_filetype):
     denied_users = _get_denied_users(album_id)
     # Sort users by upload speed (fastest first) for quicker downloads
     sorted_users = sorted(results.keys(), key=lambda u: user_upload_speed.get(u, 0), reverse=True)
+    is_catch_all = allowed_filetype == "*"
     for username in sorted_users:
         if username in denied_users:
             logger.info(f"Skipping user '{username}' for album ID {album_id}: denylisted (previously provided mislabeled quality)")
             continue
-        if allowed_filetype not in results[username]:
-            continue
+        if is_catch_all:
+            # Catch-all: merge all cached directories for this user
+            file_dirs = []
+            for ft_dirs in results[username].values():
+                file_dirs.extend(d for d in ft_dirs if d not in file_dirs)
+            if not file_dirs:
+                continue
+        else:
+            if allowed_filetype not in results[username]:
+                continue
+            file_dirs = results[username][allowed_filetype]
         logger.debug(f"Parsing result from user: {username}")
-        file_dirs = results[username][allowed_filetype]
         found, directory, file_dir = check_for_match(all_tracks, allowed_filetype, file_dirs, username)
         if found:
             directory = download_filter(allowed_filetype, directory)
@@ -684,14 +693,22 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
     count_found = 0
     album_id = all_tracks[0]["albumId"]
     denied_users = _get_denied_users(album_id)
+    is_catch_all = allowed_filetype == "*"
     for disk in split_release:
         for username in tmp_results:
             if username in denied_users:
                 logger.info(f"Skipping user '{username}' for album ID {album_id} (multi-disc): denylisted (previously provided mislabeled quality)")
                 continue
-            if allowed_filetype not in tmp_results[username]:
-                continue
-            file_dirs = results[username][allowed_filetype]
+            if is_catch_all:
+                file_dirs = []
+                for ft_dirs in results[username].values():
+                    file_dirs.extend(d for d in ft_dirs if d not in file_dirs)
+                if not file_dirs:
+                    continue
+            else:
+                if allowed_filetype not in tmp_results[username]:
+                    continue
+                file_dirs = results[username][allowed_filetype]
             found, directory, file_dir = check_for_match(disk["tracks"], allowed_filetype, file_dirs, username)
             if found:
                 directory = download_filter(allowed_filetype, directory)
@@ -861,6 +878,70 @@ def find_download(album, grab_list):
                     f"{allowed_filetype}, skipping non-monitored releases"
                 )
                 break
+
+    # --- Catch-all fallback: accept any audio format if no quality override ---
+    # Quality override means we're upgrading (already imported, want better).
+    # No override means first-time download — take anything we can get.
+    if not quality_override and "*" not in [ft.strip() for ft in (cfg.allowed_filetypes or ())]:
+        logger.info(
+            f"No match at preferred quality for {artist_name} - {album.title}, "
+            f"trying catch-all (any audio format)"
+        )
+        allowed_filetype = "*"
+        releases = list(album.releases)
+        has_monitored = any(r.monitored for r in releases)
+        num_releases = len(releases)
+        for _ in range(0, num_releases):
+            if len(releases) == 0:
+                break
+            release = choose_release(artist_name, releases)
+            releases.remove(release)
+            all_tracks = get_album_tracks(album, release_id=release.id)
+            if not all_tracks:
+                continue
+            found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
+            if found:
+                assert downloads is not None
+                grab_list[album_id] = GrabListEntry(
+                    album_id=album_id,
+                    files=downloads,
+                    filetype=allowed_filetype,
+                    title=album.title,
+                    artist=artist_name,
+                    year=album.release_date[0:4],
+                    mb_release_id=release.foreign_release_id,
+                    db_request_id=album.db_request_id,
+                    db_source=album.db_source,
+                    db_quality_override=album.db_quality_override,
+                )
+                return True
+            elif len(release.media) > 1:
+                found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
+                if found:
+                    assert downloads is not None
+                    grab_list[album_id] = GrabListEntry(
+                        album_id=album_id,
+                        files=downloads,
+                        filetype=allowed_filetype,
+                        title=album.title,
+                        artist=artist_name,
+                        year=album.release_date[0:4],
+                        mb_release_id=release.foreign_release_id,
+                        db_request_id=album.db_request_id,
+                        db_source=album.db_source,
+                        db_quality_override=album.db_quality_override,
+                    )
+                    return True
+            if has_monitored and not release.monitored:
+                break
+            if has_monitored and release.monitored:
+                logger.info(
+                    f"Monitored release ({release.track_count} tracks) not found on "
+                    f"Soulseek for {artist_name} - {album.title} at catch-all quality, "
+                    f"skipping non-monitored releases"
+                )
+                break
+
     return False
 
 
