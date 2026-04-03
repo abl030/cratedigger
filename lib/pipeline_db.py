@@ -287,7 +287,7 @@ class PipelineDB:
 
     def update_status(self, request_id, status, **extra):
         now = datetime.now(timezone.utc)
-        sets = ["status = %s", "updated_at = %s"]
+        sets = ["status = %s", "active_download_state = NULL", "updated_at = %s"]
         params = [status, now]
         for key, val in extra.items():
             sets.append(f"{key} = %s")
@@ -311,6 +311,7 @@ class PipelineDB:
                     validation_attempts = 0,
                     next_retry_after = NULL,
                     last_attempt_at = NULL,
+                    active_download_state = NULL,
                     quality_override = %s,
                     prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate),
                     min_bitrate = %s,
@@ -327,6 +328,7 @@ class PipelineDB:
                     validation_attempts = 0,
                     next_retry_after = NULL,
                     last_attempt_at = NULL,
+                    active_download_state = NULL,
                     quality_override = %s,
                     updated_at = %s
                 WHERE id = %s

@@ -504,6 +504,48 @@ class TestRederiveTransferIds(unittest.TestCase):
         self.assertEqual(entry.files[0].id, "")
 
 
+class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
+    """Test process_completed_album returns True/False."""
+
+    @patch("lib.download.music_tag")
+    def test_returns_true_on_success(self, mock_mt):
+        """Successful file move + processing returns True."""
+        from lib.download import process_completed_album
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create source file
+            src_dir = os.path.join(tmpdir, "source_dir")
+            os.makedirs(src_dir)
+            src_file = os.path.join(src_dir, "01 - Track.mp3")
+            with open(src_file, "w") as f:
+                f.write("fake audio")
+
+            files = [_make_file(filename="source_dir\\01 - Track.mp3",
+                                file_dir="source_dir")]
+            album = _make_album_data(files=files, mb_release_id=None)
+            ctx = _make_ctx()
+            ctx.cfg.slskd_download_dir = tmpdir
+            ctx.cfg.beets_validation_enabled = False
+            mock_mt.load_file.return_value = MagicMock()
+            result = process_completed_album(album, [], ctx)
+            self.assertTrue(result)
+
+    def test_returns_false_on_file_move_failure(self):
+        """File move failure returns False."""
+        from lib.download import process_completed_album
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Source dir exists but file doesn't — move will fail
+            files = [_make_file(filename="nonexistent_dir\\01 - Track.mp3",
+                                file_dir="nonexistent_dir")]
+            album = _make_album_data(files=files, mb_release_id=None)
+            ctx = _make_ctx()
+            ctx.cfg.slskd_download_dir = tmpdir
+            ctx.cfg.beets_validation_enabled = False
+            result = process_completed_album(album, [], ctx)
+            self.assertFalse(result)
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 

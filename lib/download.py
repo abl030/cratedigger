@@ -185,7 +185,7 @@ def _gather_spectral_context(album_data: GrabListEntry, import_folder: str,
 # === Download completion processing ===
 
 def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: SoularrContext) -> None:
+                            ctx: SoularrContext) -> bool:
     """Process a fully-downloaded album: move files, tag, validate, stage/import."""
     import_folder_name = sanitize_folder_name(
         f"{album_data.artist} - {album_data.title} ({album_data.year})")
@@ -219,7 +219,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
                 os.rmdir(import_folder_fullpath)
             except OSError:
                 logger.warning(f"Could not remove temp import directory {import_folder_fullpath}")
-            return
+            return False
     else:  # Only runs if all files are successfully moved
         for rm_dir in rm_dirs:
             if rm_dir != import_folder_fullpath:
@@ -242,6 +242,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
                 logger.exception(f"Error writing tags for: {file.import_path}")
         if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
             _process_beets_validation(album_data, import_folder_fullpath, ctx)
+        return True
 
 
 def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath: str,
@@ -615,14 +616,10 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
             # Clear active_download_state but keep status='downloading'.
             # process_completed_album will set final status via mark_done/mark_failed.
             db.clear_download_state(request_id)
-            result = process_completed_album(entry, [], ctx)
+            success = process_completed_album(entry, [], ctx)
             # Safety net: if process_completed_album returned without setting
             # a final status (happens when beets_validation_enabled=False or
             # mb_release_id is empty), the album is still 'downloading'.
-            # NOTE: process_completed_album currently returns None (commit 6
-            # changes it to bool). Treat None as success — the file-move
-            # rollback path is the only explicit failure.
-            success = result is not False
             refreshed = db.get_request(request_id)
             if refreshed and refreshed["status"] == "downloading":
                 if success:
