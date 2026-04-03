@@ -236,7 +236,6 @@ IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
 # ---------------------------------------------------------------------------
 
 @dataclass
-@dataclass
 class ActiveDownloadFileState:
     """Per-file state persisted for active downloads."""
     username: str
