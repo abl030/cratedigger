@@ -42,8 +42,11 @@ lib/
   beets_db.py           — BeetsDB: read-only beets SQLite queries (AlbumInfo dataclass)
   config.py             — SoularrConfig dataclass (typed config from config.ini)
   context.py            — SoularrContext dataclass (replaces module globals for extracted functions)
-  download.py           — Download monitoring, completion processing, spectral context
+  download.py           — Async download polling, completion processing, spectral context
                            gathering, slskd transfer helpers. All functions accept ctx.
+                           Key functions: poll_active_downloads(), process_completed_album(),
+                           build_active_download_state(), reconstruct_grab_list_entry(),
+                           rederive_transfer_ids(), grab_most_wanted() (enqueue-only, non-blocking).
   grab_list.py          — GrabList: wanted-album selection with priority/ordering
   import_dispatch.py    — Auto-import decision tree: runs import_one.py, uses
                            dispatch_action() flags for mark_done/failed/denylist/requeue.
@@ -65,6 +68,8 @@ lib/
                            - ValidationResult, CandidateSummary
                            Harness data types:
                            - HarnessItem, HarnessTrackInfo, TrackMapping
+                           Async download state:
+                           - ActiveDownloadState, ActiveDownloadFileState
                            Other:
                            - DownloadInfo, SpectralContext, DispatchAction
   search.py             — Search query building and normalization
@@ -85,21 +90,22 @@ scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, quality, force-import, migrate
   populate_tracks.py    — Populate tracks from MusicBrainz API
   run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
-tests/                     695 tests total
+tests/                     922 tests total
   test_album_source.py      — 16 tests for AlbumSource (incl. verified_lossless override)
   test_beets_db.py           — 17 tests for BeetsDB queries
   test_beets_validation.py   — 19 tests for beets validation
   test_config.py             — 42 tests for SoularrConfig
   test_context.py            — tests for SoularrContext dataclass
   test_disambiguation.py     — 7 tests for beets disambiguation (import_one path resolution)
-  test_download.py           — 28 tests for lib/download.py (transfer helpers, spectral, monitoring)
-  test_grab_list.py          — 60 tests for GrabList
+  test_download.py           — 56 tests for lib/download.py (poll_active_downloads, transfer helpers,
+                                 spectral, grab_most_wanted, reconstruction, retry)
+  test_grab_list.py          — 27 tests for GrabListEntry/DownloadFile dataclasses
   test_import_dispatch.py    — 18 tests for import dispatch (incl. override computation)
-  test_import_result.py      — 35 tests for ImportResult, DownloadInfo, JSON parsing
+  test_import_result.py      — 40 tests for ImportResult, DownloadInfo, ActiveDownloadState, JSON parsing
   test_integration.py        — 20 tests for full search→enqueue→download flow (mocked slskd)
   test_force_import.py       — 12 tests for force-import (CLI, DB, --force flag, path resolution)
-  test_pipeline_cli.py       — 7 tests for CLI
-  test_pipeline_db.py        — 35 tests for PipelineDB
+  test_pipeline_cli.py       — 9 tests for CLI (incl. downloading status display)
+  test_pipeline_db.py        — 40 tests for PipelineDB (incl. downloading status, active_download_state)
   test_quality_classification.py — 38 tests for quality classification (real audio fixtures)
   test_quality_decisions.py  — 98 tests for pure decision functions + pipeline contract tests
   test_search.py             — 32 tests for search query building
@@ -109,7 +115,7 @@ tests/                     695 tests total
   test_util.py               — tests for lib/util.py (move_failed_import, sanitize, etc.)
   test_validation_result.py  — 27 tests for ValidationResult, CandidateSummary, harness types
   test_web_recents.py        — 72 tests for recents tab classification (LogEntry, ClassifiedEntry)
-  test_web_server.py         — 21 tests for HTTP endpoints + bitrate override (mocked DB, real server)
+  test_web_server.py         — 24 tests for HTTP endpoints + downloading status contracts
   test_verify_filetype.py    — 7 tests for verify_filetype (direct import from lib/quality)
   test_import_one_stages.py  — 18 tests for import_one.py pure stage decisions
 test_soularr.py         — Legacy verify_filetype tests (imports from lib/quality)
@@ -169,14 +175,17 @@ Web UI (music.ablz.au)               CLI
       ▼                                ▼
 ┌──────────────────────────────────────────────┐
 │           PostgreSQL (pipeline DB)            │
-│  status: wanted→searching→downloading→       │
-│          validating→staged→imported           │
+│  status: wanted → downloading → imported     │
+│                                  manual      │
 └──────────────────┬───────────────────────────┘
-                   │ get_wanted()
-                   ▼
+                   │
+    ┌──────────────┴──────────────┐
+    │ poll_active_downloads()     │ get_wanted()
+    │ (check previous downloads)  │ (search new)
+    ▼                             ▼
 ┌──────────────────────────────────────────────┐
-│  Soularr (soularr.py + album_source.py)      │
-│  search Soulseek → download → validate       │
+│  Soularr (soularr.py + lib/download.py)      │
+│  Phase 1: poll → Phase 2: search + enqueue   │
 └──────────────────┬───────────────────────────┘
                    │
          ┌─────────┴──────────┐
@@ -231,7 +240,7 @@ POST /api/pipeline/force-import {"download_log_id": N}
 
 ### download_log outcomes
 
-5 valid values: `success`, `rejected`, `failed`, `timeout`, `force_import`
+6 valid values: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`
 
 ## Decision Architecture
 
@@ -280,6 +289,7 @@ All types in `lib/quality.py`, fully typed with pyright, JSON round-trip seriali
 - **Import path**: `ImportResult` → `AudioQualityMeasurement` (new/existing), `ConversionInfo`, `SpectralDetail`, `PostflightInfo`
 - **Validation path**: `ValidationResult` → `CandidateSummary` → `HarnessTrackInfo`, `HarnessItem`, `TrackMapping`
 - **Dispatch path**: `DispatchAction` (action flags from `dispatch_action()`), `StageResult` (in `import_one.py` — pure stage decisions)
+- **Async download path**: `ActiveDownloadState` → `ActiveDownloadFileState` (persisted to `album_requests.active_download_state` JSONB)
 - **Shared**: `DownloadInfo` (replaces untyped dl_info dict), `SpectralContext` (pre-import spectral gathering), `AlbumInfo` (beets DB queries in `lib/beets_db.py`)
 
 ## Quality Upgrade System
@@ -343,6 +353,7 @@ Uses `sox` bandpass filtering to detect transcodes. Measures RMS energy in 16 x 
 - `verified_lossless BOOLEAN` — True only when imported from spectral-verified genuine FLAC→V0.
 - `spectral_grade TEXT` — Latest spectral analysis result ("genuine", "suspect", "marginal").
 - `spectral_bitrate INTEGER` — Estimated original bitrate from cliff detection (kbps).
+- `active_download_state JSONB` — Persisted download state for async polling (filetype, enqueued_at, per-file username/filename/size). Set by `set_downloading()`, cleared on completion/timeout.
 
 ### Key Fields (`download_log` table)
 
@@ -543,7 +554,7 @@ pipeline-cli debug-download <download_log_id>
 ## Known Issues
 
 - **Track name matching**: `album_match()` uses fuzzy filename matching — can match wrong pressings with same title. Track title cross-check added as post-match gate but won't catch all cases.
-- **`searching` status not updating**: `update_status()` in main loop doesn't reliably persist — cosmetic issue, doesn't affect functionality.
+- **Discogs-sourced albums**: Numeric IDs instead of MB UUIDs. Cannot use upgrade pipeline. See `TODO.md`.
 
 ## MusicBrainz API
 
