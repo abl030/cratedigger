@@ -430,13 +430,17 @@ def search_for_album(album):
             user_upload_speed[username] = speed
         logger.info(f"Caching and truncating results for user: {username}")
         init_files = result["files"]  # init_files short for initial files. Before truncating
+        # Pre-parsed specs + config strings for the cache key
+        from lib.quality import file_identity, filetype_matches
+        filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
         # Search the returned files and only cache files that are of the allowed_filetypes
         for file in init_files:
             file_dir = file["filename"].rsplit("\\", 1)[0]  # split dir/filenames on \
-            for allowed_filetype in cfg.allowed_filetypes:
-                if verify_filetype(file, allowed_filetype):  # Check the filename for an allowed type
+            identity = file_identity(file)
+            for allowed_filetype, spec in filter_specs:
+                if filetype_matches(identity, spec):
                     if allowed_filetype not in search_cache[album_id][username]:
-                        search_cache[album_id][username][allowed_filetype] = []  # Init the cache for this allowed filetype
+                        search_cache[album_id][username][allowed_filetype] = []
                     if file_dir not in search_cache[album_id][username][allowed_filetype]:
                         search_cache[album_id][username][allowed_filetype].append(file_dir)
     return True
@@ -549,10 +553,13 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         speed = result.get("uploadSpeed", 0)
         if speed and (username not in upload_speeds or speed > upload_speeds[username]):
             upload_speeds[username] = speed
+        from lib.quality import file_identity, filetype_matches
+        par_filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
         for file in result["files"]:
             file_dir = file["filename"].rsplit("\\", 1)[0]
-            for allowed_filetype in search_cfg.allowed_filetypes:
-                if verify_filetype(file, allowed_filetype):
+            identity = file_identity(file)
+            for allowed_filetype, spec in par_filter_specs:
+                if filetype_matches(identity, spec):
                     if allowed_filetype not in cache_entries[username]:
                         cache_entries[username][allowed_filetype] = []
                     if file_dir not in cache_entries[username][allowed_filetype]:
@@ -783,6 +790,60 @@ def get_album_by_id(album_id):
     raise KeyError(f"Album {album_id} not found in cache")
 
 
+def _try_filetype(album, results, allowed_filetype, grab_list) -> bool:
+    """Try to match and enqueue an album at a specific filetype quality.
+
+    Iterates releases (monitored first), tries single-album then multi-disc.
+    Returns True and populates grab_list on success.
+    """
+    album_id = album.id
+    artist_name = album.artist_name
+    releases = list(album.releases)
+    has_monitored = any(r.monitored for r in releases)
+
+    for _ in range(len(releases)):
+        if not releases:
+            break
+        release = choose_release(artist_name, releases)
+        releases.remove(release)
+        all_tracks = get_album_tracks(album, release_id=release.id)
+        if not all_tracks:
+            logger.warning(f"No tracks for {artist_name} - {album.title} (release {release.id}) — skipping")
+            continue
+
+        found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
+        if not found and len(release.media) > 1:
+            found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
+
+        if found:
+            assert downloads is not None
+            grab_list[album_id] = GrabListEntry(
+                album_id=album_id,
+                files=downloads,
+                filetype=allowed_filetype,
+                title=album.title,
+                artist=artist_name,
+                year=album.release_date[0:4],
+                mb_release_id=release.foreign_release_id,
+                db_request_id=album.db_request_id,
+                db_source=album.db_source,
+                db_quality_override=album.db_quality_override,
+            )
+            return True
+
+        if has_monitored and release.monitored:
+            logger.info(
+                f"Monitored release ({release.track_count} tracks) not found on "
+                f"Soulseek for {artist_name} - {album.title} at quality "
+                f"{allowed_filetype}, skipping non-monitored releases"
+            )
+            break
+        if has_monitored and not release.monitored:
+            break
+
+    return False
+
+
 def find_download(album, grab_list):
     """
     This does the main loop over search results and user directories
@@ -791,7 +852,6 @@ def find_download(album, grab_list):
     """
     album_id = album.id
     artist_name = album.artist_name
-    artist_id = album.artist_id
     results = search_cache[album_id]
 
     # Cache album so get_album_by_id() works during matching
@@ -810,137 +870,18 @@ def find_download(album, grab_list):
 
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        releases = list(album.releases)
+        if _try_filetype(album, results, allowed_filetype, grab_list):
+            return True
 
-        # Check if any release is explicitly monitored by the user.
-        has_monitored = any(r.monitored for r in releases)
-
-        num_releases = len(releases)
-        for _ in range(0, num_releases):
-            if len(releases) == 0:
-                break
-            release = choose_release(artist_name, releases)
-            releases.remove(release)
-            release_id = release.id
-            all_tracks = get_album_tracks(album, release_id=release_id)
-            if not all_tracks:
-                logger.warning(f"No tracks for {artist_name} - {album.title} (release {release_id}) — skipping")
-                continue
-            found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
-
-            if found:
-                assert downloads is not None
-                grab_list[album_id] = GrabListEntry(
-                    album_id=album_id,
-                    files=downloads,
-                    filetype=allowed_filetype,
-                    title=album.title,
-                    artist=artist_name,
-                    year=album.release_date[0:4],
-                    mb_release_id=release.foreign_release_id,
-
-                    db_request_id=album.db_request_id,
-                    db_source=album.db_source,
-                    db_quality_override=album.db_quality_override,
-                )
-                return True
-            elif len(release.media) > 1:
-                found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
-                if found:
-                    assert downloads is not None
-                    grab_list[album_id] = GrabListEntry(
-                        album_id=album_id,
-                        files=downloads,
-                        filetype=allowed_filetype,
-                        title=album.title,
-                        artist=artist_name,
-                        year=album.release_date[0:4],
-                        mb_release_id=release.foreign_release_id,
-                        db_request_id=album.db_request_id,
-                        db_source=album.db_source,
-                        db_quality_override=album.db_quality_override,
-                    )
-                    return True
-
-            # If a monitored release was tried and didn't match, stop here.
-            if has_monitored and not release.monitored:
-                # We already tried the monitored release (choose_release
-                # returns it first) and we're now on a non-monitored one.
-                # This shouldn't happen because we break below, but guard
-                # against it defensively.
-                break
-            if has_monitored and release.monitored:
-                # The monitored release was tried and didn't match.
-                # Skip remaining releases for this quality tier.
-                logger.info(
-                    f"Monitored release ({release.track_count} tracks) not found on "
-                    f"Soulseek for {artist_name} - {album.title} at quality "
-                    f"{allowed_filetype}, skipping non-monitored releases"
-                )
-                break
-
-    # --- Catch-all fallback: accept any audio format if no quality override ---
-    # Quality override means we're upgrading (already imported, want better).
-    # No override means first-time download — take anything we can get.
+    # Catch-all fallback: accept any audio format if no quality override.
+    # Quality override means we're upgrading — don't fall back to worse quality.
     if not quality_override and "*" not in [ft.strip() for ft in (cfg.allowed_filetypes or ())]:
         logger.info(
             f"No match at preferred quality for {artist_name} - {album.title}, "
             f"trying catch-all (any audio format)"
         )
-        allowed_filetype = "*"
-        releases = list(album.releases)
-        has_monitored = any(r.monitored for r in releases)
-        num_releases = len(releases)
-        for _ in range(0, num_releases):
-            if len(releases) == 0:
-                break
-            release = choose_release(artist_name, releases)
-            releases.remove(release)
-            all_tracks = get_album_tracks(album, release_id=release.id)
-            if not all_tracks:
-                continue
-            found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
-            if found:
-                assert downloads is not None
-                grab_list[album_id] = GrabListEntry(
-                    album_id=album_id,
-                    files=downloads,
-                    filetype=allowed_filetype,
-                    title=album.title,
-                    artist=artist_name,
-                    year=album.release_date[0:4],
-                    mb_release_id=release.foreign_release_id,
-                    db_request_id=album.db_request_id,
-                    db_source=album.db_source,
-                    db_quality_override=album.db_quality_override,
-                )
-                return True
-            elif len(release.media) > 1:
-                found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
-                if found:
-                    assert downloads is not None
-                    grab_list[album_id] = GrabListEntry(
-                        album_id=album_id,
-                        files=downloads,
-                        filetype=allowed_filetype,
-                        title=album.title,
-                        artist=artist_name,
-                        year=album.release_date[0:4],
-                        mb_release_id=release.foreign_release_id,
-                        db_request_id=album.db_request_id,
-                        db_source=album.db_source,
-                        db_quality_override=album.db_quality_override,
-                    )
-                    return True
-            if has_monitored and not release.monitored:
-                break
-            if has_monitored and release.monitored:
-                logger.info(
-                    f"Monitored release ({release.track_count} tracks) not found on "
-                    f"Soulseek for {artist_name} - {album.title} at catch-all quality, "
-                    f"skipping non-monitored releases"
-                )
-                break
+        if _try_filetype(album, results, "*", grab_list):
+            return True
 
     return False
 
@@ -1057,7 +998,6 @@ def _search_and_queue_parallel(albums):
 
 
 from lib.grab_list import GrabListEntry
-from lib.quality import verify_filetype
 
 from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
                           slskd_do_enqueue as _slskd_do_enqueue_impl,

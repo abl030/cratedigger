@@ -83,11 +83,19 @@ class SoularrConfig:
     lock_file_path: str = ""
     config_file_path: str = ""
 
+    # --- Derived (computed once at init) ---
+    _allowed_specs: "tuple[AudioFileSpec, ...]" = ()
+
+    def __post_init__(self) -> None:
+        from lib.quality import parse_filetype_config
+        object.__setattr__(
+            self, "_allowed_specs",
+            tuple(parse_filetype_config(s) for s in self.allowed_filetypes),
+        )
+
     @property
     def allowed_specs(self) -> "tuple[AudioFileSpec, ...]":
-        """Parsed AudioFileSpec filters from allowed_filetypes config."""
-        from lib.quality import parse_filetype_config
-        return tuple(parse_filetype_config(s) for s in self.allowed_filetypes)
+        return self._allowed_specs
 
     @classmethod
     def from_ini(cls, config: configparser.ConfigParser,

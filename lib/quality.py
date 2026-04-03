@@ -745,7 +745,7 @@ def parse_filetype_config(config_str: str) -> AudioFileSpec:
     return AudioFileSpec(codec=codec, extension=extension, quality=quality)
 
 
-def file_identity(file: dict[str, Any]) -> AudioFileSpec:
+def file_identity(file: dict[str, Any] | Any) -> AudioFileSpec:
     """Construct an AudioFileSpec from a raw slskd file dict.
 
     This is the IDENTITY form — audio metadata is set, quality is not.
