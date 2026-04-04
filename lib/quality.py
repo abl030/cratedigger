@@ -4,11 +4,98 @@ Pure functions — no database, no filesystem, no external dependencies.
 Used by soularr.py and import_one.py, tested directly against real audio fixtures.
 """
 
+import enum
 import json
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
+_QUALITY_UPGRADE_LIST = [ft.strip() for ft in QUALITY_UPGRADE_TIERS.split(",")]
+
+
+class QualityIntent(enum.Enum):
+    """Explicit quality intent for a pipeline request.
+
+    Replaces the ad-hoc quality_override CSV with a semantic model that
+    search, import, and quality gate logic can branch on directly.
+    """
+    best_effort = "best_effort"
+    flac_only = "flac_only"
+    flac_preferred = "flac_preferred"
+    upgrade = "upgrade"
+
+
+def search_filetypes(intent: QualityIntent, config_allowed: list[str]) -> list[str]:
+    """Map a quality intent to the ordered list of filetypes to search.
+
+    Pure function — no I/O. The returned list is tried in order by the search
+    loop in soularr.py; the first match wins.
+    """
+    if intent == QualityIntent.best_effort:
+        return list(config_allowed)
+    if intent == QualityIntent.flac_only:
+        return ["flac"]
+    if intent == QualityIntent.flac_preferred:
+        return list(_QUALITY_UPGRADE_LIST)
+    # upgrade
+    return list(_QUALITY_UPGRADE_LIST)
+
+
+def intent_allows_catch_all(intent: QualityIntent) -> bool:
+    """Whether this intent permits falling back to any audio format.
+
+    Only best_effort allows catch-all — all other intents restrict quality.
+    """
+    return intent == QualityIntent.best_effort
+
+
+def derive_intent(quality_override: str | None) -> QualityIntent:
+    """Derive a QualityIntent from an existing quality_override DB value.
+
+    Backward-compatible bridge: recognizes all existing DB values
+    (None, "flac", "flac,mp3 v0,mp3 320") and maps them to intents.
+    Also recognizes literal intent names ("flac_only", "flac_preferred").
+    """
+    if not quality_override:
+        return QualityIntent.best_effort
+
+    stripped = quality_override.strip()
+
+    # Literal intent names (new path)
+    try:
+        return QualityIntent(stripped)
+    except ValueError:
+        pass
+
+    # Legacy DB values
+    if stripped == "flac":
+        return QualityIntent.flac_only
+
+    # Any multi-value CSV (including QUALITY_UPGRADE_TIERS) is an upgrade
+    normalized = [ft.strip() for ft in stripped.split(",")]
+    if len(normalized) > 1:
+        return QualityIntent.upgrade
+
+    # Single unknown value — treat as best_effort
+    return QualityIntent.best_effort
+
+
+def intent_to_quality_override(intent: QualityIntent) -> str | None:
+    """Convert a QualityIntent to the quality_override DB string.
+
+    This is the reverse of derive_intent — used when writing to the DB.
+    """
+    if intent == QualityIntent.best_effort:
+        return None
+    if intent == QualityIntent.flac_only:
+        return "flac"
+    if intent == QualityIntent.flac_preferred:
+        # Store the literal intent name so it round-trips through derive_intent.
+        # Legacy code that splits on commas won't encounter this value — it's
+        # only written by the new intent-aware path (Commit 2).
+        return "flac_preferred"
+    # upgrade — keep the CSV for backward compat with existing DB rows
+    return QUALITY_UPGRADE_TIERS
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
