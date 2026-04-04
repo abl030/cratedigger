@@ -1273,39 +1273,57 @@ def main():
         from lib.context import SoularrContext
         _module_ctx = SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 
-        # --- Phase 1: Poll active downloads from previous runs ---
+        # --- Phase 1 + Phase 2 run concurrently ---
+        # Phase 1 (poll downloads) operates on status='downloading' rows.
+        # Phase 2 (search + enqueue) operates on status='wanted' rows.
+        # Disjoint status buckets — the set_downloading() guard prevents
+        # Phase 2 from overwriting Phase 1's transitions.
+        # Phase 1 gets its own DatabaseSource (psycopg2 is not thread-safe).
+        from concurrent.futures import ThreadPoolExecutor
         from lib.download import poll_active_downloads as _poll_impl
-        logger.info("Polling active downloads...")
-        try:
-            _poll_impl(_module_ctx)
-        except Exception:
-            logger.exception("Error polling active downloads — continuing to search phase")
 
-        # --- Phase 2: Search and enqueue new downloads ---
-        logger.info("Getting wanted records from pipeline DB...")
-        wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
-        logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
-
-        if len(wanted_records) > 0:
+        def _run_phase1():
+            """Run Phase 1 in a background thread with its own DB connection."""
+            phase1_source = DatabaseSource(cfg.pipeline_db_dsn)
+            phase1_ctx = SoularrContext(
+                cfg=cfg, slskd=slskd, pipeline_db_source=phase1_source)
             try:
-                filtered = filter_list(wanted_records)
-                if filtered is not None:
-                    failed = grab_most_wanted(filtered)
-                else:
-                    failed = 0
-                    logger.info("No releases wanted that aren't on the deny list and/or blacklisted")
-            except Exception:
-                logger.exception("Fatal error! Exiting...")
+                _poll_impl(phase1_ctx)
+            finally:
+                phase1_source.close()
 
-                if os.path.exists(lock_file_path) and not is_docker():
-                    os.remove(lock_file_path)
-                sys.exit(0)
-            if failed == 0:
-                logger.info("Soularr finished. Exiting...")
+        logger.info("Starting Phase 1 (poll downloads) in background...")
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
+            phase1_future = pool.submit(_run_phase1)
+
+            # --- Phase 2: Search and enqueue new downloads (main thread) ---
+            logger.info("Getting wanted records from pipeline DB...")
+            wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
+            logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
+
+            failed = 0
+            if len(wanted_records) > 0:
+                try:
+                    filtered = filter_list(wanted_records)
+                    if filtered is not None:
+                        failed = grab_most_wanted(filtered)
+                    else:
+                        logger.info("No releases wanted that aren't on the deny list and/or blacklisted")
+                except Exception:
+                    logger.exception("Fatal error in search phase!")
+                if failed == 0:
+                    logger.info("Soularr finished. Exiting...")
+                else:
+                    logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
             else:
-                logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
-        else:
-            logger.info("No releases wanted. Exiting...")
+                logger.info("No releases wanted. Exiting...")
+
+            # Wait for Phase 1 to finish before cleanup
+            try:
+                phase1_future.result()
+                logger.info("Phase 1 (poll downloads) completed.")
+            except Exception:
+                logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
 
         # Clean up completed transfer UI entries
         slskd.transfers.remove_completed_downloads()
