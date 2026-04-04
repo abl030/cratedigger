@@ -16,7 +16,7 @@ import unicodedata
 import difflib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lib.config import SoularrConfig
@@ -250,7 +250,7 @@ def _extract_title_from_filename(filename: str) -> str:
     return _normalize_title(name)
 
 
-def _track_titles_cross_check(expected_tracks: list, slskd_files: list) -> bool:
+def _track_titles_cross_check(expected_tracks: Sequence[Any], slskd_files: Sequence[Any]) -> bool:
     """Cross-check that Soulseek filenames match expected track titles.
 
     Returns True if enough titles match, False if too many are missing.

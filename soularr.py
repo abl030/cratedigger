@@ -8,13 +8,39 @@ import time
 import difflib
 import configparser
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING, TypedDict
 import copy
 import slskd_api
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
     from lib.config import SoularrConfig
+    from lib.context import SoularrContext
+
+
+class TrackRecord(TypedDict):
+    """Track dict from pipeline DB — shape used by matching functions."""
+    albumId: int
+    title: str
+    mediumNumber: int
+
+
+class _SlskdFileRequired(TypedDict):
+    filename: str
+
+class SlskdFile(_SlskdFileRequired, total=False):
+    """File dict from slskd directory browse. Only filename is required."""
+    size: int
+    bitRate: int
+    sampleRate: int
+    bitDepth: int
+    isVariableBitRate: bool
+
+
+class SlskdDirectory(TypedDict):
+    """Directory dict from slskd users.directory() API."""
+    directory: str
+    files: list[SlskdFile]
 
 
 class EnvInterpolation(configparser.ExtendedInterpolation):
@@ -53,7 +79,7 @@ pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set i
 _module_ctx: Any = None  # SoularrContext — set in main()
 
 
-def album_match(expected_tracks, slskd_tracks, username, filetype, ctx):
+def album_match(expected_tracks: Sequence[TrackRecord], slskd_tracks: Sequence[SlskdFile], username: str, filetype: str, ctx: SoularrContext) -> bool:
     counted = []
     total_match = 0.0
 
@@ -120,7 +146,7 @@ def check_ratio(separator, ratio, expected_filename, slskd_filename):
     return ratio
 
 
-def album_track_num(directory):
+def album_track_num(directory: SlskdDirectory) -> dict[str, Any]:
     from lib.quality import AUDIO_EXTENSIONS as _all_audio_exts
     files = directory["files"]
     specs = cfg.allowed_specs
@@ -241,7 +267,7 @@ def choose_release(artist_name, releases):
 
 
 
-def download_filter(allowed_filetype, directory: Any):
+def download_filter(allowed_filetype: str, directory: SlskdDirectory) -> SlskdDirectory:
     """
     Filters the directory listing from SLSKD using the filetype whitelist.
     If not using the whitelist it will only return the audio files of the allowed filetype.
@@ -357,7 +383,7 @@ def _browse_directories(
     return results
 
 
-def check_for_match(tracks, allowed_filetype, file_dirs, username, ctx):
+def check_for_match(tracks: Sequence[TrackRecord], allowed_filetype: str, file_dirs: list[str], username: str, ctx: SoularrContext) -> tuple[bool, Any, str]:
     """
     Does the actual match checking on a single disk/album.
 
