@@ -289,6 +289,36 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(f.status)
 
+    def test_bulk_snapshot_populates_status(self):
+        """When snapshot is provided, use match_transfer instead of per-file API."""
+        from lib.download import slskd_download_status
+        ctx = _make_ctx()
+        f = _make_file(filename="Music\\01 - Track.mp3", username="user1")
+        snapshot = [{
+            "username": "user1",
+            "directories": [{"files": [{
+                "filename": "Music\\01 - Track.mp3",
+                "id": "file-id-1",
+                "state": "Completed, Succeeded",
+                "size": 5000000,
+            }]}],
+        }]
+        ok = slskd_download_status([f], ctx, snapshot=snapshot)
+        self.assertTrue(ok)
+        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        # No per-file API calls should have been made
+        ctx.slskd.transfers.get_download.assert_not_called()
+
+    def test_bulk_snapshot_file_not_found(self):
+        """When snapshot doesn't contain the file, status is None, returns False."""
+        from lib.download import slskd_download_status
+        ctx = _make_ctx()
+        f = _make_file(filename="Music\\missing.mp3", username="user1")
+        snapshot = [{"username": "user1", "directories": [{"files": []}]}]
+        ok = slskd_download_status([f], ctx, snapshot=snapshot)
+        self.assertFalse(ok)
+        self.assertIsNone(f.status)
+
 
 class TestSlskdDoEnqueue(unittest.TestCase):
 
@@ -848,7 +878,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
         # Mock slskd status: file is complete
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Completed, Succeeded"}
             return True
@@ -868,7 +898,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Completed, Succeeded"}
             return True
@@ -898,7 +928,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row(state_dict=state_dict)
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "InProgress", "bytesTransferred": 12345}
             return True
@@ -930,7 +960,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row(state_dict=state_dict)
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "InProgress", "bytesTransferred": 22345}
             return True
@@ -999,7 +1029,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "InProgress", "bytesTransferred": 2048}
             return True
@@ -1044,7 +1074,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ]
         ctx.slskd.transfers.get_all_downloads.side_effect = get_downloads_side_effect
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 if f.username == "user1":
                     f.status = {"state": "Completed, Succeeded"}
@@ -1086,7 +1116,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Completed, Errored"}
             return True
@@ -1117,7 +1147,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         cfg.remote_queue_timeout = 120  # 2 minutes
         cfg.stalled_timeout = 600  # 10 minutes (not exceeded)
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Queued, Remotely"}
             return True
@@ -1150,7 +1180,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         cfg.remote_queue_timeout = 3600
         cfg.stalled_timeout = 120
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Queued, Remotely"}
             return True
@@ -1187,7 +1217,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             "directories": [{"directory": "user1\\Music", "files": slskd_files}],
         }]
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 if f.id:  # Only files with IDs get polled
                     f.status = {"state": "InProgress"}
@@ -1231,7 +1261,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ]}],
         }]
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 if f.filename.endswith("03.flac"):
                     f.status = {"state": "Completed, Errored"}
@@ -1282,7 +1312,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Completed, Succeeded"}
             return True
@@ -1304,7 +1334,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
-        def mock_status(downloads, ctx_arg):
+        def mock_status(downloads, ctx_arg, **kwargs):
             for f in downloads:
                 f.status = {"state": "Completed, Succeeded"}
             return True

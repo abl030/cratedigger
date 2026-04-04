@@ -61,13 +61,26 @@ def cancel_and_delete(files: list[Any], ctx: SoularrContext) -> None:
             shutil.rmtree(delete_dir)
 
 
-def slskd_download_status(downloads: list[Any], ctx: SoularrContext) -> bool:
-    """Get status of each download file from slskd API."""
+def slskd_download_status(downloads: list[Any], ctx: SoularrContext,
+                          *, snapshot: list[dict[str, Any]] | None = None) -> bool:
+    """Get status of each download file from slskd API.
+
+    When snapshot is provided, matches locally against the pre-fetched bulk
+    download list instead of making per-file API calls.
+    """
     ok = True
     for file in downloads:
         try:
-            status = ctx.slskd.transfers.get_download(file.username, file.id)
-            file.status = status
+            if snapshot is not None:
+                transfer = match_transfer(snapshot, file.filename, username=file.username)
+                if transfer is not None:
+                    file.status = dict(transfer)
+                else:
+                    file.status = None
+                    ok = False
+            else:
+                status = ctx.slskd.transfers.get_download(file.username, file.id)
+                file.status = status
         except Exception:
             logger.exception(f"Error getting download status of {file.filename}")
             file.status = None
@@ -563,16 +576,21 @@ def _get_all_downloads_snapshot(
 def rederive_transfer_ids(
     entry: GrabListEntry,
     slskd_client: Any,
+    *,
+    snapshot: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Re-derive slskd transfer IDs for all files in a GrabListEntry.
 
     Queries the slskd bulk download API once and matches by username+filename.
     Updates file.id in-place. Files whose transfers have vanished keep id="".
+    When snapshot is provided, uses it instead of fetching from the API.
     """
-    downloads = _get_all_downloads_snapshot(
-        slskd_client,
-        purpose=f"transfer re-derivation for {entry.artist} - {entry.title}",
-    )
+    downloads = snapshot
+    if downloads is None:
+        downloads = _get_all_downloads_snapshot(
+            slskd_client,
+            purpose=f"transfer re-derivation for {entry.artist} - {entry.title}",
+        )
     if downloads is None:
         return False
 
@@ -779,6 +797,13 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
 
     logger.info(f"Polling {len(downloading)} active download(s)...")
 
+    # One bulk snapshot for the entire poll cycle — avoids per-file API calls
+    cycle_snapshot = _get_all_downloads_snapshot(
+        ctx.slskd, purpose="poll cycle snapshot")
+    if cycle_snapshot is None:
+        logger.warning("Failed to get download snapshot — skipping poll cycle")
+        return
+
     for row in downloading:
         request_id = row["id"]
         raw_state = row.get("active_download_state")
@@ -802,8 +827,8 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
             _run_completed_processing(entry, request_id, state, db, ctx)
             continue
 
-        # Re-derive transfer IDs from slskd
-        if not rederive_transfer_ids(entry, ctx.slskd):
+        # Re-derive transfer IDs from pre-fetched snapshot
+        if not rederive_transfer_ids(entry, ctx.slskd, snapshot=cycle_snapshot):
             logger.warning(f"API error re-deriving transfers for {entry.artist} - {entry.title} "
                            f"— will retry next cycle")
             continue
@@ -829,7 +854,8 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
             f for f in entry.files
             if f.id and not (f.status and str(f.status.get("state", "")).startswith("Completed,"))
         ]
-        if files_requiring_status and not slskd_download_status(files_requiring_status, ctx):
+        if files_requiring_status and not slskd_download_status(
+                files_requiring_status, ctx, snapshot=cycle_snapshot):
             logger.warning(f"API error polling {entry.artist} - {entry.title} — "
                           f"will retry next cycle")
             continue
