@@ -350,6 +350,51 @@ class TestSlskdDoEnqueue(unittest.TestCase):
             result = slskd_do_enqueue("user1", [], "dir", ctx)
         self.assertIsNone(result)
 
+    def test_enqueue_polls_until_ids_found(self):
+        """Transfer IDs appear on 2nd poll — should resolve in 2 iterations, not 5s."""
+        from lib.download import slskd_do_enqueue
+        ctx = _make_ctx()
+        ctx.slskd.transfers.enqueue.return_value = True
+        snapshot_with_id = [{
+            "username": "user1",
+            "directories": [{"files": [{"filename": "track.mp3", "id": "tid-1"}]}],
+        }]
+        snapshot_without_id = [{
+            "username": "user1",
+            "directories": [{"files": []}],
+        }]
+        ctx.slskd.transfers.get_all_downloads.side_effect = [
+            snapshot_without_id,  # 1st poll: not ready
+            snapshot_with_id,     # 2nd poll: ready
+        ]
+        files = [{"filename": "track.mp3", "size": 5000000}]
+        with patch("time.sleep"):
+            result = slskd_do_enqueue("user1", files, "user1\\Music", ctx)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].id, "tid-1")
+        # Should have polled twice
+        self.assertEqual(ctx.slskd.transfers.get_all_downloads.call_count, 2)
+
+    def test_enqueue_timeout_returns_partial(self):
+        """Transfer IDs never appear — should return whatever we have after timeout."""
+        from lib.download import slskd_do_enqueue
+        ctx = _make_ctx()
+        ctx.slskd.transfers.enqueue.return_value = True
+        # Never returns the transfer ID
+        ctx.slskd.transfers.get_all_downloads.return_value = [{
+            "username": "user1",
+            "directories": [{"files": []}],
+        }]
+        files = [{"filename": "track.mp3", "size": 5000000}]
+        with patch("time.sleep"):
+            result = slskd_do_enqueue("user1", files, "user1\\Music", ctx)
+        # Should return empty list (no files matched), not None
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result), 0)
+
 
 class TestGatherSpectralContextFunction(unittest.TestCase):
     """Test the actual _gather_spectral_context function from lib/download."""

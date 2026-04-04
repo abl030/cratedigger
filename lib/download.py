@@ -99,14 +99,33 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
     if not enqueue:
         return None
 
-    downloads: list[DownloadFile] = []
-    time.sleep(5)
-    download_list = _get_all_downloads_snapshot(
-        ctx.slskd,
-        purpose=f"download status for {username} after enqueue",
-    )
+    # Poll for transfer IDs — slskd needs time to register the enqueue.
+    # Typically resolves in 1-2s; max 10s before giving up.
+    max_wait = 10.0
+    interval = 1.0
+    elapsed = 0.0
+    download_list: list[dict[str, Any]] | None = None
+
+    while elapsed < max_wait:
+        time.sleep(interval)
+        elapsed += interval
+        download_list = _get_all_downloads_snapshot(
+            ctx.slskd,
+            purpose=f"download status for {username} after enqueue",
+        )
+        if download_list is None:
+            continue
+        if all(
+            match_transfer_id(download_list, f["filename"], username=username)
+            is not None
+            for f in files
+        ):
+            break
+
     if download_list is None:
         return None
+
+    downloads: list[DownloadFile] = []
     for file in files:
         transfer_id = match_transfer_id(
             download_list,
