@@ -325,18 +325,18 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
                 broken_user.append(username)
                 logger.debug(f"Updated broken users {broken_user}")
                 return False, {}, ""
-            folder_cache[username][file_dir] = copy.deepcopy(directory)
+            folder_cache[username][file_dir] = directory
         else:
             logger.info(f"User: {username} Folder: {file_dir} in cache. Using cached value")
-            directory = copy.deepcopy(folder_cache[username][file_dir])
 
+        directory = folder_cache[username][file_dir]
         track_num = len(tracks)
         tracks_info = album_track_num(directory)
 
         if tracks_info["count"] == track_num and tracks_info["filetype"] != "":
             if album_match(tracks, directory["files"], username, allowed_filetype):
                 if _track_titles_cross_check(tracks, directory["files"]):
-                    return True, directory, file_dir
+                    return True, copy.deepcopy(directory), file_dir
                 else:
                     logger.warning(
                         f"Track title cross-check FAILED for user {username}, "

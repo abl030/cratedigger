@@ -569,5 +569,100 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         self.assertEqual(results, original_results)
 
 
+class TestDeepcopyDeferredToMatch(unittest.TestCase):
+    """Verify deepcopy only happens for matched directories, not every lookup."""
+
+    def setUp(self):
+        from lib.quality import parse_filetype_config
+        self._orig_cfg = soularr.cfg
+        self._orig_slskd = soularr.slskd
+        self._orig_folder_cache = soularr.folder_cache
+        self._orig_broken_user = soularr.broken_user
+        self._orig_album_cache = soularr._current_album_cache
+
+        mock_cfg = MagicMock()
+        mock_cfg.allowed_filetypes = ("flac",)
+        mock_cfg.allowed_specs = tuple(parse_filetype_config(s) for s in mock_cfg.allowed_filetypes)
+        mock_cfg.minimum_match_ratio = 0.5
+        mock_cfg.ignored_users = ()
+        mock_cfg.download_filtering = True
+        mock_cfg.use_extension_whitelist = True
+        mock_cfg.extensions_whitelist = ("jpg",)
+        soularr.cfg = mock_cfg
+
+        soularr.folder_cache = {}
+        soularr.broken_user = []
+        soularr._current_album_cache = {}
+        soularr._slskd_version_gt_0_22_2 = True
+
+    def tearDown(self):
+        soularr.cfg = self._orig_cfg
+        soularr.slskd = self._orig_slskd
+        soularr.folder_cache = self._orig_folder_cache
+        soularr.broken_user = self._orig_broken_user
+        soularr._current_album_cache = self._orig_album_cache
+        soularr._slskd_version_gt_0_22_2 = None
+
+    def test_folder_cache_not_corrupted_after_download_filter(self):
+        """download_filter mutates directory['files'], but folder_cache should be intact."""
+        dir_files = [
+            {"filename": "01 - Track One.flac", "size": 100},
+            {"filename": "cover.jpg", "size": 50},
+            {"filename": "info.nfo", "size": 10},
+        ]
+        # Pre-populate folder_cache (simulating a previous browse)
+        soularr.folder_cache["testuser"] = {
+            "Music\\Album": {"files": list(dir_files), "directory": "Music\\Album"}
+        }
+
+        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+
+        # First call: match with 1 track, 1 audio file
+        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        found, directory, file_dir = soularr.check_for_match(
+            tracks, "flac", ["Music\\Album"], "testuser"
+        )
+        self.assertTrue(found)
+
+        # Mutate the returned directory via download_filter (as try_enqueue does)
+        soularr.download_filter("flac", directory)
+
+        # folder_cache should still have ALL 3 files (including .nfo)
+        cached = soularr.folder_cache["testuser"]["Music\\Album"]
+        cached_filenames = [f["filename"] for f in cached["files"]]
+        self.assertIn("info.nfo", cached_filenames)
+        self.assertEqual(len(cached["files"]), 3)
+
+    def test_second_lookup_after_mutation_still_works(self):
+        """A second check_for_match on the same dir should work after first was mutated."""
+        dir_files = [
+            {"filename": "01 - Track One.flac", "size": 100},
+            {"filename": "cover.jpg", "size": 50},
+        ]
+        soularr.folder_cache["testuser"] = {
+            "Music\\Album": {"files": list(dir_files), "directory": "Music\\Album"}
+        }
+
+        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+
+        # First match
+        found1, dir1, _ = soularr.check_for_match(
+            tracks, "flac", ["Music\\Album"], "testuser"
+        )
+        self.assertTrue(found1)
+
+        # Mutate it
+        soularr.download_filter("flac", dir1)
+
+        # Second match on the same cached dir should still succeed
+        found2, dir2, _ = soularr.check_for_match(
+            tracks, "flac", ["Music\\Album"], "testuser"
+        )
+        self.assertTrue(found2)
+        # And should have both files (not the filtered version)
+        self.assertEqual(len(dir2["files"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
