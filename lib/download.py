@@ -18,7 +18,8 @@ import music_tag
 
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (spectral_import_decision, SpectralContext,
-                         ActiveDownloadState, ActiveDownloadFileState)
+                         ActiveDownloadState, ActiveDownloadFileState,
+                         DownloadDecision, decide_download_action)
 from lib.import_dispatch import (_build_download_info, dispatch_import)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
@@ -837,54 +838,55 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
         state_changed = _capture_download_progress(statusful_files, state, now)
 
         all_remote_queued = _all_files_remotely_queued(entry.files, queued)
+        error_filenames = [f.filename for f in problems] if problems is not None else None
+        file_retries = {f.filename: (f.retry or 0) for f in entry.files}
 
-        # Remote queue timeout: all files are still waiting on the peer's queue.
-        # Do not apply stalled_timeout to this state; that policy is only for
-        # transfers that have actually started and then stopped making progress.
-        if all_remote_queued and elapsed_seconds >= ctx.cfg.remote_queue_timeout:
-            _timeout_album(entry, request_id,
-                          f"remote_queue_timeout {ctx.cfg.remote_queue_timeout}s exceeded "
-                          f"(all {queued} files queued remotely)", ctx)
+        progress_at = state.last_progress_at or state.enqueued_at
+        idle_seconds = (now - datetime.fromisoformat(progress_at)).total_seconds()
+
+        verdict = decide_download_action(
+            album_done=album_done,
+            error_filenames=error_filenames,
+            total_files=len(entry.files),
+            all_remote_queued=all_remote_queued,
+            elapsed_seconds=elapsed_seconds,
+            idle_seconds=idle_seconds,
+            remote_queue_timeout=ctx.cfg.remote_queue_timeout,
+            stalled_timeout=ctx.cfg.stalled_timeout,
+            file_retries=file_retries,
+            max_file_retries=MAX_FILE_RETRIES,
+            processing_started=False,
+        )
+
+        if verdict.decision == DownloadDecision.timeout_remote_queue:
+            _timeout_album(entry, request_id, verdict.reason, ctx)
             continue
 
-        if album_done and problems is None:
+        if verdict.decision == DownloadDecision.complete:
             logger.info(f"Download complete: {entry.artist} - {entry.title}")
             _run_completed_processing(entry, request_id, state, db, ctx)
             continue
 
-        if problems is not None:
-            # All files errored → timeout the album
-            if len(problems) == len(entry.files):
-                _timeout_album(entry, request_id,
-                              f"all {len(problems)} files errored", ctx)
-                continue
+        if verdict.decision == DownloadDecision.timeout_all_errored:
+            _timeout_album(entry, request_id, verdict.reason, ctx)
+            continue
 
-            # Partial errors: attempt re-enqueue for errored files
-            album_timed_out = False
-            for file in problems:
-                state_str = file.status.get("state", "") if file.status else ""
-                if state_str in ("Completed, Cancelled", "Completed, TimedOut",
-                                 "Completed, Errored", "Completed, Aborted",
-                                 "Completed, Rejected"):
-                    for df in entry.files:
-                        if df.filename == file.filename:
-                            retries_used = df.retry or 0
-                            if retries_used >= MAX_FILE_RETRIES:
-                                _timeout_album(
-                                    entry,
-                                    request_id,
-                                    f"file exceeded retry limit after "
-                                    f"{MAX_FILE_RETRIES} retries: {file.filename}",
-                                    ctx,
-                                )
-                                album_timed_out = True
-                                break
+        if verdict.decision == DownloadDecision.timeout_stalled:
+            _timeout_album(entry, request_id, verdict.reason, ctx)
+            continue
 
-                            retries_used += 1
-                            df.retry = retries_used
-                            logger.info(f"Re-enqueue failed file "
-                                        f"({retries_used}/{MAX_FILE_RETRIES} retries): "
-                                        f"{file.filename}")
+        if verdict.decision == DownloadDecision.retry_files:
+            for retry_filename in verdict.files_to_retry:
+                for df in entry.files:
+                    if df.filename == retry_filename:
+                        retries_used = (df.retry or 0) + 1
+                        df.retry = retries_used
+                        logger.info(f"Re-enqueue failed file "
+                                    f"({retries_used}/{MAX_FILE_RETRIES} retries): "
+                                    f"{retry_filename}")
+                        # Find the problem file for username/size/dir
+                        file = next((f for f in entry.files if f.filename == retry_filename), None)
+                        if file:
                             requeue = slskd_do_enqueue(
                                 file.username,
                                 [{"filename": file.filename, "size": file.size}],
@@ -896,32 +898,14 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
                                 df.last_state = None
                                 state.last_progress_at = now.isoformat()
                             else:
-                                logger.warning(f"Failed to re-enqueue file: {file.filename}")
-                            break
-                    if album_timed_out:
+                                logger.warning(f"Failed to re-enqueue file: {retry_filename}")
                         break
-            if album_timed_out:
-                continue
 
             refreshed = db.get_request(request_id)
             if refreshed and refreshed["status"] != "downloading":
                 continue
 
-        if not all_remote_queued:
-            progress_at = state.last_progress_at or state.enqueued_at
-            idle_seconds = (
-                now - datetime.fromisoformat(progress_at)
-            ).total_seconds()
-            if idle_seconds >= ctx.cfg.stalled_timeout:
-                _timeout_album(
-                    entry,
-                    request_id,
-                    f"no download progress for {idle_seconds:.0f}s "
-                    f"(stalled_timeout {ctx.cfg.stalled_timeout}s)",
-                    ctx,
-                )
-                continue
-
+        # In progress — persist state and log
         refreshed = db.get_request(request_id)
         if refreshed and refreshed["status"] != "downloading":
             continue

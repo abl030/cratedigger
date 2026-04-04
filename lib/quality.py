@@ -99,6 +99,92 @@ def intent_to_quality_override(intent: QualityIntent) -> str | None:
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
+
+# --- Download state reducer (pure decision for async poller) ---
+
+class DownloadDecision(enum.Enum):
+    """High-level decision from the download state reducer."""
+    in_progress = "in_progress"
+    complete = "complete"
+    retry_files = "retry_files"
+    timeout_remote_queue = "timeout_remote_queue"
+    timeout_stalled = "timeout_stalled"
+    timeout_all_errored = "timeout_all_errored"
+    processing = "processing"
+
+
+@dataclass(frozen=True)
+class DownloadVerdict:
+    """Result of decide_download_action — typed decision for the poller."""
+    decision: DownloadDecision
+    files_to_retry: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def decide_download_action(
+    *,
+    album_done: bool,
+    error_filenames: list[str] | None,
+    total_files: int,
+    all_remote_queued: bool,
+    elapsed_seconds: float,
+    idle_seconds: float,
+    remote_queue_timeout: int,
+    stalled_timeout: int,
+    file_retries: dict[str, int],
+    max_file_retries: int,
+    processing_started: bool,
+) -> DownloadVerdict:
+    """Pure download state reducer — no I/O, no DB, no slskd.
+
+    Takes a snapshot of the download state and returns a typed decision
+    that the poller acts on.
+    """
+    if processing_started:
+        return DownloadVerdict(DownloadDecision.processing)
+
+    if album_done and error_filenames is None:
+        return DownloadVerdict(DownloadDecision.complete)
+
+    # Remote queue timeout: all files waiting on peer, total elapsed exceeded
+    if all_remote_queued and elapsed_seconds >= remote_queue_timeout:
+        return DownloadVerdict(
+            DownloadDecision.timeout_remote_queue,
+            reason=f"remote_queue_timeout {remote_queue_timeout}s exceeded")
+
+    # Error handling
+    if error_filenames is not None:
+        if len(error_filenames) == total_files:
+            return DownloadVerdict(
+                DownloadDecision.timeout_all_errored,
+                reason=f"all {total_files} files errored")
+
+        # Check which files can be retried
+        files_to_retry = []
+        for fn in error_filenames:
+            retries = file_retries.get(fn, 0)
+            if retries >= max_file_retries:
+                return DownloadVerdict(
+                    DownloadDecision.timeout_stalled,
+                    reason=f"file exceeded retry limit after "
+                           f"{max_file_retries} retries: {fn}")
+            files_to_retry.append(fn)
+
+        if files_to_retry:
+            return DownloadVerdict(
+                DownloadDecision.retry_files,
+                files_to_retry=files_to_retry)
+
+    # Stall detection (only when not all remotely queued)
+    if not all_remote_queued and idle_seconds >= stalled_timeout:
+        return DownloadVerdict(
+            DownloadDecision.timeout_stalled,
+            reason=f"no download progress for {idle_seconds:.0f}s "
+                   f"(stalled_timeout {stalled_timeout}s)")
+
+    return DownloadVerdict(DownloadDecision.in_progress)
+
+
 @dataclass
 class HarnessItem:
     """Local file as seen by the beets harness during matching."""
