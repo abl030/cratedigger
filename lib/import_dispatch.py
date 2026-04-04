@@ -132,11 +132,18 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
         if decision == "requeue_upgrade":
-            upgrade_override = intent_to_quality_override(QualityIntent.upgrade)
             if verified_lossless:
                 logger.info(
                     f"QUALITY GATE: {label} gate_bitrate < {QUALITY_MIN_BITRATE_KBPS}kbps "
                     f"but verified_lossless=True — accepting")
+                db = ctx.pipeline_db_source._get_db()
+                update_fields_vl: dict[str, object] = {"min_bitrate": min_br_kbps}
+                if spectral_br:
+                    update_fields_vl["spectral_bitrate"] = spectral_br
+                apply_transition(db, request_id, "imported",
+                                 from_status="imported", **update_fields_vl)
+                return
+            upgrade_override = intent_to_quality_override(QualityIntent.upgrade)
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",

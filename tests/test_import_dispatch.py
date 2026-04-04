@@ -334,8 +334,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         album_data = _make_album_data()
         ctx = _make_ctx()
         db = ctx.pipeline_db_source._get_db.return_value
-        db.get_request.return_value = make_request_row(
-            spectral_bitrate=None, verified_lossless=False, **extra_req_fields)
+        merged = {"spectral_bitrate": None, "verified_lossless": False}
+        merged.update(extra_req_fields)
+        db.get_request.return_value = make_request_row(**merged)
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
              patch("lib.quality.quality_gate_decision",
@@ -358,6 +359,14 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
             intent_to_quality_override(QualityIntent.upgrade),
         )
+
+    def test_requeue_upgrade_verified_lossless_accepts(self):
+        """verified_lossless=True should accept, not requeue, even on requeue_upgrade."""
+        db = self._run_quality_gate("requeue_upgrade", verified_lossless=True)
+        # Should NOT have called reset_to_wanted
+        db.reset_to_wanted.assert_not_called()
+        # Should NOT have denylisted anyone
+        db.add_denylist.assert_not_called()
 
     def test_requeue_flac_uses_intent(self):
         """requeue_flac should use intent_to_quality_override(flac_only)."""
