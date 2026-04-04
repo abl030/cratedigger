@@ -149,6 +149,110 @@ def make_download_list(directories):
 # ─── Tests ───────────────────────────────────────────────────────────
 
 
+class TestBuildSearchCache(unittest.TestCase):
+    """Direct tests for _build_search_cache — the pure cache-building function."""
+
+    def _specs(self, *filetypes):
+        from lib.quality import parse_filetype_config
+        return [(ft, parse_filetype_config(ft)) for ft in filetypes]
+
+    def test_basic_flac(self):
+        """FLAC files should be cached under their username and filetype."""
+        results = [make_search_result("user1", [
+            {"filename": "Music\\Album\\01.flac", "size": 100},
+            {"filename": "Music\\Album\\02.flac", "size": 100},
+        ])]
+        entries, speeds, counts = soularr._build_search_cache(results, self._specs("flac"))
+        self.assertIn("user1", entries)
+        self.assertIn("flac", entries["user1"])
+        self.assertEqual(entries["user1"]["flac"], ["Music\\Album"])
+        self.assertEqual(counts["user1"]["Music\\Album"], 2)
+
+    def test_upload_speed_max(self):
+        """Fastest upload speed per user should be kept."""
+        results = [
+            make_search_result("user1", [
+                {"filename": "A\\01.flac", "size": 100},
+            ], upload_speed=1000),
+            make_search_result("user1", [
+                {"filename": "B\\01.flac", "size": 100},
+            ], upload_speed=5000),
+        ]
+        _, speeds, _ = soularr._build_search_cache(results, self._specs("flac"))
+        self.assertEqual(speeds["user1"], 5000)
+
+    def test_multiple_filetypes(self):
+        """Files should be categorized into separate filetype buckets."""
+        results = [make_search_result("user1", [
+            {"filename": "A\\01.flac", "size": 100, "bitRate": 1411,
+             "sampleRate": 44100, "bitDepth": 16, "isVariableBitRate": False},
+            {"filename": "A\\01.mp3", "size": 50, "bitRate": 245,
+             "sampleRate": 44100, "bitDepth": 0, "isVariableBitRate": True},
+        ])]
+        entries, _, _ = soularr._build_search_cache(
+            results, self._specs("flac", "mp3 v0")
+        )
+        self.assertIn("flac", entries["user1"])
+        self.assertIn("mp3 v0", entries["user1"])
+
+    def test_non_audio_ignored(self):
+        """Non-audio files should not be counted or cached."""
+        results = [make_search_result("user1", [
+            {"filename": "A\\cover.jpg", "size": 50},
+        ])]
+        entries, _, counts = soularr._build_search_cache(results, self._specs("flac"))
+        # User entry created but no filetypes
+        self.assertEqual(entries.get("user1", {}), {})
+
+    def test_empty_results(self):
+        """Empty search results should return empty dicts."""
+        entries, speeds, counts = soularr._build_search_cache([], self._specs("flac"))
+        self.assertEqual(entries, {})
+        self.assertEqual(speeds, {})
+        self.assertEqual(counts, {})
+
+    def test_dedup_dirs(self):
+        """Same directory from multiple files should appear once."""
+        results = [make_search_result("user1", [
+            {"filename": "A\\01.flac", "size": 100},
+            {"filename": "A\\02.flac", "size": 100},
+            {"filename": "A\\03.flac", "size": 100},
+        ])]
+        entries, _, counts = soularr._build_search_cache(results, self._specs("flac"))
+        self.assertEqual(entries["user1"]["flac"], ["A"])
+        self.assertEqual(counts["user1"]["A"], 3)
+
+
+class TestGetUserDirs(unittest.TestCase):
+    """Direct tests for _get_user_dirs — candidate directory selection."""
+
+    def test_specific_filetype(self):
+        """Should return dirs for the exact filetype requested."""
+        results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir3"]}
+        self.assertEqual(soularr._get_user_dirs(results, "flac"), ["Dir1", "Dir2"])
+
+    def test_missing_filetype_returns_none(self):
+        """Should return None when the user has no dirs for that filetype."""
+        results = {"flac": ["Dir1"]}
+        self.assertIsNone(soularr._get_user_dirs(results, "mp3 v0"))
+
+    def test_catch_all_merges_all(self):
+        """Catch-all '*' should merge dirs from all filetypes, deduped."""
+        results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir2", "Dir3"]}
+        dirs = soularr._get_user_dirs(results, "*")
+        self.assertEqual(dirs, ["Dir1", "Dir2", "Dir3"])
+
+    def test_catch_all_empty_returns_none(self):
+        """Catch-all with no dirs should return None."""
+        results = {"flac": [], "mp3 v0": []}
+        self.assertIsNone(soularr._get_user_dirs(results, "*"))
+
+    def test_catch_all_single_filetype(self):
+        """Catch-all with one filetype should return those dirs."""
+        results = {"flac": ["Dir1"]}
+        self.assertEqual(soularr._get_user_dirs(results, "*"), ["Dir1"])
+
+
 class TestRawDictBoundary(unittest.TestCase):
     """Verify that functions receiving raw slskd dicts work with plain dicts,
     not DownloadFile instances."""
