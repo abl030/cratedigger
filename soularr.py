@@ -300,6 +300,40 @@ def _get_version_check() -> bool:
     return _slskd_version_gt_0_22_2
 
 
+_PENALTY_KEYWORDS = (
+    "archive", "best of", "greatest hits", "magazine", "compilation",
+    "singles", "soundtrack", "various", "bootleg", "discography",
+)
+
+
+def rank_candidate_dirs(
+    file_dirs: list[str], album_title: str, artist_name: str
+) -> list[str]:
+    """Sort candidate directories by likelihood of being the correct album.
+
+    Promotes paths containing the album or artist name; demotes paths with
+    penalty keywords (compilations, archives, etc.). Stable sort — equal
+    scores preserve original order.
+    """
+    title_lower = album_title.lower()
+    artist_lower = artist_name.lower()
+
+    def _score(d: str) -> int:
+        d_lower = d.lower()
+        score = 0
+        if title_lower in d_lower:
+            score += 2
+        if artist_lower in d_lower:
+            score += 1
+        for kw in _PENALTY_KEYWORDS:
+            if kw in d_lower:
+                score -= 3
+                break  # one penalty is enough
+        return score
+
+    return sorted(file_dirs, key=_score, reverse=True)
+
+
 def check_for_match(tracks, allowed_filetype, file_dirs, username):
     """
     Does the actual match checking on a single disk/album.
@@ -308,7 +342,10 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
     if username in broken_user:
         return False, {}, ""
     track_num = len(tracks)
-    for file_dir in file_dirs:
+    # Rank dirs so we try the most promising ones first
+    album_info = get_album_by_id(tracks[0]["albumId"])
+    ranked_dirs = rank_candidate_dirs(file_dirs, album_info.title, album_info.artist_name)
+    for file_dir in ranked_dirs:
         neg_key = (username, file_dir, track_num, allowed_filetype)
         if neg_key in _negative_matches:
             logger.debug(f"Negative cache hit: {username} {file_dir} ({track_num} tracks, {allowed_filetype})")

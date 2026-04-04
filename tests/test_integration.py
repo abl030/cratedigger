@@ -853,5 +853,63 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         self.mock_slskd.users.directory.assert_called_once()
 
 
+class TestRankCandidateDirs(unittest.TestCase):
+    """Verify candidate directory ranking promotes good paths and demotes bad ones."""
+
+    def test_album_name_in_path_promoted(self):
+        dirs = [
+            "Music\\Various\\Collection",
+            "Music\\Artist\\The Album Name",
+            "Music\\Other\\Random",
+        ]
+        ranked = soularr.rank_candidate_dirs(dirs, "The Album Name", "Artist")
+        self.assertEqual(ranked[0], "Music\\Artist\\The Album Name")
+
+    def test_artist_name_in_path_promoted(self):
+        dirs = [
+            "Music\\Other\\Album",
+            "Music\\Artist\\Album",
+        ]
+        ranked = soularr.rank_candidate_dirs(dirs, "Album", "Artist")
+        self.assertEqual(ranked[0], "Music\\Artist\\Album")
+
+    def test_penalty_keywords_demoted(self):
+        dirs = [
+            "Music\\Artist\\Best Of Artist",
+            "Music\\Artist\\The Real Album",
+            "Music\\Artist\\Greatest Hits",
+        ]
+        ranked = soularr.rank_candidate_dirs(dirs, "The Real Album", "Artist")
+        self.assertEqual(ranked[0], "Music\\Artist\\The Real Album")
+        # Best Of and Greatest Hits should be last
+        penalty_dirs = ranked[1:]
+        self.assertTrue(all(
+            any(kw in d.lower() for kw in ["best of", "greatest hits"])
+            for d in penalty_dirs
+        ))
+
+    def test_discography_demoted(self):
+        dirs = [
+            "Music\\Artist\\Discography\\Album",
+            "Music\\Artist\\Album",
+        ]
+        ranked = soularr.rank_candidate_dirs(dirs, "Album", "Artist")
+        self.assertEqual(ranked[0], "Music\\Artist\\Album")
+
+    def test_case_insensitive(self):
+        dirs = [
+            "music\\other\\random",
+            "MUSIC\\ARTIST\\THE ALBUM",
+        ]
+        ranked = soularr.rank_candidate_dirs(dirs, "The Album", "Artist")
+        self.assertEqual(ranked[0], "MUSIC\\ARTIST\\THE ALBUM")
+
+    def test_preserves_order_for_equal_scores(self):
+        """Dirs with equal scores should preserve original order."""
+        dirs = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
+        ranked = soularr.rank_candidate_dirs(dirs, "Unrelated", "Nobody")
+        self.assertEqual(ranked, dirs)
+
+
 if __name__ == "__main__":
     unittest.main()
