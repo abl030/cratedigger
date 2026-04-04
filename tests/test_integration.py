@@ -195,7 +195,7 @@ class TestRawDictBoundary(unittest.TestCase):
             soularr.cfg = orig_cfg
 
     def test_download_filter_with_raw_dicts(self):
-        """download_filter receives raw directory dicts."""
+        """download_filter returns a new dict without mutating the input."""
         orig_cfg = soularr.cfg
         soularr.cfg = _make_matching_cfg(
             download_filtering=True,
@@ -208,11 +208,13 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "cover.jpg", "size": 50},
                 {"filename": "info.nfo", "size": 10},
             ])
-            soularr.download_filter("flac", directory)
-            filenames = [f["filename"] for f in directory["files"]]
+            filtered = soularr.download_filter("flac", directory)
+            filenames = [f["filename"] for f in filtered["files"]]
             self.assertIn("01 - Track.flac", filenames)
             self.assertIn("cover.jpg", filenames)
             self.assertNotIn("info.nfo", filenames)
+            # Original should be unchanged
+            self.assertEqual(len(directory["files"]), 3)
         finally:
             soularr.cfg = orig_cfg
 
@@ -514,7 +516,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         soularr.pipeline_db_source = self._orig_pdb
 
     def test_folder_cache_not_corrupted_after_download_filter(self):
-        """download_filter mutates directory['files'], but folder_cache should be intact."""
+        """download_filter returns a new dict — folder_cache should be intact."""
         dir_files = [
             {"filename": "01 - Track One.flac", "size": 100},
             {"filename": "cover.jpg", "size": 50},
