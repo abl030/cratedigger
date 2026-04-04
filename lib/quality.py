@@ -1581,6 +1581,42 @@ class RepairAction:
     detail: str
 
 
+def find_orphaned_downloads(
+    db_rows: list[dict[str, Any]],
+    active_transfers: set[tuple[str, str]],
+) -> list[OrphanInfo]:
+    """Detect downloading rows whose slskd transfers no longer exist. Pure — no I/O.
+
+    Args:
+        db_rows: album_requests rows (must include status, active_download_state).
+        active_transfers: set of (username, filename) tuples from slskd API.
+
+    Returns OrphanInfo for each downloading row where NONE of its files
+    appear in active_transfers.
+    """
+    issues: list[OrphanInfo] = []
+    for row in db_rows:
+        if row["status"] != "downloading":
+            continue
+        state = row.get("active_download_state")
+        if not state:
+            continue  # corrupt_downloading — handled by find_inconsistencies
+        files = state.get("files", [])
+        if not files:
+            continue
+        has_active = any(
+            (f.get("username"), f.get("filename")) in active_transfers
+            for f in files
+        )
+        if not has_active:
+            usernames = sorted(set(f.get("username", "?") for f in files))
+            issues.append(OrphanInfo(
+                request_id=row["id"],
+                issue_type="orphaned_download",
+                detail=f"no active slskd transfers (users: {', '.join(usernames)})"))
+    return issues
+
+
 def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
     """Detect inconsistent rows in album_requests. Pure — no I/O.
 
@@ -1612,11 +1648,11 @@ def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
 
 def suggest_repair(issue: OrphanInfo) -> RepairAction:
     """Suggest a repair action for a detected inconsistency. Pure."""
-    if issue.issue_type == "corrupt_downloading":
+    if issue.issue_type in ("corrupt_downloading", "orphaned_download"):
         return RepairAction(
             request_id=issue.request_id,
             action="reset_to_wanted",
-            detail="Reset corrupt downloading row to wanted")
+            detail="Reset downloading row to wanted (transfers gone)")
     elif issue.issue_type == "stale_imported_path":
         return RepairAction(
             request_id=issue.request_id,
