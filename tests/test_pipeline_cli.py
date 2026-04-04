@@ -220,5 +220,57 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
         self.assertEqual(len(ads["files"]), 1)
 
 
+class TestCmdSetIntent(unittest.TestCase):
+    """Tests for cmd_set_intent — quality intent CLI command."""
+
+    @patch("builtins.print")
+    def test_set_intent_on_wanted(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = {
+            "id": 1, "status": "wanted", "artist_name": "A",
+            "album_title": "B", "quality_override": None, "min_bitrate": None,
+        }
+        args = MagicMock(id=1, intent="flac_only")
+        pipeline_cli.cmd_set_intent(db, args)
+        db._execute.assert_called_once()
+        call_args = db._execute.call_args[0]
+        self.assertIn("quality_override", call_args[0])
+        self.assertEqual(call_args[1][0], "flac")
+
+    @patch("builtins.print")
+    def test_set_intent_on_imported_requeues(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = {
+            "id": 2, "status": "imported", "artist_name": "A",
+            "album_title": "B", "quality_override": None, "min_bitrate": 245,
+        }
+        args = MagicMock(id=2, intent="flac_preferred")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.reset_to_wanted.assert_called_once()
+        call_kwargs = db.reset_to_wanted.call_args.kwargs if db.reset_to_wanted.call_args.kwargs else db.reset_to_wanted.call_args[1]
+        self.assertEqual(call_kwargs.get("quality_override"), "flac_preferred")
+
+    @patch("builtins.print")
+    def test_set_intent_refuses_downloading(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = {
+            "id": 3, "status": "downloading", "artist_name": "A",
+            "album_title": "B",
+        }
+        args = MagicMock(id=3, intent="flac_only")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.reset_to_wanted.assert_not_called()
+        db._execute.assert_not_called()
+
+    @patch("builtins.print")
+    def test_set_intent_not_found(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = None
+        args = MagicMock(id=99, intent="upgrade")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.reset_to_wanted.assert_not_called()
+        db._execute.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement, PostflightInfo,
-                         QUALITY_UPGRADE_TIERS)
+                         QUALITY_UPGRADE_TIERS,
+                         QualityIntent, intent_to_quality_override)
 
 
 def _make_import_result(decision="import", new_min_bitrate=245,
@@ -329,6 +330,78 @@ class TestOverrideMinBitrate(unittest.TestCase):
             "on_disk_spectral_bitrate": None,
         })
         self.assertIsNone(val)
+
+
+class TestQualityGateUsesIntent(unittest.TestCase):
+    """Verify _check_quality_gate uses intent_to_quality_override."""
+
+    def _run_quality_gate(self, gate_decision, **extra_req_fields):
+        """Run _check_quality_gate with a mocked quality_gate_decision."""
+        from lib.import_dispatch import _check_quality_gate
+        album_data = _make_album_data()
+        ctx = _make_ctx()
+        db = ctx.pipeline_db_source._get_db.return_value
+        req_fields = {"spectral_bitrate": None, "verified_lossless": False,
+                      **extra_req_fields}
+        db.get_request.return_value = req_fields
+
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
+             patch("lib.quality.quality_gate_decision",
+                   return_value=gate_decision):
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = MagicMock(
+                min_bitrate_kbps=192, is_cbr=True)
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate(album_data, 42, ctx)
+
+        return db
+
+    def test_requeue_upgrade_uses_intent(self):
+        """requeue_upgrade should use intent_to_quality_override(upgrade)."""
+        db = self._run_quality_gate("requeue_upgrade")
+        call_args = db.reset_to_wanted.call_args
+        self.assertEqual(
+            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            intent_to_quality_override(QualityIntent.upgrade),
+        )
+
+    def test_requeue_flac_uses_intent(self):
+        """requeue_flac should use intent_to_quality_override(flac_only)."""
+        db = self._run_quality_gate("requeue_flac")
+        call_args = db.reset_to_wanted.call_args
+        self.assertEqual(
+            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            intent_to_quality_override(QualityIntent.flac_only),
+        )
+
+    def test_dispatch_requeue_uses_intent(self):
+        """dispatch_import requeue path should use intent_to_quality_override."""
+        ir = _make_import_result(decision="transcode_upgrade",
+                                 new_min_bitrate=227)
+        album_data = _make_album_data()
+        ctx = _make_ctx()
+        bv_result = _make_bv_result()
+        dl_info = DownloadInfo(filetype="mp3")
+
+        with patch("lib.import_dispatch.sp.run") as mock_run, \
+             patch("lib.import_dispatch._cleanup_staged_dir"), \
+             patch("lib.import_dispatch.trigger_meelo_scan"), \
+             patch("lib.import_dispatch._check_quality_gate"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="", stderr="")
+            from lib.import_dispatch import dispatch_import
+            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
+                            42, ctx)
+
+        db = ctx.pipeline_db_source._get_db()
+        call_args = db.reset_to_wanted.call_args
+        self.assertEqual(
+            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            intent_to_quality_override(QualityIntent.upgrade),
+        )
 
 
 if __name__ == "__main__":

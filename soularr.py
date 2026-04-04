@@ -1000,15 +1000,15 @@ def find_download(album, grab_list, ctx):
     # Cache album so get_album_by_id() works during matching
     ctx.current_album_cache[album_id] = album
 
-    filetypes_to_try = cfg.allowed_filetypes
+    from lib.quality import derive_intent, search_filetypes, intent_allows_catch_all
 
-    # Per-album quality override from pipeline DB (e.g. upgrade requests)
-    quality_override = album.db_quality_override
-    if quality_override:
-        filetypes_to_try = [ft.strip() for ft in quality_override.split(",")]
+    intent = derive_intent(album.db_quality_override)
+    filetypes_to_try = search_filetypes(intent, list(cfg.allowed_filetypes))
+
+    if album.db_quality_override:
         logger.info(
             f"Quality override for {artist_name} - {album.title}: "
-            f"searching only {filetypes_to_try}"
+            f"intent={intent.value}, searching {filetypes_to_try}"
         )
 
     for allowed_filetype in filetypes_to_try:
@@ -1016,9 +1016,8 @@ def find_download(album, grab_list, ctx):
         if _try_filetype(album, results, allowed_filetype, grab_list, ctx):
             return True
 
-    # Catch-all fallback: accept any audio format if no quality override.
-    # Quality override means we're upgrading — don't fall back to worse quality.
-    if not quality_override and "*" not in [ft.strip() for ft in (cfg.allowed_filetypes or ())]:
+    # Catch-all fallback: only best_effort allows falling back to any format.
+    if intent_allows_catch_all(intent) and "*" not in [ft.strip() for ft in (cfg.allowed_filetypes or ())]:
         logger.info(
             f"No match at preferred quality for {artist_name} - {album.title}, "
             f"trying catch-all (any audio format)"

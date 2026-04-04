@@ -187,6 +187,35 @@ def cmd_set(db, args):
     print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: {old_status} → {args.status}")
 
 
+def cmd_set_intent(db, args):
+    """Set quality intent for a request."""
+    from lib.quality import QualityIntent, intent_to_quality_override
+    req = db.get_request(args.id)
+    if not req:
+        print(f"  Request {args.id} not found.")
+        return
+    if req["status"] == "downloading":
+        print(f"  Cannot set intent while album is downloading.")
+        return
+    intent = QualityIntent(args.intent)
+    quality_override = intent_to_quality_override(intent)
+    old_override = req.get("quality_override")
+
+    if req["status"] == "imported":
+        min_br = req.get("min_bitrate")
+        db.reset_to_wanted(args.id, quality_override=quality_override,
+                           min_bitrate=min_br)
+        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
+              f"intent={intent.value}, re-queued for search")
+    else:
+        db._execute(
+            "UPDATE album_requests SET quality_override = %s, updated_at = NOW() WHERE id = %s",
+            (quality_override, args.id),
+        )
+        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
+              f"intent={intent.value} (override: {old_override} → {quality_override})")
+
+
 def _fmt_br(kbps):
     """Format a bitrate value for display."""
     if kbps is None:
@@ -681,6 +710,12 @@ def main():
     p_quality = sub.add_parser("quality", help="Show quality state and simulate decisions")
     p_quality.add_argument("id", type=int, help="Request ID")
 
+    # set-intent
+    p_intent = sub.add_parser("set-intent", help="Set quality intent for a request")
+    p_intent.add_argument("id", type=int, help="Request ID")
+    p_intent.add_argument("intent", choices=["best_effort", "flac_only", "flac_preferred", "upgrade"],
+                          help="Quality intent")
+
     # force-import
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
     p_force.add_argument("download_log_id", type=int, help="Download log ID")
@@ -704,6 +739,7 @@ def main():
         "retry": cmd_retry,
         "cancel": cmd_cancel,
         "set": cmd_set,
+        "set-intent": cmd_set_intent,
         "show": cmd_show,
         "quality": cmd_quality,
         "force-import": cmd_force_import,

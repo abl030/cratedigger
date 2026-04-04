@@ -292,6 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/pipeline/update": ("pipeline", "mb"),
         "/api/pipeline/upgrade": ("pipeline", "library", "mb"),
         "/api/pipeline/set-quality": ("pipeline",),
+        "/api/pipeline/set-intent": ("pipeline",),
         "/api/pipeline/ban-source": ("pipeline", "library", "mb"),
         "/api/pipeline/force-import": ("pipeline", "library", "mb"),
         "/api/pipeline/delete": ("pipeline", "mb"),

@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          ValidationResult,
-                         QUALITY_UPGRADE_TIERS, QUALITY_MIN_BITRATE_KBPS,
+                         QUALITY_MIN_BITRATE_KBPS,
+                         QualityIntent, intent_to_quality_override,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames)
 from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
@@ -131,13 +132,14 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
         if decision == "requeue_upgrade":
+            upgrade_override = intent_to_quality_override(QualityIntent.upgrade)
             if verified_lossless:
                 logger.info(
                     f"QUALITY GATE: {label} gate_bitrate < {QUALITY_MIN_BITRATE_KBPS}kbps "
                     f"but verified_lossless=True — accepting")
             db = ctx.pipeline_db_source._get_db()
             db.reset_to_wanted(request_id,
-                               quality_override=QUALITY_UPGRADE_TIERS,
+                               quality_override=upgrade_override,
                                min_bitrate=min_br_kbps)
             usernames = extract_usernames(album_data.files)
             gate_br = compute_effective_override_bitrate(min_br_kbps, spectral_br) or min_br_kbps
@@ -152,11 +154,12 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int | None,
                 f"QUALITY GATE: {label} "
                 f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
-                f"(searching {QUALITY_UPGRADE_TIERS})")
+                f"(searching {upgrade_override})")
         elif decision == "requeue_flac":
+            flac_override = intent_to_quality_override(QualityIntent.flac_only)
             db = ctx.pipeline_db_source._get_db()
             db.reset_to_wanted(request_id,
-                               quality_override="flac",
+                               quality_override=flac_override,
                                min_bitrate=min_br_kbps)
             logger.info(
                 f"QUALITY GATE: {label} "
@@ -301,7 +304,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 db = ctx.pipeline_db_source._get_db()
                 db.reset_to_wanted(
                     request_id,
-                    quality_override=QUALITY_UPGRADE_TIERS,
+                    quality_override=intent_to_quality_override(QualityIntent.upgrade),
                     min_bitrate=new_br if action.mark_done else None)
 
             if action.run_quality_gate:

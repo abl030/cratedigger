@@ -300,13 +300,14 @@ def post_pipeline_update(h, body: dict) -> None:
         return
 
     if new_status == "wanted" and req["status"] != "wanted":
+        from lib.quality import QualityIntent, intent_to_quality_override
         mbid = req.get("mb_release_id")
         quality = None
         min_br = None
         b = s._beets_db()
         if mbid and b:
             if b.album_exists(mbid):
-                quality = "flac,mp3 v0,mp3 320"
+                quality = intent_to_quality_override(QualityIntent.upgrade)
                 min_br = b.get_min_bitrate(mbid)
         s._db().reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
     else:
@@ -318,12 +319,13 @@ def post_pipeline_update(h, body: dict) -> None:
 def post_pipeline_upgrade(h, body: dict) -> None:
     s = _server()
     import mb as mb_api
+    from lib.quality import QualityIntent, intent_to_quality_override
     mbid = body.get("mb_release_id", "").strip()
     if not mbid:
         h._error("Missing mb_release_id")
         return
 
-    quality = "flac,mp3 v0,mp3 320"
+    quality = intent_to_quality_override(QualityIntent.upgrade)
 
     min_bitrate = None
     b = s._beets_db()
@@ -420,6 +422,61 @@ def post_pipeline_set_quality(h, body: dict) -> None:
     })
 
 
+def post_pipeline_set_intent(h, body: dict) -> None:
+    """Set quality intent for a pipeline request."""
+    from lib.quality import QualityIntent, intent_to_quality_override
+    s = _server()
+    req_id = body.get("id")
+    intent_str = body.get("intent", "").strip()
+
+    if not req_id:
+        h._error("Missing id")
+        return
+
+    valid_intents = [i.value for i in QualityIntent]
+    if intent_str not in valid_intents:
+        h._error(f"Invalid intent: {intent_str!r}. Valid: {valid_intents}")
+        return
+
+    intent = QualityIntent(intent_str)
+    req = s._db().get_request(int(req_id))
+    if not req:
+        h._error("Not found", 404)
+        return
+
+    quality_override = intent_to_quality_override(intent)
+
+    if req["status"] == "downloading":
+        h._error("Cannot set intent while album is downloading")
+        return
+
+    if req["status"] == "imported":
+        # Re-queue for search with the new intent
+        min_br = req.get("min_bitrate")
+        s._db().reset_to_wanted(int(req_id), quality_override=quality_override,
+                                min_bitrate=min_br)
+        h._json({
+            "status": "ok",
+            "id": int(req_id),
+            "intent": intent_str,
+            "quality_override": quality_override,
+            "requeued": True,
+        })
+    else:
+        # Just update the override for next search (wanted or manual)
+        s._db()._execute(
+            "UPDATE album_requests SET quality_override = %s, updated_at = NOW() WHERE id = %s",
+            (quality_override, int(req_id)),
+        )
+        h._json({
+            "status": "ok",
+            "id": int(req_id),
+            "intent": intent_str,
+            "quality_override": quality_override,
+            "requeued": False,
+        })
+
+
 def post_pipeline_ban_source(h, body: dict) -> None:
     s = _server()
     req_id = body.get("request_id")
@@ -447,7 +504,8 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
     req = s._db().get_request(int(req_id))
     if req:
-        quality = req.get("quality_override") or "flac,mp3 v0,mp3 320"
+        from lib.quality import QualityIntent, intent_to_quality_override
+        quality = req.get("quality_override") or intent_to_quality_override(QualityIntent.upgrade)
         min_br = req.get("min_bitrate")
         s._db().reset_to_wanted(int(req_id), quality_override=quality, min_bitrate=min_br)
 
@@ -584,6 +642,7 @@ POST_ROUTES: dict[str, object] = {
     "/api/pipeline/update": post_pipeline_update,
     "/api/pipeline/upgrade": post_pipeline_upgrade,
     "/api/pipeline/set-quality": post_pipeline_set_quality,
+    "/api/pipeline/set-intent": post_pipeline_set_intent,
     "/api/pipeline/ban-source": post_pipeline_ban_source,
     "/api/pipeline/force-import": post_pipeline_force_import,
     "/api/pipeline/delete": post_pipeline_delete,
