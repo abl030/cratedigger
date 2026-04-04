@@ -551,53 +551,26 @@ def cmd_force_import(db, args):
     print(f"  Path: {failed_path}")
     print(f"  MBID: {mbid}")
 
-    # 5. Call import_one.py --force
-    cmd = [
-        sys.executable, IMPORT_ONE,
+    from lib.import_service import run_import, log_and_update_import
+    outcome = run_import(
         failed_path, mbid,
-        "--request-id", str(request_id),
-        "--force",
-    ]
-    # Pass override-min-bitrate if album has one
-    if req["min_bitrate"]:
-        cmd.extend(["--override-min-bitrate", str(req["min_bitrate"])])
-
-    print(f"  Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-
-    # 6. Parse ImportResult from stdout
-    import_result_json = None
-    for line in result.stdout.splitlines():
-        if "__IMPORT_RESULT__" in line:
-            try:
-                import_result_json = line.split("__IMPORT_RESULT__")[1].strip()
-            except (IndexError, json.JSONDecodeError):
-                pass
-
-    # Print stderr (human-readable logs)
-    if result.stderr:
-        for line in result.stderr.strip().splitlines():
-            print(f"  {line}")
-
-    # 7. Log result to download_log
-    db.log_download(
         request_id=request_id,
-        outcome="force_import",
-        import_result=import_result_json,
-        staged_path=failed_path,
+        import_one_path=IMPORT_ONE,
+        force=True,
+        override_min_bitrate=req["min_bitrate"],
     )
-
-    if result.returncode == 0:
-        from lib.transitions import apply_transition
+    log_and_update_import(db, request_id, outcome,
+                          outcome_label="force_import",
+                          staged_path=failed_path)
+    if outcome.success:
         print(f"  [OK] Force-import successful (exit code 0)")
-        apply_transition(db, request_id, "imported")
     else:
-        print(f"  [WARN] import_one.py exited with code {result.returncode}")
+        print(f"  [WARN] {outcome.message}")
 
 
 def cmd_manual_import(db, args):
     """Import a local folder as a pipeline request."""
-    from manual_import import run_manual_import, import_result_log_fields
+    from lib.import_service import run_import, log_and_update_import
 
     request_id = args.id
     path = args.path
@@ -617,65 +590,19 @@ def cmd_manual_import(db, args):
     print(f"  Path: {path}")
     print(f"  MBID: {mbid}")
 
-    # 2. Run import
-    result = run_manual_import(
+    outcome = run_import(
+        path, mbid,
         request_id=request_id,
-        mb_release_id=mbid,
-        path=path,
         import_one_path=IMPORT_ONE,
         override_min_bitrate=req["min_bitrate"],
     )
-
-    # 3. Log to download_log
-    log_fields = import_result_log_fields(result.import_result_json)
-    db.log_download(
-        request_id=request_id,
-        outcome="manual_import" if result.success else "failed",
-        import_result=result.import_result_json,
-        staged_path=path,
-        error_message=None if result.success else result.message,
-        **log_fields,
-    )
-
-    # 4. Update status
-    if result.success:
-        update_fields: dict[str, object] = {}
-        if result.import_result_json:
-            try:
-                ir = json.loads(result.import_result_json)
-                new_m = ir.get("new_measurement") or {}
-                if new_m:
-                    # v2 format
-                    if new_m.get("spectral_grade"):
-                        update_fields["spectral_grade"] = new_m["spectral_grade"]
-                    if new_m.get("spectral_bitrate_kbps") is not None:
-                        update_fields["spectral_bitrate"] = new_m["spectral_bitrate_kbps"]
-                    if new_m.get("min_bitrate_kbps") is not None:
-                        update_fields["min_bitrate"] = new_m["min_bitrate_kbps"]
-                    if new_m.get("verified_lossless"):
-                        update_fields["verified_lossless"] = True
-                else:
-                    # v1 fallback
-                    spectral = ir.get("spectral", {})
-                    quality = ir.get("quality", {})
-                    conv = ir.get("conversion", {})
-                    if spectral.get("grade"):
-                        update_fields["spectral_grade"] = spectral["grade"]
-                    if spectral.get("bitrate") is not None:
-                        update_fields["spectral_bitrate"] = spectral["bitrate"]
-                    if quality.get("new_min_bitrate") is not None:
-                        update_fields["min_bitrate"] = quality["new_min_bitrate"]
-                    if (conv.get("was_converted")
-                            and conv.get("original_filetype", "").lower() == "flac"
-                            and spectral.get("grade") == "genuine"):
-                        update_fields["verified_lossless"] = True
-            except (json.JSONDecodeError, TypeError):
-                pass
-        from lib.transitions import apply_transition
-        apply_transition(db, request_id, "imported", **update_fields)
-        print(f"  [OK] {result.message}")
+    log_and_update_import(db, request_id, outcome,
+                          outcome_label="manual_import",
+                          staged_path=path)
+    if outcome.success:
+        print(f"  [OK] {outcome.message}")
     else:
-        print(f"  [FAIL] {result.message}")
+        print(f"  [FAIL] {outcome.message}")
 
 
 def main():

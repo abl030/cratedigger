@@ -576,53 +576,27 @@ def post_pipeline_force_import(h, body: dict) -> None:
         h._error(f"Files not found at: {failed_path}")
         return
 
+    from lib.import_service import run_import, log_and_update_import
     import_one_path = os.path.join(
         os.path.dirname(__file__), "..", "..", "harness", "import_one.py")
-    cmd = [
-        sys.executable, import_one_path,
+    outcome = run_import(
         failed_path, mbid,
-        "--request-id", str(request_id),
-        "--force",
-    ]
-    if req.get("min_bitrate"):
-        cmd.extend(["--override-min-bitrate", str(req["min_bitrate"])])
-
-    import subprocess as _sp
-    result = _sp.run(cmd, capture_output=True, text=True, timeout=1800)
-
-    import_result_json = None
-    for line in result.stdout.splitlines():
-        if "__IMPORT_RESULT__" in line:
-            try:
-                import_result_json = line.split("__IMPORT_RESULT__")[1].strip()
-            except (IndexError, json.JSONDecodeError):
-                pass
-
-    s._db().log_download(
         request_id=request_id,
-        outcome="force_import",
-        import_result=import_result_json,
-        staged_path=failed_path,
+        import_one_path=import_one_path,
+        force=True,
+        override_min_bitrate=req.get("min_bitrate"),
     )
-
-    if result.returncode == 0:
-        update_fields: dict[str, object] = {}
-        if import_result_json:
-            try:
-                update_fields = s._extract_import_fields(json.loads(import_result_json))
-            except (json.JSONDecodeError, TypeError):
-                pass
-        from lib.transitions import apply_transition
-        apply_transition(s._db(), request_id, "imported",
-                         from_status=req["status"], **update_fields)
+    log_and_update_import(s._db(), request_id, outcome,
+                          outcome_label="force_import",
+                          staged_path=failed_path)
 
     h._json({
-        "status": "ok" if result.returncode == 0 else "error",
-        "exit_code": result.returncode,
+        "status": "ok" if outcome.success else "error",
+        "exit_code": outcome.exit_code,
         "request_id": request_id,
         "artist": req["artist_name"],
         "album": req["album_title"],
-        "stderr": result.stderr[-500:] if result.stderr else "",
+        "message": outcome.message,
     })
 
 

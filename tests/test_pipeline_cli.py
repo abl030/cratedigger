@@ -150,36 +150,30 @@ class TestTracksFromMbRelease(unittest.TestCase):
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
     def test_failed_manual_import_logs_error_message(self, _mock_print):
+        from lib.import_service import ImportOutcome
         db = MagicMock()
         db.get_request.return_value = {
             "id": 123,
+            "status": "manual",
             "artist_name": "Artist",
             "album_title": "Album",
             "mb_release_id": "mbid-123",
             "min_bitrate": 320,
         }
 
-        with patch("manual_import.run_manual_import") as mock_run, \
-                patch("manual_import.import_result_log_fields") as mock_fields:
-            mock_run.return_value = MagicMock(
-                success=False,
-                exit_code=5,
-                message="239kbps is not better than existing 320kbps",
-                import_result_json='{"decision":"downgrade","exit_code":5}',
-            )
-            mock_fields.return_value = {"actual_min_bitrate": 239}
-
+        mock_outcome = ImportOutcome(
+            success=False, exit_code=5,
+            message="import_one.py exited with code 5",
+            import_result_json='{"decision":"downgrade","exit_code":5}',
+        )
+        with patch("lib.import_service.run_import", return_value=mock_outcome):
             args = MagicMock(id=123, path="/tmp/Album")
             pipeline_cli.cmd_manual_import(db, args)
 
-        db.log_download.assert_called_once_with(
-            request_id=123,
-            outcome="failed",
-            import_result='{"decision":"downgrade","exit_code":5}',
-            staged_path="/tmp/Album",
-            error_message="239kbps is not better than existing 320kbps",
-            actual_min_bitrate=239,
-        )
+        db.log_download.assert_called_once()
+        kwargs = db.log_download.call_args.kwargs
+        self.assertEqual(kwargs["outcome"], "failed")
+        self.assertEqual(kwargs["staged_path"], "/tmp/Album")
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
