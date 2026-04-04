@@ -251,6 +251,29 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._post("/api/pipeline/delete", {})
         self.assertEqual(status, 400)
 
+    def test_post_set_intent_success(self):
+        """POST /api/pipeline/set-intent returns ok with required fields."""
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"id": 100, "intent": "flac_only"})
+        self.assertEqual(status, 200)
+        for key in ("status", "id", "intent", "quality_override", "requeued"):
+            self.assertIn(key, data, f"Missing key '{key}' in set-intent response")
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["intent"], "flac_only")
+
+    def test_post_set_intent_invalid(self):
+        """POST /api/pipeline/set-intent with bad intent returns 400."""
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"id": 100, "intent": "garbage"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_post_set_intent_missing_id(self):
+        """POST /api/pipeline/set-intent without id returns 400."""
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"intent": "flac_only"})
+        self.assertEqual(status, 400)
+
     def test_unknown_post_returns_404(self):
         status, data = self._post("/api/nonexistent", {})
         self.assertEqual(status, 404)
