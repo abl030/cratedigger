@@ -401,7 +401,7 @@ def _build_downloaded_label(entry: LogEntry) -> str:
                or 0)
 
     if entry.was_converted and entry.original_filetype:
-        conv_label = quality_label("mp3", br_kbps)
+        conv_label = quality_label(fmt, br_kbps)
         return f"{entry.original_filetype.upper()} (converted to {conv_label})"
 
     return quality_label(fmt, br_kbps) if br_kbps else fmt.upper()

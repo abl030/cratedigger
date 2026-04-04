@@ -563,6 +563,16 @@ class TestDownloadedLabel(unittest.TestCase):
         self.assertIn("FLAC", result.downloaded_label)
         self.assertIn("V0", result.downloaded_label)
 
+    def test_opus_converted_download(self):
+        """FLAC converted to Opus shows correct format, not MP3."""
+        result = classify_log_entry(_entry(
+            outcome="success", was_converted=True,
+            original_filetype="flac", actual_filetype="opus",
+            actual_min_bitrate=117, bitrate=117000))
+        self.assertIn("FLAC", result.downloaded_label)
+        self.assertIn("OPUS", result.downloaded_label)
+        self.assertNotIn("MP3", result.downloaded_label)
+
     def test_no_filetype_download(self):
         """Missing filetype doesn't crash."""
         result = classify_log_entry(_entry(
