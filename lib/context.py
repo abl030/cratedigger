@@ -29,3 +29,6 @@ class SoularrContext:
     folder_cache: dict[str, Any] = field(default_factory=dict)
     user_upload_speed: dict[str, int] = field(default_factory=dict)
     broken_user: list[str] = field(default_factory=list)
+    search_dir_audio_count: dict[str, dict[str, int]] = field(default_factory=dict)
+    negative_matches: set[tuple[str, str, int, str]] = field(default_factory=set)
+    current_album_cache: dict[int, Any] = field(default_factory=dict)

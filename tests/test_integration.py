@@ -32,12 +32,13 @@ from lib.import_dispatch import _build_download_info
 from lib.context import SoularrContext
 
 
-def _make_ctx(cfg=None, slskd=None):
+def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
     """Build a test SoularrContext."""
     return SoularrContext(
         cfg=cfg or MagicMock(),
         slskd=slskd or MagicMock(),
-        pipeline_db_source=MagicMock(),
+        pipeline_db_source=pipeline_db_source or MagicMock(),
+        **cache_overrides,
     )
 
 
@@ -431,20 +432,12 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = soularr.cfg
         self._orig_slskd = soularr.slskd
-        self._orig_folder_cache = soularr.folder_cache
-        self._orig_broken_user = soularr.broken_user
-        self._orig_album_cache = soularr._current_album_cache
         self._orig_pdb = soularr.pipeline_db_source
 
-        soularr.cfg = _make_matching_cfg()
-
-        soularr.folder_cache = {}
-        soularr.broken_user = []
-        soularr._current_album_cache = {}
-        soularr.search_dir_audio_count = {}
+        mock_cfg = _make_matching_cfg()
+        soularr.cfg = mock_cfg
 
         mock_slskd = MagicMock()
-        # Return dirs with 1 file each — won't match multi-disc tracks
         mock_slskd.users.directory.return_value = [
             make_directory("Music\\Disc1", [
                 {"filename": "01 - Track.flac", "size": 100},
@@ -452,17 +445,15 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         ]
         soularr.slskd = mock_slskd
 
-        # Mock pipeline_db_source for _get_denied_users
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
+
     def tearDown(self):
         soularr.cfg = self._orig_cfg
         soularr.slskd = self._orig_slskd
-        soularr.folder_cache = self._orig_folder_cache
-        soularr.broken_user = self._orig_broken_user
-        soularr._current_album_cache = self._orig_album_cache
         soularr.pipeline_db_source = self._orig_pdb
 
     def test_results_dict_not_mutated(self):
@@ -472,11 +463,9 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 "flac": ["Music\\Disc1", "Music\\Disc2"],
             }
         }
-        # Deep copy to compare later
         import copy
         original_results = copy.deepcopy(results)
 
-        # Mock a release with 2 media
         release = MagicMock()
         media1 = MagicMock()
         media1.medium_number = 1
@@ -488,10 +477,9 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             {"albumId": 1, "title": "Track One", "mediumNumber": 1},
             {"albumId": 1, "title": "Track Two", "mediumNumber": 2},
         ]
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        # Will fail to match (no slskd mock set up), but should not mutate results
-        soularr.try_multi_enqueue(release, tracks, results, "flac")
+        soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
 
         self.assertEqual(results, original_results)
 
@@ -502,28 +490,28 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = soularr.cfg
         self._orig_slskd = soularr.slskd
-        self._orig_folder_cache = soularr.folder_cache
-        self._orig_broken_user = soularr.broken_user
-        self._orig_album_cache = soularr._current_album_cache
+        self._orig_pdb = soularr.pipeline_db_source
 
-        soularr.cfg = _make_matching_cfg(
+        mock_cfg = _make_matching_cfg(
             download_filtering=True,
             use_extension_whitelist=True,
             extensions_whitelist=("jpg",),
         )
+        soularr.cfg = mock_cfg
 
-        soularr.folder_cache = {}
-        soularr.broken_user = []
-        soularr._current_album_cache = {}
+        mock_slskd = MagicMock()
+        soularr.slskd = mock_slskd
 
+        mock_pdb = MagicMock()
+        mock_pdb.get_denied_users.return_value = []
+        soularr.pipeline_db_source = mock_pdb
+
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
         soularr.slskd = self._orig_slskd
-        soularr.folder_cache = self._orig_folder_cache
-        soularr.broken_user = self._orig_broken_user
-        soularr._current_album_cache = self._orig_album_cache
-
+        soularr.pipeline_db_source = self._orig_pdb
 
     def test_folder_cache_not_corrupted_after_download_filter(self):
         """download_filter mutates directory['files'], but folder_cache should be intact."""
@@ -533,16 +521,16 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
             {"filename": "info.nfo", "size": 10},
         ]
         # Pre-populate folder_cache (simulating a previous browse)
-        soularr.folder_cache["testuser"] = {
+        self.ctx.folder_cache["testuser"] = {
             "Music\\Album": {"files": list(dir_files), "directory": "Music\\Album"}
         }
 
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         # First call: match with 1 track, 1 audio file
         tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
         found, directory, file_dir = soularr.check_for_match(
-            tracks, "flac", ["Music\\Album"], "testuser"
+            tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found)
 
@@ -550,7 +538,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         soularr.download_filter("flac", directory)
 
         # folder_cache should still have ALL 3 files (including .nfo)
-        cached = soularr.folder_cache["testuser"]["Music\\Album"]
+        cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
         cached_filenames = [f["filename"] for f in cached["files"]]
         self.assertIn("info.nfo", cached_filenames)
         self.assertEqual(len(cached["files"]), 3)
@@ -561,16 +549,16 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
             {"filename": "01 - Track One.flac", "size": 100},
             {"filename": "cover.jpg", "size": 50},
         ]
-        soularr.folder_cache["testuser"] = {
+        self.ctx.folder_cache["testuser"] = {
             "Music\\Album": {"files": list(dir_files), "directory": "Music\\Album"}
         }
 
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
 
         # First match
         found1, dir1, _ = soularr.check_for_match(
-            tracks, "flac", ["Music\\Album"], "testuser"
+            tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found1)
 
@@ -579,7 +567,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
 
         # Second match on the same cached dir should still succeed
         found2, dir2, _ = soularr.check_for_match(
-            tracks, "flac", ["Music\\Album"], "testuser"
+            tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found2)
         # And should have both files (not the filtered version)
@@ -592,35 +580,32 @@ class TestNegativeMatchCache(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = soularr.cfg
         self._orig_slskd = soularr.slskd
-        self._orig_folder_cache = soularr.folder_cache
-        self._orig_broken_user = soularr.broken_user
-        self._orig_album_cache = soularr._current_album_cache
-        self._orig_neg_cache = soularr._negative_matches
+        self._orig_pdb = soularr.pipeline_db_source
 
-        soularr.cfg = _make_matching_cfg()
+        mock_cfg = _make_matching_cfg()
+        soularr.cfg = mock_cfg
 
-        soularr.folder_cache = {}
-        soularr.broken_user = []
-        soularr._current_album_cache = {}
-        soularr._negative_matches = set()
-        soularr.search_dir_audio_count = {}
+        mock_slskd = MagicMock()
+        soularr.slskd = mock_slskd
+
+        mock_pdb = MagicMock()
+        mock_pdb.get_denied_users.return_value = []
+        soularr.pipeline_db_source = mock_pdb
+
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
         soularr.slskd = self._orig_slskd
-        soularr.folder_cache = self._orig_folder_cache
-        soularr.broken_user = self._orig_broken_user
-        soularr._current_album_cache = self._orig_album_cache
-        soularr._negative_matches = self._orig_neg_cache
-
+        soularr.pipeline_db_source = self._orig_pdb
 
     def test_same_dir_same_track_count_skipped(self):
         """A dir that failed matching should be skipped on retry with same track count."""
         # Pre-populate cache with a dir that has 1 file (won't match 3 tracks)
-        soularr.folder_cache["user1"] = {
+        self.ctx.folder_cache["user1"] = {
             "Music\\Album": {"files": [{"filename": "01.flac", "size": 100}], "directory": "Music\\Album"}
         }
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks = [
             {"albumId": 1, "title": "Track One", "mediumNumber": 1},
@@ -629,42 +614,42 @@ class TestNegativeMatchCache(unittest.TestCase):
         ]
 
         # First call — misses (1 file vs 3 tracks)
-        found1, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
+        found1, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertFalse(found1)
 
         # Negative cache should contain (user1, Music\Album, 3, flac)
-        self.assertIn(("user1", "Music\\Album", 3, "flac"), soularr._negative_matches)
+        self.assertIn(("user1", "Music\\Album", 3, "flac"), self.ctx.negative_matches)
 
         # Second call with same track count — should skip (no album_track_num re-eval)
         # We verify by checking that the negative cache hit prevents redundant work
-        found2, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
+        found2, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertFalse(found2)
 
     def test_same_dir_different_filetype_not_skipped(self):
         """A dir cached as negative for 'flac' should still be tried for '*'."""
-        soularr.folder_cache["user1"] = {
+        self.ctx.folder_cache["user1"] = {
             "Music\\Album": {
                 "files": [{"filename": "01 - Track One.mp3", "size": 100}],
                 "directory": "Music\\Album",
             }
         }
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
 
         # Fails for "flac" (file is .mp3, album_track_num won't count it as flac)
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
-        self.assertIn(("user1", "Music\\Album", 1, "flac"), soularr._negative_matches)
+        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        self.assertIn(("user1", "Music\\Album", 1, "flac"), self.ctx.negative_matches)
 
         # Should NOT be skipped for "*" (different filetype key)
-        self.assertNotIn(("user1", "Music\\Album", 1, "*"), soularr._negative_matches)
+        self.assertNotIn(("user1", "Music\\Album", 1, "*"), self.ctx.negative_matches)
 
     def test_same_dir_different_track_count_not_skipped(self):
         """A dir that failed for 3 tracks should still be tried for 1 track."""
         # Dir has 1 audio file
-        soularr.folder_cache["user1"] = {
+        self.ctx.folder_cache["user1"] = {
             "Music\\Album": {"files": [{"filename": "01 - Track One.flac", "size": 100}], "directory": "Music\\Album"}
         }
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         # Fail with 3 tracks
         tracks_3 = [
@@ -672,11 +657,11 @@ class TestNegativeMatchCache(unittest.TestCase):
             {"albumId": 1, "title": "Track Two", "mediumNumber": 1},
             {"albumId": 1, "title": "Track Three", "mediumNumber": 1},
         ]
-        soularr.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1")
+        soularr.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Now try with 1 track — should NOT be skipped (different track count)
         tracks_1 = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
-        found, _, _ = soularr.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1")
+        found, _, _ = soularr.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertTrue(found)  # 1 file matches 1 track
 
 
@@ -686,51 +671,42 @@ class TestSearchResultPreFiltering(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = soularr.cfg
         self._orig_slskd = soularr.slskd
-        self._orig_folder_cache = soularr.folder_cache
-        self._orig_broken_user = soularr.broken_user
-        self._orig_album_cache = soularr._current_album_cache
-        self._orig_neg_cache = soularr._negative_matches
-        self._orig_dir_counts = soularr.search_dir_audio_count
+        self._orig_pdb = soularr.pipeline_db_source
 
-        soularr.cfg = _make_matching_cfg()
+        mock_cfg = _make_matching_cfg()
+        soularr.cfg = mock_cfg
 
         self.mock_slskd = MagicMock()
         soularr.slskd = self.mock_slskd
 
-        soularr.folder_cache = {}
-        soularr.broken_user = []
-        soularr._current_album_cache = {}
-        soularr._negative_matches = set()
-        soularr.search_dir_audio_count = {}
+        mock_pdb = MagicMock()
+        mock_pdb.get_denied_users.return_value = []
+        soularr.pipeline_db_source = mock_pdb
 
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.mock_slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
         soularr.slskd = self._orig_slskd
-        soularr.folder_cache = self._orig_folder_cache
-        soularr.broken_user = self._orig_broken_user
-        soularr._current_album_cache = self._orig_album_cache
-        soularr._negative_matches = self._orig_neg_cache
-        soularr.search_dir_audio_count = self._orig_dir_counts
-
+        soularr.pipeline_db_source = self._orig_pdb
 
     def test_dir_with_wrong_count_skipped_before_browse(self):
         """Directory with 3 audio files should be skipped when we need 12 tracks."""
         # Search metadata says this dir has 3 audio files
-        soularr.search_dir_audio_count = {
+        self.ctx.search_dir_audio_count = {
             "user1": {"Music\\Album": 3}
         }
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
+        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should NOT have called slskd.users.directory — skipped before browse
         self.mock_slskd.users.directory.assert_not_called()
 
     def test_dir_with_close_count_not_skipped(self):
         """Directory with 13 audio files should NOT be skipped for 12 tracks (tolerance +-2)."""
-        soularr.search_dir_audio_count = {
+        self.ctx.search_dir_audio_count = {
             "user1": {"Music\\Album": 13}
         }
         # Set up directory return for when it does browse
@@ -739,24 +715,24 @@ class TestSearchResultPreFiltering(unittest.TestCase):
                 {"filename": f"0{i} - Track.flac", "size": 100} for i in range(13)
             ])
         ]
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
+        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # SHOULD have browsed — count is close enough
         self.mock_slskd.users.directory.assert_called_once()
 
     def test_dir_without_metadata_not_skipped(self):
         """Directory with no search metadata should still be browsed."""
-        soularr.search_dir_audio_count = {}  # no data
+        # ctx.search_dir_audio_count is empty by default
         self.mock_slskd.users.directory.return_value = [
             make_directory("Music\\Album", [{"filename": "01.flac", "size": 100}])
         ]
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1")
+        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should browse — no metadata to pre-filter
         self.mock_slskd.users.directory.assert_called_once()
@@ -826,33 +802,24 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = soularr.cfg
         self._orig_slskd = soularr.slskd
-        self._orig_folder_cache = soularr.folder_cache
-        self._orig_broken_user = soularr.broken_user
-        self._orig_album_cache = soularr._current_album_cache
-        self._orig_neg_cache = soularr._negative_matches
-        self._orig_dir_counts = soularr.search_dir_audio_count
+        self._orig_pdb = soularr.pipeline_db_source
 
-        soularr.cfg = _make_matching_cfg()
+        mock_cfg = _make_matching_cfg()
+        soularr.cfg = mock_cfg
 
         self.mock_slskd = MagicMock()
         soularr.slskd = self.mock_slskd
 
-        soularr.folder_cache = {}
-        soularr.broken_user = []
-        soularr._current_album_cache = {}
-        soularr._negative_matches = set()
-        soularr.search_dir_audio_count = {}
+        mock_pdb = MagicMock()
+        mock_pdb.get_denied_users.return_value = []
+        soularr.pipeline_db_source = mock_pdb
 
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.mock_slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
         soularr.slskd = self._orig_slskd
-        soularr.folder_cache = self._orig_folder_cache
-        soularr.broken_user = self._orig_broken_user
-        soularr._current_album_cache = self._orig_album_cache
-        soularr._negative_matches = self._orig_neg_cache
-        soularr.search_dir_audio_count = self._orig_dir_counts
-
+        soularr.pipeline_db_source = self._orig_pdb
 
     def test_parallel_browse_populates_cache(self):
         """_browse_directories should populate folder_cache for all dirs."""
@@ -898,14 +865,14 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         """If all browses for a user fail, they should be marked broken."""
         self.mock_slskd.users.directory.side_effect = Exception("Peer gone")
 
-        soularr._current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
 
         found, _, _ = soularr.check_for_match(
-            tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1"
+            tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1", self.ctx
         )
         self.assertFalse(found)
-        self.assertIn("user1", soularr.broken_user)
+        self.assertIn("user1", self.ctx.broken_user)
 
 
 if __name__ == "__main__":

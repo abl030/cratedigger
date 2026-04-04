@@ -47,20 +47,17 @@ logger = logging.getLogger("soularr")
 # === API client instances (set in main()) ===
 pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
 
-# === Runtime State & Caches ===
-search_cache = {}
-folder_cache = {}
-user_upload_speed = {}  # username → upload speed in bytes/sec (from search results)
-broken_user = []
-search_dir_audio_count: dict[str, dict[str, int]] = {}  # username → {dir → audio file count}
-_negative_matches: set[tuple[str, str, int, str]] = set()  # (username, file_dir, track_count, filetype)
+# === Runtime context (populated in main()) ===
+# Module-level reference for thin wrappers that can't receive ctx as a parameter.
+# All matching/search functions receive ctx explicitly.
+_module_ctx: Any = None  # SoularrContext — set in main()
 
 
-def album_match(expected_tracks, slskd_tracks, username, filetype):
+def album_match(expected_tracks, slskd_tracks, username, filetype, ctx):
     counted = []
     total_match = 0.0
 
-    album_info = get_album_by_id(expected_tracks[0]["albumId"])
+    album_info = get_album_by_id(expected_tracks[0]["albumId"], ctx)
     album_name = album_info.title
     artist_name = album_info.artist_name
 
@@ -361,7 +358,7 @@ def _browse_directories(
     return results
 
 
-def check_for_match(tracks, allowed_filetype, file_dirs, username):
+def check_for_match(tracks, allowed_filetype, file_dirs, username, ctx):
     """
     Does the actual match checking on a single disk/album.
 
@@ -369,22 +366,22 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
     Phase 2: Browse uncached dirs in parallel.
     Phase 3: Match serially (early exit on first match).
     """
-    logger.debug(f"Current broken users {broken_user}")
-    if username in broken_user:
+    logger.debug(f"Current broken users {ctx.broken_user}")
+    if username in ctx.broken_user:
         return False, {}, ""
     track_num = len(tracks)
-    album_info = get_album_by_id(tracks[0]["albumId"])
+    album_info = get_album_by_id(tracks[0]["albumId"], ctx)
     ranked_dirs = rank_candidate_dirs(file_dirs, album_info.title, album_info.artist_name)
 
     # Phase 1: Filter — determine which dirs need browsing
     dirs_to_try: list[str] = []
     for file_dir in ranked_dirs:
         neg_key = (username, file_dir, track_num, allowed_filetype)
-        if neg_key in _negative_matches:
+        if neg_key in ctx.negative_matches:
             logger.debug(f"Negative cache hit: {username} {file_dir} ({track_num} tracks, {allowed_filetype})")
             continue
 
-        user_counts = search_dir_audio_count.get(username)
+        user_counts = ctx.search_dir_audio_count.get(username)
         if user_counts and file_dir in user_counts:
             search_count = user_counts[file_dir]
             if abs(search_count - track_num) > 2:
@@ -392,7 +389,7 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
                     f"Pre-filter skip: {username} {file_dir} has {search_count} "
                     f"audio files, need {track_num} tracks"
                 )
-                _negative_matches.add(neg_key)
+                ctx.negative_matches.add(neg_key)
                 continue
 
         dirs_to_try.append(file_dir)
@@ -401,10 +398,10 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
         return False, {}, ""
 
     # Phase 2: Browse uncached dirs in parallel
-    if username not in folder_cache:
-        folder_cache[username] = {}
+    if username not in ctx.folder_cache:
+        ctx.folder_cache[username] = {}
 
-    uncached = [d for d in dirs_to_try if d not in folder_cache[username]]
+    uncached = [d for d in dirs_to_try if d not in ctx.folder_cache[username]]
     if uncached:
         logger.info(
             f"Browsing {len(uncached)} dirs from {username} "
@@ -412,26 +409,26 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
         )
         browsed = _browse_directories(uncached, username, cfg.browse_parallelism)
         for d, result in browsed.items():
-            folder_cache[username][d] = result
+            ctx.folder_cache[username][d] = result
 
         # If ALL browses failed, mark user as broken
         if not browsed and len(uncached) == len(dirs_to_try):
-            broken_user.append(username)
+            ctx.broken_user.append(username)
             logger.debug(f"All browses failed for {username}, marked as broken")
             return False, {}, ""
 
     # Phase 3: Match serially — early exit on first match
     for file_dir in dirs_to_try:
-        if file_dir not in folder_cache[username]:
+        if file_dir not in ctx.folder_cache[username]:
             # Browse failed for this dir
             continue
 
-        directory = folder_cache[username][file_dir]
+        directory = ctx.folder_cache[username][file_dir]
         tracks_info = album_track_num(directory)
         neg_key = (username, file_dir, track_num, allowed_filetype)
 
         if tracks_info["count"] == track_num and tracks_info["filetype"] != "":
-            if album_match(tracks, directory["files"], username, allowed_filetype):
+            if album_match(tracks, directory["files"], username, allowed_filetype, ctx):
                 if _track_titles_cross_check(tracks, directory["files"]):
                     return True, copy.deepcopy(directory), file_dir
                 else:
@@ -439,7 +436,7 @@ def check_for_match(tracks, allowed_filetype, file_dirs, username):
                         f"Track title cross-check FAILED for user {username}, "
                         f"dir {file_dir} — skipping (wrong pressing?)"
                     )
-        _negative_matches.add(neg_key)
+        ctx.negative_matches.add(neg_key)
     return False, {}, ""
 
 
@@ -470,7 +467,7 @@ def filter_list(albums):
         return None
 
 
-def search_for_album(album):
+def search_for_album(album, ctx):
     from lib.search import build_query
 
     album_title = album.title
@@ -514,7 +511,7 @@ def search_for_album(album):
             logger.error("Failed to perform search via SLSKD due to timeout on search results.")
             return False
 
-    search_results = slskd.searches.search_responses(search["id"])  # We use this API call twice. Let's just cache it locally.
+    search_results = slskd.searches.search_responses(search["id"])
     logger.info(f"Search returned {len(search_results)} results")
     if cfg.delete_searches:
         slskd.searches.delete(search["id"])
@@ -522,38 +519,35 @@ def search_for_album(album):
     if not len(search_results) > 0:
         return False
 
-    if album_id not in search_cache:
-        search_cache[album_id] = {}  # This is so we can check for matches we missed or if a user goes offline during our download
+    if album_id not in ctx.search_cache:
+        ctx.search_cache[album_id] = {}
 
-    for result in search_results:  # Switching to cached version. One less API call
+    for result in search_results:
         username = result["username"]
-        if username not in search_cache[album_id]:
-            # If we don't currently have a cache for a user set one up
-            search_cache[album_id][username] = {}
+        if username not in ctx.search_cache[album_id]:
+            ctx.search_cache[album_id][username] = {}
         # Cache upload speed for sorting — prefer faster peers
         speed = result.get("uploadSpeed", 0)
-        if speed and (username not in user_upload_speed or speed > user_upload_speed[username]):
-            user_upload_speed[username] = speed
+        if speed and (username not in ctx.user_upload_speed or speed > ctx.user_upload_speed[username]):
+            ctx.user_upload_speed[username] = speed
         logger.info(f"Caching and truncating results for user: {username}")
-        init_files = result["files"]  # init_files short for initial files. Before truncating
-        # Pre-parsed specs + config strings for the cache key
+        init_files = result["files"]
         from lib.quality import file_identity, filetype_matches
         filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
-        # Search the returned files and only cache files that are of the allowed_filetypes
-        if username not in search_dir_audio_count:
-            search_dir_audio_count[username] = {}
-        user_dir_counts = search_dir_audio_count[username]
+        if username not in ctx.search_dir_audio_count:
+            ctx.search_dir_audio_count[username] = {}
+        user_dir_counts = ctx.search_dir_audio_count[username]
         for file in init_files:
-            file_dir = file["filename"].rsplit("\\", 1)[0]  # split dir/filenames on \
+            file_dir = file["filename"].rsplit("\\", 1)[0]
             identity = file_identity(file)
             matched = False
             for allowed_filetype, spec in filter_specs:
                 if filetype_matches(identity, spec):
                     matched = True
-                    if allowed_filetype not in search_cache[album_id][username]:
-                        search_cache[album_id][username][allowed_filetype] = []
-                    if file_dir not in search_cache[album_id][username][allowed_filetype]:
-                        search_cache[album_id][username][allowed_filetype].append(file_dir)
+                    if allowed_filetype not in ctx.search_cache[album_id][username]:
+                        ctx.search_cache[album_id][username][allowed_filetype] = []
+                    if file_dir not in ctx.search_cache[album_id][username][allowed_filetype]:
+                        ctx.search_cache[album_id][username][allowed_filetype].append(file_dir)
             if matched:
                 user_dir_counts[file_dir] = user_dir_counts.get(file_dir, 0) + 1
     return True
@@ -710,36 +704,35 @@ def _execute_search(album, search_cfg, slskd_client):
                                    search_cfg, slskd_client)
 
 
-def _merge_search_result(result):
-    """Merge a SearchResult into module-level search_cache and user_upload_speed.
+def _merge_search_result(result, ctx):
+    """Merge a SearchResult into ctx caches.
 
     Called only from the main thread — no locking needed.
     """
     album_id = result.album_id
-    if album_id not in search_cache:
-        search_cache[album_id] = {}
+    if album_id not in ctx.search_cache:
+        ctx.search_cache[album_id] = {}
 
     for username, filetypes in result.cache_entries.items():
-        if username not in search_cache[album_id]:
-            search_cache[album_id][username] = {}
+        if username not in ctx.search_cache[album_id]:
+            ctx.search_cache[album_id][username] = {}
         for filetype, dirs in filetypes.items():
-            if filetype not in search_cache[album_id][username]:
-                search_cache[album_id][username][filetype] = []
+            if filetype not in ctx.search_cache[album_id][username]:
+                ctx.search_cache[album_id][username][filetype] = []
             for d in dirs:
-                if d not in search_cache[album_id][username][filetype]:
-                    search_cache[album_id][username][filetype].append(d)
+                if d not in ctx.search_cache[album_id][username][filetype]:
+                    ctx.search_cache[album_id][username][filetype].append(d)
 
     for username, speed in result.upload_speeds.items():
-        if username not in user_upload_speed or speed > user_upload_speed[username]:
-            user_upload_speed[username] = speed
+        if username not in ctx.user_upload_speed or speed > ctx.user_upload_speed[username]:
+            ctx.user_upload_speed[username] = speed
 
     for username, dir_counts in result.dir_audio_counts.items():
-        if username not in search_dir_audio_count:
-            search_dir_audio_count[username] = {}
+        if username not in ctx.search_dir_audio_count:
+            ctx.search_dir_audio_count[username] = {}
         for d, count in dir_counts.items():
-            # Take max — same dir may appear in multiple search results
-            existing = search_dir_audio_count[username].get(d, 0)
-            search_dir_audio_count[username][d] = max(existing, count)
+            existing = ctx.search_dir_audio_count[username].get(d, 0)
+            ctx.search_dir_audio_count[username][d] = max(existing, count)
 
 
 def _get_denied_users(album_id):
@@ -754,7 +747,7 @@ def _get_denied_users(album_id):
     return denied
 
 
-def try_enqueue(all_tracks, results, allowed_filetype):
+def try_enqueue(all_tracks, results, allowed_filetype, ctx):
     """
     Single album match and enqueue.
     Iterates over all users and enqueues a found match
@@ -762,7 +755,7 @@ def try_enqueue(all_tracks, results, allowed_filetype):
     album_id = all_tracks[0]["albumId"]
     denied_users = _get_denied_users(album_id)
     # Sort users by upload speed (fastest first) for quicker downloads
-    sorted_users = sorted(results.keys(), key=lambda u: user_upload_speed.get(u, 0), reverse=True)
+    sorted_users = sorted(results.keys(), key=lambda u: ctx.user_upload_speed.get(u, 0), reverse=True)
     is_catch_all = allowed_filetype == "*"
     for username in sorted_users:
         if username in denied_users:
@@ -780,7 +773,7 @@ def try_enqueue(all_tracks, results, allowed_filetype):
                 continue
             file_dirs = results[username][allowed_filetype]
         logger.debug(f"Parsing result from user: {username}")
-        found, directory, file_dir = check_for_match(all_tracks, allowed_filetype, file_dirs, username)
+        found, directory, file_dir = check_for_match(all_tracks, allowed_filetype, file_dirs, username, ctx)
         if found:
             directory = download_filter(allowed_filetype, directory)
             for i in range(0, len(directory["files"])):
@@ -790,25 +783,25 @@ def try_enqueue(all_tracks, results, allowed_filetype):
                 if downloads is not None:
                     return True, downloads
                 else:
-                    album = get_album_by_id(all_tracks[0]["albumId"])
+                    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
                     album_name = album.title
                     artist_name = album.artist_name
                     logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
             except Exception as e:
-                album = get_album_by_id(all_tracks[0]["albumId"])
+                album = get_album_by_id(all_tracks[0]["albumId"], ctx)
                 album_name = album.title
                 artist_name = album.artist_name
 
                 logger.warning(f"Exception enqueueing tracks: {e}")
                 logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
-    album = get_album_by_id(all_tracks[0]["albumId"])
+    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
     album_name = album.title
     artist_name = album.artist_name
     logger.info(f"Failed to enqueue {artist_name} - {album_name}")
     return False, None
 
 
-def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
+def try_multi_enqueue(release, all_tracks, results, allowed_filetype, ctx):
     """
     This is the multi-disk/media path for locating and enqueueing an album
     It does a flat search first. Then it does a split search.
@@ -831,7 +824,7 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
     denied_users = _get_denied_users(album_id)
     is_catch_all = allowed_filetype == "*"
     for disk in split_release:
-        _negative_matches.clear()  # each disc has different expected titles
+        ctx.negative_matches.clear()  # each disc has different expected titles
         for username in results:
             if username in denied_users:
                 logger.info(f"Skipping user '{username}' for album ID {album_id} (multi-disc): denylisted (previously provided mislabeled quality)")
@@ -846,7 +839,7 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
                 if allowed_filetype not in results[username]:
                     continue
                 file_dirs = results[username][allowed_filetype]
-            found, directory, file_dir = check_for_match(disk["tracks"], allowed_filetype, file_dirs, username)
+            found, directory, file_dir = check_for_match(disk["tracks"], allowed_filetype, file_dirs, username, ctx)
             if found:
                 directory = download_filter(allowed_filetype, directory)
                 disk["source"] = (username, directory, file_dir)
@@ -873,22 +866,20 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype):
                     all_downloads.extend(downloads)
                     enqueued += 1
                 else:
-                    album = get_album_by_id(all_tracks[0]["albumId"])
+                    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
                     album_name = album.title
                     artist_name = album.artist_name
                     logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
-                    # Delete ALL other downloads in all_downloads list
                     if len(all_downloads) > 0:
                         cancel_and_delete(all_downloads)
                         return False, None
             except Exception:
-                album = get_album_by_id(all_tracks[0]["albumId"])
+                album = get_album_by_id(all_tracks[0]["albumId"], ctx)
                 album_name = album.title
                 artist_name = album.artist_name
 
                 logger.exception("Exception enqueueing tracks")
                 logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
-                # Delete all other downloads in all_downloads list
                 if len(all_downloads) > 0:
                     cancel_and_delete(all_downloads)
                     return False, None
@@ -909,18 +900,14 @@ def get_album_tracks(album, release_id=None):
     return pipeline_db_source.get_tracks(album)
 
 
-# Cache for current album being processed
-_current_album_cache = {}
-
-
-def get_album_by_id(album_id):
-    """Get album data by ID from cache."""
-    if album_id in _current_album_cache:
-        return _current_album_cache[album_id]
+def get_album_by_id(album_id, ctx):
+    """Get album data by ID from context cache."""
+    if album_id in ctx.current_album_cache:
+        return ctx.current_album_cache[album_id]
     raise KeyError(f"Album {album_id} not found in cache")
 
 
-def _try_filetype(album, results, allowed_filetype, grab_list) -> bool:
+def _try_filetype(album, results, allowed_filetype, grab_list, ctx) -> bool:
     """Try to match and enqueue an album at a specific filetype quality.
 
     Iterates releases (monitored first), tries single-album then multi-disc.
@@ -941,9 +928,9 @@ def _try_filetype(album, results, allowed_filetype, grab_list) -> bool:
             logger.warning(f"No tracks for {artist_name} - {album.title} (release {release.id}) — skipping")
             continue
 
-        found, downloads = try_enqueue(all_tracks, results, allowed_filetype)
+        found, downloads = try_enqueue(all_tracks, results, allowed_filetype, ctx)
         if not found and len(release.media) > 1:
-            found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype)
+            found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype, ctx)
 
         if found:
             assert downloads is not None
@@ -974,7 +961,7 @@ def _try_filetype(album, results, allowed_filetype, grab_list) -> bool:
     return False
 
 
-def find_download(album, grab_list):
+def find_download(album, grab_list, ctx):
     """
     This does the main loop over search results and user directories
     It has two paths it can take. One is the "single album" path
@@ -982,13 +969,13 @@ def find_download(album, grab_list):
     """
     album_id = album.id
     artist_name = album.artist_name
-    results = search_cache[album_id]
+    results = ctx.search_cache[album_id]
 
     # Clear negative match cache per-album — same dir could match a different album
-    _negative_matches.clear()
+    ctx.negative_matches.clear()
 
     # Cache album so get_album_by_id() works during matching
-    _current_album_cache[album_id] = album
+    ctx.current_album_cache[album_id] = album
 
     filetypes_to_try = cfg.allowed_filetypes
 
@@ -1003,7 +990,7 @@ def find_download(album, grab_list):
 
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        if _try_filetype(album, results, allowed_filetype, grab_list):
+        if _try_filetype(album, results, allowed_filetype, grab_list, ctx):
             return True
 
     # Catch-all fallback: accept any audio format if no quality override.
@@ -1013,23 +1000,23 @@ def find_download(album, grab_list):
             f"No match at preferred quality for {artist_name} - {album.title}, "
             f"trying catch-all (any audio format)"
         )
-        if _try_filetype(album, results, "*", grab_list):
+        if _try_filetype(album, results, "*", grab_list, ctx):
             return True
 
     return False
 
 
-def search_and_queue(albums):
+def search_and_queue(albums, ctx):
     if cfg.parallel_searches > 1 and len(albums) > 1:
-        return _search_and_queue_parallel(albums)
+        return _search_and_queue_parallel(albums, ctx)
     grab_list = {}
     failed_grab = []
     failed_search = []
     total = len(albums)
     for i, album in enumerate(albums, 1):
         logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
-        if search_for_album(album):
-            if not find_download(album, grab_list):
+        if search_for_album(album, ctx):
+            if not find_download(album, grab_list, ctx):
                 failed_grab.append(album)
 
         else:
@@ -1037,7 +1024,7 @@ def search_and_queue(albums):
     return grab_list, failed_search, failed_grab
 
 
-def _search_and_queue_parallel(albums):
+def _search_and_queue_parallel(albums, ctx):
     """Pipeline searches with result processing: always 2 searches in flight.
 
     slskd constraints (from source code):
@@ -1107,8 +1094,8 @@ def _search_and_queue_parallel(albums):
                         f"({result.result_count} results, {result.elapsed_s:.1f}s)"
                     )
                     if result.success:
-                        _merge_search_result(result)
-                        if not find_download(album, grab_list):
+                        _merge_search_result(result, ctx)
+                        if not find_download(album, grab_list, ctx):
                             failed_grab.append(album)
                     else:
                         failed_search.append(album)
@@ -1138,9 +1125,8 @@ from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
 
 
 def _make_ctx():
-    """Build a SoularrContext from module globals."""
-    from lib.context import SoularrContext
-    return SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
+    """Return the module-level SoularrContext (created in main())."""
+    return _module_ctx
 
 
 def cancel_and_delete(files):
@@ -1152,7 +1138,7 @@ def slskd_do_enqueue(username, files, file_dir):
 
 
 def grab_most_wanted(albums):
-    return _grab_most_wanted_impl(albums, search_and_queue, _make_ctx())
+    return _grab_most_wanted_impl(albums, lambda albs: search_and_queue(albs, _module_ctx), _module_ctx)
 
 
 from lib.util import (_track_titles_cross_check,
@@ -1165,12 +1151,7 @@ def main():
         slskd, \
         config, \
         pipeline_db_source, \
-        search_cache, \
-        folder_cache, \
-        user_upload_speed, \
-        broken_user, \
-        _negative_matches, \
-        search_dir_audio_count
+        _module_ctx
 
     # Let's allow some overrides to be passed to the script
     parser = argparse.ArgumentParser(description="""Soularr downloads wanted albums from Soulseek via slskd""")
@@ -1259,21 +1240,17 @@ def main():
         if cfg.meelo_url:
             logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
 
-        # Init directory cache. The wide search returns all the data we need. This prevents us from hammering the users on the Soulseek network
-        search_cache = {}
-        folder_cache = {}
-        user_upload_speed = {}
-        broken_user = []
-        _negative_matches = set()
-        search_dir_audio_count = {}
-
         slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.slskd_api_key, url_base=cfg.slskd_url_base)
+
+        # Build context with fresh caches for this cycle
+        from lib.context import SoularrContext
+        _module_ctx = SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 
         # --- Phase 1: Poll active downloads from previous runs ---
         from lib.download import poll_active_downloads as _poll_impl
         logger.info("Polling active downloads...")
         try:
-            _poll_impl(_make_ctx())
+            _poll_impl(_module_ctx)
         except Exception:
             logger.exception("Error polling active downloads — continuing to search phase")
 
