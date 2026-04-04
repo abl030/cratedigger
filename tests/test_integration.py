@@ -133,11 +133,16 @@ def make_search_result(username, files, upload_speed=1048576):
     }
 
 
-def make_directory(dir_path, files):
+def make_tracks(*track_defs: tuple[int, str, int]) -> list["soularr.TrackRecord"]:
+    """Build a list of TrackRecord dicts from (albumId, title, mediumNumber) tuples."""
+    return [{"albumId": a, "title": t, "mediumNumber": m} for a, t, m in track_defs]  # type: ignore[misc]
+
+
+def make_directory(dir_path: str, files: list[dict[str, object]]) -> "soularr.SlskdDirectory":
     """Build a directory dict as slskd.users.directory() returns it."""
     return {
         "directory": dir_path,
-        "files": files,
+        "files": files,  # type: ignore[typeddict-item]  # test dicts are structurally compatible
     }
 
 
@@ -579,10 +584,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         media2.medium_number = 2
         release.media = [media1, media2]
 
-        tracks = [
-            {"albumId": 1, "title": "Track One", "mediumNumber": 1},
-            {"albumId": 1, "title": "Track Two", "mediumNumber": 2},
-        ]
+        tracks = make_tracks((1, "Track One", 1), (1, "Track Two", 2))
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
@@ -634,7 +636,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         # First call: match with 1 track, 1 audio file
-        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        tracks = make_tracks((1, "Track One", 1))
         found, directory, file_dir = soularr.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
@@ -660,7 +662,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         }
 
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
-        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        tracks = make_tracks((1, "Track One", 1))
 
         # First match
         found1, dir1, _ = soularr.check_for_match(
@@ -713,11 +715,11 @@ class TestNegativeMatchCache(unittest.TestCase):
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks = [
-            {"albumId": 1, "title": "Track One", "mediumNumber": 1},
-            {"albumId": 1, "title": "Track Two", "mediumNumber": 1},
-            {"albumId": 1, "title": "Track Three", "mediumNumber": 1},
-        ]
+        tracks = make_tracks(
+            (1, "Track One", 1),
+            (1, "Track Two", 1),
+            (1, "Track Three", 1),
+        )
 
         # First call — misses (1 file vs 3 tracks)
         found1, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
@@ -740,7 +742,7 @@ class TestNegativeMatchCache(unittest.TestCase):
             }
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
-        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        tracks = make_tracks((1, "Track One", 1))
 
         # Fails for "flac" (file is .mp3, album_track_num won't count it as flac)
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
@@ -758,15 +760,15 @@ class TestNegativeMatchCache(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         # Fail with 3 tracks
-        tracks_3 = [
-            {"albumId": 1, "title": "Track One", "mediumNumber": 1},
-            {"albumId": 1, "title": "Track Two", "mediumNumber": 1},
-            {"albumId": 1, "title": "Track Three", "mediumNumber": 1},
-        ]
+        tracks_3 = make_tracks(
+            (1, "Track One", 1),
+            (1, "Track Two", 1),
+            (1, "Track Three", 1),
+        )
         soularr.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Now try with 1 track — should NOT be skipped (different track count)
-        tracks_1 = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        tracks_1 = make_tracks((1, "Track One", 1))
         found, _, _ = soularr.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertTrue(found)  # 1 file matches 1 track
 
@@ -804,7 +806,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
+        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should NOT have called slskd.users.directory — skipped before browse
@@ -823,7 +825,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ]
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
+        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # SHOULD have browsed — count is close enough
@@ -837,7 +839,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ]
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
+        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should browse — no metadata to pre-filter
@@ -972,7 +974,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.mock_slskd.users.directory.side_effect = Exception("Peer gone")
 
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
-        tracks = [{"albumId": 1, "title": "Track One", "mediumNumber": 1}]
+        tracks = make_tracks((1, "Track One", 1))
 
         found, _, _ = soularr.check_for_match(
             tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1", self.ctx
