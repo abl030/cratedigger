@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, toAWST, awstDate, awstTime, awstDateTime, esc } from '../web/js/util.js';
+import { qualityLabel, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -74,6 +74,16 @@ assertEqual(esc("it\\'s"), 'it&#92;&#39;s', 'escapes backslash+quote combo');
 assertEqual(esc(''), '', 'empty string');
 assertEqual(esc(null), '', 'null returns empty');
 assertEqual(esc(undefined), '', 'undefined returns empty');
+
+// --- overrideToIntent tests ---
+console.log('overrideToIntent()');
+assertEqual(overrideToIntent(null), 'best_effort', 'null → best_effort');
+assertEqual(overrideToIntent(undefined), 'best_effort', 'undefined → best_effort');
+assertEqual(overrideToIntent(''), 'best_effort', 'empty string → best_effort');
+assertEqual(overrideToIntent('flac'), 'flac_only', '"flac" → flac_only');
+assertEqual(overrideToIntent('flac_preferred'), 'flac_preferred', '"flac_preferred" → flac_preferred');
+assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'upgrade', 'CSV upgrade tiers → upgrade');
+assertEqual(overrideToIntent('flac,mp3 v0'), 'upgrade', 'partial CSV → upgrade');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

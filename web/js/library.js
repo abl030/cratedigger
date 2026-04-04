@@ -1,6 +1,6 @@
 // @ts-check
 import { API, toast, updatePipelineStatus } from './state.js';
-import { esc, qualityLabel } from './util.js';
+import { esc, qualityLabel, overrideToIntent } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 
 /**
@@ -296,18 +296,6 @@ export async function upgradeAlbum(mbid, btn) {
     btn.textContent = 'Error';
     toast('Upgrade failed', true);
   }
-}
-
-/**
- * Reverse-map quality_override DB string to QualityIntent enum value.
- * @param {string|null|undefined} override
- * @returns {string}
- */
-function overrideToIntent(override) {
-  if (!override) return 'best_effort';
-  if (override === 'flac') return 'flac_only';
-  if (override === 'flac_preferred') return 'flac_preferred';
-  return 'upgrade';  // CSV like "flac,mp3 v0,mp3 320"
 }
 
 /**

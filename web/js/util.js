@@ -43,6 +43,18 @@ export function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 export function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
 /**
+ * Reverse-map quality_override DB string to QualityIntent enum value.
+ * @param {string|null|undefined} override
+ * @returns {string}
+ */
+export function overrideToIntent(override) {
+  if (!override) return 'best_effort';
+  if (override === 'flac') return 'flac_only';
+  if (override === 'flac_preferred') return 'flac_preferred';
+  return 'upgrade';  // CSV like "flac,mp3 v0,mp3 320"
+}
+
+/**
  * HTML-escape a string. Works in both browser and Node.
  * @param {string|null|undefined} s
  * @returns {string}
