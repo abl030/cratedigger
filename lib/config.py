@@ -82,6 +82,7 @@ class SoularrConfig:
     plex_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/prom_music"
 
     # --- Paths (derived from args) ---
+    var_dir: str = "."
     lock_file_path: str = ""
     config_file_path: str = ""
 
@@ -196,6 +197,7 @@ class SoularrConfig:
             plex_library_section_id=get("Plex", "library_section_id") or None,
             plex_path_map=get("Plex", "path_map") or None,
             # Paths
+            var_dir=var_dir,
             lock_file_path=os.path.join(var_dir, ".soularr.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
         )

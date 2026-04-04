@@ -1273,6 +1273,10 @@ def main():
         from lib.context import SoularrContext
         _module_ctx = SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 
+        # Load persisted caches from previous runs
+        from lib.cache import load_caches
+        load_caches(_module_ctx, cfg.var_dir)
+
         # --- Phase 1 + Phase 2 run concurrently ---
         # Phase 1 (poll downloads) operates on status='downloading' rows.
         # Phase 2 (search + enqueue) operates on status='wanted' rows.
@@ -1329,6 +1333,13 @@ def main():
         slskd.transfers.remove_completed_downloads()
 
     finally:
+        # Save caches for next run
+        try:
+            from lib.cache import save_caches as _save
+            _save(_module_ctx, cfg.var_dir)
+        except Exception:
+            pass
+
         # Bust web UI cache so freshly imported albums appear immediately
         try:
             import urllib.request
