@@ -192,7 +192,8 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
                 entry.existing_min_bitrate,
                 entry.actual_min_bitrate or entry.request_min_bitrate,
                 entry.was_converted, entry.original_filetype,
-                is_verified_lossless)
+                is_verified_lossless,
+                actual_filetype=entry.actual_filetype)
             return ("Upgraded", "badge-upgraded", "#3a6", verdict)
 
         # New import
@@ -266,7 +267,8 @@ def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
 def _classify_quality_override(entry: LogEntry,
                                is_verified_lossless: bool) -> tuple[str, str, str, str]:
     """Classify a quality_override upgrade (replacing unverified CBR)."""
-    cur_label = quality_label("MP3", entry.actual_min_bitrate
+    fmt = entry.actual_filetype or entry.filetype or "mp3"
+    cur_label = quality_label(fmt, entry.actual_min_bitrate
                               or entry.request_min_bitrate or 0)
     parts = [f"Replaced unverified CBR with {cur_label}"]
     if entry.was_converted and entry.original_filetype:
@@ -343,10 +345,12 @@ def _rejection_verdict(entry: LogEntry) -> str:
 
 def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],
                      was_converted: bool, original_ft: Optional[str],
-                     is_verified_lossless: bool) -> str:
+                     is_verified_lossless: bool,
+                     actual_filetype: Optional[str] = None) -> str:
     """Build verdict for a successful upgrade."""
-    prev_label = quality_label("MP3", prev_br) if prev_br else "?"
-    cur_label = quality_label("MP3", cur_br) if cur_br else "?"
+    fmt = actual_filetype or "mp3"
+    prev_label = quality_label("mp3", prev_br) if prev_br else "?"
+    cur_label = quality_label(fmt, cur_br) if cur_br else "?"
     parts = [f"{prev_label} to {cur_label}"]
     if was_converted and original_ft:
         parts.append(f"from {original_ft.upper()}")

@@ -608,6 +608,25 @@ class TestQualityOverride(unittest.TestCase):
             existing_min_bitrate=320, actual_min_bitrate=243))
         self.assertEqual(result.badge, "Upgraded")
 
+    def test_quality_override_opus_shows_opus(self):
+        """Opus upgrade should show OPUS in verdict, not MP3."""
+        result = classify_log_entry(_entry(
+            outcome="success", quality_override="flac",
+            existing_min_bitrate=320, actual_filetype="opus",
+            was_converted=True, original_filetype="flac"))
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertIn("OPUS", result.verdict)
+        self.assertNotIn("MP3", result.verdict)
+
+    def test_upgrade_opus_shows_opus_in_verdict(self):
+        """Opus upgrade verdict should use actual filetype."""
+        result = classify_log_entry(_entry(
+            outcome="success", existing_min_bitrate=192,
+            actual_filetype="opus", actual_min_bitrate=117,
+            was_converted=True, original_filetype="flac"))
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertIn("OPUS", result.verdict)
+
 
 if __name__ == "__main__":
     unittest.main()
