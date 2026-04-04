@@ -1561,3 +1561,69 @@ def full_pipeline_decision(
         result["keep_searching"] = True
 
     return result
+
+
+# --- Repair / orphan detection (pure functions) ---
+
+@dataclass(frozen=True)
+class OrphanInfo:
+    """A detected inconsistency in pipeline DB state."""
+    request_id: int
+    issue_type: str  # "corrupt_downloading", "stale_imported_path"
+    detail: str
+
+
+@dataclass(frozen=True)
+class RepairAction:
+    """Suggested repair for a detected inconsistency."""
+    request_id: int
+    action: str  # "reset_to_wanted", "clear_imported_path", "manual_review"
+    detail: str
+
+
+def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
+    """Detect inconsistent rows in album_requests. Pure — no I/O.
+
+    Checks:
+    - downloading row with no active_download_state (corrupt crash recovery)
+    - wanted/manual row with stale imported_path
+    """
+    issues: list[OrphanInfo] = []
+    for row in db_rows:
+        rid = row["id"]
+        status = row["status"]
+        state = row.get("active_download_state")
+        path = row.get("imported_path")
+
+        if status == "downloading" and not state:
+            issues.append(OrphanInfo(
+                request_id=rid,
+                issue_type="corrupt_downloading",
+                detail="downloading with no active_download_state"))
+
+        if status in ("wanted", "manual") and path:
+            issues.append(OrphanInfo(
+                request_id=rid,
+                issue_type="stale_imported_path",
+                detail=f"status={status} but imported_path={path}"))
+
+    return issues
+
+
+def suggest_repair(issue: OrphanInfo) -> RepairAction:
+    """Suggest a repair action for a detected inconsistency. Pure."""
+    if issue.issue_type == "corrupt_downloading":
+        return RepairAction(
+            request_id=issue.request_id,
+            action="reset_to_wanted",
+            detail="Reset corrupt downloading row to wanted")
+    elif issue.issue_type == "stale_imported_path":
+        return RepairAction(
+            request_id=issue.request_id,
+            action="clear_imported_path",
+            detail="Clear stale imported_path on non-imported row")
+    else:
+        return RepairAction(
+            request_id=issue.request_id,
+            action="manual_review",
+            detail=f"Unknown issue type: {issue.issue_type}")
