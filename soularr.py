@@ -466,6 +466,48 @@ def filter_list(albums):
         return None
 
 
+def _build_search_cache(
+    search_results: list[Any],
+    filter_specs: list[tuple[str, Any]],
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, int], dict[str, dict[str, int]]]:
+    """Build cache dicts from raw slskd search results.
+
+    Returns (cache_entries, upload_speeds, dir_audio_counts).
+    Pure — no I/O, no ctx writes.
+    """
+    from lib.quality import file_identity, filetype_matches
+
+    cache_entries: dict[str, dict[str, list[str]]] = {}
+    upload_speeds: dict[str, int] = {}
+    dir_audio_counts: dict[str, dict[str, int]] = {}
+
+    for result in search_results:
+        username = result["username"]
+        if username not in cache_entries:
+            cache_entries[username] = {}
+        if username not in dir_audio_counts:
+            dir_audio_counts[username] = {}
+        user_dir_counts = dir_audio_counts[username]
+        speed = result.get("uploadSpeed", 0)
+        if speed and (username not in upload_speeds or speed > upload_speeds[username]):
+            upload_speeds[username] = speed
+        for file in result["files"]:
+            file_dir = file["filename"].rsplit("\\", 1)[0]
+            identity = file_identity(file)
+            matched = False
+            for allowed_filetype, spec in filter_specs:
+                if filetype_matches(identity, spec):
+                    matched = True
+                    if allowed_filetype not in cache_entries[username]:
+                        cache_entries[username][allowed_filetype] = []
+                    if file_dir not in cache_entries[username][allowed_filetype]:
+                        cache_entries[username][allowed_filetype].append(file_dir)
+            if matched:
+                user_dir_counts[file_dir] = user_dir_counts.get(file_dir, 0) + 1
+
+    return cache_entries, upload_speeds, dir_audio_counts
+
+
 def search_for_album(album, ctx):
     from lib.search import build_query
 
@@ -518,37 +560,21 @@ def search_for_album(album, ctx):
     if not len(search_results) > 0:
         return False
 
-    if album_id not in ctx.search_cache:
-        ctx.search_cache[album_id] = {}
-
-    for result in search_results:
-        username = result["username"]
-        if username not in ctx.search_cache[album_id]:
-            ctx.search_cache[album_id][username] = {}
-        # Cache upload speed for sorting — prefer faster peers
-        speed = result.get("uploadSpeed", 0)
-        if speed and (username not in ctx.user_upload_speed or speed > ctx.user_upload_speed[username]):
-            ctx.user_upload_speed[username] = speed
+    from lib.search import SearchResult
+    filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
+    cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
+        search_results, filter_specs
+    )
+    for username in cache_entries:
         logger.info(f"Caching and truncating results for user: {username}")
-        init_files = result["files"]
-        from lib.quality import file_identity, filetype_matches
-        filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
-        if username not in ctx.search_dir_audio_count:
-            ctx.search_dir_audio_count[username] = {}
-        user_dir_counts = ctx.search_dir_audio_count[username]
-        for file in init_files:
-            file_dir = file["filename"].rsplit("\\", 1)[0]
-            identity = file_identity(file)
-            matched = False
-            for allowed_filetype, spec in filter_specs:
-                if filetype_matches(identity, spec):
-                    matched = True
-                    if allowed_filetype not in ctx.search_cache[album_id][username]:
-                        ctx.search_cache[album_id][username][allowed_filetype] = []
-                    if file_dir not in ctx.search_cache[album_id][username][allowed_filetype]:
-                        ctx.search_cache[album_id][username][allowed_filetype].append(file_dir)
-            if matched:
-                user_dir_counts[file_dir] = user_dir_counts.get(file_dir, 0) + 1
+
+    # Reuse the same merge path as the parallel pipeline
+    _merge_search_result(SearchResult(
+        album_id=album_id, success=True,
+        cache_entries=cache_entries,
+        upload_speeds=upload_speeds,
+        dir_audio_counts=dir_audio_counts,
+    ), ctx)
     return True
 
 
@@ -648,36 +674,10 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         return SearchResult(album_id=album_id, success=False, query=query,
                             result_count=0, elapsed_s=elapsed)
 
-    # Build cache entries, upload speeds, and per-dir audio file counts
-    cache_entries: dict[str, dict[str, list[str]]] = {}
-    upload_speeds: dict[str, int] = {}
-    dir_audio_counts: dict[str, dict[str, int]] = {}
-
-    from lib.quality import file_identity, filetype_matches
-    par_filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
-    for result in search_results:
-        username = result["username"]
-        if username not in cache_entries:
-            cache_entries[username] = {}
-        if username not in dir_audio_counts:
-            dir_audio_counts[username] = {}
-        user_dir_counts = dir_audio_counts[username]
-        speed = result.get("uploadSpeed", 0)
-        if speed and (username not in upload_speeds or speed > upload_speeds[username]):
-            upload_speeds[username] = speed
-        for file in result["files"]:
-            file_dir = file["filename"].rsplit("\\", 1)[0]
-            identity = file_identity(file)
-            matched = False
-            for allowed_filetype, spec in par_filter_specs:
-                if filetype_matches(identity, spec):
-                    matched = True
-                    if allowed_filetype not in cache_entries[username]:
-                        cache_entries[username][allowed_filetype] = []
-                    if file_dir not in cache_entries[username][allowed_filetype]:
-                        cache_entries[username][allowed_filetype].append(file_dir)
-            if matched:
-                user_dir_counts[file_dir] = user_dir_counts.get(file_dir, 0) + 1
+    filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
+    cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
+        search_results, filter_specs
+    )
 
     return SearchResult(
         album_id=album_id,
