@@ -747,6 +747,21 @@ def _get_denied_users(album_id):
     return denied
 
 
+def _get_user_dirs(results_for_user: dict[str, list[str]], allowed_filetype: str) -> list[str] | None:
+    """Get candidate directories for a user, handling catch-all merging.
+
+    Returns None if the user has no dirs for the requested filetype.
+    """
+    if allowed_filetype == "*":
+        file_dirs: list[str] = []
+        for ft_dirs in results_for_user.values():
+            file_dirs.extend(d for d in ft_dirs if d not in file_dirs)
+        return file_dirs or None
+    if allowed_filetype not in results_for_user:
+        return None
+    return results_for_user[allowed_filetype]
+
+
 def try_enqueue(all_tracks, results, allowed_filetype, ctx):
     """
     Single album match and enqueue.
@@ -756,22 +771,13 @@ def try_enqueue(all_tracks, results, allowed_filetype, ctx):
     denied_users = _get_denied_users(album_id)
     # Sort users by upload speed (fastest first) for quicker downloads
     sorted_users = sorted(results.keys(), key=lambda u: ctx.user_upload_speed.get(u, 0), reverse=True)
-    is_catch_all = allowed_filetype == "*"
     for username in sorted_users:
         if username in denied_users:
             logger.info(f"Skipping user '{username}' for album ID {album_id}: denylisted (previously provided mislabeled quality)")
             continue
-        if is_catch_all:
-            # Catch-all: merge all cached directories for this user
-            file_dirs = []
-            for ft_dirs in results[username].values():
-                file_dirs.extend(d for d in ft_dirs if d not in file_dirs)
-            if not file_dirs:
-                continue
-        else:
-            if allowed_filetype not in results[username]:
-                continue
-            file_dirs = results[username][allowed_filetype]
+        file_dirs = _get_user_dirs(results[username], allowed_filetype)
+        if file_dirs is None:
+            continue
         logger.debug(f"Parsing result from user: {username}")
         found, directory, file_dir = check_for_match(all_tracks, allowed_filetype, file_dirs, username, ctx)
         if found:
@@ -822,23 +828,15 @@ def try_multi_enqueue(release, all_tracks, results, allowed_filetype, ctx):
     count_found = 0
     album_id = all_tracks[0]["albumId"]
     denied_users = _get_denied_users(album_id)
-    is_catch_all = allowed_filetype == "*"
     for disk in split_release:
         ctx.negative_matches.clear()  # each disc has different expected titles
         for username in results:
             if username in denied_users:
                 logger.info(f"Skipping user '{username}' for album ID {album_id} (multi-disc): denylisted (previously provided mislabeled quality)")
                 continue
-            if is_catch_all:
-                file_dirs = []
-                for ft_dirs in results[username].values():
-                    file_dirs.extend(d for d in ft_dirs if d not in file_dirs)
-                if not file_dirs:
-                    continue
-            else:
-                if allowed_filetype not in results[username]:
-                    continue
-                file_dirs = results[username][allowed_filetype]
+            file_dirs = _get_user_dirs(results[username], allowed_filetype)
+            if file_dirs is None:
+                continue
             found, directory, file_dir = check_for_match(disk["tracks"], allowed_filetype, file_dirs, username, ctx)
             if found:
                 directory = download_filter(allowed_filetype, directory)
