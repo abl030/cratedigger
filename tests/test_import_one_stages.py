@@ -5,12 +5,46 @@ These test the decision points extracted from main() — each stage function
 takes data inputs and returns a StageResult without I/O.
 """
 
+import importlib
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "harness"))
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LIB_DIR = os.path.join(ROOT_DIR, "lib")
+HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
+
+sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, HARNESS_DIR)
+
+
+class TestImportBootstrap(unittest.TestCase):
+    """Standalone harness imports should bootstrap the repo root."""
+
+    def test_harness_only_import_bootstraps_lib_package(self):
+        module_names = ["import_one", "lib", "lib.beets_db", "lib.quality", "lib.spectral_check"]
+        saved_modules = {name: sys.modules.get(name) for name in module_names}
+        saved_path = list(sys.path)
+        try:
+            for name in module_names:
+                sys.modules.pop(name, None)
+            sys.path[:] = [p for p in sys.path if p not in (ROOT_DIR, LIB_DIR, HARNESS_DIR)]
+            sys.path.insert(0, HARNESS_DIR)
+
+            import_one = importlib.import_module("import_one")
+
+            self.assertEqual(import_one.ROOT_DIR, ROOT_DIR)
+            self.assertIn(ROOT_DIR, sys.path)
+            self.assertIn(LIB_DIR, sys.path)
+            spectral_check = importlib.import_module("lib.spectral_check")
+            self.assertTrue(callable(spectral_check.analyze_album))
+        finally:
+            sys.path[:] = saved_path
+            for name in module_names:
+                sys.modules.pop(name, None)
+            for name, module in saved_modules.items():
+                if module is not None:
+                    sys.modules[name] = module
 
 
 # ============================================================================

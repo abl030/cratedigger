@@ -31,12 +31,24 @@ import sys
 from dataclasses import dataclass
 from typing import NoReturn
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-from quality import (transcode_detection, import_quality_decision,
-                     AudioQualityMeasurement,
-                     TRANSCODE_MIN_BITRATE_KBPS,
-                     ImportResult, PostflightInfo)
-from beets_db import BeetsDB
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LIB_DIR = os.path.join(ROOT_DIR, "lib")
+
+
+def _bootstrap_import_paths() -> None:
+    """Ensure standalone harness runs can import both lib.* and top-level modules."""
+    for path in (ROOT_DIR, LIB_DIR):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+_bootstrap_import_paths()
+
+from lib.beets_db import BeetsDB
+from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
+                         AudioQualityMeasurement, ImportResult,
+                         PostflightInfo, TRANSCODE_MIN_BITRATE_KBPS,
+                         import_quality_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
             or "/etc/profiles/per-user/abl030/bin/beet")
@@ -111,8 +123,6 @@ def final_exit_decision(is_transcode: bool) -> int:
 # ---------------------------------------------------------------------------
 # Quality checking
 # ---------------------------------------------------------------------------
-
-from quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
 
 def _get_folder_min_bitrate(folder_path):
@@ -379,8 +389,7 @@ def run_import(path, mb_release_id):
 def update_pipeline_db(request_id, status, imported_path=None, distance=None, scenario=None):
     """Update pipeline DB status. Best-effort — failures logged but don't block."""
     try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-        from pipeline_db import PipelineDB
+        from lib.pipeline_db import PipelineDB
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
         db = PipelineDB(dsn)
         extra = {}
@@ -474,7 +483,7 @@ def main():
     existing_spectral_grade: str | None = None
     existing_spectral_bitrate: int | None = None
     try:
-        from spectral_check import analyze_album as spectral_analyze
+        from lib.spectral_check import analyze_album as spectral_analyze
         spectral_result = spectral_analyze(args.path, trim_seconds=30)
         spectral_grade = spectral_result.grade
         spectral_bitrate = spectral_result.estimated_bitrate_kbps
