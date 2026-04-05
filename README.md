@@ -82,6 +82,27 @@ WHERE id = <id>;
 All types are fully typed dataclasses with pyright enforcement and JSON round-trip serialization:
 `ImportResult`, `ValidationResult`, `CandidateSummary`, `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `DownloadInfo`, `SpectralContext`, `AlbumInfo`, `ActiveDownloadState`, `ActiveDownloadFileState`.
 
+## Pipeline CLI diagnostics
+
+`pipeline-cli` already has the pipeline DB connection configured, so use it for ad-hoc debugging instead of hand-rolling `psql` or Python one-offs.
+
+```bash
+# Inline SQL (runs in a read-only DB session)
+pipeline-cli query "SELECT id, status, artist_name, album_title FROM album_requests WHERE status = 'wanted' LIMIT 5"
+
+# Multi-line SQL without shell quoting
+pipeline-cli query - <<'SQL'
+SELECT id, artist_name, album_title, min_bitrate, current_spectral_bitrate
+FROM album_requests
+WHERE current_spectral_bitrate IS NOT NULL
+ORDER BY updated_at DESC
+LIMIT 10
+SQL
+
+# JSON output for scripting
+pipeline-cli query --json "SELECT id, outcome, import_result FROM download_log ORDER BY id DESC LIMIT 3"
+```
+
 ## What's different from upstream
 
 - **PostgreSQL pipeline DB** replaces Lidarr as the source of truth

@@ -545,11 +545,25 @@ pipeline-cli quality <request_id>
 
 # Raw JSONB audit data for a specific download attempt
 pipeline-cli debug-download <download_log_id>
+
+# Ad-hoc SQL through the existing DB connection (read-only session)
+pipeline-cli query "SELECT id, status, artist_name, album_title FROM album_requests WHERE status = 'wanted' LIMIT 5"
+
+# Multi-line SQL without shell quoting
+pipeline-cli query - <<'SQL'
+SELECT id, artist_name, album_title, min_bitrate, current_spectral_bitrate
+FROM album_requests
+WHERE current_spectral_bitrate IS NOT NULL
+ORDER BY updated_at DESC
+LIMIT 10
+SQL
 ```
 
 `pipeline-cli quality` runs `full_pipeline_decision()` with the album's actual state and shows whether genuine FLAC, V0, CBR 320, or suspect FLAC would be imported or rejected.
 
 `pipeline-cli show` displays the 8 quality columns from `album_requests` (min_bitrate, prev_min_bitrate, verified_lossless, spectral_grade, spectral_bitrate, on_disk_spectral_grade, on_disk_spectral_bitrate, quality_override) and renders the `ImportResult` JSONB from each download history entry showing the decision chain and measurements.
+
+`pipeline-cli query` executes arbitrary SQL in a session with `default_transaction_read_only = on`, so it is safe for diagnostics but will reject writes. Add `--json` when you need machine-readable output.
 
 ## Known Issues
 

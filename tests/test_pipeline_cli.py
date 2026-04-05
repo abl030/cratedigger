@@ -1,8 +1,10 @@
 """Tests for scripts/pipeline_cli.py — Pipeline CLI commands."""
 
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch, MagicMock
 
 # Bootstrap ephemeral PostgreSQL if available
@@ -172,6 +174,124 @@ class TestCmdManualImport(unittest.TestCase):
         kwargs = db.log_download.call_args.kwargs
         self.assertEqual(kwargs["outcome"], "failed")
         self.assertEqual(kwargs["staged_path"], "/tmp/Album")
+
+
+class TestCmdQuery(unittest.TestCase):
+    def test_query_renders_table_output_in_read_only_mode(self):
+        db = MagicMock()
+        query_cur = MagicMock()
+        query_cur.description = [("id",), ("artist_name",), ("details",)]
+        query_cur.fetchall.return_value = [
+            {"id": 7, "artist_name": "Buke and Gase", "details": {"tracks": 3}},
+        ]
+        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+
+        args = MagicMock(sql="SELECT id, artist_name, details FROM album_requests", json=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertIsNone(rc)
+        self.assertEqual(
+            db._execute.call_args_list[0][0][0],
+            "SET SESSION default_transaction_read_only = on",
+        )
+        self.assertEqual(
+            db._execute.call_args_list[1][0][0],
+            "SELECT id, artist_name, details FROM album_requests",
+        )
+        self.assertEqual(
+            db._execute.call_args_list[2][0][0],
+            "SET SESSION default_transaction_read_only = off",
+        )
+        output = stdout.getvalue()
+        self.assertIn("id | artist_name", output)
+        self.assertIn('{"tracks": 3}', output)
+        self.assertIn("(1 row)", output)
+
+    def test_query_reads_sql_from_stdin_when_dash_is_passed(self):
+        db = MagicMock()
+        query_cur = MagicMock()
+        query_cur.description = [("value",)]
+        query_cur.fetchall.return_value = [{"value": 1}]
+        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+
+        args = MagicMock(sql="-", json=False)
+        stdout = io.StringIO()
+        with patch("sys.stdin", io.StringIO("SELECT 1 AS value")), redirect_stdout(stdout):
+            pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(
+            db._execute.call_args_list[1][0][0],
+            "SELECT 1 AS value",
+        )
+        self.assertIn("value", stdout.getvalue())
+
+    def test_query_can_emit_json(self):
+        db = MagicMock()
+        query_cur = MagicMock()
+        query_cur.description = [("id",), ("status",)]
+        query_cur.fetchall.return_value = [{"id": 3, "status": "wanted"}]
+        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+
+        args = MagicMock(sql="SELECT id, status FROM album_requests", json=True)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            '[\n  {\n    "id": 3,\n    "status": "wanted"\n  }\n]',
+        )
+
+    def test_query_reports_sql_errors_and_resets_read_only(self):
+        import psycopg2
+
+        db = MagicMock()
+        db._execute.side_effect = [
+            MagicMock(),
+            psycopg2.ProgrammingError('syntax error at or near "BOOM"'),
+            MagicMock(),
+        ]
+
+        args = MagicMock(sql="BOOM", json=False)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("syntax error", stderr.getvalue())
+        self.assertEqual(
+            db._execute.call_args_list[2][0][0],
+            "SET SESSION default_transaction_read_only = off",
+        )
+
+
+@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
+class TestCmdQueryIntegration(unittest.TestCase):
+    """Integration test: read-only session rejects writes against real DB."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_query_rejects_writes(self):
+        args = MagicMock(sql="DELETE FROM album_requests", json=False)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(self.db, args)
+        self.assertEqual(rc, 1)
+        self.assertIn("read-only", stderr.getvalue().lower())
+
+    def test_query_allows_reads(self):
+        args = MagicMock(sql="SELECT count(*) AS n FROM album_requests", json=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_query(self.db, args)
+        self.assertIsNone(rc)
+        self.assertIn("n", stdout.getvalue())
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")

@@ -4,6 +4,7 @@
 Commands:
     list [status]       List album requests (optionally filtered by status)
     add <mbid>          Add a new request by MusicBrainz release ID
+    query <sql>         Run a read-only SQL query for debugging
     status              Show counts by status
     retry <id>          Reset a failed/rejected request to wanted
     cancel <id>         Set a request to skipped
@@ -27,8 +28,14 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+from datetime import date, datetime, time
+from decimal import Decimal
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+import psycopg2
+
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
 from pipeline_db import PipelineDB, DEFAULT_DSN
 
 MB_API = "http://192.168.1.35:5200/ws/2"
@@ -245,6 +252,95 @@ def _fmt_measurement(m, label=""):
     if m.get("is_cbr"):
         parts.append("CBR")
     return f"{label}{', '.join(parts)}"
+
+
+def _json_default(value):
+    """Serialize common PostgreSQL values for JSON/debug output."""
+    if isinstance(value, (date, datetime, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+def _stringify_query_value(value):
+    """Format a SQL value for table output."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=_json_default, sort_keys=True)
+    if isinstance(value, (date, datetime, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def _render_query_table(rows, columns):
+    """Render SQL query results as a simple aligned table."""
+    widths = {col: len(col) for col in columns}
+    string_rows = []
+
+    for row in rows:
+        rendered = []
+        for col in columns:
+            text = _stringify_query_value(row.get(col))
+            widths[col] = max(widths[col], len(text))
+            rendered.append(text)
+        string_rows.append(rendered)
+
+    header = " | ".join(col.ljust(widths[col]) for col in columns)
+    divider = "-+-".join("-" * widths[col] for col in columns)
+    lines = [header, divider]
+    for rendered in string_rows:
+        lines.append(" | ".join(
+            value.ljust(widths[col]) for col, value in zip(columns, rendered)
+        ))
+    row_label = "row" if len(rows) == 1 else "rows"
+    lines.append(f"({len(rows)} {row_label})")
+    return lines
+
+
+def _get_query_sql(args):
+    """Resolve SQL text from argv or stdin."""
+    sql = sys.stdin.read() if args.sql == "-" else args.sql
+    sql = sql.strip()
+    if not sql:
+        raise ValueError("No SQL provided.")
+    return sql
+
+
+def cmd_query(db, args):
+    """Run a debugging SQL query in a read-only session."""
+    try:
+        sql = _get_query_sql(args)
+    except ValueError as exc:
+        print(f"  [ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    db._execute("SET SESSION default_transaction_read_only = on")
+    try:
+        cur = db._execute(sql)
+        columns = [desc[0] for desc in cur.description] if cur.description else []
+        rows = [dict(row) for row in cur.fetchall()] if cur.description else []
+    except psycopg2.Error as exc:
+        message = exc.pgerror or str(exc)
+        print(f"  [ERROR] {message.strip()}", file=sys.stderr)
+        return 1
+    finally:
+        db._execute("SET SESSION default_transaction_read_only = off")
+
+    if args.json:
+        print(json.dumps(rows, indent=2, default=_json_default))
+        return None
+
+    if not columns:
+        print("Query executed successfully.")
+        return None
+
+    for line in _render_query_table(rows, columns):
+        print(line)
+    return None
 
 
 def _render_import_result(ir_raw):
@@ -714,6 +810,11 @@ def main():
     p_add.add_argument("--source", default="request", choices=["request", "redownload", "manual"],
                        help="Source type (default: request)")
 
+    # query
+    p_query = sub.add_parser("query", help="Run a read-only SQL query for debugging")
+    p_query.add_argument("sql", help="SQL query string, or '-' to read SQL from stdin")
+    p_query.add_argument("--json", action="store_true", help="Print rows as JSON")
+
     # status
     sub.add_parser("status", help="Show counts by status")
 
@@ -769,6 +870,7 @@ def main():
     commands = {
         "list": cmd_list,
         "add": cmd_add,
+        "query": cmd_query,
         "status": cmd_status,
         "retry": cmd_retry,
         "cancel": cmd_cancel,
