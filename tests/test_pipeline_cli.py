@@ -355,11 +355,11 @@ class TestCmdSetIntent(unittest.TestCase):
             id=2, status="imported", artist_name="A", album_title="B",
             min_bitrate=245,
         )
-        args = MagicMock(id=2, intent="flac_preferred")
+        args = MagicMock(id=2, intent="upgrade")
         pipeline_cli.cmd_set_intent(db, args)
         db.reset_to_wanted.assert_called_once()
         call_kwargs = db.reset_to_wanted.call_args.kwargs if db.reset_to_wanted.call_args.kwargs else db.reset_to_wanted.call_args[1]
-        self.assertEqual(call_kwargs.get("quality_override"), "flac_preferred")
+        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0,mp3 320")
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):

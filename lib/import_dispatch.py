@@ -17,7 +17,7 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          SpectralMeasurement,
                          ValidationResult,
                          QUALITY_MIN_BITRATE_KBPS,
-                         QualityIntent, intent_to_quality_override,
+                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, narrow_override_on_downgrade)
 from lib.transitions import apply_transition
@@ -149,7 +149,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                     min_bitrate=min_br_kbps,
                 )
                 return
-            upgrade_override = intent_to_quality_override(QualityIntent.upgrade)
+            upgrade_override = QUALITY_UPGRADE_TIERS
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
@@ -170,7 +170,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {upgrade_override})")
         elif decision == "requeue_flac":
-            flac_override = intent_to_quality_override(QualityIntent.flac_only)
+            flac_override = QUALITY_FLAC_ONLY
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
@@ -188,6 +188,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 "imported",
                 from_status="imported",
                 min_bitrate=min_br_kbps,
+                quality_override=None,  # done searching
             )
             if verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
@@ -340,7 +341,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             if action.requeue:
                 db = ctx.pipeline_db_source._get_db()
                 requeue_fields: dict[str, object] = {
-                    "quality_override": intent_to_quality_override(QualityIntent.upgrade),
+                    "quality_override": QUALITY_UPGRADE_TIERS,
                 }
                 if action.mark_done and new_br is not None:
                     requeue_fields["min_bitrate"] = new_br

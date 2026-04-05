@@ -13,8 +13,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement, PostflightInfo,
                          SpectralMeasurement,
-                         QUALITY_UPGRADE_TIERS,
-                         QualityIntent, intent_to_quality_override)
+                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
 from tests.helpers import make_request_row
 
 
@@ -222,20 +221,22 @@ class TestDispatchImport(unittest.TestCase):
         call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
         self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0")
 
-    def test_downgrade_narrows_flac_preferred_before_mark_failed(self):
+    def test_downgrade_preserves_override_when_tier_not_matched(self):
+        """320 downgrade with flac-only override → no narrowing (tier not in CSV)."""
         ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
                                  prev_min_bitrate=320)
         ctx = _make_ctx()
         db = ctx.pipeline_db_source._get_db()
         db.get_request.return_value = make_request_row(
             status="downloading",
-            quality_override="flac_preferred",
+            quality_override="flac",
         )
 
         result = self._dispatch(ir, ctx=ctx)
 
         call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
-        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0")
+        # narrowing returns None (mp3 320 not in "flac"), so no override passed
+        self.assertIsNone(call_kwargs.get("quality_override"))
 
     def test_transcode_upgrade(self):
         ir = _make_import_result(decision="transcode_upgrade",
@@ -358,7 +359,7 @@ class TestOverrideMinBitrate(unittest.TestCase):
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):
-    """Verify _check_quality_gate uses intent_to_quality_override."""
+    """Verify _check_quality_gate uses quality constants."""
 
     def _run_quality_gate(self, gate_decision, **extra_req_fields):
         """Run _check_quality_gate with a mocked quality_gate_decision."""
@@ -384,12 +385,12 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         return db
 
     def test_requeue_upgrade_uses_intent(self):
-        """requeue_upgrade should use intent_to_quality_override(upgrade)."""
+        """requeue_upgrade should use quality constants(upgrade)."""
         db = self._run_quality_gate("requeue_upgrade")
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
             call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
-            intent_to_quality_override(QualityIntent.upgrade),
+            QUALITY_UPGRADE_TIERS,
         )
 
     def test_requeue_upgrade_verified_lossless_accepts(self):
@@ -401,12 +402,12 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db.add_denylist.assert_not_called()
 
     def test_requeue_flac_uses_intent(self):
-        """requeue_flac should use intent_to_quality_override(flac_only)."""
+        """requeue_flac should use quality constants(flac_only)."""
         db = self._run_quality_gate("requeue_flac")
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
             call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
-            intent_to_quality_override(QualityIntent.flac_only),
+            QUALITY_FLAC_ONLY,
         )
 
     def test_quality_gate_reads_current_spectral_not_last_download(self):
@@ -496,7 +497,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db.reset_to_wanted.assert_not_called()
 
     def test_dispatch_requeue_uses_intent(self):
-        """dispatch_import requeue path should use intent_to_quality_override."""
+        """dispatch_import requeue path should use quality constants."""
         ir = _make_import_result(decision="transcode_upgrade",
                                  new_min_bitrate=227)
         album_data = _make_album_data()
@@ -519,7 +520,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
             call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
-            intent_to_quality_override(QualityIntent.upgrade),
+            QUALITY_UPGRADE_TIERS,
         )
 
 

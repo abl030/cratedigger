@@ -201,7 +201,7 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_request_fields(req_id, quality_override="flac_preferred")
+        db.update_request_fields(req_id, quality_override="flac,mp3 v0,mp3 320")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
@@ -209,7 +209,7 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac_preferred")
+        self.assertEqual(req["quality_override"], "flac,mp3 v0,mp3 320")
 
     def test_mark_failed_uses_explicit_narrowed_override(self):
         source, db = self._make_source()
@@ -219,7 +219,7 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_request_fields(req_id, quality_override="flac_preferred")
+        db.update_request_fields(req_id, quality_override="flac,mp3 v0,mp3 320")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="quality_downgrade")
 

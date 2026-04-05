@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.import_service import run_import, log_and_update_import  # type: ignore[import-not-found]
-from lib.quality import QualityIntent, intent_to_quality_override  # type: ignore[import-not-found]
+from lib.quality import QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY, INTENT_NAMES  # type: ignore[import-not-found]
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
 from quality import get_decision_tree, full_pipeline_decision  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
@@ -308,7 +308,7 @@ def post_pipeline_update(h, body: dict) -> None:
         b = s._beets_db()
         if mbid and b:
             if b.album_exists(mbid):
-                quality = intent_to_quality_override(QualityIntent.upgrade)
+                quality = QUALITY_UPGRADE_TIERS
                 min_br = b.get_min_bitrate(mbid)
         kwargs: dict[str, object] = {"from_status": req["status"]}
         if quality is not None:
@@ -330,7 +330,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         h._error("Missing mb_release_id")
         return
 
-    quality = intent_to_quality_override(QualityIntent.upgrade)
+    quality = QUALITY_UPGRADE_TIERS
 
     min_bitrate = None
     b = s._beets_db()
@@ -440,18 +440,16 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         h._error("Missing id")
         return
 
-    valid_intents = [i.value for i in QualityIntent]
-    if intent_str not in valid_intents:
-        h._error(f"Invalid intent: {intent_str!r}. Valid: {valid_intents}")
+    if intent_str not in INTENT_NAMES:
+        h._error(f"Invalid intent: {intent_str!r}. Valid: {list(INTENT_NAMES)}")
         return
 
-    intent = QualityIntent(intent_str)
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
         return
 
-    quality_override = intent_to_quality_override(intent)
+    quality_override = INTENT_NAMES[intent_str]
 
     if req["status"] == "downloading":
         h._error("Cannot set intent while album is downloading")
@@ -513,7 +511,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
     req = s._db().get_request(int(req_id))
     if req:
-        quality = req.get("quality_override") or intent_to_quality_override(QualityIntent.upgrade)
+        quality = req.get("quality_override") or QUALITY_UPGRADE_TIERS
         min_br = req.get("min_bitrate")
         ban_kwargs: dict[str, object] = {"from_status": req["status"]}
         if quality is not None:

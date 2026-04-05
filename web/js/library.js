@@ -187,7 +187,6 @@ export async function toggleLibDetail(id) {
         <select id="lib-intent-${id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">
           <option value="best_effort"${currentIntent === 'best_effort' ? ' selected' : ''}>Best effort</option>
           <option value="flac_only"${currentIntent === 'flac_only' ? ' selected' : ''}>FLAC only</option>
-          <option value="flac_preferred"${currentIntent === 'flac_preferred' ? ' selected' : ''}>FLAC preferred</option>
           <option value="upgrade"${currentIntent === 'upgrade' ? ' selected' : ''}>Upgrade</option>
         </select>
       </div>`;

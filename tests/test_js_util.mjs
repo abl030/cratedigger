@@ -81,7 +81,7 @@ assertEqual(overrideToIntent(null), 'best_effort', 'null → best_effort');
 assertEqual(overrideToIntent(undefined), 'best_effort', 'undefined → best_effort');
 assertEqual(overrideToIntent(''), 'best_effort', 'empty string → best_effort');
 assertEqual(overrideToIntent('flac'), 'flac_only', '"flac" → flac_only');
-assertEqual(overrideToIntent('flac_preferred'), 'flac_preferred', '"flac_preferred" → flac_preferred');
+assertEqual(overrideToIntent('flac_preferred'), 'upgrade', '"flac_preferred" (legacy) → upgrade');
 assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'upgrade', 'CSV upgrade tiers → upgrade');
 assertEqual(overrideToIntent('flac,mp3 v0'), 'upgrade', 'partial CSV → upgrade');
 

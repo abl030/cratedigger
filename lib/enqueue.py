@@ -384,16 +384,15 @@ def find_download(
     ctx.negative_matches.clear()
     ctx.current_album_cache[album_id] = album
 
-    from lib.quality import resolve_search_intent
+    from lib.quality import search_tiers
 
-    resolved = resolve_search_intent(album.db_quality_override,
-                                     list(ctx.cfg.allowed_filetypes))
-    filetypes_to_try = resolved.search_tiers
+    filetypes_to_try, catch_all = search_tiers(
+        album.db_quality_override, list(ctx.cfg.allowed_filetypes))
 
     if album.db_quality_override:
         logger.info(
             f"Quality override for {artist_name} - {album.title}: "
-            f"intent={resolved.intent.value}, searching {filetypes_to_try}"
+            f"searching {filetypes_to_try}"
         )
 
     for allowed_filetype in filetypes_to_try:
@@ -402,7 +401,7 @@ def find_download(
             return True
 
     if (
-        resolved.catch_all
+        catch_all
         and "*" not in [ft.strip() for ft in (ctx.cfg.allowed_filetypes or ())]
     ):
         logger.info(

@@ -199,7 +199,7 @@ def cmd_set(db, args):
 
 def cmd_set_intent(db, args):
     """Set quality intent for a request."""
-    from lib.quality import QualityIntent, intent_to_quality_override
+    from lib.quality import INTENT_NAMES
     from lib.transitions import apply_transition
     req = db.get_request(args.id)
     if not req:
@@ -208,8 +208,7 @@ def cmd_set_intent(db, args):
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return
-    intent = QualityIntent(args.intent)
-    quality_override = intent_to_quality_override(intent)
+    quality_override = INTENT_NAMES[args.intent]
     old_override = req.get("quality_override")
 
     if req["status"] == "imported":
@@ -218,14 +217,14 @@ def cmd_set_intent(db, args):
                          quality_override=quality_override,
                          min_bitrate=min_br)
         print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={intent.value}, re-queued for search")
+              f"intent={args.intent}, re-queued for search")
     else:
         db._execute(
             "UPDATE album_requests SET quality_override = %s, updated_at = NOW() WHERE id = %s",
             (quality_override, args.id),
         )
         print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={intent.value} (override: {old_override} → {quality_override})")
+              f"intent={args.intent} (override: {old_override} → {quality_override})")
 
 
 def _fmt_br(kbps):
@@ -842,7 +841,7 @@ def main():
     # set-intent
     p_intent = sub.add_parser("set-intent", help="Set quality intent for a request")
     p_intent.add_argument("id", type=int, help="Request ID")
-    p_intent.add_argument("intent", choices=["best_effort", "flac_only", "flac_preferred", "upgrade"],
+    p_intent.add_argument("intent", choices=["best_effort", "flac_only", "flac", "upgrade"],
                           help="Quality intent")
 
     # force-import

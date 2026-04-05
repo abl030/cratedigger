@@ -276,6 +276,15 @@ class PipelineDB:
                         CHECK(status IN ('wanted', 'downloading', 'imported', 'manual'));
                 END $$;
             """)
+            # Migrate symbolic intent names to concrete CSV values
+            cur.execute("""
+                UPDATE album_requests SET quality_override = 'flac,mp3 v0,mp3 320'
+                WHERE quality_override IN ('flac_preferred', 'upgrade');
+            """)
+            cur.execute("""
+                UPDATE album_requests SET quality_override = NULL
+                WHERE quality_override = 'best_effort';
+            """)
         mig_conn.close()
 
     def close(self):

@@ -900,11 +900,6 @@ class TestNarrowOverrideOnDowngrade(unittest.TestCase):
         result = narrow_override_on_downgrade("flac,mp3 v0", dl)
         self.assertEqual(result, "mp3 v0")
 
-    def test_removes_320_from_flac_preferred(self):
-        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
-        result = narrow_override_on_downgrade("flac_preferred", dl)
-        self.assertEqual(result, "flac,mp3 v0")
-
     def test_removes_v0_from_override(self):
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=True, bitrate=245000)
         result = narrow_override_on_downgrade("flac,mp3 v0,mp3 320", dl)
