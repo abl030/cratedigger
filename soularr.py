@@ -5,11 +5,9 @@ import argparse
 import os
 import sys
 import time
-import difflib
 import configparser
 import logging
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
-import copy
 import slskd_api
 
 if TYPE_CHECKING:
@@ -78,410 +76,49 @@ pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set i
 # All matching/search functions receive ctx explicitly.
 _module_ctx: Any = None  # SoularrContext — set in main()
 
-
-def album_match(expected_tracks: Sequence[TrackRecord], slskd_tracks: Sequence[SlskdFile], username: str, filetype: str, ctx: SoularrContext) -> bool:
-    counted = []
-    total_match = 0.0
-
-    album_info = get_album_by_id(expected_tracks[0]["albumId"], ctx)
-    album_name = album_info.title
-    artist_name = album_info.artist_name
-
-    from lib.quality import parse_filetype_config
-    spec = parse_filetype_config(filetype)
-    is_catch_all = spec.extension == "*"
-    for expected_track in expected_tracks:
-        best_match = 0.0
-        expected_filename = expected_track["title"]  # fallback for empty slskd_tracks
-
-        for slskd_track in slskd_tracks:
-            # For catch-all, use the actual extension from the slskd track
-            if is_catch_all:
-                slskd_ext = slskd_track["filename"].rsplit(".", 1)[-1].lower() if "." in slskd_track["filename"] else ""
-                expected_filename = expected_track["title"] + "." + slskd_ext
-            else:
-                expected_filename = expected_track["title"] + "." + spec.extension
-            slskd_filename = slskd_track["filename"]
-
-            # Try to match the ratio with the exact filenames
-            ratio = difflib.SequenceMatcher(None, expected_filename, slskd_filename).ratio()
-
-            # If ratio is a bad match try and split off (with " " as the separator) the garbage at the start of the slskd_filename and try again
-            ratio = check_ratio(" ", ratio, expected_filename, slskd_filename)
-            # Same but with "_" as the separator
-            ratio = check_ratio("_", ratio, expected_filename, slskd_filename)
-
-            # Same checks but preappend album name.
-            ratio = check_ratio("", ratio, album_name + " " + expected_filename, slskd_filename)
-            ratio = check_ratio(" ", ratio, album_name + " " + expected_filename, slskd_filename)
-            ratio = check_ratio("_", ratio, album_name + " " + expected_filename, slskd_filename)
-
-            if ratio > best_match:
-                best_match = ratio
-
-        if best_match > cfg.minimum_match_ratio:
-            counted.append(expected_filename)
-            total_match += best_match
-
-    if len(counted) == len(expected_tracks) and username not in cfg.ignored_users:
-        logger.info(f"Found match from user: {username} for {len(counted)} tracks! Track attributes: {filetype}")
-        logger.info(f"Average sequence match ratio: {total_match / len(counted)}")
-        logger.info("SUCCESSFUL MATCH")
-        logger.info("-------------------")
-        return True
-
-    return False
-
-
-def check_ratio(separator, ratio, expected_filename, slskd_filename):
-    if ratio < cfg.minimum_match_ratio:
-        if separator != "":
-            expected_filename_word_count = len(expected_filename.split()) * -1
-            truncated_slskd_filename = " ".join(slskd_filename.split(separator)[expected_filename_word_count:])
-            ratio = difflib.SequenceMatcher(None, expected_filename, truncated_slskd_filename).ratio()
-        else:
-            ratio = difflib.SequenceMatcher(None, expected_filename, slskd_filename).ratio()
-
-        return ratio
-    return ratio
-
-
-def album_track_num(directory: SlskdDirectory) -> dict[str, Any]:
-    from lib.quality import AUDIO_EXTENSIONS as _all_audio_exts
-    files = directory["files"]
-    specs = cfg.allowed_specs
-    # Check if any spec is catch-all ("*")
-    has_catch_all = any(s.extension == "*" for s in specs)
-    allowed_exts = list(_all_audio_exts) if has_catch_all else [s.extension for s in specs]
-    count = 0
-    index = -1
-    filetype = ""
-    for file in files:
-        ext = file["filename"].split(".")[-1].lower()
-        if ext in allowed_exts:
-            if has_catch_all:
-                # Catch-all: count all audio files, track majority extension
-                if index == -1:
-                    filetype = ext
-                count += 1
-            else:
-                new_index = allowed_exts.index(ext)
-                if index == -1:
-                    index = new_index
-                    filetype = allowed_exts[index]
-                elif new_index != index:
-                    filetype = ""
-                    break
-                count += 1
-
-    return_data = {"count": count, "filetype": filetype}
-    return return_data
-
-
-def release_trackcount_mode(releases):
-    track_count = {}
-
-    for release in releases:
-        trackcount = release.track_count
-        if trackcount in track_count:
-            track_count[trackcount] += 1
-        else:
-            track_count[trackcount] = 1
-
-    most_common_trackcount = None
-    max_count = 0
-
-    for trackcount, count in track_count.items():
-        if count > max_count:
-            max_count = count
-            most_common_trackcount = trackcount
-
-    return most_common_trackcount
-
-
-def choose_release(artist_name, releases):
-    most_common_trackcount = release_trackcount_mode(releases)
-
-    # Prefer the release marked as monitored — this is the one the
-    # user explicitly selected in the UI and represents the edition they want.
-    for release in releases:
-        if not release.monitored:
-            continue
-        country = release.country[0] if release.country else None
-        if release.format[1] == "x" and cfg.allow_multi_disc:
-            format_accepted = release.format.split("x", 1)[1] in cfg.accepted_formats
-        else:
-            format_accepted = release.format in cfg.accepted_formats
-        if format_accepted:
-            logger.info(
-                f"Selected monitored release for {artist_name}: {release.status}, "
-                f"{country}, {release.format}, Mediums: {release.medium_count}, "
-                f"Tracks: {release.track_count}, ID: {release.id}"
-            )
-            return release
-
-    for release in releases:
-        country = release.country[0] if release.country else None
-
-        if release.format[1] == "x" and cfg.allow_multi_disc:
-            format_accepted = release.format.split("x", 1)[1] in cfg.accepted_formats
-        else:
-            format_accepted = release.format in cfg.accepted_formats
-
-        if cfg.use_most_common_tracknum:
-            if release.track_count == most_common_trackcount:
-                track_count_bool = True
-            else:
-                track_count_bool = False
-        else:
-            track_count_bool = True
-
-        if (cfg.skip_region_check or country in cfg.accepted_countries) and format_accepted and release.status == "Official" and track_count_bool:
-            logger.info(
-                ", ".join(
-                    [
-                        f"Selected release for {artist_name}: {release.status}",
-                        str(country),
-                        release.format,
-                        f"Mediums: {release.medium_count}",
-                        f"Tracks: {release.track_count}",
-                        f"ID: {release.id}",
-                    ]
-                )
-            )
-
-            return release
-
-    if cfg.use_most_common_tracknum:
-        for release in releases:
-            if release.track_count == most_common_trackcount:
-                return release
-        else:
-            default_release = releases[0]
-
-    else:
-        default_release = releases[0]
-
-    return default_release
-
-
-
-
-def download_filter(allowed_filetype: str, directory: SlskdDirectory) -> SlskdDirectory:
-    """
-    Filters the directory listing from SLSKD using the filetype whitelist.
-    If not using the whitelist it will only return the audio files of the allowed filetype.
-    This is to prevent downloading m3u,cue,txt,jpg,etc. files that are sometimes stored in
-    the same folders as the music files.
-    """
-    logging.debug("download_filtering")
-    if cfg.download_filtering:
-        from lib.quality import parse_filetype_config, AUDIO_EXTENSIONS as _all_audio
-        spec = parse_filetype_config(allowed_filetype)
-        whitelist = []  # Init an empty list to take just the allowed_filetype
-        if cfg.use_extension_whitelist:
-            whitelist = list(cfg.extensions_whitelist)
-        if spec.extension == "*":
-            whitelist.extend(_all_audio)
-        else:
-            whitelist.append(spec.extension)
-        unwanted = []
-        logger.debug(f"Accepted extensions: {whitelist}")
-        for file in directory["files"]:
-            for extension in whitelist:
-                if file["filename"].split(".")[-1].lower() == extension.lower():
-                    break  # Jump out and don't add wanted files to the unwanted list
-            else:
-                unwanted.append(file["filename"])  # Add to list of files to remove from the wanted list
-                logger.debug(f"Unwanted file: {file['filename']}")
-        if len(unwanted) > 0:
-            temp = []
-            logger.debug(f"Unwanted Files: {unwanted}")
-            for file in directory["files"]:
-                if file["filename"] not in unwanted:
-                    logger.debug(f"Added file to queue: {file['filename']}")
-                    temp.append(file)
-            for files in temp:
-                logger.debug(f"File in final list: {files['filename']}")
-            return {**directory, "files": temp}  # New dict — never mutate the input
-    return directory
-
-
-
-_PENALTY_KEYWORDS = (
-    "archive", "best of", "greatest hits", "magazine", "compilation",
-    "singles", "soundtrack", "various", "bootleg", "discography",
+from lib.browse import (
+    _browse_directories,
+    _browse_one,
+    download_filter,
+    rank_candidate_dirs,
+)
+from lib.enqueue import (
+    _get_denied_users,
+    _get_user_dirs,
+    _prefixed_directory_files,
+    _try_filetype,
+    choose_release,
+    find_download,
+    get_album_tracks,
+    release_trackcount_mode,
+    try_enqueue,
+    try_multi_enqueue,
+)
+from lib.matching import (
+    album_match,
+    album_track_num,
+    check_for_match,
+    check_ratio,
+    get_album_by_id,
 )
 
 
-def rank_candidate_dirs(
-    file_dirs: list[str], album_title: str, artist_name: str
-) -> list[str]:
-    """Sort candidate directories by likelihood of being the correct album.
-
-    Promotes paths containing the album or artist name; demotes paths with
-    penalty keywords (compilations, archives, etc.). Stable sort — equal
-    scores preserve original order.
-    """
-    title_lower = album_title.lower()
-    artist_lower = artist_name.lower()
-
-    def _score(d: str) -> int:
-        d_lower = d.lower()
-        score = 0
-        if title_lower in d_lower:
-            score += 2
-        if artist_lower in d_lower:
-            score += 1
-        for kw in _PENALTY_KEYWORDS:
-            if kw in d_lower:
-                score -= 3
-                break  # one penalty is enough
-        return score
-
-    return sorted(file_dirs, key=_score, reverse=True)
-
-
-def _browse_one(username: str, file_dir: str) -> tuple[str, Any | None]:
-    """Browse a single directory from slskd. Returns (file_dir, result_or_None)."""
-    try:
-        directory = slskd.users.directory(username=username, directory=file_dir)[0]
-        return file_dir, directory
-    except Exception:
-        logger.exception(f'Error getting directory from user: "{username}"')
-        return file_dir, None
-
-
-def _browse_directories(
-    dirs_to_browse: list[str], username: str, max_workers: int = 4
-) -> dict[str, Any]:
-    """Browse multiple directories in parallel. Returns {file_dir: directory}.
-
-    Failed browses are omitted from the result dict.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    if not dirs_to_browse:
-        return {}
-
-    # Single dir — don't bother with thread pool
-    if len(dirs_to_browse) == 1:
-        file_dir, result = _browse_one(username, dirs_to_browse[0])
-        return {file_dir: result} if result is not None else {}
-
-    results: dict[str, Any] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_browse_one, username, d): d
-            for d in dirs_to_browse
-        }
-        for future in as_completed(futures):
-            file_dir, result = future.result()
-            if result is not None:
-                results[file_dir] = result
-
-    return results
-
-
-def check_for_match(tracks: Sequence[TrackRecord], allowed_filetype: str, file_dirs: list[str], username: str, ctx: SoularrContext) -> tuple[bool, Any, str]:
-    """
-    Does the actual match checking on a single disk/album.
-
-    Phase 1: Filter dirs (negative cache, pre-filter by audio count).
-    Phase 2: Browse uncached dirs in parallel.
-    Phase 3: Match serially (early exit on first match).
-    """
-    logger.debug(f"Current broken users {ctx.broken_user}")
-    if username in ctx.broken_user:
-        return False, {}, ""
-    track_num = len(tracks)
-    album_info = get_album_by_id(tracks[0]["albumId"], ctx)
-    ranked_dirs = rank_candidate_dirs(file_dirs, album_info.title, album_info.artist_name)
-
-    # Phase 1: Filter — determine which dirs need browsing
-    dirs_to_try: list[str] = []
-    for file_dir in ranked_dirs:
-        neg_key = (username, file_dir, track_num, allowed_filetype)
-        if neg_key in ctx.negative_matches:
-            logger.debug(f"Negative cache hit: {username} {file_dir} ({track_num} tracks, {allowed_filetype})")
-            continue
-
-        user_counts = ctx.search_dir_audio_count.get(username)
-        if user_counts and file_dir in user_counts:
-            search_count = user_counts[file_dir]
-            if abs(search_count - track_num) > 2:
-                logger.debug(
-                    f"Pre-filter skip: {username} {file_dir} has {search_count} "
-                    f"audio files, need {track_num} tracks"
-                )
-                ctx.negative_matches.add(neg_key)
-                continue
-
-        dirs_to_try.append(file_dir)
-
-    if not dirs_to_try:
-        return False, {}, ""
-
-    # Phase 2: Browse uncached dirs in parallel
-    if username not in ctx.folder_cache:
-        ctx.folder_cache[username] = {}
-
-    uncached = [d for d in dirs_to_try if d not in ctx.folder_cache[username]]
-    if uncached:
-        logger.info(
-            f"Browsing {len(uncached)} dirs from {username} "
-            f"(parallelism={cfg.browse_parallelism})"
-        )
-        browsed = _browse_directories(uncached, username, cfg.browse_parallelism)
-        for d, result in browsed.items():
-            ctx.folder_cache[username][d] = result
-            ctx._folder_cache_ts.setdefault(username, {})[d] = time.time()
-
-        # If ALL browses failed, mark user as broken
-        if not browsed and len(uncached) == len(dirs_to_try):
-            ctx.broken_user.append(username)
-            logger.debug(f"All browses failed for {username}, marked as broken")
-            return False, {}, ""
-
-    # Phase 3: Match serially — early exit on first match
-    for file_dir in dirs_to_try:
-        if file_dir not in ctx.folder_cache[username]:
-            # Browse failed for this dir
-            continue
-
-        directory = ctx.folder_cache[username][file_dir]
-        tracks_info = album_track_num(directory)
-        neg_key = (username, file_dir, track_num, allowed_filetype)
-
-        if tracks_info["count"] == track_num and tracks_info["filetype"] != "":
-            if album_match(tracks, directory["files"], username, allowed_filetype, ctx):
-                if _track_titles_cross_check(tracks, directory["files"]):
-                    return True, copy.deepcopy(directory), file_dir
-                else:
-                    logger.warning(
-                        f"Track title cross-check FAILED for user {username}, "
-                        f"dir {file_dir} — skipping (wrong pressing?)"
-                    )
-        ctx.negative_matches.add(neg_key)
-    return False, {}, ""
-
-
-def is_blacklisted(title: str) -> bool:
-    for word in cfg.title_blacklist:
+def is_blacklisted(title: str, title_blacklist: Sequence[str]) -> bool:
+    for word in title_blacklist:
         if word and word.lower() in title.lower():
             logger.info(f"Skipping {title} due to blacklisted word: {word}")
             return True
     return False
 
 
-def filter_list(albums):
+def filter_list(albums, filter_cfg: SoularrConfig):
     """
     Helper to do all the various filtering in one go and in one place. Same net effect as the previous multi-stage approach
     Just neater and easier to work on.
     """
     list_to_download = []
     for album in albums:
-        if is_blacklisted(album.title):
+        if is_blacklisted(album.title, filter_cfg.title_blacklist):
             logger.info(f"Skipping blacklisted album: {album.artist_name} - {album.title} (ID: {album.id}")
             continue
         else:
@@ -716,18 +353,6 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
     )
 
 
-def _execute_search(album, search_cfg, slskd_client):
-    """Submit + wait for one search. Used by sequential path."""
-    result = _submit_search(album, search_cfg, slskd_client)
-    if result is None:
-        from lib.search import SearchResult
-        return SearchResult(album_id=album.id, success=False,
-                            query=album.title)
-    search_id, query, album_id = result
-    return _collect_search_results(search_id, query, album_id,
-                                   search_cfg, slskd_client)
-
-
 def _merge_search_result(result, ctx):
     """Merge a SearchResult into ctx caches.
 
@@ -759,281 +384,6 @@ def _merge_search_result(result, ctx):
             existing = ctx.search_dir_audio_count[username].get(d, 0)
             ctx.search_dir_audio_count[username][d] = max(existing, count)
             ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
-
-
-def _get_denied_users(album_id, ctx):
-    """Get denied users from pipeline DB source_denylist. Cached per album per run."""
-    request_id = abs(album_id)
-    if request_id in ctx.denied_users_cache:
-        return ctx.denied_users_cache[request_id]
-    denied = set()
-    try:
-        db = pipeline_db_source._get_db()
-        denied.update(e["username"] for e in db.get_denylisted_users(request_id))
-    except Exception:
-        pass
-    ctx.denied_users_cache[request_id] = denied
-    return denied
-
-
-def _get_user_dirs(results_for_user: dict[str, list[str]], allowed_filetype: str) -> list[str] | None:
-    """Get candidate directories for a user, handling catch-all merging.
-
-    Returns None if the user has no dirs for the requested filetype.
-    """
-    if allowed_filetype == "*":
-        seen: set[str] = set()
-        file_dirs: list[str] = []
-        for ft_dirs in results_for_user.values():
-            for d in ft_dirs:
-                if d not in seen:
-                    seen.add(d)
-                    file_dirs.append(d)
-        return file_dirs or None
-    if allowed_filetype not in results_for_user:
-        return None
-    return results_for_user[allowed_filetype]
-
-
-def try_enqueue(all_tracks, results, allowed_filetype, ctx):
-    """
-    Single album match and enqueue.
-    Iterates over all users and enqueues a found match
-    """
-    album_id = all_tracks[0]["albumId"]
-    denied_users = _get_denied_users(album_id, ctx)
-    # Sort users by upload speed (fastest first) for quicker downloads
-    sorted_users = sorted(results.keys(), key=lambda u: ctx.user_upload_speed.get(u, 0), reverse=True)
-    for username in sorted_users:
-        if username in denied_users:
-            logger.info(f"Skipping user '{username}' for album ID {album_id}: denylisted (previously provided mislabeled quality)")
-            continue
-        file_dirs = _get_user_dirs(results[username], allowed_filetype)
-        if file_dirs is None:
-            continue
-        logger.debug(f"Parsing result from user: {username}")
-        found, directory, file_dir = check_for_match(all_tracks, allowed_filetype, file_dirs, username, ctx)
-        if found:
-            directory = download_filter(allowed_filetype, directory)
-            for i in range(0, len(directory["files"])):
-                directory["files"][i]["filename"] = file_dir + "\\" + directory["files"][i]["filename"]
-            try:
-                downloads = slskd_do_enqueue(username=username, files=directory["files"], file_dir=file_dir)
-                if downloads is not None:
-                    return True, downloads
-                else:
-                    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
-                    album_name = album.title
-                    artist_name = album.artist_name
-                    logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
-            except Exception as e:
-                album = get_album_by_id(all_tracks[0]["albumId"], ctx)
-                album_name = album.title
-                artist_name = album.artist_name
-
-                logger.warning(f"Exception enqueueing tracks: {e}")
-                logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
-    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
-    album_name = album.title
-    artist_name = album.artist_name
-    logger.info(f"Failed to enqueue {artist_name} - {album_name}")
-    return False, None
-
-
-def try_multi_enqueue(release, all_tracks, results, allowed_filetype, ctx):
-    """
-    This is the multi-disk/media path for locating and enqueueing an album
-    It does a flat search first. Then it does a split search.
-    Otherwise it's basically the same as the single album search.
-    """
-    split_release = []
-    for media in release.media:
-        disk = {}
-        disk["source"] = None
-        disk["tracks"] = []
-        disk["disk_no"] = media.medium_number
-        disk["disk_count"] = len(release.media)
-        for track in all_tracks:
-            if track["mediumNumber"] == media.medium_number:
-                disk["tracks"].append(track)
-        split_release.append(disk)
-    total = len(split_release)
-    count_found = 0
-    album_id = all_tracks[0]["albumId"]
-    denied_users = _get_denied_users(album_id, ctx)
-    for disk in split_release:
-        ctx.negative_matches.clear()  # each disc has different expected titles
-        for username in results:
-            if username in denied_users:
-                logger.info(f"Skipping user '{username}' for album ID {album_id} (multi-disc): denylisted (previously provided mislabeled quality)")
-                continue
-            file_dirs = _get_user_dirs(results[username], allowed_filetype)
-            if file_dirs is None:
-                continue
-            found, directory, file_dir = check_for_match(disk["tracks"], allowed_filetype, file_dirs, username, ctx)
-            if found:
-                directory = download_filter(allowed_filetype, directory)
-                disk["source"] = (username, directory, file_dir)
-                count_found += 1
-                break
-        else:
-            return (
-                False,
-                None,
-            )  # Only runs if we complete the loop without finding a source for the current disk regardless of how many other disks we located. All or nothing.
-    if count_found == total:
-        all_downloads = []
-        enqueued = 0
-        for disk in split_release:
-            username, directory, file_dir = disk["source"]
-            for i in range(0, len(directory["files"])):
-                directory["files"][i]["filename"] = file_dir + "\\" + directory["files"][i]["filename"]
-            try:
-                downloads = slskd_do_enqueue(username=username, files=directory["files"], file_dir=file_dir)
-                if downloads is not None:
-                    for file in downloads:
-                        file.disk_no = disk["disk_no"]
-                        file.disk_count = disk["disk_count"]
-                    all_downloads.extend(downloads)
-                    enqueued += 1
-                else:
-                    album = get_album_by_id(all_tracks[0]["albumId"], ctx)
-                    album_name = album.title
-                    artist_name = album.artist_name
-                    logger.info(f"Failed to enqueue download to slskd for {artist_name} - {album_name} from {username}")
-                    if len(all_downloads) > 0:
-                        cancel_and_delete(all_downloads)
-                        return False, None
-            except Exception:
-                album = get_album_by_id(all_tracks[0]["albumId"], ctx)
-                album_name = album.title
-                artist_name = album.artist_name
-
-                logger.exception("Exception enqueueing tracks")
-                logger.info(f"Exception enqueueing download to slskd for {artist_name} - {album_name} from {username}")
-                if len(all_downloads) > 0:
-                    cancel_and_delete(all_downloads)
-                    return False, None
-        if enqueued == total:
-            return True, all_downloads
-        else:
-            # Delete all other downloads
-            if len(all_downloads) > 0:
-                cancel_and_delete(all_downloads)
-            return False, None
-
-    else:
-        return False, None
-
-
-def get_album_tracks(album, release_id=None):
-    """Get tracks for an album from pipeline DB."""
-    return pipeline_db_source.get_tracks(album)
-
-
-def get_album_by_id(album_id, ctx):
-    """Get album data by ID from context cache."""
-    if album_id in ctx.current_album_cache:
-        return ctx.current_album_cache[album_id]
-    raise KeyError(f"Album {album_id} not found in cache")
-
-
-def _try_filetype(album, results, allowed_filetype, grab_list, ctx) -> bool:
-    """Try to match and enqueue an album at a specific filetype quality.
-
-    Iterates releases (monitored first), tries single-album then multi-disc.
-    Returns True and populates grab_list on success.
-    """
-    album_id = album.id
-    artist_name = album.artist_name
-    releases = list(album.releases)
-    has_monitored = any(r.monitored for r in releases)
-
-    for _ in range(len(releases)):
-        if not releases:
-            break
-        release = choose_release(artist_name, releases)
-        releases.remove(release)
-        all_tracks = get_album_tracks(album, release_id=release.id)
-        if not all_tracks:
-            logger.warning(f"No tracks for {artist_name} - {album.title} (release {release.id}) — skipping")
-            continue
-
-        found, downloads = try_enqueue(all_tracks, results, allowed_filetype, ctx)
-        if not found and len(release.media) > 1:
-            found, downloads = try_multi_enqueue(release, all_tracks, results, allowed_filetype, ctx)
-
-        if found:
-            assert downloads is not None
-            grab_list[album_id] = GrabListEntry(
-                album_id=album_id,
-                files=downloads,
-                filetype=allowed_filetype,
-                title=album.title,
-                artist=artist_name,
-                year=album.release_date[0:4],
-                mb_release_id=release.foreign_release_id,
-                db_request_id=album.db_request_id,
-                db_source=album.db_source,
-                db_quality_override=album.db_quality_override,
-            )
-            return True
-
-        if has_monitored and release.monitored:
-            logger.info(
-                f"Monitored release ({release.track_count} tracks) not found on "
-                f"Soulseek for {artist_name} - {album.title} at quality "
-                f"{allowed_filetype}, skipping non-monitored releases"
-            )
-            break
-        if has_monitored and not release.monitored:
-            break
-
-    return False
-
-
-def find_download(album, grab_list, ctx):
-    """
-    This does the main loop over search results and user directories
-    It has two paths it can take. One is the "single album" path
-    The other is the multi-media path.
-    """
-    album_id = album.id
-    artist_name = album.artist_name
-    results = ctx.search_cache[album_id]
-
-    # Clear negative match cache per-album — same dir could match a different album
-    ctx.negative_matches.clear()
-
-    # Cache album so get_album_by_id() works during matching
-    ctx.current_album_cache[album_id] = album
-
-    from lib.quality import derive_intent, search_filetypes, intent_allows_catch_all
-
-    intent = derive_intent(album.db_quality_override)
-    filetypes_to_try = search_filetypes(intent, list(cfg.allowed_filetypes))
-
-    if album.db_quality_override:
-        logger.info(
-            f"Quality override for {artist_name} - {album.title}: "
-            f"intent={intent.value}, searching {filetypes_to_try}"
-        )
-
-    for allowed_filetype in filetypes_to_try:
-        logger.info(f"Checking for Quality: {allowed_filetype}")
-        if _try_filetype(album, results, allowed_filetype, grab_list, ctx):
-            return True
-
-    # Catch-all fallback: only best_effort allows falling back to any format.
-    if intent_allows_catch_all(intent) and "*" not in [ft.strip() for ft in (cfg.allowed_filetypes or ())]:
-        logger.info(
-            f"No match at preferred quality for {artist_name} - {album.title}, "
-            f"trying catch-all (any audio format)"
-        )
-        if _try_filetype(album, results, "*", grab_list, ctx):
-            return True
-
-    return False
 
 
 def search_and_queue(albums, ctx):
@@ -1146,8 +496,6 @@ def _search_and_queue_parallel(albums, ctx):
 
     return grab_list, failed_search, failed_grab
 
-
-from lib.grab_list import GrabListEntry
 
 from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
                           slskd_do_enqueue as _slskd_do_enqueue_impl,
@@ -1311,7 +659,7 @@ def main():
             failed = 0
             if len(wanted_records) > 0:
                 try:
-                    filtered = filter_list(wanted_records)
+                    filtered = filter_list(wanted_records, cfg)
                     if filtered is not None:
                         failed = grab_most_wanted(filtered)
                     else:

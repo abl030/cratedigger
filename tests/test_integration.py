@@ -4,6 +4,7 @@ Uses realistic slskd API fixtures with mocked API calls. Catches type
 mismatches at the boundary between raw slskd dicts and DownloadFile instances.
 """
 
+import copy
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ sys.modules["slskd_api.apis.users"] = MagicMock()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import soularr
+from lib import enqueue as enqueue_module
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.download import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
@@ -297,7 +299,7 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "02 - Track.flac", "size": 100},
                 {"filename": "cover.jpg", "size": 50},
             ])
-            result = soularr.album_track_num(directory)
+            result = soularr.album_track_num(directory, soularr.cfg)
             self.assertEqual(result["count"], 2)
             self.assertEqual(result["filetype"], "flac")
         finally:
@@ -317,7 +319,7 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "cover.jpg", "size": 50},
                 {"filename": "info.nfo", "size": 10},
             ])
-            filtered = soularr.download_filter("flac", directory)
+            filtered = soularr.download_filter("flac", directory, soularr.cfg)
             filenames = [f["filename"] for f in filtered["files"]]
             self.assertIn("01 - Track.flac", filenames)
             self.assertIn("cover.jpg", filenames)
@@ -326,6 +328,86 @@ class TestRawDictBoundary(unittest.TestCase):
             self.assertEqual(len(directory["files"]), 3)
         finally:
             soularr.cfg = orig_cfg
+
+
+class TestContextDependencyPropagation(unittest.TestCase):
+    """Verify matching/enqueue helpers use ctx dependencies, not module globals."""
+
+    def setUp(self):
+        self._orig_cfg = soularr.cfg
+        self._orig_pdb = soularr.pipeline_db_source
+
+    def tearDown(self):
+        soularr.cfg = self._orig_cfg
+        soularr.pipeline_db_source = self._orig_pdb
+
+    def test_check_for_match_uses_ctx_cfg(self):
+        """Matching should read config from ctx, not the module-level cfg."""
+        soularr.cfg = _make_matching_cfg(
+            allowed_filetypes=("mp3",),
+            minimum_match_ratio=0.99,
+            ignored_users=("user1",),
+        )
+        ctx_cfg = _make_matching_cfg(
+            allowed_filetypes=("flac",),
+            minimum_match_ratio=0.5,
+            ignored_users=(),
+        )
+        ctx = _make_ctx(cfg=ctx_cfg)
+        ctx.folder_cache["user1"] = {
+            "Music\\Album": make_directory("Music\\Album", [
+                {"filename": "01 - Track One.flac", "size": 100},
+            ])
+        }
+        ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+
+        found, _, _ = soularr.check_for_match(
+            make_tracks((1, "Track One", 1)),
+            "flac",
+            ["Music\\Album"],
+            "user1",
+            ctx,
+        )
+
+        self.assertTrue(found)
+
+    def test_get_denied_users_uses_ctx_pipeline_db_source(self):
+        """Denylist lookups should use ctx.pipeline_db_source."""
+        ctx_source = MagicMock()
+        ctx_db = MagicMock()
+        ctx_db.get_denylisted_users.return_value = [{"username": "baduser"}]
+        ctx_source._get_db.return_value = ctx_db
+        ctx = _make_ctx(pipeline_db_source=ctx_source)
+
+        global_source = MagicMock()
+        global_db = MagicMock()
+        global_db.get_denylisted_users.return_value = [{"username": "wrong"}]
+        global_source._get_db.return_value = global_db
+        soularr.pipeline_db_source = global_source
+
+        denied = soularr._get_denied_users(12, ctx)
+
+        self.assertEqual(denied, {"baduser"})
+        ctx_source._get_db.assert_called_once()
+        global_source._get_db.assert_not_called()
+
+    def test_get_album_tracks_uses_ctx_pipeline_db_source(self):
+        """Track lookups should use ctx.pipeline_db_source."""
+        album = MagicMock()
+        expected_tracks = make_tracks((1, "Track One", 1))
+        ctx_source = MagicMock()
+        ctx_source.get_tracks.return_value = expected_tracks
+        ctx = _make_ctx(pipeline_db_source=ctx_source)
+
+        global_source = MagicMock()
+        global_source.get_tracks.return_value = []
+        soularr.pipeline_db_source = global_source
+
+        tracks = soularr.get_album_tracks(album, ctx)
+
+        self.assertEqual(tracks, expected_tracks)
+        ctx_source.get_tracks.assert_called_once_with(album)
+        global_source.get_tracks.assert_not_called()
 
 
 class TestSlskdDoEnqueue(unittest.TestCase):
@@ -586,14 +668,75 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
 
         tracks = make_tracks((1, "Track One", 1), (1, "Track Two", 2))
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        dir1 = make_directory("Music\\Disc1", [{"filename": "01 - Track.flac", "size": 100}])
+        dir2 = make_directory("Music\\Disc2", [{"filename": "01 - Track.flac", "size": 100}])
 
-        soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
+        with patch.object(
+            enqueue_module,
+            "check_for_match",
+            side_effect=[
+                (True, dir1, "Music\\Disc1"),
+                (True, dir2, "Music\\Disc2"),
+            ],
+        ), patch.object(
+            enqueue_module,
+            "slskd_do_enqueue",
+            side_effect=[[MagicMock()], [MagicMock()]],
+        ):
+            soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
 
         self.assertEqual(results, original_results)
 
+    def test_directory_file_entries_not_mutated_when_prefixing_paths(self):
+        """try_multi_enqueue should build prefixed file copies, not mutate cached dirs."""
+        release = MagicMock()
+        media1 = MagicMock()
+        media1.medium_number = 1
+        media2 = MagicMock()
+        media2.medium_number = 2
+        release.media = [media1, media2]
+
+        tracks = make_tracks((1, "Track One", 1), (1, "Track Two", 2))
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        results = {"user1": {"flac": ["Music\\Disc1", "Music\\Disc2"]}}
+
+        dir1 = make_directory("Music\\Disc1", [{"filename": "01 - Track.flac", "size": 100}])
+        dir2 = make_directory("Music\\Disc2", [{"filename": "01 - Track.flac", "size": 100}])
+        download1 = MagicMock()
+        download2 = MagicMock()
+
+        with patch.object(
+            enqueue_module,
+            "check_for_match",
+            side_effect=[
+                (True, dir1, "Music\\Disc1"),
+                (True, dir2, "Music\\Disc2"),
+            ],
+        ), patch.object(
+            enqueue_module,
+            "slskd_do_enqueue",
+            side_effect=[[download1], [download2]],
+        ) as enqueue_mock:
+            found, downloads = soularr.try_multi_enqueue(
+                release, tracks, results, "flac", self.ctx
+            )
+
+        self.assertTrue(found)
+        self.assertEqual(downloads, [download1, download2])
+        self.assertEqual(dir1["files"][0]["filename"], "01 - Track.flac")
+        self.assertEqual(dir2["files"][0]["filename"], "01 - Track.flac")
+        self.assertEqual(
+            enqueue_mock.call_args_list[0].kwargs["files"][0]["filename"],
+            "Music\\Disc1\\01 - Track.flac",
+        )
+        self.assertEqual(
+            enqueue_mock.call_args_list[1].kwargs["files"][0]["filename"],
+            "Music\\Disc2\\01 - Track.flac",
+        )
+
 
 class TestDeepcopyDeferredToMatch(unittest.TestCase):
-    """Verify deepcopy only happens for matched directories, not every lookup."""
+    """Verify successful matches do not corrupt cached directory data."""
 
     def setUp(self):
         self._orig_cfg = soularr.cfg
@@ -643,7 +786,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         self.assertTrue(found)
 
         # Mutate the returned directory via download_filter (as try_enqueue does)
-        soularr.download_filter("flac", directory)
+        soularr.download_filter("flac", directory, self.ctx.cfg)
 
         # folder_cache should still have ALL 3 files (including .nfo)
         cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
@@ -671,7 +814,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         self.assertTrue(found1)
 
         # Mutate it
-        soularr.download_filter("flac", dir1)
+        soularr.download_filter("flac", dir1, self.ctx.cfg)
 
         # Second match on the same cached dir should still succeed
         found2, dir2, _ = soularr.check_for_match(
@@ -680,6 +823,81 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         self.assertTrue(found2)
         # And should have both files (not the filtered version)
         self.assertEqual(len(dir2["files"]), 2)
+
+    def test_successful_match_does_not_call_deepcopy(self):
+        """check_for_match should return the cached directory directly on success."""
+        self.ctx.folder_cache["testuser"] = {
+            "Music\\Album": make_directory("Music\\Album", [
+                {"filename": "01 - Track One.flac", "size": 100},
+            ])
+        }
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+
+        with patch.object(
+            copy,
+            "deepcopy",
+            side_effect=AssertionError("deepcopy should not be used"),
+        ):
+            found, directory, file_dir = soularr.check_for_match(
+                make_tracks((1, "Track One", 1)),
+                "flac",
+                ["Music\\Album"],
+                "testuser",
+                self.ctx,
+            )
+
+        self.assertTrue(found)
+        self.assertEqual(file_dir, "Music\\Album")
+        self.assertIs(directory, self.ctx.folder_cache["testuser"]["Music\\Album"])
+
+
+class TestSingleEnqueuePathPrefixing(unittest.TestCase):
+    """Verify try_enqueue prefixes file paths without mutating the source directory."""
+
+    def setUp(self):
+        self._orig_cfg = soularr.cfg
+        soularr.cfg = _make_matching_cfg()
+        source = MagicMock()
+        db = MagicMock()
+        db.get_denylisted_users.return_value = []
+        source._get_db.return_value = db
+        self.ctx = _make_ctx(cfg=soularr.cfg, pipeline_db_source=source)
+        self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
+        self.ctx.user_upload_speed["user1"] = 10
+
+    def tearDown(self):
+        soularr.cfg = self._orig_cfg
+
+    def test_try_enqueue_builds_prefixed_file_copies(self):
+        directory = make_directory("Music\\Album", [
+            {"filename": "01 - Track.flac", "size": 100},
+        ])
+        results = {"user1": {"flac": ["Music\\Album"]}}
+        downloads = [MagicMock()]
+
+        with patch.object(
+            enqueue_module,
+            "check_for_match",
+            return_value=(True, directory, "Music\\Album"),
+        ), patch.object(
+            enqueue_module,
+            "slskd_do_enqueue",
+            return_value=downloads,
+        ) as enqueue_mock:
+            found, actual_downloads = soularr.try_enqueue(
+                make_tracks((1, "Track One", 1)),
+                results,
+                "flac",
+                self.ctx,
+            )
+
+        self.assertTrue(found)
+        self.assertEqual(actual_downloads, downloads)
+        self.assertEqual(directory["files"][0]["filename"], "01 - Track.flac")
+        self.assertEqual(
+            enqueue_mock.call_args.kwargs["files"][0]["filename"],
+            "Music\\Album\\01 - Track.flac",
+        )
 
 
 class TestNegativeMatchCache(unittest.TestCase):
@@ -939,7 +1157,9 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.mock_slskd.users.directory.side_effect = mock_directory
 
         dirs_to_browse = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
-        results = soularr._browse_directories(dirs_to_browse, "user1", max_workers=2)
+        results = soularr._browse_directories(
+            dirs_to_browse, "user1", self.mock_slskd, max_workers=2
+        )
 
         self.assertEqual(len(results), 3)
         self.assertIn("Music\\Dir1", results)
@@ -961,7 +1181,9 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.mock_slskd.users.directory.side_effect = mock_directory
 
         dirs_to_browse = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
-        results = soularr._browse_directories(dirs_to_browse, "user1", max_workers=2)
+        results = soularr._browse_directories(
+            dirs_to_browse, "user1", self.mock_slskd, max_workers=2
+        )
 
         # Dir1 and Dir3 should succeed, Dir2 should fail
         self.assertEqual(len(results), 2)
