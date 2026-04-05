@@ -415,6 +415,54 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                           "quality gate should use on_disk_spectral_bitrate, "
                           "not stale spectral_bitrate from download")
 
+    def test_genuine_v0_replacing_transcode_accepted(self):
+        """Contract test: genuine V0 replacing a transcode should be accepted
+        by the quality gate, not requeued. Tests the full mark_done → quality
+        gate data flow. Regression test for issue #18."""
+        from lib.import_dispatch import _check_quality_gate
+        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+
+        album_data = _make_album_data()
+        ctx = _make_ctx()
+        db = ctx.pipeline_db_source._get_db.return_value
+
+        # After mark_done fix: genuine import clears stale spectral data
+        db.get_request.return_value = make_request_row(
+            spectral_bitrate=None,            # cleared by mark_done (was 192)
+            spectral_grade="genuine",         # updated by mark_done
+            on_disk_spectral_bitrate=None,    # cleared by mark_done (was 192)
+            on_disk_spectral_grade="genuine", # updated by mark_done
+            verified_lossless=False,          # MP3 V0, not from FLAC
+        )
+
+        captured = {}
+
+        def capture_and_decide(measurement):
+            captured["m"] = measurement
+            # Run the REAL decision function
+            return quality_gate_decision(measurement)
+
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
+             patch("lib.quality.quality_gate_decision",
+                   side_effect=capture_and_decide):
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = MagicMock(
+                min_bitrate_kbps=226, is_cbr=False)
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate(album_data, 42, ctx)
+
+        m = captured["m"]
+        # Should see: 226kbps VBR, no spectral drag, not verified lossless
+        self.assertEqual(m.min_bitrate_kbps, 226)
+        self.assertFalse(m.is_cbr)
+        self.assertIsNone(m.spectral_bitrate_kbps)
+        # Decision should be "accept" (VBR >= 210), NOT "requeue_upgrade"
+        self.assertEqual(quality_gate_decision(m), "accept")
+        # Should NOT have called reset_to_wanted (no requeue)
+        db.reset_to_wanted.assert_not_called()
+
     def test_dispatch_requeue_uses_intent(self):
         """dispatch_import requeue path should use intent_to_quality_override."""
         ir = _make_import_result(decision="transcode_upgrade",
