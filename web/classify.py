@@ -317,8 +317,8 @@ def _rejection_verdict(entry: LogEntry) -> str:
 
     if scenario == "spectral_reject":
         new = f"{entry.spectral_bitrate}kbps" if entry.spectral_bitrate else "unknown"
-        old = (f"{entry.existing_spectral_bitrate}kbps"
-               if entry.existing_spectral_bitrate else "unknown")
+        old_kbps = entry.existing_spectral_bitrate or entry.existing_min_bitrate
+        old = f"{old_kbps}kbps" if old_kbps else "unknown"
         return f"Spectral: {new} is not better than existing {old}"
 
     if scenario == "transcode_downgrade":

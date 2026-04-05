@@ -362,6 +362,8 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
 
     new_quality = spec_ctx.bitrate
     existing_quality = spec_ctx.existing_spectral_bitrate or 0
+    # Effective existing: matches what spectral_import_decision() uses internally
+    effective_existing = existing_quality or spec_ctx.existing_min_bitrate or 0
     label = f"{album_data.artist} - {album_data.title}"
 
     spectral_decision = spectral_import_decision(
@@ -371,18 +373,18 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
     if spectral_decision == "reject":
         logger.warning(
             f"SPECTRAL REJECT: {label} "
-            f"new spectral {new_quality}kbps <= existing {existing_quality}kbps")
+            f"new spectral {new_quality}kbps <= existing {effective_existing}kbps")
         usernames = set(f.username for f in album_data.files if f.username)
         if request_id and ctx.pipeline_db_source:
             db = ctx.pipeline_db_source._get_db()
             for username in usernames:
                 db.add_denylist(request_id, username,
-                                f"spectral: {new_quality}kbps <= existing {existing_quality}kbps")
+                                f"spectral: {new_quality}kbps <= existing {effective_existing}kbps")
             logger.info(f"  Denylisted {usernames} for request {request_id}")
         # Set bv_result fields so _handle_rejected_result logs one row with spectral detail
         bv_result.valid = False
         bv_result.scenario = "spectral_reject"
-        bv_result.detail = f"spectral {new_quality}kbps <= existing {existing_quality}kbps"
+        bv_result.detail = f"spectral {new_quality}kbps <= existing {effective_existing}kbps"
         # Attach spectral info to album_data so _handle_rejected_result picks it up
         album_data.spectral_grade = spec_ctx.grade
         album_data.spectral_bitrate = new_quality
@@ -390,7 +392,7 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
     elif spectral_decision == "import_upgrade":
         logger.info(
             f"SPECTRAL UPGRADE: {label} "
-            f"suspect at {new_quality}kbps but > existing {existing_quality}kbps, importing")
+            f"suspect at {new_quality}kbps but > existing {effective_existing}kbps, importing")
     elif spectral_decision == "import_no_exist":
         logger.info(
             f"SPECTRAL: {label} "
@@ -442,6 +444,7 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         dl_info.spectral_grade = album_data.spectral_grade
         dl_info.spectral_bitrate = album_data.spectral_bitrate
         dl_info.existing_spectral_bitrate = album_data.existing_spectral_bitrate
+        dl_info.existing_min_bitrate = album_data.existing_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
     ctx.pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames,

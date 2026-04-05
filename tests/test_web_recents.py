@@ -299,6 +299,17 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("160", result.verdict)
         self.assertIn("192", result.verdict)
 
+    def test_spectral_reject_verdict_falls_back_to_min_bitrate(self):
+        """When existing_spectral_bitrate is 0/None (genuine files have no cliff),
+        the verdict should fall back to existing_min_bitrate."""
+        result = classify_log_entry(_entry(
+            outcome="rejected", beets_scenario="spectral_reject",
+            spectral_bitrate=192, existing_spectral_bitrate=0,
+            existing_min_bitrate=226))
+        self.assertIn("192", result.verdict)
+        self.assertIn("226", result.verdict)
+        self.assertNotIn("unknown", result.verdict)
+
     def test_transcode_downgrade_verdict(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="transcode_downgrade",
