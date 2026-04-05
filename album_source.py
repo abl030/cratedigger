@@ -279,8 +279,8 @@ class DatabaseSource:
         )
 
     def mark_failed(self, album_record, bv_result, usernames=None,
-                    download_info=None):
-        """Log the failure and denylist users, but keep album wanted for retry."""
+                    download_info=None, quality_override=None):
+        """Log the failure, preserve intent, and keep the album wanted for retry."""
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
@@ -288,10 +288,14 @@ class DatabaseSource:
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
+        if quality_override is None:
+            req = db.get_request(request_id)
+            quality_override = req.get("quality_override") if req else None
         from lib.transitions import apply_transition
         apply_transition(db, request_id, "wanted",
                          beets_distance=bv_result.distance,
-                         beets_scenario=bv_result.scenario)
+                         beets_scenario=bv_result.scenario,
+                         quality_override=quality_override)
         db.record_attempt(request_id, "validation")
 
         db.log_download(

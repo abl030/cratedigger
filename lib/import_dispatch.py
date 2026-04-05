@@ -262,6 +262,8 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             decision = ir.decision or "unknown"
             action = dispatch_action(decision)
             usernames = extract_usernames(album_data.files) if action.denylist else set()
+            narrowed_override = None
+            current_override = None
 
             new_br = ir.new_measurement.min_bitrate_kbps if ir.new_measurement else None
             prev_br = ir.existing_measurement.min_bitrate_kbps if ir.existing_measurement else None
@@ -298,6 +300,16 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                     detail = ir.error
                     logger.error(f"AUTO-IMPORT FAILED: {label} "
                                  f"(decision={decision}, error={ir.error})")
+                if decision == "downgrade" and ctx.pipeline_db_source is not None:
+                    try:
+                        db = ctx.pipeline_db_source._get_db()
+                        req_row = db.get_request(request_id)
+                        current_override = req_row.get("quality_override") if req_row else None
+                        narrowed_override = narrow_override_on_downgrade(
+                            current_override, dl_info)
+                    except Exception:
+                        logger.debug(
+                            "Failed to inspect quality_override before downgrade reset")
                 ctx.pipeline_db_source.mark_failed(
                     album_data,
                     ValidationResult(
@@ -305,7 +317,12 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                         detail=detail,
                         error=ir.error if decision not in ("downgrade", "transcode_downgrade") else None),
                     usernames=usernames if action.denylist else None,
-                    download_info=dl_info)
+                    download_info=dl_info,
+                    quality_override=narrowed_override)
+                if narrowed_override is not None:
+                    logger.info(
+                        f"  Narrowed quality_override '{current_override}'"
+                        f" -> '{narrowed_override}' after downgrade")
 
             # --- Common actions driven by flags ---
             if action.denylist:
@@ -319,23 +336,6 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 for username in usernames:
                     db.add_denylist(request_id, username, reason)
                 logger.info(f"  Denylisted {usernames} for request {request_id}")
-
-            # After downgrade: narrow quality_override so we stop searching
-            # for the tier that was just rejected (prevents infinite loops)
-            if decision == "downgrade" and ctx.pipeline_db_source is not None:
-                try:
-                    db = ctx.pipeline_db_source._get_db()
-                    req_row = db.get_request(request_id)
-                    current_override = req_row.get("quality_override") if req_row else None
-                    narrowed = narrow_override_on_downgrade(current_override, dl_info)
-                    if narrowed is not None:
-                        db.update_request_fields(request_id,
-                                                 quality_override=narrowed)
-                        logger.info(
-                            f"  Narrowed quality_override '{current_override}'"
-                            f" → '{narrowed}' after downgrade")
-                except Exception:
-                    logger.debug("Failed to narrow quality_override after downgrade")
 
             if action.requeue:
                 db = ctx.pipeline_db_source._get_db()

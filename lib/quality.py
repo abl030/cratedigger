@@ -1061,6 +1061,16 @@ def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
     return None
 
 
+def _quality_override_tiers(quality_override: str | None) -> list[str] | None:
+    """Expand a stored quality_override into the concrete search tiers it means."""
+    if not quality_override:
+        return None
+    resolved = resolve_search_intent(quality_override, [])
+    if resolved.intent == QualityIntent.best_effort:
+        return None
+    return list(resolved.search_tiers)
+
+
 def narrow_override_on_downgrade(quality_override: str | None,
                                  dl_info: "DownloadInfo") -> str | None:
     """Remove the rejected filetype tier from quality_override after downgrade.
@@ -1071,12 +1081,12 @@ def narrow_override_on_downgrade(quality_override: str | None,
 
     Returns the narrowed override string, or None if no change is needed.
     """
-    if not quality_override:
-        return None
     tier = rejected_download_tier(dl_info)
     if not tier:
         return None
-    tiers = [t.strip() for t in quality_override.split(",")]
+    tiers = _quality_override_tiers(quality_override)
+    if not tiers:
+        return None
     if tier not in tiers:
         return None
     narrowed = [t for t in tiers if t != tier]

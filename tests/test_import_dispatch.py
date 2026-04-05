@@ -207,6 +207,36 @@ class TestDispatchImport(unittest.TestCase):
         db = result["pipeline_db_source"]._get_db()
         db.add_denylist.assert_called()
 
+    def test_downgrade_passes_narrowed_override_to_mark_failed(self):
+        ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
+                                 prev_min_bitrate=320)
+        ctx = _make_ctx()
+        db = ctx.pipeline_db_source._get_db()
+        db.get_request.return_value = make_request_row(
+            status="downloading",
+            quality_override="flac,mp3 v0,mp3 320",
+        )
+
+        result = self._dispatch(ir, ctx=ctx)
+
+        call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
+        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0")
+
+    def test_downgrade_narrows_flac_preferred_before_mark_failed(self):
+        ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
+                                 prev_min_bitrate=320)
+        ctx = _make_ctx()
+        db = ctx.pipeline_db_source._get_db()
+        db.get_request.return_value = make_request_row(
+            status="downloading",
+            quality_override="flac_preferred",
+        )
+
+        result = self._dispatch(ir, ctx=ctx)
+
+        call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
+        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0")
+
     def test_transcode_upgrade(self):
         ir = _make_import_result(decision="transcode_upgrade",
                                  new_min_bitrate=227)
