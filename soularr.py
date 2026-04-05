@@ -435,6 +435,7 @@ def check_for_match(tracks: Sequence[TrackRecord], allowed_filetype: str, file_d
         browsed = _browse_directories(uncached, username, cfg.browse_parallelism)
         for d, result in browsed.items():
             ctx.folder_cache[username][d] = result
+            ctx._folder_cache_ts.setdefault(username, {})[d] = time.time()
 
         # If ALL browses failed, mark user as broken
         if not browsed and len(uncached) == len(dirs_to_try):
@@ -749,6 +750,7 @@ def _merge_search_result(result, ctx):
     for username, speed in result.upload_speeds.items():
         if username not in ctx.user_upload_speed or speed > ctx.user_upload_speed[username]:
             ctx.user_upload_speed[username] = speed
+            ctx._upload_speed_ts[username] = time.time()
 
     for username, dir_counts in result.dir_audio_counts.items():
         if username not in ctx.search_dir_audio_count:
@@ -756,6 +758,7 @@ def _merge_search_result(result, ctx):
         for d, count in dir_counts.items():
             existing = ctx.search_dir_audio_count[username].get(d, 0)
             ctx.search_dir_audio_count[username][d] = max(existing, count)
+            ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
 
 
 def _get_denied_users(album_id, ctx):

@@ -33,3 +33,8 @@ class SoularrContext:
     negative_matches: set[tuple[str, str, int, str]] = field(default_factory=set)
     current_album_cache: dict[int, Any] = field(default_factory=dict)
     denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
+
+    # --- Cache timestamps (epoch floats, for per-entry TTL eviction) ---
+    _folder_cache_ts: dict[str, dict[str, float]] = field(default_factory=dict)
+    _upload_speed_ts: dict[str, float] = field(default_factory=dict)
+    _dir_audio_count_ts: dict[str, dict[str, float]] = field(default_factory=dict)
