@@ -1000,6 +1000,50 @@ def extract_usernames(files: Any) -> set[str]:
     return {f.username for f in files if f.username}
 
 
+def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
+    """Determine which quality_override tier a rejected download corresponds to.
+
+    Maps from DownloadInfo properties to the tier string used in quality_override
+    CSV (e.g. "flac", "mp3 v0", "mp3 320").
+    """
+    slskd_ft = (dl_info.slskd_filetype or dl_info.filetype or "").lower().strip()
+    if slskd_ft == "flac" or dl_info.was_converted:
+        return "flac"
+    if "mp3" in slskd_ft:
+        if dl_info.is_vbr:
+            return "mp3 v0"
+        bitrate = dl_info.bitrate
+        if bitrate is None:
+            return None
+        kbps = bitrate // 1000 if bitrate > 1000 else bitrate
+        return f"mp3 {kbps}"
+    return None
+
+
+def narrow_override_on_downgrade(quality_override: str | None,
+                                 dl_info: "DownloadInfo") -> str | None:
+    """Remove the rejected filetype tier from quality_override after downgrade.
+
+    When a download is rejected as a downgrade (existing quality >= download),
+    searching for the same tier again will produce the same result. Remove it
+    to prevent infinite retry loops (e.g. downloading genuine CBR 320 six times).
+
+    Returns the narrowed override string, or None if no change is needed.
+    """
+    if not quality_override:
+        return None
+    tier = rejected_download_tier(dl_info)
+    if not tier:
+        return None
+    tiers = [t.strip() for t in quality_override.split(",")]
+    if tier not in tiers:
+        return None
+    narrowed = [t for t in tiers if t != tier]
+    if not narrowed:
+        return None  # Don't remove the last tier
+    return ",".join(narrowed)
+
+
 # ---------------------------------------------------------------------------
 # AudioFileSpec — single source of truth for filetype identity
 # ---------------------------------------------------------------------------

@@ -19,6 +19,9 @@ from lib.quality import (
     is_verified_lossless,
     AudioQualityMeasurement,
     SpectralContext,
+    DownloadInfo,
+    rejected_download_tier,
+    narrow_override_on_downgrade,
     QUALITY_MIN_BITRATE_KBPS,
     TRANSCODE_MIN_BITRATE_KBPS,
 )
@@ -837,6 +840,92 @@ class TestDispatchActionContract(unittest.TestCase):
             a = dispatch_action(outcome)
             self.assertTrue(a.mark_done or a.mark_failed,
                             f"dispatch_action('{outcome}') must set mark_done or mark_failed")
+
+
+# ============================================================================
+# rejected_download_tier + narrow_override_on_downgrade
+# ============================================================================
+
+class TestRejectedDownloadTier(unittest.TestCase):
+    """Test mapping from DownloadInfo to quality_override tier string."""
+
+    def test_cbr_320_bps(self):
+        """CBR 320 (bitrate in bps after import_one) → 'mp3 320'."""
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        self.assertEqual(rejected_download_tier(dl), "mp3 320")
+
+    def test_cbr_320_kbps(self):
+        """CBR 320 (bitrate in kbps from slskd) → 'mp3 320'."""
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320)
+        self.assertEqual(rejected_download_tier(dl), "mp3 320")
+
+    def test_cbr_256(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=256000)
+        self.assertEqual(rejected_download_tier(dl), "mp3 256")
+
+    def test_vbr_mp3(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=True, bitrate=245000)
+        self.assertEqual(rejected_download_tier(dl), "mp3 v0")
+
+    def test_flac(self):
+        dl = DownloadInfo(slskd_filetype="flac", is_vbr=False, bitrate=1411000)
+        self.assertEqual(rejected_download_tier(dl), "flac")
+
+    def test_converted_flac(self):
+        """FLAC converted to V0 — tier is 'flac' (the source format)."""
+        dl = DownloadInfo(slskd_filetype="flac", was_converted=True,
+                          is_vbr=True, bitrate=245000)
+        self.assertEqual(rejected_download_tier(dl), "flac")
+
+    def test_empty_dl_info(self):
+        dl = DownloadInfo()
+        self.assertIsNone(rejected_download_tier(dl))
+
+    def test_mp3_no_bitrate(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=None)
+        self.assertIsNone(rejected_download_tier(dl))
+
+
+class TestNarrowOverrideOnDowngrade(unittest.TestCase):
+    """Test narrowing quality_override after downgrade rejection."""
+
+    def test_removes_320_from_upgrade_tiers(self):
+        """Standard case: 'flac,mp3 v0,mp3 320' + 320 → 'flac,mp3 v0'."""
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        result = narrow_override_on_downgrade("flac,mp3 v0,mp3 320", dl)
+        self.assertEqual(result, "flac,mp3 v0")
+
+    def test_removes_flac_from_override(self):
+        dl = DownloadInfo(slskd_filetype="flac", is_vbr=False)
+        result = narrow_override_on_downgrade("flac,mp3 v0", dl)
+        self.assertEqual(result, "mp3 v0")
+
+    def test_removes_v0_from_override(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=True, bitrate=245000)
+        result = narrow_override_on_downgrade("flac,mp3 v0,mp3 320", dl)
+        self.assertEqual(result, "flac,mp3 320")
+
+    def test_no_change_when_tier_not_in_override(self):
+        """320 download but override is 'flac' only → no change."""
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        result = narrow_override_on_downgrade("flac", dl)
+        self.assertIsNone(result)
+
+    def test_no_change_when_no_override(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        result = narrow_override_on_downgrade(None, dl)
+        self.assertIsNone(result)
+
+    def test_wont_remove_last_tier(self):
+        """'mp3 320' + 320 → None (don't narrow to empty)."""
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        result = narrow_override_on_downgrade("mp3 320", dl)
+        self.assertIsNone(result)
+
+    def test_handles_whitespace_in_override(self):
+        dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
+        result = narrow_override_on_downgrade("flac, mp3 v0, mp3 320", dl)
+        self.assertEqual(result, "flac,mp3 v0")
 
 
 if __name__ == "__main__":

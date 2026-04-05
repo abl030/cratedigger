@@ -19,7 +19,7 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          QUALITY_MIN_BITRATE_KBPS,
                          QualityIntent, intent_to_quality_override,
                          dispatch_action, compute_effective_override_bitrate,
-                         extract_usernames)
+                         extract_usernames, narrow_override_on_downgrade)
 from lib.transitions import apply_transition
 from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
 
@@ -319,6 +319,23 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 for username in usernames:
                     db.add_denylist(request_id, username, reason)
                 logger.info(f"  Denylisted {usernames} for request {request_id}")
+
+            # After downgrade: narrow quality_override so we stop searching
+            # for the tier that was just rejected (prevents infinite loops)
+            if decision == "downgrade" and ctx.pipeline_db_source is not None:
+                try:
+                    db = ctx.pipeline_db_source._get_db()
+                    req_row = db.get_request(request_id)
+                    current_override = req_row.get("quality_override") if req_row else None
+                    narrowed = narrow_override_on_downgrade(current_override, dl_info)
+                    if narrowed is not None:
+                        db.update_request_fields(request_id,
+                                                 quality_override=narrowed)
+                        logger.info(
+                            f"  Narrowed quality_override '{current_override}'"
+                            f" → '{narrowed}' after downgrade")
+                except Exception:
+                    logger.debug("Failed to narrow quality_override after downgrade")
 
             if action.requeue:
                 db = ctx.pipeline_db_source._get_db()
