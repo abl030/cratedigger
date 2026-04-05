@@ -30,6 +30,9 @@ def search_filetypes(intent: QualityIntent, config_allowed: list[str]) -> list[s
 
     Pure function — no I/O. The returned list is tried in order by the search
     loop in soularr.py; the first match wins.
+
+    Prefer resolve_search_intent() for new call sites — it handles narrowed
+    CSV overrides correctly and returns catch_all in one call.
     """
     if intent == QualityIntent.best_effort:
         return list(config_allowed)
@@ -96,6 +99,44 @@ def intent_to_quality_override(intent: QualityIntent) -> str | None:
         return "flac_preferred"
     # upgrade — keep the CSV for backward compat with existing DB rows
     return QUALITY_UPGRADE_TIERS
+
+
+@dataclass(frozen=True)
+class ResolvedIntent:
+    """Complete search plan resolved from quality_override + config.
+
+    Replaces the lossy derive_intent() → search_filetypes() → intent_allows_catch_all()
+    three-call pattern. Carries the literal tier list so narrowed CSV overrides
+    (e.g. "flac,mp3 v0" after removing mp3 320) are honored without information loss.
+    """
+    intent: QualityIntent
+    search_tiers: list[str]
+    catch_all: bool
+
+
+def resolve_search_intent(quality_override: str | None,
+                          config_allowed: list[str]) -> ResolvedIntent:
+    """Resolve quality_override + config into a complete search plan.
+
+    Single entry point for the search-time read path. Handles narrowed CSV
+    overrides correctly — "flac,mp3 v0" produces ["flac", "mp3 v0"], not the
+    full QUALITY_UPGRADE_TIERS.
+    """
+    intent = derive_intent(quality_override)
+    if intent == QualityIntent.best_effort:
+        return ResolvedIntent(intent, list(config_allowed), catch_all=True)
+    if intent == QualityIntent.flac_only:
+        return ResolvedIntent(intent, ["flac"], catch_all=False)
+    if intent == QualityIntent.flac_preferred:
+        return ResolvedIntent(intent, list(_QUALITY_UPGRADE_LIST), catch_all=False)
+    # upgrade — use literal CSV if available (narrowed overrides), else default
+    if quality_override and "," in quality_override:
+        tiers = [t.strip() for t in quality_override.split(",")]
+    else:
+        tiers = list(_QUALITY_UPGRADE_LIST)
+    return ResolvedIntent(intent, tiers, catch_all=False)
+
+
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
@@ -998,6 +1039,60 @@ def compute_effective_override_bitrate(
 def extract_usernames(files: Any) -> set[str]:
     """Extract unique non-empty usernames from a list of file objects."""
     return {f.username for f in files if f.username}
+
+
+def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
+    """Determine which quality_override tier a rejected download corresponds to.
+
+    Maps from DownloadInfo properties to the tier string used in quality_override
+    CSV (e.g. "flac", "mp3 v0", "mp3 320").
+    """
+    slskd_ft = (dl_info.slskd_filetype or dl_info.filetype or "").lower().strip()
+    if slskd_ft == "flac" or dl_info.was_converted:
+        return "flac"
+    if "mp3" in slskd_ft:
+        if dl_info.is_vbr:
+            return "mp3 v0"
+        bitrate = dl_info.bitrate
+        if bitrate is None:
+            return None
+        kbps = bitrate // 1000 if bitrate > 1000 else bitrate
+        return f"mp3 {kbps}"
+    return None
+
+
+def _quality_override_tiers(quality_override: str | None) -> list[str] | None:
+    """Expand a stored quality_override into the concrete search tiers it means."""
+    if not quality_override:
+        return None
+    resolved = resolve_search_intent(quality_override, [])
+    if resolved.intent == QualityIntent.best_effort:
+        return None
+    return list(resolved.search_tiers)
+
+
+def narrow_override_on_downgrade(quality_override: str | None,
+                                 dl_info: "DownloadInfo") -> str | None:
+    """Remove the rejected filetype tier from quality_override after downgrade.
+
+    When a download is rejected as a downgrade (existing quality >= download),
+    searching for the same tier again will produce the same result. Remove it
+    to prevent infinite retry loops (e.g. downloading genuine CBR 320 six times).
+
+    Returns the narrowed override string, or None if no change is needed.
+    """
+    tier = rejected_download_tier(dl_info)
+    if not tier:
+        return None
+    tiers = _quality_override_tiers(quality_override)
+    if not tiers:
+        return None
+    if tier not in tiers:
+        return None
+    narrowed = [t for t in tiers if t != tier]
+    if not narrowed:
+        return None  # Don't remove the last tier
+    return ",".join(narrowed)
 
 
 # ---------------------------------------------------------------------------

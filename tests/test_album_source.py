@@ -193,6 +193,42 @@ class TestDatabaseSource(unittest.TestCase):
         usernames = {d["username"] for d in denied}
         self.assertEqual(usernames, {"bad_user1", "bad_user2"})
 
+    def test_mark_failed_preserves_existing_quality_override(self):
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="fail-preserve-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db.update_request_fields(req_id, quality_override="flac_preferred")
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
+
+        source.mark_failed(record, bv_result)
+
+        req = db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["quality_override"], "flac_preferred")
+
+    def test_mark_failed_uses_explicit_narrowed_override(self):
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="fail-narrow-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db.update_request_fields(req_id, quality_override="flac_preferred")
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = ValidationResult(valid=False, distance=0.35, scenario="quality_downgrade")
+
+        source.mark_failed(record, bv_result, quality_override="flac,mp3 v0")
+
+        req = db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+
     def test_mark_done_sets_on_disk_spectral(self):
         """Successful import updates current_spectral_grade/bitrate."""
         from lib.quality import DownloadInfo, SpectralMeasurement
