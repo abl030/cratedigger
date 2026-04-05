@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.grab_list import GrabListEntry, DownloadFile
+from lib.quality import SpectralMeasurement
 
 
 def _make_entry(**overrides):
@@ -51,22 +52,23 @@ class TestConstruction(unittest.TestCase):
     def test_processing_defaults(self):
         e = _make_entry()
         self.assertIsNone(e.import_folder)
-        self.assertIsNone(e.spectral_grade)
-        self.assertIsNone(e.spectral_bitrate)
-        self.assertIsNone(e.existing_min_bitrate)
-        self.assertIsNone(e.existing_spectral_bitrate)
+        self.assertIsNone(e.download_spectral)
+        self.assertIsNone(e.current_min_bitrate)
+        self.assertIsNone(e.current_spectral)
 
     def test_full_construction(self):
         e = GrabListEntry(
             album_id=-5, files=[], filetype="flac", title="T", artist="A",
             year="2020", mb_release_id="x",
             db_request_id=99, db_source="request", db_quality_override="flac",
-            import_folder="/tmp/test", spectral_grade="genuine",
-            spectral_bitrate=320, existing_min_bitrate=240,
-            existing_spectral_bitrate=310,
+            import_folder="/tmp/test",
+            download_spectral=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
+            current_min_bitrate=240,
+            current_spectral=SpectralMeasurement(grade="genuine", bitrate_kbps=310),
         )
         self.assertEqual(e.db_request_id, 99)
-        self.assertEqual(e.spectral_grade, "genuine")
+        assert e.download_spectral is not None
+        self.assertEqual(e.download_spectral.grade, "genuine")
 
 
 class TestAttributeAccess(unittest.TestCase):
@@ -90,14 +92,15 @@ class TestAttributeAccess(unittest.TestCase):
 
     def test_write_spectral(self):
         e = _make_entry()
-        e.spectral_grade = "genuine"
-        e.spectral_bitrate = 256
-        e.existing_min_bitrate = 192
-        e.existing_spectral_bitrate = 310
-        self.assertEqual(e.spectral_grade, "genuine")
-        self.assertEqual(e.spectral_bitrate, 256)
-        self.assertEqual(e.existing_min_bitrate, 192)
-        self.assertEqual(e.existing_spectral_bitrate, 310)
+        e.download_spectral = SpectralMeasurement(grade="genuine", bitrate_kbps=256)
+        e.current_min_bitrate = 192
+        e.current_spectral = SpectralMeasurement(grade="genuine", bitrate_kbps=310)
+        assert e.download_spectral is not None
+        self.assertEqual(e.download_spectral.grade, "genuine")
+        self.assertEqual(e.download_spectral.bitrate_kbps, 256)
+        self.assertEqual(e.current_min_bitrate, 192)
+        assert e.current_spectral is not None
+        self.assertEqual(e.current_spectral.bitrate_kbps, 310)
 
     def test_no_dict_access(self):
         """Dict-style access must raise TypeError — no dual interface."""
@@ -136,13 +139,13 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(e.album_id, -42)
         e.import_folder = "/mnt/virtio/music/incoming"
         self.assertEqual(e.import_folder, "/mnt/virtio/music/incoming")
-        e.spectral_grade = "suspect"
-        e.spectral_bitrate = 192
-        e.existing_min_bitrate = 240
-        e.existing_spectral_bitrate = 310
-        self.assertEqual(e.spectral_grade, "suspect")
-        self.assertEqual(e.spectral_bitrate, 192)
-        self.assertEqual(e.existing_min_bitrate, 240)
+        e.download_spectral = SpectralMeasurement(grade="suspect", bitrate_kbps=192)
+        e.current_min_bitrate = 240
+        e.current_spectral = SpectralMeasurement(grade="genuine", bitrate_kbps=310)
+        assert e.download_spectral is not None
+        self.assertEqual(e.download_spectral.grade, "suspect")
+        self.assertEqual(e.download_spectral.bitrate_kbps, 192)
+        self.assertEqual(e.current_min_bitrate, 240)
         self.assertEqual(e.db_request_id, 10)
 
 

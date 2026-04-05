@@ -404,6 +404,20 @@ class SpectralContext:
 IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
 
 
+@dataclass(frozen=True)
+class SpectralMeasurement:
+    """One spectral analysis result pair."""
+    grade: Optional[str] = None
+    bitrate_kbps: Optional[int] = None
+
+    @staticmethod
+    def from_parts(grade: Optional[str], bitrate_kbps: Optional[int]) -> "SpectralMeasurement | None":
+        """Build a measurement when any spectral data exists, else None."""
+        if grade is None and bitrate_kbps is None:
+            return None
+        return SpectralMeasurement(grade=grade, bitrate_kbps=bitrate_kbps)
+
+
 # ---------------------------------------------------------------------------
 # Download info — typed replacement for the untyped dl_info dict
 # ---------------------------------------------------------------------------
@@ -527,10 +541,9 @@ class DownloadInfo:
     actual_filetype: Optional[str] = None   # after conversion
     actual_min_bitrate: Optional[int] = None
     # Spectral analysis
-    spectral_grade: Optional[str] = None
-    spectral_bitrate: Optional[int] = None
+    download_spectral: SpectralMeasurement | None = None
+    current_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: Optional[int] = None
-    existing_spectral_bitrate: Optional[int] = None
     # Verified lossless override (from import_one.py)
     verified_lossless_override: Optional[bool] = None
     # Full import_one.py result (JSON string)

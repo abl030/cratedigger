@@ -17,7 +17,9 @@ from typing import Any, Callable, TYPE_CHECKING
 import music_tag
 
 from lib.grab_list import GrabListEntry, DownloadFile
+from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (spectral_import_decision, SpectralContext,
+                         SpectralMeasurement,
                          ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, decide_download_action)
 from lib.import_dispatch import (_build_download_info, dispatch_import)
@@ -334,34 +336,33 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
                              import_folder_fullpath: str,
                              ctx: SoularrContext) -> None:
     """Apply spectral import decision and update album_data/bv_result accordingly."""
-    album_data.spectral_grade = spec_ctx.grade
-    album_data.spectral_bitrate = spec_ctx.bitrate
-    album_data.existing_spectral_bitrate = spec_ctx.existing_spectral_bitrate
-    album_data.existing_min_bitrate = spec_ctx.existing_min_bitrate
+    album_data.download_spectral = SpectralMeasurement.from_parts(
+        spec_ctx.grade, spec_ctx.bitrate)
+    album_data.current_spectral = SpectralMeasurement.from_parts(
+        spec_ctx.existing_spectral_grade, spec_ctx.existing_spectral_bitrate)
+    album_data.current_min_bitrate = spec_ctx.existing_min_bitrate
 
     # Write on-disk spectral data back to album_requests
     request_id = album_data.db_request_id
     if request_id and ctx.pipeline_db_source:
         try:
-            update_kwargs: dict[str, object] = {}
-            if spec_ctx.existing_spectral_grade:
-                update_kwargs["on_disk_spectral_grade"] = spec_ctx.existing_spectral_grade
-            if spec_ctx.existing_spectral_bitrate is not None:
-                update_kwargs["on_disk_spectral_bitrate"] = spec_ctx.existing_spectral_bitrate
-            if update_kwargs:
+            if album_data.current_spectral is not None:
                 db = ctx.pipeline_db_source._get_db()
-                req = db.get_request(request_id)
-                if req:
-                    db._execute(
-                        "UPDATE album_requests SET "
-                        + ", ".join(f"{k} = %s" for k in update_kwargs)
-                        + " WHERE id = %s",
-                        list(update_kwargs.values()) + [request_id])
+                db.update_spectral_state(
+                    request_id,
+                    RequestSpectralStateUpdate(
+                        current=album_data.current_spectral,
+                    ),
+                )
         except Exception:
             logger.exception("Failed to update on-disk spectral data")
 
     new_quality = spec_ctx.bitrate
-    existing_quality = spec_ctx.existing_spectral_bitrate or 0
+    existing_quality = (
+        album_data.current_spectral.bitrate_kbps
+        if album_data.current_spectral is not None
+        else 0
+    )
     # Effective existing: matches what spectral_import_decision() uses internally
     effective_existing = existing_quality or spec_ctx.existing_min_bitrate or 0
     label = f"{album_data.artist} - {album_data.title}"
@@ -386,9 +387,13 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
         bv_result.scenario = "spectral_reject"
         bv_result.detail = f"spectral {new_quality}kbps <= existing {effective_existing}kbps"
         # Attach spectral info to album_data so _handle_rejected_result picks it up
-        album_data.spectral_grade = spec_ctx.grade
-        album_data.spectral_bitrate = new_quality
-        album_data.existing_spectral_bitrate = existing_quality
+        album_data.download_spectral = SpectralMeasurement.from_parts(
+            spec_ctx.grade, new_quality)
+        if album_data.current_spectral is not None:
+            album_data.current_spectral = SpectralMeasurement(
+                grade=album_data.current_spectral.grade,
+                bitrate_kbps=existing_quality,
+            )
     elif spectral_decision == "import_upgrade":
         logger.info(
             f"SPECTRAL UPGRADE: {label} "
@@ -411,11 +416,10 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
     dl_info = _build_download_info(album_data)
     dl_info.validation_result = bv_result.to_json()
-    if album_data.spectral_grade:
-        dl_info.spectral_grade = album_data.spectral_grade
-        dl_info.spectral_bitrate = album_data.spectral_bitrate
-        dl_info.existing_spectral_bitrate = album_data.existing_spectral_bitrate
-        dl_info.existing_min_bitrate = album_data.existing_min_bitrate
+    if album_data.download_spectral is not None:
+        dl_info.download_spectral = album_data.download_spectral
+        dl_info.current_spectral = album_data.current_spectral
+        dl_info.existing_min_bitrate = album_data.current_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
     source_type = album_data.db_source or "redownload"
@@ -440,11 +444,10 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
     bv_result.denylisted_users = sorted(usernames)
     dl_info = _build_download_info(album_data)
     dl_info.validation_result = bv_result.to_json()
-    if album_data.spectral_grade:
-        dl_info.spectral_grade = album_data.spectral_grade
-        dl_info.spectral_bitrate = album_data.spectral_bitrate
-        dl_info.existing_spectral_bitrate = album_data.existing_spectral_bitrate
-        dl_info.existing_min_bitrate = album_data.existing_min_bitrate
+    if album_data.download_spectral is not None:
+        dl_info.download_spectral = album_data.download_spectral
+        dl_info.current_spectral = album_data.current_spectral
+        dl_info.existing_min_bitrate = album_data.current_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
     ctx.pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames,

@@ -336,12 +336,15 @@ def cmd_show(db, args):
     min_br = req.get("min_bitrate")
     prev_br = req.get("prev_min_bitrate")
     verified = req.get("verified_lossless")
-    s_grade = req.get("spectral_grade")
-    s_br = req.get("spectral_bitrate")
-    od_grade = req.get("on_disk_spectral_grade")
-    od_br = req.get("on_disk_spectral_bitrate")
+    s_grade = req.get("last_download_spectral_grade")
+    s_br = req.get("last_download_spectral_bitrate")
+    cur_grade = req.get("current_spectral_grade")
+    cur_br = req.get("current_spectral_bitrate")
     q_override = req.get("quality_override")
-    has_quality = any(v is not None for v in [min_br, prev_br, verified, s_grade, s_br, od_grade, od_br, q_override])
+    has_quality = any(
+        v is not None
+        for v in [min_br, prev_br, verified, s_grade, s_br, cur_grade, cur_br, q_override]
+    )
     if has_quality:
         print(f"\n  Quality:")
         print(f"    min_bitrate:        {_fmt_br(min_br)}")
@@ -352,12 +355,12 @@ def cmd_show(db, args):
             sg = s_grade
             if s_br:
                 sg += f" ~{s_br}kbps"
-            print(f"    spectral:          {sg}")
-        if od_grade:
-            od = od_grade
-            if od_br:
-                od += f" ~{od_br}kbps"
-            print(f"    on_disk_spectral:  {od}")
+            print(f"    last_download:     {sg}")
+        if cur_grade:
+            current = cur_grade
+            if cur_br:
+                current += f" ~{cur_br}kbps"
+            print(f"    current_spectral:  {current}")
         if q_override:
             print(f"    quality_override:  {q_override}")
 
@@ -397,8 +400,7 @@ def cmd_quality(db, args):
     label = f"{req['artist_name']} - {req['album_title']}"
     min_br = req.get("min_bitrate")
     verified = bool(req.get("verified_lossless"))
-    s_br = req.get("spectral_bitrate")
-    od_br = req.get("on_disk_spectral_bitrate")
+    current_br = req.get("current_spectral_bitrate")
     q_override = req.get("quality_override")
 
     print(f"  {label}")
@@ -421,15 +423,15 @@ def cmd_quality(db, args):
         current = AudioQualityMeasurement(
             min_bitrate_kbps=min_br, is_cbr=is_cbr,
             verified_lossless=verified,
-            spectral_bitrate_kbps=s_br)
+            spectral_bitrate_kbps=current_br)
         gate = quality_gate_decision(current)
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
                       "requeue_flac": "NEEDS FLAC"}[gate]
         print(f"  Quality gate:  {gate_label}")
         print(f"    min_bitrate={_fmt_br(min_br)}, verified_lossless={verified}, "
               f"is_cbr={is_cbr}")
-        if s_br:
-            print(f"    spectral_bitrate={s_br}kbps")
+        if current_br:
+            print(f"    current_spectral_bitrate={current_br}kbps")
         if q_override:
             print(f"    searching: {q_override}")
     else:
@@ -437,8 +439,8 @@ def cmd_quality(db, args):
 
     # --- Simulate common scenarios ---
     effective_existing = min_br
-    if od_br and min_br and od_br < min_br:
-        effective_existing = od_br
+    if current_br and min_br and current_br < min_br:
+        effective_existing = current_br
 
     scenarios = [
         ("Genuine FLAC → V0", dict(
@@ -459,8 +461,8 @@ def cmd_quality(db, args):
     for name, params in scenarios:
         result = full_pipeline_decision(
             existing_min_bitrate=effective_existing,
-            existing_spectral_bitrate=od_br,
-            override_min_bitrate=od_br if od_br and min_br and od_br < min_br else None,
+            existing_spectral_bitrate=current_br,
+            override_min_bitrate=current_br if current_br and min_br and current_br < min_br else None,
             verified_lossless=verified,
             **params)
 
@@ -606,10 +608,10 @@ def cmd_manual_import(db, args):
 
 
 def cmd_repair_spectral(db, args):
-    """Find and repair albums stuck by stale on_disk_spectral_bitrate.
+    """Find and repair albums stuck by stale current_spectral_bitrate.
 
-    Identifies wanted albums where on_disk_spectral_grade is genuine but
-    on_disk_spectral_bitrate still holds a stale transcode estimate,
+    Identifies wanted albums where current_spectral_grade is genuine but
+    current_spectral_bitrate still holds a stale transcode estimate,
     causing the quality gate to requeue indefinitely (issue #18).
     """
     from quality import AudioQualityMeasurement, quality_gate_decision
@@ -618,12 +620,13 @@ def cmd_repair_spectral(db, args):
     # (genuine files should have no spectral cliff → bitrate should be NULL)
     cur = db._execute("""
         SELECT id, artist_name, album_title, min_bitrate,
-               on_disk_spectral_bitrate, on_disk_spectral_grade,
-               spectral_bitrate, spectral_grade, verified_lossless
+               current_spectral_bitrate, current_spectral_grade,
+               last_download_spectral_bitrate, last_download_spectral_grade,
+               verified_lossless
         FROM album_requests
         WHERE status = 'wanted'
-          AND on_disk_spectral_grade = 'genuine'
-          AND on_disk_spectral_bitrate IS NOT NULL
+          AND current_spectral_grade = 'genuine'
+          AND current_spectral_bitrate IS NOT NULL
     """)
     candidates = [dict(r) for r in cur.fetchall()]
 
@@ -638,9 +641,9 @@ def cmd_repair_spectral(db, args):
         rid = req["id"]
         label = f"{req['artist_name']} - {req['album_title']}"
         min_br = req["min_bitrate"]
-        stale_br = req["on_disk_spectral_bitrate"]
+        stale_br = req["current_spectral_bitrate"]
         print(f"  [{rid:>4}] {label}")
-        print(f"         min_bitrate={min_br}kbps, stale on_disk_spectral={stale_br}kbps")
+        print(f"         min_bitrate={min_br}kbps, stale current_spectral={stale_br}kbps")
 
         # Check what quality gate would decide after clearing stale data
         measurement = AudioQualityMeasurement(
@@ -659,8 +662,8 @@ def cmd_repair_spectral(db, args):
         # Clear stale spectral fields
         db._execute("""
             UPDATE album_requests
-            SET spectral_bitrate = NULL,
-                on_disk_spectral_bitrate = NULL,
+            SET last_download_spectral_bitrate = NULL,
+                current_spectral_bitrate = NULL,
                 updated_at = NOW()
             WHERE id = %s
         """, (rid,))
@@ -752,7 +755,7 @@ def main():
 
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
-                              help="Fix albums stuck by stale on_disk_spectral_bitrate (#18)")
+                              help="Fix albums stuck by stale current_spectral_bitrate (#18)")
     p_repair.add_argument("--dry-run", action="store_true",
                           help="Show what would be repaired without changing anything")
 

@@ -184,9 +184,10 @@ class TestApplyTransition(unittest.TestCase):
     def test_extra_fields_passed_to_update_status(self):
         db = self._make_db("downloading")
         apply_transition(db, 1, "imported", from_status="downloading",
-                         min_bitrate=245, spectral_grade="genuine")
+                         min_bitrate=245, last_download_spectral_grade="genuine")
         db.update_status.assert_called_once_with(
-            1, "imported", min_bitrate=245, spectral_grade="genuine")
+            1, "imported", min_bitrate=245,
+            last_download_spectral_grade="genuine")
 
     def test_invalid_transition_logs_warning(self):
         """Invalid transitions still proceed (with warning) for backward compat."""

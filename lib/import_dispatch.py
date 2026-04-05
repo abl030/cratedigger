@@ -14,6 +14,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
+                         SpectralMeasurement,
                          ValidationResult,
                          QUALITY_MIN_BITRATE_KBPS,
                          QualityIntent, intent_to_quality_override,
@@ -48,11 +49,12 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     if new_m:
         if new_m.min_bitrate_kbps is not None:
             dl_info.bitrate = new_m.min_bitrate_kbps * 1000
-        dl_info.spectral_grade = new_m.spectral_grade
-        dl_info.spectral_bitrate = new_m.spectral_bitrate_kbps
+        dl_info.download_spectral = SpectralMeasurement.from_parts(
+            new_m.spectral_grade, new_m.spectral_bitrate_kbps)
         dl_info.verified_lossless_override = new_m.verified_lossless
     if existing_m:
-        dl_info.existing_spectral_bitrate = existing_m.spectral_bitrate_kbps
+        dl_info.current_spectral = SpectralMeasurement.from_parts(
+            existing_m.spectral_grade, existing_m.spectral_bitrate_kbps)
         if existing_m.min_bitrate_kbps is not None:
             dl_info.existing_min_bitrate = existing_m.min_bitrate_kbps
     dl_info.import_result = ir.to_json()
@@ -114,11 +116,11 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
         req = None
         try:
             req = ctx.pipeline_db_source._get_db().get_request(request_id)
-            raw_br = req.get("on_disk_spectral_bitrate") if req else None
+            raw_br = req.get("current_spectral_bitrate") if req else None
             spectral_br = raw_br if isinstance(raw_br, int) else None
             effective = compute_effective_override_bitrate(min_br_kbps, spectral_br)
             if effective is not None and effective < min_br_kbps:
-                logger.info(f"QUALITY GATE: using on_disk_spectral={spectral_br}kbps "
+                logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
                             f"(lower than beets min_bitrate={min_br_kbps}kbps)")
         except Exception:
             logger.debug("QUALITY GATE: DB lookup failed for spectral override")
@@ -139,11 +141,13 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                     f"QUALITY GATE: {label} gate_bitrate < {QUALITY_MIN_BITRATE_KBPS}kbps "
                     f"but verified_lossless=True — accepting")
                 db = ctx.pipeline_db_source._get_db()
-                update_fields_vl: dict[str, object] = {"min_bitrate": min_br_kbps}
-                if spectral_br:
-                    update_fields_vl["spectral_bitrate"] = spectral_br
-                apply_transition(db, request_id, "imported",
-                                 from_status="imported", **update_fields_vl)
+                apply_transition(
+                    db,
+                    request_id,
+                    "imported",
+                    from_status="imported",
+                    min_bitrate=min_br_kbps,
+                )
                 return
             upgrade_override = intent_to_quality_override(QualityIntent.upgrade)
             db = ctx.pipeline_db_source._get_db()
@@ -178,11 +182,13 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 f"searching for FLAC to verify")
         else:  # accept
             db = ctx.pipeline_db_source._get_db()
-            update_fields: dict[str, object] = {"min_bitrate": min_br_kbps}
-            if spectral_br:
-                update_fields["spectral_bitrate"] = spectral_br
-            apply_transition(db, request_id, "imported",
-                             from_status="imported", **update_fields)
+            apply_transition(
+                db,
+                request_id,
+                "imported",
+                from_status="imported",
+                min_bitrate=min_br_kbps,
+            )
             if verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
             else:
@@ -226,7 +232,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             req = ctx.pipeline_db_source._get_db().get_request(request_id)
             if req:
                 effective_br = compute_effective_override_bitrate(
-                    req.get("min_bitrate"), req.get("on_disk_spectral_bitrate"))
+                    req.get("min_bitrate"), req.get("current_spectral_bitrate"))
                 if effective_br is not None:
                     cmd.extend(["--override-min-bitrate", str(effective_br)])
         except Exception:

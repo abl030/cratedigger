@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement, PostflightInfo,
+                         SpectralMeasurement,
                          QUALITY_UPGRADE_TIERS,
                          QualityIntent, intent_to_quality_override)
 from tests.helpers import make_request_row
@@ -95,7 +96,8 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.actual_filetype, "mp3")
         self.assertTrue(dl.is_vbr)
         self.assertEqual(dl.bitrate, 245000)
-        self.assertEqual(dl.spectral_grade, "genuine")
+        assert dl.download_spectral is not None
+        self.assertEqual(dl.download_spectral.grade, "genuine")
 
     def test_no_conversion(self):
         from lib.import_dispatch import _populate_dl_info_from_import_result
@@ -303,25 +305,25 @@ class TestOverrideMinBitrate(unittest.TestCase):
     def test_uses_spectral_when_lower(self):
         """Container says 320, spectral says 128 — should pass 128."""
         val = self._get_override_value(
-            make_request_row(min_bitrate=320, on_disk_spectral_bitrate=128))
+            make_request_row(min_bitrate=320, current_spectral_bitrate=128))
         self.assertEqual(val, 128)
 
     def test_uses_container_when_no_spectral(self):
         """No spectral data — should pass container bitrate."""
         val = self._get_override_value(
-            make_request_row(min_bitrate=320, on_disk_spectral_bitrate=None))
+            make_request_row(min_bitrate=320, current_spectral_bitrate=None))
         self.assertEqual(val, 320)
 
     def test_uses_container_when_spectral_higher(self):
         """Spectral is higher than container — use container (more conservative)."""
         val = self._get_override_value(
-            make_request_row(min_bitrate=192, on_disk_spectral_bitrate=256))
+            make_request_row(min_bitrate=192, current_spectral_bitrate=256))
         self.assertEqual(val, 192)
 
     def test_no_override_when_no_bitrate(self):
         """No min_bitrate and no spectral — no override passed."""
         val = self._get_override_value(
-            make_request_row(min_bitrate=None, on_disk_spectral_bitrate=None))
+            make_request_row(min_bitrate=None, current_spectral_bitrate=None))
         self.assertIsNone(val)
 
 
@@ -334,7 +336,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         album_data = _make_album_data()
         ctx = _make_ctx()
         db = ctx.pipeline_db_source._get_db.return_value
-        merged = {"on_disk_spectral_bitrate": None, "verified_lossless": False}
+        merged = {"current_spectral_bitrate": None, "verified_lossless": False}
         merged.update(extra_req_fields)
         db.get_request.return_value = make_request_row(**merged)
 
@@ -377,18 +379,18 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             intent_to_quality_override(QualityIntent.flac_only),
         )
 
-    def test_quality_gate_reads_on_disk_spectral_not_download(self):
-        """Quality gate must use on_disk_spectral_bitrate (what's on disk),
-        not spectral_bitrate (stale from a previous download). Issue #18."""
+    def test_quality_gate_reads_current_spectral_not_last_download(self):
+        """Quality gate must use current_spectral_bitrate (what's on disk),
+        not last_download_spectral_bitrate (stale from a previous download)."""
         from lib.import_dispatch import _check_quality_gate
         from lib.quality import AudioQualityMeasurement
         album_data = _make_album_data()
         ctx = _make_ctx()
         db = ctx.pipeline_db_source._get_db.return_value
-        # on_disk is None (genuine, no cliff) but spectral_bitrate is stale 192
+        # current is None (genuine, no cliff) but last_download is stale 192
         db.get_request.return_value = make_request_row(
-            spectral_bitrate=192,           # stale from old download
-            on_disk_spectral_bitrate=None,  # genuine files, cleared by mark_done
+            last_download_spectral_bitrate=192,  # stale from old download
+            current_spectral_bitrate=None,       # genuine files, cleared by mark_done
             verified_lossless=False)
 
         captured_measurement = {}
@@ -409,11 +411,11 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             _check_quality_gate(album_data, 42, ctx)
 
         m = captured_measurement["m"]
-        # spectral_bitrate_kbps on the measurement should be None (from on_disk),
+        # spectral_bitrate_kbps on the measurement should be None (from current),
         # NOT 192 (from stale download spectral)
         self.assertIsNone(m.spectral_bitrate_kbps,
-                          "quality gate should use on_disk_spectral_bitrate, "
-                          "not stale spectral_bitrate from download")
+                          "quality gate should use current_spectral_bitrate, "
+                          "not stale last_download_spectral_bitrate")
 
     def test_genuine_v0_replacing_transcode_accepted(self):
         """Contract test: genuine V0 replacing a transcode should be accepted
@@ -428,10 +430,10 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
         # After mark_done fix: genuine import clears stale spectral data
         db.get_request.return_value = make_request_row(
-            spectral_bitrate=None,            # cleared by mark_done (was 192)
-            spectral_grade="genuine",         # updated by mark_done
-            on_disk_spectral_bitrate=None,    # cleared by mark_done (was 192)
-            on_disk_spectral_grade="genuine", # updated by mark_done
+            last_download_spectral_bitrate=None,  # cleared by mark_done (was 192)
+            last_download_spectral_grade="genuine",
+            current_spectral_bitrate=None,        # cleared by mark_done (was 192)
+            current_spectral_grade="genuine",
             verified_lossless=False,          # MP3 V0, not from FLAC
         )
 

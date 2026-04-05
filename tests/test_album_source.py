@@ -194,8 +194,8 @@ class TestDatabaseSource(unittest.TestCase):
         self.assertEqual(usernames, {"bad_user1", "bad_user2"})
 
     def test_mark_done_sets_on_disk_spectral(self):
-        """Successful import updates on_disk_spectral_grade/bitrate."""
-        from lib.quality import DownloadInfo
+        """Successful import updates current_spectral_grade/bitrate."""
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="spectral-uuid",
@@ -206,21 +206,20 @@ class TestDatabaseSource(unittest.TestCase):
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=True, distance=0.05, scenario="strong_match")
         dl = DownloadInfo()
-        dl.spectral_grade = "suspect"
-        dl.spectral_bitrate = 160
+        dl.download_spectral = SpectralMeasurement(grade="suspect", bitrate_kbps=160)
 
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
                          download_info=dl)
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["on_disk_spectral_grade"], "suspect")
-        self.assertEqual(req["on_disk_spectral_bitrate"], 160)
+        self.assertEqual(req["current_spectral_grade"], "suspect")
+        self.assertEqual(req["current_spectral_bitrate"], 160)
 
     def test_mark_done_override_false_prevents_verified_lossless(self):
         """import_one says will_be_verified_lossless=False — mark_done must not
         set verified_lossless=True even if is_verified_lossless() would."""
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-override-uuid", artist_name="The National",
@@ -230,7 +229,7 @@ class TestDatabaseSource(unittest.TestCase):
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
-        dl.spectral_grade = "genuine"  # is_verified_lossless() would return True
+        dl.download_spectral = SpectralMeasurement(grade="genuine")
         dl.verified_lossless_override = False  # but import_one says no
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
                          download_info=dl)
@@ -240,7 +239,7 @@ class TestDatabaseSource(unittest.TestCase):
 
     def test_mark_done_override_true_sets_verified_lossless(self):
         """import_one says will_be_verified_lossless=True — sets it."""
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-true-uuid", artist_name="A",
@@ -250,7 +249,7 @@ class TestDatabaseSource(unittest.TestCase):
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
-        dl.spectral_grade = "genuine"
+        dl.download_spectral = SpectralMeasurement(grade="genuine")
         dl.verified_lossless_override = True
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
                          download_info=dl)
@@ -259,9 +258,9 @@ class TestDatabaseSource(unittest.TestCase):
         self.assertTrue(req.get("verified_lossless", False))
 
     def test_mark_done_verified_lossless_uses_bitrate_for_spectral(self):
-        """When verified_lossless, on_disk_spectral_bitrate should be the
+        """When verified_lossless, current_spectral_bitrate should be the
         actual V0 min bitrate, not the spectral cliff estimate."""
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-bitrate-uuid", artist_name="The National",
@@ -271,8 +270,7 @@ class TestDatabaseSource(unittest.TestCase):
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
-        dl.spectral_grade = "genuine"
-        dl.spectral_bitrate = 128  # bad spectral estimate
+        dl.download_spectral = SpectralMeasurement(grade="genuine", bitrate_kbps=128)
         dl.bitrate = 245000  # actual V0 min bitrate (bps)
         dl.verified_lossless_override = True
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
@@ -280,13 +278,13 @@ class TestDatabaseSource(unittest.TestCase):
         req = db.get_request(req_id)
         assert req is not None
         # Should use V0 bitrate (245), not spectral estimate (128)
-        self.assertEqual(req["on_disk_spectral_bitrate"], 245)
-        # spectral_bitrate (the download's raw spectral) stays as-is
-        self.assertEqual(req["spectral_bitrate"], 128)
+        self.assertEqual(req["current_spectral_bitrate"], 245)
+        # last_download_spectral_bitrate (the download's raw spectral) stays as-is
+        self.assertEqual(req["last_download_spectral_bitrate"], 128)
 
     def test_mark_done_no_override_falls_back(self):
         """No override (legacy path) — derives from is_verified_lossless()."""
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-fallback-uuid", artist_name="A",
@@ -296,7 +294,7 @@ class TestDatabaseSource(unittest.TestCase):
         dl = DownloadInfo()
         dl.was_converted = True
         dl.original_filetype = "flac"
-        dl.spectral_grade = "genuine"
+        dl.download_spectral = SpectralMeasurement(grade="genuine")
         # No verified_lossless_override set
         source.mark_done(record, bv_result, dest_path="/Incoming/A/B",
                          download_info=dl)
@@ -306,38 +304,38 @@ class TestDatabaseSource(unittest.TestCase):
 
     def test_mark_done_genuine_clears_stale_spectral_bitrate(self):
         """When genuine files (no spectral cliff) replace a transcode,
-        stale on_disk_spectral_bitrate and spectral_bitrate must be cleared.
+        stale current_spectral_bitrate and last_download_spectral_bitrate
+        must be cleared.
         Regression test for issue #18."""
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="stale-spectral-uuid", artist_name="Brand New",
             album_title="Daisy", source="request")
         # Simulate prior transcode import leaving stale spectral data
         db._execute(
-            "UPDATE album_requests SET spectral_bitrate = %s, "
-            "on_disk_spectral_bitrate = %s, on_disk_spectral_grade = %s, "
-            "spectral_grade = %s WHERE id = %s",
+            "UPDATE album_requests SET last_download_spectral_bitrate = %s, "
+            "current_spectral_bitrate = %s, current_spectral_grade = %s, "
+            "last_download_spectral_grade = %s WHERE id = %s",
             (192, 192, "likely_transcode", "likely_transcode", req_id))
 
-        # New import: genuine MP3 V0 (no cliff → spectral_bitrate is None)
+        # New import: genuine MP3 V0 (no cliff → bitrate_kbps is None)
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=True, distance=0.0, scenario="strong_match")
         dl = DownloadInfo()
-        dl.spectral_grade = "genuine"
-        dl.spectral_bitrate = None  # genuine files have no cliff
+        dl.download_spectral = SpectralMeasurement(grade="genuine", bitrate_kbps=None)
         source.mark_done(record, bv_result, dest_path="/Incoming/Brand New/Daisy",
                          download_info=dl)
 
         req = db.get_request(req_id)
         assert req is not None
         # Stale values must be cleared, not left at 192
-        self.assertIsNone(req["on_disk_spectral_bitrate"],
-                          "on_disk_spectral_bitrate should be cleared for genuine import")
-        self.assertIsNone(req["spectral_bitrate"],
-                          "spectral_bitrate should be cleared for genuine import")
-        self.assertEqual(req["on_disk_spectral_grade"], "genuine")
-        self.assertEqual(req["spectral_grade"], "genuine")
+        self.assertIsNone(req["current_spectral_bitrate"],
+                          "current_spectral_bitrate should be cleared for genuine import")
+        self.assertIsNone(req["last_download_spectral_bitrate"],
+                          "last_download_spectral_bitrate should be cleared for genuine import")
+        self.assertEqual(req["current_spectral_grade"], "genuine")
+        self.assertEqual(req["last_download_spectral_grade"], "genuine")
 
     def test_get_denylisted_users(self):
         source, db = self._make_source()

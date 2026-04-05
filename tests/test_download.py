@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
-from lib.quality import DownloadInfo, SpectralContext
+from lib.quality import DownloadInfo, SpectralContext, SpectralMeasurement
 
 
 def _utc_now_iso() -> str:
@@ -55,10 +55,9 @@ def _make_album_data(files=None, filetype="mp3", is_vbr=False,
     mock.year = year
     mock.mb_release_id = mb_release_id
     mock.filetype = filetype
-    mock.spectral_grade = None
-    mock.spectral_bitrate = None
-    mock.existing_spectral_bitrate = None
-    mock.existing_min_bitrate = None
+    mock.download_spectral = None
+    mock.current_spectral = None
+    mock.current_min_bitrate = None
     mock.album_id = 123
     mock.db_request_id = 1
     mock.db_source = "request"
@@ -460,6 +459,37 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
         self.assertTrue(result.needs_check)
         self.assertEqual(result.existing_min_bitrate, 256)
         self.assertEqual(result.existing_spectral_bitrate, 310)
+
+
+class TestApplySpectralDecision(unittest.TestCase):
+    """Tests the DB write contract for spectral state updates."""
+
+    @patch("lib.download.spectral_import_decision", return_value="accept")
+    def test_existing_genuine_state_propagates_none_bitrate(self, _mock_decision):
+        from lib.download import _apply_spectral_decision
+        from lib.pipeline_db import RequestSpectralStateUpdate
+
+        album = _make_album_data()
+        ctx = _make_ctx()
+        db = cast(Any, ctx.pipeline_db_source._get_db).return_value
+        bv_result = MagicMock(valid=True)
+        spec_ctx = SpectralContext(
+            needs_check=True,
+            grade="genuine",
+            bitrate=None,
+            existing_min_bitrate=226,
+            existing_spectral_grade="genuine",
+            existing_spectral_bitrate=None,
+        )
+
+        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
+
+        db.update_spectral_state.assert_called_once_with(
+            album.db_request_id,
+            RequestSpectralStateUpdate(
+                current=SpectralMeasurement(grade="genuine", bitrate_kbps=None),
+            ),
+        )
 
 
 class TestGrabMostWanted(unittest.TestCase):

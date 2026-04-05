@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from lib.quality import SpectralMeasurement
+
 
 @dataclass
 class GrabListEntry:
@@ -32,10 +34,9 @@ class GrabListEntry:
 
     # Transient: process_completed_album
     import_folder: Optional[str] = None
-    spectral_grade: Optional[str] = None
-    spectral_bitrate: Optional[int] = None
-    existing_min_bitrate: Optional[int] = None
-    existing_spectral_bitrate: Optional[int] = None
+    download_spectral: SpectralMeasurement | None = None
+    current_min_bitrate: Optional[int] = None
+    current_spectral: SpectralMeasurement | None = None
 
 
 

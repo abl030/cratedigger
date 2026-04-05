@@ -199,9 +199,9 @@ class TestServerEndpoints(unittest.TestCase):
             "created_at": "2026-04-03T12:00:00+00:00",
             "updated_at": "2026-04-03T12:00:00+00:00",
             "min_bitrate": None, "prev_min_bitrate": None,
-            "verified_lossless": False, "spectral_grade": None,
-            "spectral_bitrate": None, "on_disk_spectral_grade": None,
-            "on_disk_spectral_bitrate": None,
+            "verified_lossless": False, "last_download_spectral_grade": None,
+            "last_download_spectral_bitrate": None, "current_spectral_grade": None,
+            "current_spectral_bitrate": None,
             "imported_path": None, "reasoning": None,
             "active_download_state": {"filetype": "flac", "enqueued_at": "now", "files": []},
         }

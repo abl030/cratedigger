@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.quality import (
     ImportResult, ConversionInfo, SpectralDetail, PostflightInfo,
     AudioQualityMeasurement,
-    DownloadInfo,
+    DownloadInfo, SpectralMeasurement,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
 
@@ -470,7 +470,7 @@ class TestDownloadInfo(unittest.TestCase):
         self.assertIsNone(dl.username)
         self.assertIsNone(dl.filetype)
         self.assertFalse(dl.was_converted)
-        self.assertIsNone(dl.spectral_grade)
+        self.assertIsNone(dl.download_spectral)
         self.assertIsNone(dl.import_result)
 
     def test_flac_conversion(self) -> None:
@@ -483,12 +483,13 @@ class TestDownloadInfo(unittest.TestCase):
             original_filetype="flac",
             slskd_filetype="flac",
             actual_filetype="mp3",
-            spectral_grade="genuine",
+            download_spectral=SpectralMeasurement(grade="genuine"),
         )
         self.assertTrue(dl.was_converted)
         self.assertEqual(dl.original_filetype, "flac")
         self.assertEqual(dl.actual_filetype, "mp3")
-        self.assertEqual(dl.spectral_grade, "genuine")
+        assert dl.download_spectral is not None
+        self.assertEqual(dl.download_spectral.grade, "genuine")
 
     def test_attribute_error_on_typo(self) -> None:
         """Key advantage over dict: typos are caught at attribute access."""
@@ -522,15 +523,18 @@ class TestDownloadInfo(unittest.TestCase):
             actual_filetype=ir.conversion.target_filetype,
             bitrate=(new_m.min_bitrate_kbps * 1000
                      if new_m.min_bitrate_kbps else None),
-            spectral_grade=new_m.spectral_grade,
-            spectral_bitrate=new_m.spectral_bitrate_kbps,
-            existing_spectral_bitrate=existing_m.spectral_bitrate_kbps,
+            download_spectral=SpectralMeasurement.from_parts(
+                new_m.spectral_grade, new_m.spectral_bitrate_kbps),
+            current_spectral=SpectralMeasurement.from_parts(
+                existing_m.spectral_grade, existing_m.spectral_bitrate_kbps),
             import_result=ir.to_json(),
         )
         self.assertTrue(dl.was_converted)
         self.assertEqual(dl.bitrate, 245000)
-        self.assertEqual(dl.spectral_grade, "genuine")
-        self.assertEqual(dl.existing_spectral_bitrate, 128)
+        assert dl.download_spectral is not None
+        self.assertEqual(dl.download_spectral.grade, "genuine")
+        assert dl.current_spectral is not None
+        self.assertEqual(dl.current_spectral.bitrate_kbps, 128)
         stored = json.loads(dl.import_result)  # type: ignore[arg-type]
         self.assertEqual(stored["decision"], "import")
 
@@ -559,8 +563,10 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.slskd_filetype, "flac")
         self.assertEqual(dl.actual_filetype, "mp3")
         self.assertEqual(dl.bitrate, 245000)
-        self.assertEqual(dl.spectral_grade, "genuine")
-        self.assertEqual(dl.existing_spectral_bitrate, 128)
+        assert dl.download_spectral is not None
+        self.assertEqual(dl.download_spectral.grade, "genuine")
+        assert dl.current_spectral is not None
+        self.assertEqual(dl.current_spectral.bitrate_kbps, 128)
         self.assertTrue(dl.verified_lossless_override)
         self.assertIsNotNone(dl.import_result)
 

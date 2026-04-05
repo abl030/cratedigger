@@ -40,8 +40,10 @@ class TestExtractImportUpdateFields(unittest.TestCase):
             }
         })
         fields = extract_import_update_fields(ir)
-        self.assertEqual(fields["spectral_grade"], "genuine")
-        self.assertEqual(fields["spectral_bitrate"], 256)
+        self.assertEqual(fields["last_download_spectral_grade"], "genuine")
+        self.assertEqual(fields["last_download_spectral_bitrate"], 256)
+        self.assertEqual(fields["current_spectral_grade"], "genuine")
+        self.assertEqual(fields["current_spectral_bitrate"], 245)
         self.assertEqual(fields["min_bitrate"], 245)
         self.assertTrue(fields["verified_lossless"])
 
@@ -55,8 +57,10 @@ class TestExtractImportUpdateFields(unittest.TestCase):
             },
         })
         fields = extract_import_update_fields(ir)
-        self.assertEqual(fields["spectral_grade"], "genuine")
-        self.assertEqual(fields["spectral_bitrate"], 256)
+        self.assertEqual(fields["last_download_spectral_grade"], "genuine")
+        self.assertEqual(fields["last_download_spectral_bitrate"], 256)
+        self.assertEqual(fields["current_spectral_grade"], "genuine")
+        self.assertEqual(fields["current_spectral_bitrate"], 245)
         self.assertEqual(fields["min_bitrate"], 245)
         self.assertTrue(fields["verified_lossless"])
 

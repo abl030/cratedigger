@@ -11,11 +11,14 @@ Usage:
 """
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
+
+from lib.quality import SpectralMeasurement
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
 
@@ -124,6 +127,24 @@ CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
 """
 
 
+@dataclass(frozen=True)
+class RequestSpectralStateUpdate:
+    """Typed update for latest-download and on-disk spectral state."""
+    last_download: SpectralMeasurement | None = None
+    current: SpectralMeasurement | None = None
+
+    def as_update_fields(self) -> dict[str, object]:
+        """Expand the typed state into album_requests column updates."""
+        fields: dict[str, object] = {}
+        if self.last_download is not None:
+            fields["last_download_spectral_grade"] = self.last_download.grade
+            fields["last_download_spectral_bitrate"] = self.last_download.bitrate_kbps
+        if self.current is not None:
+            fields["current_spectral_grade"] = self.current.grade
+            fields["current_spectral_bitrate"] = self.current.bitrate_kbps
+        return fields
+
+
 class PipelineDB:
     """PostgreSQL-backed pipeline database."""
 
@@ -193,18 +214,41 @@ class PipelineDB:
                     EXCEPTION WHEN duplicate_column THEN NULL;
                     END $$;
                 """)
+            for old_col, new_col in [
+                ("spectral_bitrate", "last_download_spectral_bitrate"),
+                ("spectral_grade", "last_download_spectral_grade"),
+                ("on_disk_spectral_grade", "current_spectral_grade"),
+                ("on_disk_spectral_bitrate", "current_spectral_bitrate"),
+            ]:
+                cur.execute(f"""
+                    DO $$ BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_requests'
+                              AND column_name = '{old_col}'
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_requests'
+                              AND column_name = '{new_col}'
+                        ) THEN
+                            ALTER TABLE album_requests RENAME COLUMN {old_col} TO {new_col};
+                        END IF;
+                    END $$;
+                """)
             for col, coltype in [
                 ("quality_override", "TEXT"),
                 ("min_bitrate", "INTEGER"),
                 ("prev_min_bitrate", "INTEGER"),
-                # Spectral quality verification columns
-                ("spectral_bitrate", "INTEGER"),
-                ("spectral_grade", "TEXT"),
                 ("verified_lossless", "BOOLEAN DEFAULT FALSE"),
-                # On-disk spectral data (describes files currently in beets,
-                # regardless of how they got there — updated on every spectral run)
-                ("on_disk_spectral_grade", "TEXT"),
-                ("on_disk_spectral_bitrate", "INTEGER"),
+                # Latest spectral analysis of the most recent download attempt
+                ("last_download_spectral_bitrate", "INTEGER"),
+                ("last_download_spectral_grade", "TEXT"),
+                # Spectral data for the files currently in beets, regardless
+                # of how they got there — updated on every spectral run
+                ("current_spectral_grade", "TEXT"),
+                ("current_spectral_bitrate", "INTEGER"),
                 # Async downloads: per-album download state
                 ("active_download_state", "JSONB"),
                 # Final format on disk (e.g. "opus 128" when Opus conversion used)
@@ -289,6 +333,23 @@ class PipelineDB:
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 
+    def update_request_fields(self, request_id: int, **extra: Any) -> None:
+        """Update album_requests metadata without changing status."""
+        if not extra:
+            return
+        now = datetime.now(timezone.utc)
+        sets = ["updated_at = %s"]
+        params: list[object] = [now]
+        for key, val in extra.items():
+            sets.append(f"{key} = %s")
+            params.append(val)
+        params.append(request_id)
+        self._execute(
+            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
+            params,
+        )
+        self.conn.commit()
+
     def update_status(self, request_id, status, **extra):
         now = datetime.now(timezone.utc)
         sets = ["status = %s", "active_download_state = NULL", "updated_at = %s"]
@@ -302,6 +363,14 @@ class PipelineDB:
             params,
         )
         self.conn.commit()
+
+    def update_spectral_state(
+        self,
+        request_id: int,
+        update: RequestSpectralStateUpdate,
+    ) -> None:
+        """Write spectral state pairs together, including explicit NULLs."""
+        self.update_request_fields(request_id, **update.as_update_fields())
 
     def reset_to_wanted(self, request_id, quality_override=None, min_bitrate=None):
         now = datetime.now(timezone.utc)

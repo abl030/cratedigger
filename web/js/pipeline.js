@@ -177,15 +177,12 @@ export async function toggleDetail(elId, requestId) {
       const minBrKbps = minBr ? Math.round(minBr / 1000) : 0;
       const fmt = beetsTracks[0]?.format || '';
       const nominal = minBrKbps ? qualityLabel(fmt, minBrKbps) : fmt;
-      // Spectral data: album_requests has it if set, otherwise check the
-      // most recent download_log entry's existing_spectral_bitrate (what
-      // was on disk when that download happened — if it's the latest entry,
-      // that's still what's on disk now unless a later import replaced it)
-      // On-disk spectral data — describes files currently in beets,
-      // updated on every spectral run (even rejected downloads).
-      // Falls back to import-time spectral data for older entries.
-      const spectralBr = req.on_disk_spectral_bitrate || req.spectral_bitrate || null;
-      const spectralGrade = req.on_disk_spectral_grade || req.spectral_grade || null;
+      // Current spectral data describes the files currently in beets.
+      // Fall back to the most recent download's measurement for older rows.
+      const spectralBr =
+        req.current_spectral_bitrate || req.last_download_spectral_bitrate || null;
+      const spectralGrade =
+        req.current_spectral_grade || req.last_download_spectral_grade || null;
       const verified = req.verified_lossless === true || req.verified_lossless === 'True';
       let qualitySummary = nominal;
       if (verified) {

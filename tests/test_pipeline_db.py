@@ -536,29 +536,78 @@ class TestSpectralColumns(unittest.TestCase):
 
     def test_album_request_spectral_columns(self):
         self.db.update_status(self.req_id, "imported",
-                              spectral_bitrate=128,
-                              spectral_grade="suspect")
+                              last_download_spectral_bitrate=128,
+                              last_download_spectral_grade="suspect")
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["spectral_bitrate"], 128)
-        self.assertEqual(req["spectral_grade"], "suspect")
+        self.assertEqual(req["last_download_spectral_bitrate"], 128)
+        self.assertEqual(req["last_download_spectral_grade"], "suspect")
 
     def test_on_disk_spectral_columns(self):
-        """on_disk_spectral_grade/bitrate describe files currently in beets."""
+        """current_spectral_grade/bitrate describe files currently in beets."""
         self.db.update_status(self.req_id, "imported",
-                              on_disk_spectral_grade="suspect",
-                              on_disk_spectral_bitrate=160)
+                              current_spectral_grade="suspect",
+                              current_spectral_bitrate=160)
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertEqual(req["on_disk_spectral_grade"], "suspect")
-        self.assertEqual(req["on_disk_spectral_bitrate"], 160)
+        self.assertEqual(req["current_spectral_grade"], "suspect")
+        self.assertEqual(req["current_spectral_bitrate"], 160)
 
     def test_on_disk_spectral_null_by_default(self):
-        """on_disk_spectral columns are NULL for pre-existing albums."""
+        """current_spectral columns are NULL for pre-existing albums."""
         req = self.db.get_request(self.req_id)
         assert req is not None
-        self.assertIsNone(req["on_disk_spectral_grade"])
-        self.assertIsNone(req["on_disk_spectral_bitrate"])
+        self.assertIsNone(req["current_spectral_grade"])
+        self.assertIsNone(req["current_spectral_bitrate"])
+
+    def test_update_spectral_state_updates_both_pairs(self):
+        import pipeline_db
+        from lib.quality import SpectralMeasurement
+
+        self.db.update_spectral_state(
+            self.req_id,
+            pipeline_db.RequestSpectralStateUpdate(
+                last_download=SpectralMeasurement(
+                    grade="suspect", bitrate_kbps=128),
+                current=SpectralMeasurement(
+                    grade="genuine", bitrate_kbps=245),
+            ),
+        )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["last_download_spectral_grade"], "suspect")
+        self.assertEqual(req["last_download_spectral_bitrate"], 128)
+        self.assertEqual(req["current_spectral_grade"], "genuine")
+        self.assertEqual(req["current_spectral_bitrate"], 245)
+
+    def test_update_spectral_state_on_disk_only_clears_nulls(self):
+        import pipeline_db
+        from lib.quality import SpectralMeasurement
+
+        self.db.update_status(
+            self.req_id,
+            "imported",
+            last_download_spectral_grade="likely_transcode",
+            last_download_spectral_bitrate=192,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=192,
+        )
+
+        self.db.update_spectral_state(
+            self.req_id,
+            pipeline_db.RequestSpectralStateUpdate(
+                current=SpectralMeasurement(
+                    grade="genuine", bitrate_kbps=None),
+            ),
+        )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["last_download_spectral_grade"], "likely_transcode")
+        self.assertEqual(req["last_download_spectral_bitrate"], 192)
+        self.assertEqual(req["current_spectral_grade"], "genuine")
+        self.assertIsNone(req["current_spectral_bitrate"])
 
 
 @requires_postgres
@@ -736,7 +785,9 @@ class TestDownloadingStatus(unittest.TestCase):
         state_json = json.dumps({"filetype": "flac", "enqueued_at": "t", "files": []})
         result = self.db.set_downloading(req_id, state_json)
         self.assertTrue(result)
-        self.assertEqual(self.db.get_request(req_id)["status"], "downloading")
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "downloading")
 
     def test_set_downloading_noop_from_imported(self):
         """set_downloading() returns False and doesn't overwrite imported status."""
@@ -747,7 +798,9 @@ class TestDownloadingStatus(unittest.TestCase):
         state_json = json.dumps({"filetype": "flac", "enqueued_at": "t", "files": []})
         result = self.db.set_downloading(req_id, state_json)
         self.assertFalse(result)
-        self.assertEqual(self.db.get_request(req_id)["status"], "imported")
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "imported")
 
     def test_set_downloading_noop_from_downloading(self):
         """set_downloading() returns False when already downloading (no state overwrite)."""
@@ -760,7 +813,9 @@ class TestDownloadingStatus(unittest.TestCase):
         result = self.db.set_downloading(req_id, new_state)
         self.assertFalse(result)
         # Original state preserved
-        ads = self.db.get_request(req_id)["active_download_state"]
+        req = self.db.get_request(req_id)
+        assert req is not None
+        ads = req["active_download_state"]
         self.assertEqual(ads["filetype"], "flac")
 
     def test_set_downloading_noop_from_manual(self):
@@ -772,7 +827,9 @@ class TestDownloadingStatus(unittest.TestCase):
         state_json = json.dumps({"filetype": "flac", "enqueued_at": "t", "files": []})
         result = self.db.set_downloading(req_id, state_json)
         self.assertFalse(result)
-        self.assertEqual(self.db.get_request(req_id)["status"], "manual")
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "manual")
 
     def test_update_download_state(self):
         """update_download_state() rewrites JSONB without changing status."""

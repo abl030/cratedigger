@@ -201,7 +201,8 @@ class DatabaseSource:
     def mark_done(self, album_record, bv_result, dest_path=None,
                   download_info=None):
         """Mark album as imported."""
-        from lib.quality import DownloadInfo, is_verified_lossless
+        from lib.quality import DownloadInfo, SpectralMeasurement, is_verified_lossless
+        from lib.pipeline_db import RequestSpectralStateUpdate
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
@@ -215,29 +216,31 @@ class DatabaseSource:
             beets_scenario=bv_result.scenario,
             imported_path=dest_path,
         )
-        if dl.spectral_grade:
-            update_fields["spectral_grade"] = dl.spectral_grade
-            # Always update spectral_bitrate when spectral ran — including
-            # clearing stale values when genuine files have no cliff (None).
-            update_fields["spectral_bitrate"] = dl.spectral_bitrate
         if dl.verified_lossless_override is not None:
             # import_one.py computed this — trust it over re-derivation
             if dl.verified_lossless_override:
                 update_fields["verified_lossless"] = True
-        elif is_verified_lossless(dl.was_converted, dl.original_filetype,
-                                  dl.spectral_grade):
+        elif is_verified_lossless(
+            dl.was_converted,
+            dl.original_filetype,
+            dl.download_spectral.grade if dl.download_spectral else None,
+        ):
             update_fields["verified_lossless"] = True
-        # After successful import, these files ARE what's on disk now
-        if dl.spectral_grade:
-            update_fields["on_disk_spectral_grade"] = dl.spectral_grade
-        if update_fields.get("verified_lossless") and dl.bitrate:
-            # Verified lossless: V0 bitrate is the real quality fingerprint,
-            # not the spectral cliff estimate (which can miscalibrate)
-            update_fields["on_disk_spectral_bitrate"] = dl.bitrate // 1000
-        elif dl.spectral_grade:
-            # Spectral ran: update on_disk to match, including clearing stale
-            # values when genuine files have no cliff (spectral_bitrate=None).
-            update_fields["on_disk_spectral_bitrate"] = dl.spectral_bitrate
+        if dl.download_spectral is not None:
+            current_spectral = dl.download_spectral
+            if update_fields.get("verified_lossless") and dl.bitrate:
+                # Verified lossless: V0 bitrate is the real quality fingerprint,
+                # not the spectral cliff estimate (which can miscalibrate)
+                current_spectral = SpectralMeasurement(
+                    grade=dl.download_spectral.grade,
+                    bitrate_kbps=dl.bitrate // 1000,
+                )
+            update_fields.update(
+                RequestSpectralStateUpdate(
+                    last_download=dl.download_spectral,
+                    current=current_spectral,
+                ).as_update_fields()
+            )
         if dl.final_format:
             update_fields["final_format"] = dl.final_format
         from lib.transitions import apply_transition
@@ -262,10 +265,14 @@ class DatabaseSource:
             slskd_bitrate=dl.slskd_bitrate,
             actual_filetype=dl.actual_filetype,
             actual_min_bitrate=dl.actual_min_bitrate,
-            spectral_grade=dl.spectral_grade,
-            spectral_bitrate=dl.spectral_bitrate,
+            spectral_grade=dl.download_spectral.grade if dl.download_spectral else None,
+            spectral_bitrate=(
+                dl.download_spectral.bitrate_kbps if dl.download_spectral else None
+            ),
             existing_min_bitrate=dl.existing_min_bitrate,
-            existing_spectral_bitrate=dl.existing_spectral_bitrate,
+            existing_spectral_bitrate=(
+                dl.current_spectral.bitrate_kbps if dl.current_spectral else None
+            ),
             import_result=dl.import_result,
             validation_result=dl.validation_result,
             final_format=dl.final_format,
@@ -306,10 +313,14 @@ class DatabaseSource:
             slskd_bitrate=dl.slskd_bitrate,
             actual_filetype=dl.actual_filetype,
             actual_min_bitrate=dl.actual_min_bitrate,
-            spectral_grade=dl.spectral_grade,
-            spectral_bitrate=dl.spectral_bitrate,
+            spectral_grade=dl.download_spectral.grade if dl.download_spectral else None,
+            spectral_bitrate=(
+                dl.download_spectral.bitrate_kbps if dl.download_spectral else None
+            ),
             existing_min_bitrate=dl.existing_min_bitrate,
-            existing_spectral_bitrate=dl.existing_spectral_bitrate,
+            existing_spectral_bitrate=(
+                dl.current_spectral.bitrate_kbps if dl.current_spectral else None
+            ),
             import_result=dl.import_result,
             validation_result=dl.validation_result,
         )
@@ -366,5 +377,3 @@ class DatabaseSource:
         if self._db:
             self._db.close()
             self._db = None
-
-
