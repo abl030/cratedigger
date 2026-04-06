@@ -115,23 +115,21 @@ def quality_decision_stage(
     return StageResult(decision=decision, exit_code=0)
 
 
-def should_convert_lossless(target_format: str | None) -> bool:
-    """Should lossless files be converted to V0/Opus? (pure)
+def conversion_target(target_format: str | None,
+                      will_be_verified_lossless: bool,
+                      opus_conversion_enabled: bool) -> str:
+    """What should lossless files become on disk? (pure)
 
-    Returns False when user wants FLAC kept on disk as-is.
+    Returns: "flac" (keep as-is), "opus" (Opus 128), "v0" (MP3 V0).
+    Easy to extend: add new formats as early returns.
     """
-    return target_format != "flac"
-
-
-def opus_conversion_decision(will_be_verified_lossless: bool,
-                             opus_conversion_enabled: bool,
-                             target_format: str | None = None) -> StageResult:
-    """Decide whether to convert verified lossless to Opus 128 (pure)."""
     if target_format == "flac":
-        return StageResult(decision="skip_opus")
-    if will_be_verified_lossless and opus_conversion_enabled:
-        return StageResult(decision="opus_convert")
-    return StageResult(decision="skip_opus")
+        return "flac"
+    if not will_be_verified_lossless:
+        return "v0"
+    if opus_conversion_enabled:
+        return "opus"
+    return "v0"
 
 
 def opus_cleanup_decision(opus_skipped: bool, opus_conversion_enabled: bool,
@@ -621,7 +619,7 @@ def main():
     post_conv_br = None
     is_transcode = False
 
-    if should_convert_lossless(args.target_format):
+    if args.target_format != "flac":
         _log(f"[CONVERT] {args.path}")
         converted, failed, original_ext = convert_lossless_to_v0(
             args.path, dry_run=args.dry_run,
@@ -723,9 +721,8 @@ def main():
         _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
     # --- Opus conversion (after V0 verdict, before import) ---
-    opus_stage = opus_conversion_decision(will_be_verified_lossless, args.opus_conversion,
-                                         target_format=args.target_format)
-    if opus_stage.decision == "opus_convert":
+    conv = conversion_target(args.target_format, will_be_verified_lossless, args.opus_conversion)
+    if conv == "opus":
         _log(f"[OPUS] Converting verified lossless → Opus 128kbps")
         r.v0_verification_bitrate = post_conv_br
         opus_converted, opus_failed = convert_lossless_to_opus(args.path, dry_run=args.dry_run)
@@ -759,7 +756,7 @@ def main():
         _log(f"  V0 verification bitrate: {post_conv_br}kbps")
 
     # --- Clean up kept FLAC files if opus was skipped (transcode path) ---
-    if opus_cleanup_decision(opus_stage.decision == "skip_opus",
+    if opus_cleanup_decision(conv != "opus",
                              args.opus_conversion, converted):
         for fname in os.listdir(args.path):
             if _is_lossless_file(fname, args.path):

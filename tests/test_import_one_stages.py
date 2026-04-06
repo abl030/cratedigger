@@ -226,47 +226,33 @@ class TestFinalExitDecision(unittest.TestCase):
 # ============================================================================
 
 # ============================================================================
-# opus_conversion_decision
+# conversion_target — single decision for all lossless conversion
 # ============================================================================
 
-class TestOpusConversionDecision(unittest.TestCase):
-    """Test the Opus conversion stage decision (pure)."""
+class TestConversionTarget(unittest.TestCase):
+    """Test conversion_target: what should lossless files become on disk?"""
 
-    def test_verified_lossless_with_flag_converts(self):
-        from import_one import opus_conversion_decision
-        r = opus_conversion_decision(will_be_verified_lossless=True,
-                                     opus_conversion_enabled=True)
-        self.assertEqual(r.decision, "opus_convert")
-        self.assertFalse(r.is_terminal)
+    def _target(self, target_format=None, verified=False, opus=False):
+        from import_one import conversion_target
+        return conversion_target(target_format, verified, opus)
 
-    def test_not_verified_skips(self):
-        from import_one import opus_conversion_decision
-        r = opus_conversion_decision(will_be_verified_lossless=False,
-                                     opus_conversion_enabled=True)
-        self.assertEqual(r.decision, "skip_opus")
-        self.assertFalse(r.is_terminal)
+    def test_default_is_v0(self):
+        self.assertEqual(self._target(), "v0")
 
-    def test_flag_disabled_skips(self):
-        from import_one import opus_conversion_decision
-        r = opus_conversion_decision(will_be_verified_lossless=True,
-                                     opus_conversion_enabled=False)
-        self.assertEqual(r.decision, "skip_opus")
-        self.assertFalse(r.is_terminal)
+    def test_target_format_flac_keeps_flac(self):
+        self.assertEqual(self._target(target_format="flac"), "flac")
 
-    def test_both_false_skips(self):
-        from import_one import opus_conversion_decision
-        r = opus_conversion_decision(will_be_verified_lossless=False,
-                                     opus_conversion_enabled=False)
-        self.assertEqual(r.decision, "skip_opus")
-        self.assertFalse(r.is_terminal)
+    def test_target_format_flac_overrides_opus(self):
+        self.assertEqual(self._target(target_format="flac", verified=True, opus=True), "flac")
 
-    def test_target_format_flac_skips_opus(self):
-        """target_format=flac takes precedence over opus_conversion."""
-        from import_one import opus_conversion_decision
-        r = opus_conversion_decision(will_be_verified_lossless=True,
-                                     opus_conversion_enabled=True,
-                                     target_format="flac")
-        self.assertEqual(r.decision, "skip_opus")
+    def test_verified_with_opus_returns_opus(self):
+        self.assertEqual(self._target(verified=True, opus=True), "opus")
+
+    def test_verified_without_opus_returns_v0(self):
+        self.assertEqual(self._target(verified=True, opus=False), "v0")
+
+    def test_not_verified_with_opus_returns_v0(self):
+        self.assertEqual(self._target(verified=False, opus=True), "v0")
 
 
 # ============================================================================
@@ -305,20 +291,6 @@ class TestOpusCleanupDecision(unittest.TestCase):
         self.assertFalse(r)
 
 
-class TestShouldConvertLossless(unittest.TestCase):
-    """Test target_format-aware conversion decision (pure)."""
-
-    def test_default_none_converts(self):
-        from import_one import should_convert_lossless
-        self.assertTrue(should_convert_lossless(None))
-
-    def test_flac_skips_conversion(self):
-        from import_one import should_convert_lossless
-        self.assertFalse(should_convert_lossless("flac"))
-
-    def test_non_flac_target_converts(self):
-        from import_one import should_convert_lossless
-        self.assertTrue(should_convert_lossless("mp3 v0"))
 
 
 class TestConvertV0KeepSource(unittest.TestCase):
