@@ -482,29 +482,29 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["download_attempts"], 0)
         self.assertEqual(req["validation_attempts"], 0)
 
-    def test_preserves_quality_override_when_omitted(self):
+    def test_preserves_search_filetype_override_when_omitted(self):
         req_id = self._make_request("preserve-qo")
-        self.db.update_request_fields(req_id, quality_override="flac,mp3 v0")
+        self.db.update_request_fields(req_id, search_filetype_override="flac,mp3 v0")
         self.db.reset_to_wanted(req_id)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
-    def test_sets_quality_override_when_passed(self):
+    def test_sets_search_filetype_override_when_passed(self):
         req_id = self._make_request("set-qo")
-        self.db.update_request_fields(req_id, quality_override="flac,mp3 v0,mp3 320")
-        self.db.reset_to_wanted(req_id, quality_override="flac,mp3 v0")
+        self.db.update_request_fields(req_id, search_filetype_override="flac,mp3 v0,mp3 320")
+        self.db.reset_to_wanted(req_id, search_filetype_override="flac,mp3 v0")
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
-    def test_clears_quality_override_when_none(self):
+    def test_clears_search_filetype_override_when_none(self):
         req_id = self._make_request("clear-qo")
-        self.db.update_request_fields(req_id, quality_override="flac")
-        self.db.reset_to_wanted(req_id, quality_override=None)
+        self.db.update_request_fields(req_id, search_filetype_override="flac")
+        self.db.reset_to_wanted(req_id, search_filetype_override=None)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertIsNone(req["quality_override"])
+        self.assertIsNone(req["search_filetype_override"])
 
     def test_preserves_min_bitrate_when_omitted(self):
         req_id = self._make_request("preserve-br")
@@ -550,30 +550,30 @@ class TestApplyTransitionDB(unittest.TestCase):
 
     def test_transition_to_wanted_preserves_override(self):
         from lib.transitions import apply_transition
-        req_id = self._make_request("preserve", quality_override="flac,mp3 v0")
+        req_id = self._make_request("preserve", search_filetype_override="flac,mp3 v0")
         apply_transition(self.db, req_id, "wanted", from_status="imported")
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
     def test_transition_to_wanted_with_narrowed_override(self):
         from lib.transitions import apply_transition
-        req_id = self._make_request("narrow", quality_override="flac,mp3 v0,mp3 320")
+        req_id = self._make_request("narrow", search_filetype_override="flac,mp3 v0,mp3 320")
         apply_transition(self.db, req_id, "wanted", from_status="imported",
-                         quality_override="flac,mp3 v0")
+                         search_filetype_override="flac,mp3 v0")
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
     def test_transition_to_imported_clears_override(self):
         from lib.transitions import apply_transition
-        req_id = self._make_request("clear", quality_override="flac")
+        req_id = self._make_request("clear", search_filetype_override="flac")
         apply_transition(self.db, req_id, "wanted", from_status="imported")
         apply_transition(self.db, req_id, "imported", from_status="wanted",
-                         quality_override=None)
+                         search_filetype_override=None)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertIsNone(req["quality_override"])
+        self.assertIsNone(req["search_filetype_override"])
 
 
 @requires_postgres

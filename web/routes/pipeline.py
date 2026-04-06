@@ -312,7 +312,7 @@ def post_pipeline_update(h, body: dict) -> None:
                 min_br = b.get_min_bitrate(mbid)
         kwargs: dict[str, object] = {"from_status": req["status"]}
         if quality is not None:
-            kwargs["quality_override"] = quality
+            kwargs["search_filetype_override"] = quality
         if min_br is not None:
             kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **kwargs)
@@ -342,13 +342,13 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         req_id = existing["id"]
         apply_transition(s._db(), req_id, "wanted",
                          from_status=existing["status"],
-                         quality_override=quality,
+                         search_filetype_override=quality,
                          min_bitrate=min_bitrate)
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
             "min_bitrate": min_bitrate,
-            "quality_override": quality,
+            "search_filetype_override": quality,
         })
     else:
         release = mb_api.get_release(mbid)
@@ -366,13 +366,13 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         # Newly added request — status is already 'wanted', set quality override
         apply_transition(s._db(), req_id, "wanted",
                          from_status="wanted",
-                         quality_override=quality,
+                         search_filetype_override=quality,
                          min_bitrate=min_bitrate)
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
             "min_bitrate": min_bitrate,
-            "quality_override": quality,
+            "search_filetype_override": quality,
             "created": True,
         })
 
@@ -410,7 +410,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                 b = s._beets_db()
                 if b:
                     min_bitrate = b.get_avg_bitrate_kbps(mbid)
-            extra: dict[str, object] = {"quality_override": None}
+            extra: dict[str, object] = {"search_filetype_override": None}
             if min_bitrate is not None:
                 extra["min_bitrate"] = int(min_bitrate)
             apply_transition(s._db(), req_id, "imported",
@@ -449,7 +449,7 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         h._error("Not found", 404)
         return
 
-    quality_override = INTENT_NAMES[intent_str]
+    target_format = INTENT_NAMES[intent_str]
 
     if req["status"] == "downloading":
         h._error("Cannot set intent while album is downloading")
@@ -460,26 +460,31 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         min_br = req.get("min_bitrate")
         apply_transition(s._db(), int(req_id), "wanted",
                          from_status="imported",
-                         quality_override=quality_override,
+                         search_filetype_override=target_format,
                          min_bitrate=min_br)
-        h._json({
-            "status": "ok",
-            "id": int(req_id),
-            "intent": intent_str,
-            "quality_override": quality_override,
-            "requeued": True,
-        })
-    else:
-        # Just update the override for next search (wanted or manual)
+        # Persist the user intent separately
         s._db()._execute(
-            "UPDATE album_requests SET quality_override = %s, updated_at = NOW() WHERE id = %s",
-            (quality_override, int(req_id)),
+            "UPDATE album_requests SET target_format = %s WHERE id = %s",
+            (target_format, int(req_id)),
         )
         h._json({
             "status": "ok",
             "id": int(req_id),
             "intent": intent_str,
-            "quality_override": quality_override,
+            "target_format": target_format,
+            "requeued": True,
+        })
+    else:
+        # Just update the persistent intent for next search (wanted or manual)
+        s._db()._execute(
+            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
+            (target_format, int(req_id)),
+        )
+        h._json({
+            "status": "ok",
+            "id": int(req_id),
+            "intent": intent_str,
+            "target_format": target_format,
             "requeued": False,
         })
 
@@ -511,11 +516,11 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
     req = s._db().get_request(int(req_id))
     if req:
-        quality = req.get("quality_override") or QUALITY_UPGRADE_TIERS
+        quality = req.get("search_filetype_override") or QUALITY_UPGRADE_TIERS
         min_br = req.get("min_bitrate")
         ban_kwargs: dict[str, object] = {"from_status": req["status"]}
         if quality is not None:
-            ban_kwargs["quality_override"] = quality
+            ban_kwargs["search_filetype_override"] = quality
         if min_br is not None:
             ban_kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)

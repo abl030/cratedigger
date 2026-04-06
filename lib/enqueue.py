@@ -354,7 +354,8 @@ def _try_filetype(
                 mb_release_id=release.foreign_release_id,
                 db_request_id=album.db_request_id,
                 db_source=album.db_source,
-                db_quality_override=album.db_quality_override,
+                db_search_filetype_override=album.db_search_filetype_override,
+                db_target_format=album.db_target_format,
             )
             return True
 
@@ -384,14 +385,15 @@ def find_download(
     ctx.negative_matches.clear()
     ctx.current_album_cache[album_id] = album
 
-    from lib.quality import search_tiers
+    from lib.quality import effective_search_tiers
 
-    filetypes_to_try, catch_all = search_tiers(
-        album.db_quality_override, list(ctx.cfg.allowed_filetypes))
+    filetypes_to_try, catch_all = effective_search_tiers(
+        album.db_search_filetype_override, album.db_target_format,
+        list(ctx.cfg.allowed_filetypes))
 
-    if album.db_quality_override:
+    if album.db_search_filetype_override or album.db_target_format:
         logger.info(
-            f"Quality override for {artist_name} - {album.title}: "
+            f"Search override for {artist_name} - {album.title}: "
             f"searching {filetypes_to_try}"
         )
 

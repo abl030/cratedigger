@@ -514,6 +514,7 @@ EXPECTED_PARAMS = {
     "override_min_bitrate",
     "post_conversion_min_bitrate", "converted_count",
     "verified_lossless", "opus_conversion",
+    "target_format",
 }
 
 
@@ -686,6 +687,55 @@ class TestFullPipelineContract(unittest.TestCase):
             is_flac=False, min_bitrate=245, is_cbr=False,
             opus_conversion=True)
         self.assertIsNone(r["opus_final_format"])
+
+
+# ============================================================================
+# full_pipeline_decision with target_format
+# ============================================================================
+
+class TestFullPipelineTargetFormat(unittest.TestCase):
+    """Test target_format="flac" path: skip conversion, keep FLAC on disk."""
+
+    def test_flac_target_format_skips_conversion_and_imports(self):
+        """target_format=flac + genuine FLAC → imported without conversion."""
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=0,  # no conversion happened
+            target_format="flac")
+        self.assertTrue(r["imported"])
+        self.assertEqual(r["final_status"], "imported")
+        self.assertEqual(r["stage3_quality_gate"], "accept")
+        self.assertFalse(r["keep_searching"])
+
+    def test_flac_target_format_verified_lossless(self):
+        """target_format=flac + genuine FLAC → verified_lossless despite no conversion."""
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=0,
+            target_format="flac")
+        # Quality gate should see verified_lossless=True
+        self.assertEqual(r["stage3_quality_gate"], "accept")
+
+    def test_flac_target_format_mp3_download_unchanged(self):
+        """target_format=flac but MP3 download → normal MP3 path (no effect)."""
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=240, is_cbr=False,
+            target_format="flac")
+        self.assertTrue(r["imported"])
+        self.assertEqual(r["stage2_import"], "import")
+
+    def test_flac_target_beats_existing_v0(self):
+        """FLAC at 900kbps vs existing V0 at 245kbps → upgrade."""
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=0,
+            existing_min_bitrate=245,
+            target_format="flac")
+        self.assertTrue(r["imported"])
+        self.assertEqual(r["stage2_import"], "import")
 
 
 # ============================================================================

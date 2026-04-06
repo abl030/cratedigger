@@ -181,7 +181,7 @@ export async function toggleLibDetail(id) {
         <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality('${data.mb_albumid}', null, parseInt(v))">Set</button>
         <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality('${data.mb_albumid}', 'imported', null)">Accept</button>
       </div>`;
-      const currentIntent = overrideToIntent(data.quality_override);
+      const currentIntent = overrideToIntent(data.target_format);
       html += `<div class="p-actions" style="margin-top:6px;">
         <span class="p-detail-label" style="line-height:28px;">Intent:</span>
         <select id="lib-intent-${id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">

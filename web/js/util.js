@@ -43,7 +43,7 @@ export function awstTime(isoStr) { return toAWST(isoStr).slice(11, 16); }
 export function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replace('T', ' '); }
 
 /**
- * Reverse-map quality_override DB string to a friendly intent name.
+ * Reverse-map target_format DB string to a friendly intent name.
  * @param {string|null|undefined} override
  * @returns {string}
  */

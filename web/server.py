@@ -123,7 +123,7 @@ def check_pipeline(mbids):
     pdb = _db()
     placeholders = ",".join(["%s"] * len(mbids))
     cur = pdb._execute(
-        f"SELECT id, mb_release_id, status, quality_override, min_bitrate "
+        f"SELECT id, mb_release_id, status, search_filetype_override, target_format, min_bitrate "
         f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
         tuple(mbids),
     )
@@ -131,7 +131,8 @@ def check_pipeline(mbids):
         r["mb_release_id"]: {
             "id": r["id"],
             "status": r["status"],
-            "quality_override": r["quality_override"],
+            "search_filetype_override": r["search_filetype_override"],
+            "target_format": r["target_format"],
             "min_bitrate": r["min_bitrate"],
         }
         for r in cur.fetchall()
@@ -157,7 +158,7 @@ def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
 
     Pipeline DB stores kbps, beets stores bps. Only overrides when pipeline is higher.
     """
-    if pipeline_info.get("status") == "wanted" and pipeline_info.get("quality_override"):
+    if pipeline_info.get("status") == "wanted" and (pipeline_info.get("search_filetype_override") or pipeline_info.get("target_format")):
         album["upgrade_queued"] = True
     pi_br = pipeline_info.get("min_bitrate")
     a_br = album.get("min_bitrate")

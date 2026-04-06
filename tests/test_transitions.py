@@ -156,18 +156,18 @@ class TestApplyTransition(unittest.TestCase):
     def test_downloading_to_wanted_calls_reset(self):
         db = self._make_db("downloading")
         apply_transition(db, 1, "wanted", from_status="downloading",
-                         quality_override="flac", attempt_type="download")
+                         search_filetype_override="flac", attempt_type="download")
         db.reset_to_wanted.assert_called_once_with(
-            1, quality_override="flac")
+            1, search_filetype_override="flac")
         db.record_attempt.assert_called_once_with(1, "download")
 
     def test_imported_to_wanted_calls_reset(self):
         db = self._make_db("imported")
         apply_transition(db, 1, "wanted", from_status="imported",
-                         quality_override="flac,mp3 v0,mp3 320",
+                         search_filetype_override="flac,mp3 v0,mp3 320",
                          min_bitrate=245)
         db.reset_to_wanted.assert_called_once_with(
-            1, quality_override="flac,mp3 v0,mp3 320", min_bitrate=245)
+            1, search_filetype_override="flac,mp3 v0,mp3 320", min_bitrate=245)
 
     def test_wanted_to_downloading_calls_set_downloading(self):
         db = self._make_db("wanted")

@@ -47,9 +47,10 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
             result["pipeline_status"] = req["status"]
             result["pipeline_source"] = req.get("source")
             result["pipeline_min_bitrate"] = req.get("min_bitrate")
-            result["quality_override"] = req.get("quality_override")
+            result["search_filetype_override"] = req.get("search_filetype_override")
+            result["target_format"] = req.get("target_format")
             result["upgrade_queued"] = (
-                req["status"] == "wanted" and bool(req.get("quality_override"))
+                req["status"] == "wanted" and bool(req.get("search_filetype_override") or req.get("target_format"))
             )
             from classify import classify_log_entry as _clf, LogEntry as _LE
             dh = []

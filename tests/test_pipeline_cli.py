@@ -345,7 +345,7 @@ class TestCmdSetIntent(unittest.TestCase):
         pipeline_cli.cmd_set_intent(db, args)
         db._execute.assert_called_once()
         call_args = db._execute.call_args[0]
-        self.assertIn("quality_override", call_args[0])
+        self.assertIn("target_format", call_args[0])
         self.assertEqual(call_args[1][0], "flac")
 
     @patch("builtins.print")
@@ -359,7 +359,7 @@ class TestCmdSetIntent(unittest.TestCase):
         pipeline_cli.cmd_set_intent(db, args)
         db.reset_to_wanted.assert_called_once()
         call_kwargs = db.reset_to_wanted.call_args.kwargs if db.reset_to_wanted.call_args.kwargs else db.reset_to_wanted.call_args[1]
-        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0,mp3 320")
+        self.assertEqual(call_kwargs.get("search_filetype_override"), "flac,mp3 v0,mp3 320")
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):

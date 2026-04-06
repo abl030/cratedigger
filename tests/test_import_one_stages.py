@@ -297,6 +297,22 @@ class TestOpusCleanupDecision(unittest.TestCase):
         self.assertFalse(r)
 
 
+class TestShouldConvertLossless(unittest.TestCase):
+    """Test target_format-aware conversion decision (pure)."""
+
+    def test_default_none_converts(self):
+        from import_one import should_convert_lossless
+        self.assertTrue(should_convert_lossless(None))
+
+    def test_flac_skips_conversion(self):
+        from import_one import should_convert_lossless
+        self.assertFalse(should_convert_lossless("flac"))
+
+    def test_non_flac_target_converts(self):
+        from import_one import should_convert_lossless
+        self.assertTrue(should_convert_lossless("mp3 v0"))
+
+
 class TestConvertV0KeepSource(unittest.TestCase):
     """Test that keep_source=True preserves original lossless files."""
 

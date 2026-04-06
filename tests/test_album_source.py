@@ -193,7 +193,7 @@ class TestDatabaseSource(unittest.TestCase):
         usernames = {d["username"] for d in denied}
         self.assertEqual(usernames, {"bad_user1", "bad_user2"})
 
-    def test_mark_failed_preserves_existing_quality_override(self):
+    def test_mark_failed_preserves_existing_search_filetype_override(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="fail-preserve-uuid",
@@ -201,7 +201,7 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_request_fields(req_id, quality_override="flac,mp3 v0,mp3 320")
+        db.update_request_fields(req_id, search_filetype_override="flac,mp3 v0,mp3 320")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
@@ -209,7 +209,7 @@ class TestDatabaseSource(unittest.TestCase):
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0,mp3 320")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0,mp3 320")
 
     def test_mark_failed_uses_explicit_narrowed_override(self):
         source, db = self._make_source()
@@ -219,15 +219,15 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_request_fields(req_id, quality_override="flac,mp3 v0,mp3 320")
+        db.update_request_fields(req_id, search_filetype_override="flac,mp3 v0,mp3 320")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="quality_downgrade")
 
-        source.mark_failed(record, bv_result, quality_override="flac,mp3 v0")
+        source.mark_failed(record, bv_result, search_filetype_override="flac,mp3 v0")
 
         req = db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["quality_override"], "flac,mp3 v0")
+        self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
     def test_mark_done_sets_on_disk_spectral(self):
         """Successful import updates current_spectral_grade/bitrate."""

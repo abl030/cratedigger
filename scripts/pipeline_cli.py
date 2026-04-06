@@ -208,23 +208,28 @@ def cmd_set_intent(db, args):
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return
-    quality_override = INTENT_NAMES[args.intent]
-    old_override = req.get("quality_override")
+    target_format = INTENT_NAMES[args.intent]
+    old_target = req.get("target_format")
 
     if req["status"] == "imported":
         min_br = req.get("min_bitrate")
         apply_transition(db, args.id, "wanted", from_status="imported",
-                         quality_override=quality_override,
+                         search_filetype_override=target_format,
                          min_bitrate=min_br)
+        # Persist the user intent separately
+        db._execute(
+            "UPDATE album_requests SET target_format = %s WHERE id = %s",
+            (target_format, args.id),
+        )
         print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
               f"intent={args.intent}, re-queued for search")
     else:
         db._execute(
-            "UPDATE album_requests SET quality_override = %s, updated_at = NOW() WHERE id = %s",
-            (quality_override, args.id),
+            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
+            (target_format, args.id),
         )
         print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={args.intent} (override: {old_override} → {quality_override})")
+              f"intent={args.intent} (target_format: {old_target} → {target_format})")
 
 
 def _fmt_br(kbps):
@@ -435,7 +440,7 @@ def cmd_show(db, args):
     s_br = req.get("last_download_spectral_bitrate")
     cur_grade = req.get("current_spectral_grade")
     cur_br = req.get("current_spectral_bitrate")
-    q_override = req.get("quality_override")
+    q_override = req.get("search_filetype_override")
     has_quality = any(
         v is not None
         for v in [min_br, prev_br, verified, s_grade, s_br, cur_grade, cur_br, q_override]
@@ -457,7 +462,7 @@ def cmd_show(db, args):
                 current += f" ~{cur_br}kbps"
             print(f"    current_spectral:  {current}")
         if q_override:
-            print(f"    quality_override:  {q_override}")
+            print(f"    search_filetype_override: {q_override}")
 
     tracks = db.get_tracks(req['id'])
     if tracks:
@@ -498,7 +503,7 @@ def cmd_quality(db, args):
     min_br = req.get("min_bitrate")
     verified = bool(req.get("verified_lossless"))
     current_br = req.get("current_spectral_bitrate")
-    q_override = req.get("quality_override")
+    q_override = req.get("search_filetype_override")
     spectral_grade = req.get("current_spectral_grade")
 
     print(f"  {label}")
@@ -542,9 +547,9 @@ def cmd_quality(db, args):
         is_cbr=is_cbr, min_bitrate_kbps=min_br,
         spectral_grade=spectral_grade, verified_lossless=verified)
     if backfill and not q_override:
-        print(f"  Backfill:      would set quality_override='{backfill}' on next rejection")
+        print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
     elif q_override:
-        print(f"  Backfill:      not needed (quality_override already set)")
+        print(f"  Backfill:      not needed (search_filetype_override already set)")
     else:
         print(f"  Backfill:      won't fire (conditions not met)")
 

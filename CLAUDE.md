@@ -95,7 +95,7 @@ scripts/
                            force-import, manual-import, set-intent, repair-spectral
   populate_tracks.py    — Populate tracks from MusicBrainz API
   run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
-tests/                     1153 tests total
+tests/                     1238 tests total
   test_album_source.py      — 17 tests for AlbumSource (incl. verified_lossless, stale spectral clear)
   test_artist_releases.py    — 25 tests for artist release queries
   test_audio_file_spec.py    — 93 tests for audio file spec matching
@@ -120,6 +120,8 @@ tests/                     1153 tests total
   test_pipeline_db.py        — 52 tests for PipelineDB (incl. spectral state, downloading status)
   test_quality_classification.py — 38 tests for quality classification (real audio fixtures)
   test_quality_decisions.py  — 113 tests for pure decision functions + pipeline contract tests
+  test_simulator_scenarios.py — 46 tests for full pipeline simulator (13 album states × 16 download
+                                 scenarios, named regressions, backfill propagation, invariants)
   test_quality_intent.py     — 33 tests for quality intent/override system
   test_repair.py             — 15 tests for repair-spectral command
   test_search.py             — 32 tests for search query building
@@ -320,7 +322,7 @@ After every import, the quality gate decides what to do next. It checks these co
 
 1. **`verified_lossless=TRUE` + any bitrate** → **DONE**. We verified this from genuine FLAC. Low V0 bitrate (e.g. 207kbps) on lo-fi music is fine — the source is proven lossless.
 2. **`min_bitrate < 210kbps`** → **RE-QUEUE** for upgrade. Bad quality, search for better.
-3. **CBR on disk** (all tracks same bitrate) **+ not verified_lossless** → **RE-QUEUE for FLAC only** (`quality_override="flac"`). CBR is unverifiable — spectral analysis can detect obvious upsamples but cannot prove a CBR file came from lossless source.
+3. **CBR on disk** (all tracks same bitrate) **+ not verified_lossless** → **RE-QUEUE for FLAC only** (`search_filetype_override="flac"`). CBR is unverifiable — spectral analysis can detect obvious upsamples but cannot prove a CBR file came from lossless source.
 4. **VBR above 210kbps** → **DONE**. VBR bitrate is trustworthy.
 
 ### Two Key Concepts (don't confuse them)
@@ -361,7 +363,8 @@ Uses `sox` bandpass filtering to detect transcodes. Measures RMS energy in 16 x 
 
 ### Key Fields (`album_requests` table)
 
-- `quality_override TEXT` — CSV filetype list (e.g. `"flac,mp3 v0,mp3 320"` or just `"flac"`). Overrides global `allowed_filetypes` for this album.
+- `search_filetype_override TEXT` — Transient CSV filetype list (e.g. `"flac,mp3 v0,mp3 320"` or just `"flac"`). Overrides global `allowed_filetypes` for search. Set by quality gate requeue paths and backfill. Cleared on quality gate accept.
+- `target_format TEXT` — Persistent user intent for desired format on disk (e.g. `"flac"`). Set only by user action (CLI/web set-intent). Never cleared by quality gate. When set, drives search tiers if no `search_filetype_override` is active.
 - `min_bitrate INTEGER` — Current min track bitrate in kbps (from beets).
 - `prev_min_bitrate INTEGER` — Previous min_bitrate before last upgrade. Shows delta in UI.
 - `verified_lossless BOOLEAN` — True only when imported from spectral-verified genuine FLAC→V0.
@@ -578,7 +581,7 @@ SQL
 
 `pipeline-cli quality` runs `full_pipeline_decision()` with the album's actual state and shows whether genuine FLAC, V0, CBR 320, or suspect FLAC would be imported or rejected.
 
-`pipeline-cli show` displays the quality columns from `album_requests` (min_bitrate, prev_min_bitrate, verified_lossless, last_download_spectral_grade/bitrate, current_spectral_grade/bitrate, quality_override) and renders the `ImportResult` JSONB from each download history entry showing the decision chain and measurements.
+`pipeline-cli show` displays the quality columns from `album_requests` (min_bitrate, prev_min_bitrate, verified_lossless, last_download_spectral_grade/bitrate, current_spectral_grade/bitrate, search_filetype_override, target_format) and renders the `ImportResult` JSONB from each download history entry showing the decision chain and measurements.
 
 `pipeline-cli query` executes arbitrary SQL in a session with `default_transaction_read_only = on`, so it is safe for diagnostics but will reject writes. Add `--json` when you need machine-readable output.
 

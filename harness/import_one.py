@@ -115,6 +115,14 @@ def quality_decision_stage(
     return StageResult(decision=decision, exit_code=0)
 
 
+def should_convert_lossless(target_format: str | None) -> bool:
+    """Should lossless files be converted to V0/Opus? (pure)
+
+    Returns False when user wants FLAC kept on disk as-is.
+    """
+    return target_format != "flac"
+
+
 def opus_conversion_decision(will_be_verified_lossless: bool,
                              opus_conversion_enabled: bool) -> StageResult:
     """Decide whether to convert verified lossless to Opus 128 (pure)."""
@@ -512,6 +520,8 @@ def main():
                         help="Skip distance check (for force-importing rejected albums)")
     parser.add_argument("--opus-conversion", action="store_true",
                         help="Convert verified lossless to Opus 128 instead of keeping V0")
+    parser.add_argument("--target-format", default=None,
+                        help="Desired format on disk (e.g. 'flac' to skip conversion)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -600,39 +610,50 @@ def main():
     except Exception as e:
         _log(f"  [SPECTRAL] error: {e}")
 
-    # --- Convert lossless → V0 ---
-    _log(f"[CONVERT] {args.path}")
-    converted, failed, original_ext = convert_lossless_to_v0(
-        args.path, dry_run=args.dry_run,
-        keep_source=args.opus_conversion)
-    r.conversion.converted = converted
-    r.conversion.failed = failed
-    if converted > 0:
-        r.conversion.was_converted = True
-        r.conversion.original_filetype = original_ext or "flac"
-        r.conversion.target_filetype = "mp3"
-    _log(f"  Converted {converted}, failed {failed}")
-    cd = conversion_decision(converted, failed)
-    if cd.is_terminal:
-        r.exit_code = cd.exit_code
-        r.decision = cd.decision
-        r.error = cd.error
-        _log(f"[ERROR] {r.error}")
-        _emit_and_exit(r)
+    # --- Convert lossless → V0 (unless target_format=flac) ---
+    converted = 0
+    failed = 0
+    original_ext = None
+    v0_ext_filter = None
+    post_conv_br = None
+    is_transcode = False
 
-    # --- Transcode detection ---
-    # When keep_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
-    v0_ext_filter = {".mp3"} if args.opus_conversion and converted > 0 else None
-    post_conv_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter) if converted > 0 else None
-    r.conversion.post_conversion_min_bitrate = post_conv_br
-    is_transcode = transcode_detection(converted, post_conv_br,
-                                       spectral_grade=spectral_grade)
-    r.conversion.is_transcode = is_transcode
-    if is_transcode:
-        _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
-             f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
-    if post_conv_br is not None:
-        _log(f"  post_conversion_min_bitrate={post_conv_br}")
+    if should_convert_lossless(args.target_format):
+        _log(f"[CONVERT] {args.path}")
+        converted, failed, original_ext = convert_lossless_to_v0(
+            args.path, dry_run=args.dry_run,
+            keep_source=args.opus_conversion)
+        r.conversion.converted = converted
+        r.conversion.failed = failed
+        if converted > 0:
+            r.conversion.was_converted = True
+            r.conversion.original_filetype = original_ext or "flac"
+            r.conversion.target_filetype = "mp3"
+        _log(f"  Converted {converted}, failed {failed}")
+        cd = conversion_decision(converted, failed)
+        if cd.is_terminal:
+            r.exit_code = cd.exit_code
+            r.decision = cd.decision
+            r.error = cd.error
+            _log(f"[ERROR] {r.error}")
+            _emit_and_exit(r)
+
+        # --- Transcode detection ---
+        # When keep_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
+        v0_ext_filter = {".mp3"} if args.opus_conversion and converted > 0 else None
+        post_conv_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter) if converted > 0 else None
+        r.conversion.post_conversion_min_bitrate = post_conv_br
+        is_transcode = transcode_detection(converted, post_conv_br,
+                                           spectral_grade=spectral_grade)
+        r.conversion.is_transcode = is_transcode
+        if is_transcode:
+            _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
+                 f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
+        if post_conv_br is not None:
+            _log(f"  post_conversion_min_bitrate={post_conv_br}")
+    else:
+        _log(f"[CONVERT] Skipping conversion (target_format={args.target_format})")
+        r.final_format = args.target_format
 
     if args.dry_run:
         r.decision = "dry_run"
@@ -651,7 +672,11 @@ def main():
     if new_min_br is not None:
         _log(f"  new_min_bitrate={new_min_br}")
 
-    will_be_verified_lossless = (converted > 0 and not is_transcode)
+    # Verified lossless: genuine FLAC kept on disk counts as verified
+    if args.target_format == "flac":
+        will_be_verified_lossless = spectral_grade in ("genuine", "marginal", None)
+    else:
+        will_be_verified_lossless = (converted > 0 and not is_transcode)
 
     # --- Build measurements ---
     new_m = AudioQualityMeasurement(

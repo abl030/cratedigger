@@ -12,7 +12,7 @@ from typing import Any, Optional
 QUALITY_UPGRADE_TIERS = "flac,mp3 v0,mp3 320"
 QUALITY_FLAC_ONLY = "flac"
 
-# Friendly names for CLI/web UI → quality_override DB values
+# Friendly names for CLI/web UI → search_filetype_override DB values
 INTENT_NAMES: dict[str, str | None] = {
     "best_effort": None,
     "flac_only": QUALITY_FLAC_ONLY,
@@ -21,16 +21,32 @@ INTENT_NAMES: dict[str, str | None] = {
 }
 
 
-def search_tiers(quality_override: str | None,
+def search_tiers(search_filetype_override: str | None,
                  config_allowed: list[str]) -> tuple[list[str], bool]:
-    """Return (filetypes_to_search, allow_catch_all) from a quality_override.
+    """Return (filetypes_to_search, allow_catch_all) from a search_filetype_override.
 
     NULL override = use global config + allow catch-all fallback.
     Any CSV override = search exactly those tiers, no catch-all.
     """
-    if not quality_override:
+    if not search_filetype_override:
         return list(config_allowed), True
-    return [t.strip() for t in quality_override.split(",")], False
+    return [t.strip() for t in search_filetype_override.split(",")], False
+
+
+def effective_search_tiers(
+    search_filetype_override: str | None,
+    target_format: str | None,
+    config_allowed: list[str],
+) -> tuple[list[str], bool]:
+    """Compute effective search tiers merging both override sources.
+
+    Priority: search_filetype_override > target_format > config defaults.
+    """
+    if search_filetype_override:
+        return search_tiers(search_filetype_override, config_allowed)
+    if target_format:
+        return search_tiers(target_format, config_allowed)
+    return search_tiers(None, config_allowed)
 
 
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
@@ -938,9 +954,9 @@ def extract_usernames(files: Any) -> set[str]:
 
 
 def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
-    """Determine which quality_override tier a rejected download corresponds to.
+    """Determine which search_filetype_override tier a rejected download corresponds to.
 
-    Maps from DownloadInfo properties to the tier string used in quality_override
+    Maps from DownloadInfo properties to the tier string used in search_filetype_override
     CSV (e.g. "flac", "mp3 v0", "mp3 320").
     """
     slskd_ft = (dl_info.slskd_filetype or dl_info.filetype or "").lower().strip()
@@ -957,9 +973,9 @@ def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
     return None
 
 
-def narrow_override_on_downgrade(quality_override: str | None,
+def narrow_override_on_downgrade(search_filetype_override: str | None,
                                  dl_info: "DownloadInfo") -> str | None:
-    """Remove the rejected filetype tier from quality_override after downgrade.
+    """Remove the rejected filetype tier from search_filetype_override after downgrade.
 
     When a download is rejected as a downgrade (existing quality >= download),
     searching for the same tier again will produce the same result. Remove it
@@ -967,12 +983,12 @@ def narrow_override_on_downgrade(quality_override: str | None,
 
     Returns the narrowed override string, or None if no change is needed.
     """
-    if not quality_override:
+    if not search_filetype_override:
         return None
     tier = rejected_download_tier(dl_info)
     if not tier:
         return None
-    tiers = [t.strip() for t in quality_override.split(",")]
+    tiers = [t.strip() for t in search_filetype_override.split(",")]
     if tier not in tiers:
         return None
     narrowed = [t for t in tiers if t != tier]
@@ -988,9 +1004,9 @@ def rejection_backfill_override(
     spectral_grade: str | None,
     verified_lossless: bool,
 ) -> str | None:
-    """Backfill quality_override for pre-quality-gate albums stuck in download loops.
+    """Backfill search_filetype_override for pre-quality-gate albums stuck in download loops.
 
-    When a download is rejected (e.g. downgrade) and quality_override is NULL,
+    When a download is rejected (e.g. downgrade) and search_filetype_override is NULL,
     albums with decent quality on disk keep downloading the same tier forever
     because the quality gate only fires after successful imports.
 
@@ -1497,6 +1513,8 @@ def full_pipeline_decision(
     verified_lossless=False,
     # Opus conversion
     opus_conversion=False,
+    # Target format (user intent — "flac" skips conversion)
+    target_format=None,
 ):
     """Run the full decision chain and return the final outcome.
 
@@ -1545,7 +1563,27 @@ def full_pipeline_decision(
                       else existing_min_bitrate)
                   if existing_min_bitrate is not None else None)
 
-    if is_flac:
+    if is_flac and target_format == "flac":
+        # FLAC kept on disk (no conversion) — use raw FLAC bitrate.
+        # Don't set verified_lossless on new_m for comparison — that would
+        # auto-win over existing FLAC at the same bitrate. Use plain bitrate
+        # comparison. verified_lossless is set on the album after import.
+        new_m = AudioQualityMeasurement(min_bitrate_kbps=min_bitrate)
+        result["stage2_import"] = import_quality_decision(new_m, existing_m)
+
+        if result["stage2_import"] == "downgrade":
+            result["final_status"] = "imported"
+            result["keep_searching"] = True
+            return result
+        result["imported"] = True
+
+        # Genuine FLAC on disk is verified lossless (for quality gate)
+        if spectral_grade in ("genuine", "marginal", None):
+            verified_lossless = True
+
+        gate_bitrate = min_bitrate
+        gate_cbr = False
+    elif is_flac:
         # FLAC path: convert first, then decide
         is_transcode = transcode_detection(converted_count, post_conversion_min_bitrate,
                                            spectral_grade=spectral_grade)

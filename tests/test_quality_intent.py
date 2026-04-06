@@ -70,6 +70,51 @@ class TestIntentNames(unittest.TestCase):
                             f"{name!r} has value {val!r}")
 
 
+class TestEffectiveSearchTiers(unittest.TestCase):
+    """effective_search_tiers: merge target_format + search_filetype_override.
+
+    Priority: search_filetype_override > target_format > config defaults.
+    This function doesn't exist yet — tests document the desired behavior.
+    """
+
+    def _effective(self, search_override, target_format, config):
+        from lib.quality import effective_search_tiers
+        return effective_search_tiers(search_override, target_format, config)
+
+    def test_search_override_wins_over_target_format(self):
+        """System search override takes precedence over user target_format."""
+        tiers, catch_all = self._effective(
+            "flac,mp3 v0", "flac", ["flac", "mp3 v0", "mp3 320"])
+        self.assertEqual(tiers, ["flac", "mp3 v0"])
+        self.assertFalse(catch_all)
+
+    def test_target_format_used_when_no_search_override(self):
+        """With no search override, target_format drives search tiers."""
+        tiers, catch_all = self._effective(
+            None, "flac", ["flac", "mp3 v0", "mp3 320"])
+        self.assertEqual(tiers, ["flac"])
+        self.assertFalse(catch_all)
+
+    def test_config_default_when_neither_set(self):
+        """No overrides → fall back to global config with catch-all."""
+        tiers, catch_all = self._effective(
+            None, None, ["flac", "mp3 v0", "mp3 320"])
+        self.assertEqual(tiers, ["flac", "mp3 v0", "mp3 320"])
+        self.assertTrue(catch_all)
+
+    def test_target_format_flac_no_catch_all(self):
+        """target_format constrains search — no catch-all fallback."""
+        _, catch_all = self._effective(None, "flac", ["flac", "mp3"])
+        self.assertFalse(catch_all)
+
+    def test_search_override_empty_falls_through_to_target(self):
+        """Empty string search override → treat as None → use target_format."""
+        tiers, catch_all = self._effective(
+            "", "flac", ["flac", "mp3 v0", "mp3 320"])
+        self.assertEqual(tiers, ["flac"])
+        self.assertFalse(catch_all)
+
+
 class TestNarrowSearchContract(unittest.TestCase):
     """Contract: narrowed override → search_tiers excludes removed tier."""
 

@@ -30,7 +30,8 @@ class GrabListEntry:
     # Optional: DB mode
     db_request_id: Optional[int] = None
     db_source: Optional[str] = None           # "request" or "redownload"
-    db_quality_override: Optional[str] = None
+    db_search_filetype_override: Optional[str] = None
+    db_target_format: Optional[str] = None
 
     # Transient: process_completed_album
     import_folder: Optional[str] = None

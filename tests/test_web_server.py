@@ -195,7 +195,7 @@ class TestServerEndpoints(unittest.TestCase):
             "id": 200, "album_title": "Downloading Album", "artist_name": "DL Artist",
             "mb_release_id": "dl-uuid", "status": "downloading",
             "year": 2024, "country": "US", "format": None,
-            "source": "request", "quality_override": None,
+            "source": "request", "search_filetype_override": None, "target_format": None,
             "created_at": "2026-04-03T12:00:00+00:00",
             "updated_at": "2026-04-03T12:00:00+00:00",
             "min_bitrate": None, "prev_min_bitrate": None,
@@ -256,7 +256,7 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._post("/api/pipeline/set-intent",
                                   {"id": 100, "intent": "flac_only"})
         self.assertEqual(status, 200)
-        for key in ("status", "id", "intent", "quality_override", "requeued"):
+        for key in ("status", "id", "intent", "target_format", "requeued"):
             self.assertIn(key, data, f"Missing key '{key}' in set-intent response")
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["intent"], "flac_only")
@@ -440,12 +440,12 @@ class TestApplyPipelineBitrateOverride(unittest.TestCase):
 
     def test_upgrade_queued_flag_set(self):
         album = {}
-        self._apply(album, {"status": "wanted", "quality_override": "flac,mp3 v0"})
+        self._apply(album, {"status": "wanted", "search_filetype_override": "flac,mp3 v0"})
         self.assertTrue(album.get("upgrade_queued"))
 
     def test_no_upgrade_queued_when_imported(self):
         album = {}
-        self._apply(album, {"status": "imported", "quality_override": "flac"})
+        self._apply(album, {"status": "imported", "search_filetype_override": "flac"})
         self.assertNotIn("upgrade_queued", album)
 
 

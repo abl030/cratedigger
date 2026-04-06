@@ -213,13 +213,13 @@ class TestDispatchImport(unittest.TestCase):
         db = ctx.pipeline_db_source._get_db()
         db.get_request.return_value = make_request_row(
             status="downloading",
-            quality_override="flac,mp3 v0,mp3 320",
+            search_filetype_override="flac,mp3 v0,mp3 320",
         )
 
         result = self._dispatch(ir, ctx=ctx)
 
         call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
-        self.assertEqual(call_kwargs.get("quality_override"), "flac,mp3 v0")
+        self.assertEqual(call_kwargs.get("search_filetype_override"), "flac,mp3 v0")
 
     def test_downgrade_preserves_override_when_tier_not_matched(self):
         """320 downgrade with flac-only override → no narrowing (tier not in CSV)."""
@@ -229,14 +229,14 @@ class TestDispatchImport(unittest.TestCase):
         db = ctx.pipeline_db_source._get_db()
         db.get_request.return_value = make_request_row(
             status="downloading",
-            quality_override="flac",
+            search_filetype_override="flac",
         )
 
         result = self._dispatch(ir, ctx=ctx)
 
         call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
         # narrowing returns None (mp3 320 not in "flac"), so no override passed
-        self.assertIsNone(call_kwargs.get("quality_override"))
+        self.assertIsNone(call_kwargs.get("search_filetype_override"))
 
     def test_transcode_upgrade(self):
         ir = _make_import_result(decision="transcode_upgrade",
@@ -389,7 +389,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db = self._run_quality_gate("requeue_upgrade")
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
-            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
             QUALITY_UPGRADE_TIERS,
         )
 
@@ -406,7 +406,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db = self._run_quality_gate("requeue_flac")
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
-            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
             QUALITY_FLAC_ONLY,
         )
 
@@ -519,9 +519,74 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db = ctx.pipeline_db_source._get_db()
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
-            call_args.kwargs.get("quality_override") or call_args[1].get("quality_override"),
+            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
             QUALITY_UPGRADE_TIERS,
         )
+
+
+class TestQualityGatePreservesTargetFormat(unittest.TestCase):
+    """Quality gate accept must preserve target_format (user intent).
+
+    Bug (Deloris loop): quality_override="flac" (user intent: FLAC on disk)
+    was cleared to NULL on quality gate accept. User had to manually re-queue,
+    creating a loop.
+
+    After the split: search_filetype_override is cleared on accept (transient),
+    but target_format survives (persistent user intent).
+    """
+
+    def _run_quality_gate_accept(self, target_format="flac"):
+        """Run _check_quality_gate with accept decision and target_format set."""
+        from lib.import_dispatch import _check_quality_gate
+        album_data = _make_album_data()
+        ctx = _make_ctx()
+        db = ctx.pipeline_db_source._get_db.return_value
+        db.get_request.return_value = make_request_row(
+            status="imported",
+            target_format=target_format,
+            verified_lossless=True,
+            current_spectral_bitrate=None,
+        )
+
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
+             patch("lib.quality.quality_gate_decision",
+                   return_value="accept"):
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = MagicMock(
+                min_bitrate_kbps=255, is_cbr=False)
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate(album_data, 42, ctx)
+
+        return db
+
+    def test_accept_clears_search_override_not_target_format(self):
+        """On accept, search_filetype_override=None but target_format preserved.
+
+        After refactor: quality_override is renamed to search_filetype_override.
+        The quality gate should write search_filetype_override=None (clearing
+        the transient search filter) and NOT touch target_format (preserving
+        user intent).
+
+        Current bug: quality_override=None clears everything including user intent.
+        """
+        db = self._run_quality_gate_accept(target_format="flac")
+        call_args = db.update_status.call_args
+        if call_args is None:
+            self.fail("update_status not called")
+        kwargs = call_args.kwargs if call_args.kwargs else call_args[1]
+        # After refactor: quality_override should not exist anymore
+        self.assertNotIn("quality_override", kwargs,
+            "quality_override should be renamed to search_filetype_override")
+        # search_filetype_override should be explicitly cleared
+        self.assertIn("search_filetype_override", kwargs,
+            "quality gate accept must explicitly clear search_filetype_override")
+        self.assertIsNone(kwargs["search_filetype_override"])
+        # target_format should NOT be in the update (not touched)
+        self.assertNotIn("target_format", kwargs,
+            "target_format should not be written by quality gate accept — "
+            "omitting it preserves the user's value in the DB")
 
 
 class TestOpusConversionDispatch(unittest.TestCase):
@@ -578,6 +643,41 @@ class TestOpusConversionDispatch(unittest.TestCase):
         self.assertTrue(dl.is_vbr)
         self.assertEqual(dl.bitrate, 128000)
         self.assertEqual(dl.final_format, "opus 128")
+
+
+class TestTargetFormatDispatch(unittest.TestCase):
+    """Test --target-format flag passing from dispatch_import to import_one.py."""
+
+    def _get_cmd(self, target_format=None):
+        from lib.import_dispatch import dispatch_import
+        album_data = _make_album_data()
+        album_data.db_target_format = target_format
+        ctx = _make_ctx()
+        ctx.cfg.opus_conversion = False
+        bv_result = _make_bv_result()
+        dl_info = DownloadInfo(filetype="flac")
+        ir = _make_import_result(decision="import")
+
+        with patch("lib.import_dispatch.sp.run") as mock_run, \
+             patch("lib.import_dispatch._cleanup_staged_dir"), \
+             patch("lib.import_dispatch.trigger_meelo_scan"), \
+             patch("lib.import_dispatch._check_quality_gate"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="", stderr="")
+            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
+                            42, ctx)
+            return mock_run.call_args[0][0]
+
+    def test_target_format_passed_when_set(self):
+        cmd = self._get_cmd(target_format="flac")
+        self.assertIn("--target-format", cmd)
+        idx = cmd.index("--target-format")
+        self.assertEqual(cmd[idx + 1], "flac")
+
+    def test_target_format_not_passed_when_none(self):
+        cmd = self._get_cmd(target_format=None)
+        self.assertNotIn("--target-format", cmd)
 
 
 if __name__ == "__main__":

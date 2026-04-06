@@ -510,7 +510,7 @@ class TestGrabMostWanted(unittest.TestCase):
             id=-1, title="Album", release_date="2024-01-01T00:00:00Z",
             artist_id=0, artist_name="Artist", foreign_artist_id="",
             releases=[], db_request_id=1, db_source="request",
-            db_mb_release_id="", db_quality_override=None,
+            db_mb_release_id="", db_search_filetype_override=None, db_target_format=None,
         )
         search_fn = MagicMock(return_value=({}, [failed_album], []))
         count = grab_most_wanted([], search_fn, ctx)
@@ -524,7 +524,7 @@ class TestGrabMostWanted(unittest.TestCase):
             id=-1, title="Album", release_date="2024-01-01T00:00:00Z",
             artist_id=0, artist_name="Artist", foreign_artist_id="",
             releases=[], db_request_id=1, db_source="request",
-            db_mb_release_id="", db_quality_override=None,
+            db_mb_release_id="", db_search_filetype_override=None, db_target_format=None,
         )
         search_fn = MagicMock(return_value=({}, [], [failed_album]))
         count = grab_most_wanted([], search_fn, ctx)
@@ -913,7 +913,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             "year": 2020,
             "mb_release_id": "test-mbid",
             "source": "request",
-            "quality_override": None,
+            "search_filetype_override": None,
+            "target_format": None,
             "status": "downloading",
             "active_download_state": state_dict,
         }
@@ -1561,7 +1562,8 @@ class TestReconstructGrabListEntry(unittest.TestCase):
             "year": 2020,
             "mb_release_id": "test-mbid",
             "source": "request",
-            "quality_override": None,
+            "search_filetype_override": None,
+            "target_format": None,
         }
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.album_id, 42)
@@ -1598,21 +1600,21 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         )
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": 2020, "mb_release_id": "mbid", "source": "request",
-                   "quality_override": None}
+                   "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.files[0].disk_no, 1)
         self.assertEqual(entry.files[0].disk_count, 2)
         self.assertEqual(entry.files[1].disk_no, 2)
 
-    def test_reconstruct_quality_override(self):
+    def test_reconstruct_search_filetype_override(self):
         from lib.download import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState
         state = ActiveDownloadState(filetype="flac", enqueued_at="now", files=[])
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": 2020, "mb_release_id": "mbid", "source": "request",
-                   "quality_override": "flac"}
+                   "search_filetype_override": "flac", "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
-        self.assertEqual(entry.db_quality_override, "flac")
+        self.assertEqual(entry.db_search_filetype_override, "flac")
 
     def test_reconstruct_retry_count(self):
         from lib.download import reconstruct_grab_list_entry
@@ -1629,7 +1631,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         )
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": 2020, "mb_release_id": "mbid", "source": "request",
-                   "quality_override": None}
+                   "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.files[0].retry, 5)
 
@@ -1653,7 +1655,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         )
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": 2020, "mb_release_id": "mbid", "source": "request",
-                   "quality_override": None}
+                   "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.files[0].bytes_transferred, 4096)
         self.assertEqual(entry.files[0].last_state, "InProgress")
@@ -1664,7 +1666,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         state = ActiveDownloadState(filetype="flac", enqueued_at="now", files=[])
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": None, "mb_release_id": "mbid", "source": "request",
-                   "quality_override": None}
+                   "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.year, "")
 

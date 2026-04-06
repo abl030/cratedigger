@@ -90,7 +90,7 @@ def apply_transition(
 
     Special keys extracted from extra:
         from_status: Current status (fetched from DB if not provided)
-        quality_override: For reset_to_wanted paths
+        search_filetype_override: For reset_to_wanted paths
         min_bitrate: For reset_to_wanted paths
         state_json: For set_downloading (wanted → downloading)
         attempt_type: For record_attempt (e.g. "download", "search")
@@ -103,7 +103,7 @@ def apply_transition(
     # Presence-based: only fields explicitly passed get written.
     # Omitted fields are preserved by reset_to_wanted / update_status.
     transition_fields: dict[str, object] = {}
-    for _key in ("quality_override", "min_bitrate", "prev_min_bitrate"):
+    for _key in ("search_filetype_override", "min_bitrate", "prev_min_bitrate"):
         if _key in extra:
             transition_fields[_key] = extra.pop(_key)
     state_json = extra.pop("state_json", None)

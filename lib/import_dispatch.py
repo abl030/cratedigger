@@ -161,7 +161,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
-                             quality_override=upgrade_override,
+                             search_filetype_override=upgrade_override,
                              min_bitrate=min_br_kbps)
             usernames = extract_usernames(album_data.files)
             gate_br = compute_effective_override_bitrate(min_br_kbps, spectral_br) or min_br_kbps
@@ -182,7 +182,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
-                             quality_override=flac_override,
+                             search_filetype_override=flac_override,
                              min_bitrate=min_br_kbps)
             logger.info(
                 f"QUALITY GATE: {label} "
@@ -196,7 +196,7 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 "imported",
                 from_status="imported",
                 min_bitrate=min_br_kbps,
-                quality_override=None,  # done searching
+                search_filetype_override=None,  # done searching
             )
             if verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
@@ -237,6 +237,8 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                "--request-id", str(request_id)]
         if ctx.cfg.opus_conversion:
             cmd.append("--opus-conversion")
+        if album_data.db_target_format:
+            cmd.extend(["--target-format", album_data.db_target_format])
         try:
             req = ctx.pipeline_db_source._get_db().get_request(request_id)
             if req:
@@ -313,7 +315,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                     try:
                         db = ctx.pipeline_db_source._get_db()
                         req_row = db.get_request(request_id)
-                        current_override = req_row.get("quality_override") if req_row else None
+                        current_override = req_row.get("search_filetype_override") if req_row else None
                         narrowed_override = narrow_override_on_downgrade(
                             current_override, dl_info)
                         # Backfill: if no override exists yet, check if on-disk
@@ -334,13 +336,13 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                                 )
                                 if narrowed_override:
                                     logger.info(
-                                        f"BACKFILL: {label} quality_override=NULL"
+                                        f"BACKFILL: {label} search_filetype_override=NULL"
                                         f" → '{narrowed_override}' on downgrade"
                                         f" ({beets_info.min_bitrate_kbps}kbps,"
                                         f" cbr={beets_info.is_cbr})")
                     except Exception:
                         logger.debug(
-                            "Failed to inspect quality_override before downgrade reset")
+                            "Failed to inspect search_filetype_override before downgrade reset")
                 ctx.pipeline_db_source.mark_failed(
                     album_data,
                     ValidationResult(
@@ -349,10 +351,10 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                         error=ir.error if decision not in ("downgrade", "transcode_downgrade") else None),
                     usernames=usernames if action.denylist else None,
                     download_info=dl_info,
-                    quality_override=narrowed_override)
+                    search_filetype_override=narrowed_override)
                 if narrowed_override is not None:
                     logger.info(
-                        f"  Narrowed quality_override '{current_override}'"
+                        f"  Narrowed search_filetype_override '{current_override}'"
                         f" -> '{narrowed_override}' after downgrade")
 
             # --- Common actions driven by flags ---
@@ -371,7 +373,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             if action.requeue:
                 db = ctx.pipeline_db_source._get_db()
                 requeue_fields: dict[str, object] = {
-                    "quality_override": QUALITY_UPGRADE_TIERS,
+                    "search_filetype_override": QUALITY_UPGRADE_TIERS,
                 }
                 if action.mark_done and new_br is not None:
                     requeue_fields["min_bitrate"] = new_br

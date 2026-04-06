@@ -54,7 +54,8 @@ class AlbumRecord:
     db_request_id: int
     db_source: str
     db_mb_release_id: str
-    db_quality_override: str | None
+    db_search_filetype_override: str | None
+    db_target_format: str | None
 
     @staticmethod
     def from_db_row(row: dict[str, object], tracks: list[dict[str, object]]) -> AlbumRecord:
@@ -116,8 +117,10 @@ class AlbumRecord:
         year = row.get("year") or "0000"
         mb_artist_id = row.get("mb_artist_id") or ""
         assert isinstance(mb_artist_id, str)
-        quality_override = row.get("quality_override")
+        quality_override = row.get("search_filetype_override")
         assert isinstance(quality_override, (str, type(None)))
+        target_format = row.get("target_format")
+        assert isinstance(target_format, (str, type(None)))
 
         return AlbumRecord(
             id=row_id * -1,
@@ -130,7 +133,8 @@ class AlbumRecord:
             db_request_id=row_id,
             db_source=source,
             db_mb_release_id=mb_release_id or "",
-            db_quality_override=quality_override,
+            db_search_filetype_override=quality_override,
+            db_target_format=target_format,
         )
 
 
@@ -279,7 +283,7 @@ class DatabaseSource:
         )
 
     def mark_failed(self, album_record, bv_result, usernames=None,
-                    download_info=None, quality_override=None):
+                    download_info=None, search_filetype_override=None):
         """Log the failure, preserve intent, and keep the album wanted for retry."""
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
@@ -293,8 +297,8 @@ class DatabaseSource:
             beets_distance=bv_result.distance,
             beets_scenario=bv_result.scenario,
         )
-        if quality_override is not None:
-            transition_kwargs["quality_override"] = quality_override
+        if search_filetype_override is not None:
+            transition_kwargs["search_filetype_override"] = search_filetype_override
         apply_transition(db, request_id, "wanted", **transition_kwargs)
         db.record_attempt(request_id, "validation")
 

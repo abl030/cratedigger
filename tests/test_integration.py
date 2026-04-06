@@ -599,7 +599,7 @@ class TestAlbumRecordAttrAccess(unittest.TestCase):
             id=-1, title="T", release_date="2024-01-01T00:00:00Z",
             artist_id=0, artist_name="A", foreign_artist_id="",
             releases=[], db_request_id=0, db_source="request",
-            db_mb_release_id="", db_quality_override=None,
+            db_mb_release_id="", db_search_filetype_override=None, db_target_format=None,
         )
         source = DatabaseSource.__new__(DatabaseSource)
         # db_request_id=0 is falsy, should return empty list

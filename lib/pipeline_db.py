@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS album_requests (
     imported_path TEXT,
 
     -- Quality upgrade
-    quality_override TEXT,
+    search_filetype_override TEXT,
+    target_format TEXT,
     min_bitrate INTEGER,
     prev_min_bitrate INTEGER,
 
@@ -238,7 +239,7 @@ class PipelineDB:
                     END $$;
                 """)
             for col, coltype in [
-                ("quality_override", "TEXT"),
+                ("search_filetype_override", "TEXT"),
                 ("min_bitrate", "INTEGER"),
                 ("prev_min_bitrate", "INTEGER"),
                 ("verified_lossless", "BOOLEAN DEFAULT FALSE"),
@@ -278,12 +279,37 @@ class PipelineDB:
             """)
             # Migrate symbolic intent names to concrete CSV values
             cur.execute("""
-                UPDATE album_requests SET quality_override = 'flac,mp3 v0,mp3 320'
-                WHERE quality_override IN ('flac_preferred', 'upgrade');
+                UPDATE album_requests SET search_filetype_override = 'flac,mp3 v0,mp3 320'
+                WHERE search_filetype_override IN ('flac_preferred', 'upgrade');
             """)
             cur.execute("""
-                UPDATE album_requests SET quality_override = NULL
-                WHERE quality_override = 'best_effort';
+                UPDATE album_requests SET search_filetype_override = NULL
+                WHERE search_filetype_override = 'best_effort';
+            """)
+            # Rename quality_override → search_filetype_override
+            cur.execute("""
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'album_requests'
+                          AND column_name = 'quality_override'
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'album_requests'
+                          AND column_name = 'search_filetype_override'
+                    ) THEN
+                        ALTER TABLE album_requests RENAME COLUMN quality_override TO search_filetype_override;
+                    END IF;
+                END $$;
+            """)
+            # Add target_format column
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE album_requests ADD COLUMN target_format TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
             """)
         mig_conn.close()
 
@@ -385,7 +411,7 @@ class PipelineDB:
         """Reset to wanted, clearing retry counters.
 
         Only fields explicitly passed are updated — omitted fields are
-        preserved.  Pass ``quality_override=None`` to clear the column;
+        preserved.  Pass ``search_filetype_override=None`` to clear the column;
         omitting it leaves the existing value untouched.
         """
         now = datetime.now(timezone.utc)
@@ -400,9 +426,9 @@ class PipelineDB:
             "updated_at = %s",
         ]
         params: list[object] = [now]
-        if "quality_override" in fields:
-            sets.append("quality_override = %s")
-            params.append(fields["quality_override"])
+        if "search_filetype_override" in fields:
+            sets.append("search_filetype_override = %s")
+            params.append(fields["search_filetype_override"])
         if "min_bitrate" in fields:
             sets.append("prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate)")
             sets.append("min_bitrate = %s")
@@ -499,7 +525,7 @@ class PipelineDB:
                    ar.album_title, ar.artist_name, ar.mb_release_id,
                    ar.year, ar.country, ar.status AS request_status,
                    ar.min_bitrate AS request_min_bitrate,
-                   ar.prev_min_bitrate, ar.quality_override, ar.source
+                   ar.prev_min_bitrate, ar.search_filetype_override AS quality_override, ar.source
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
         """

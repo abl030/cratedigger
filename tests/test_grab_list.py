@@ -47,7 +47,7 @@ class TestConstruction(unittest.TestCase):
         e = _make_entry()
         self.assertIsNone(e.db_request_id)
         self.assertIsNone(e.db_source)
-        self.assertIsNone(e.db_quality_override)
+        self.assertIsNone(e.db_search_filetype_override)
 
     def test_processing_defaults(self):
         e = _make_entry()
@@ -60,7 +60,7 @@ class TestConstruction(unittest.TestCase):
         e = GrabListEntry(
             album_id=-5, files=[], filetype="flac", title="T", artist="A",
             year="2020", mb_release_id="x",
-            db_request_id=99, db_source="request", db_quality_override="flac",
+            db_request_id=99, db_source="request", db_search_filetype_override="flac",
             import_folder="/tmp/test",
             download_spectral=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
             current_min_bitrate=240,

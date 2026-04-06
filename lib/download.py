@@ -463,12 +463,12 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
 
-    # Backfill quality_override for pre-quality-gate albums stuck in loops
+    # Backfill search_filetype_override for pre-quality-gate albums stuck in loops
     backfill_override = _compute_rejection_backfill(album_data, ctx)
 
     ctx.pipeline_db_source.mark_failed(album_data, bv_result, usernames=usernames,
                                        download_info=dl_info,
-                                       quality_override=backfill_override)
+                                       search_filetype_override=backfill_override)
     logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
                    f"(scenario={bv_result.scenario}, "
                    f"distance={bv_result.distance}, "
@@ -478,20 +478,20 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
 
 def _compute_rejection_backfill(album_data: GrabListEntry,
                                 ctx: SoularrContext) -> str | None:
-    """Check if quality_override should be backfilled on rejection.
+    """Check if search_filetype_override should be backfilled on rejection.
 
-    Only fires when quality_override is currently NULL and the on-disk state
+    Only fires when search_filetype_override is currently NULL and the on-disk state
     is genuine + decent quality + not verified lossless.
     """
     request_id = album_data.db_request_id
     if not request_id or not ctx.pipeline_db_source:
         return None
-    if album_data.db_quality_override:
+    if album_data.db_search_filetype_override:
         return None
     try:
         db = ctx.pipeline_db_source._get_db()
         req = db.get_request(request_id)
-        if not req or req.get("quality_override"):
+        if not req or req.get("search_filetype_override"):
             return None
         from lib.beets_db import BeetsDB
         with BeetsDB() as beets:
@@ -507,7 +507,7 @@ def _compute_rejection_backfill(album_data: GrabListEntry,
         if override:
             logger.info(
                 f"BACKFILL: {album_data.artist} - {album_data.title} "
-                f"quality_override=NULL → '{override}' "
+                f"search_filetype_override=NULL → '{override}' "
                 f"(on-disk: {info.min_bitrate_kbps}kbps, cbr={info.is_cbr}, "
                 f"spectral={req.get('current_spectral_grade')})")
         return override
@@ -726,7 +726,8 @@ def reconstruct_grab_list_entry(
         mb_release_id=request.get("mb_release_id") or "",
         db_request_id=request["id"],
         db_source=request.get("source"),
-        db_quality_override=request.get("quality_override"),
+        db_search_filetype_override=request.get("search_filetype_override"),
+        db_target_format=request.get("target_format"),
     )
 
 
