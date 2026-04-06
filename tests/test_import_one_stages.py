@@ -260,6 +260,14 @@ class TestOpusConversionDecision(unittest.TestCase):
         self.assertEqual(r.decision, "skip_opus")
         self.assertFalse(r.is_terminal)
 
+    def test_target_format_flac_skips_opus(self):
+        """target_format=flac takes precedence over opus_conversion."""
+        from import_one import opus_conversion_decision
+        r = opus_conversion_decision(will_be_verified_lossless=True,
+                                     opus_conversion_enabled=True,
+                                     target_format="flac")
+        self.assertEqual(r.decision, "skip_opus")
+
 
 # ============================================================================
 # opus_cleanup_decision — clean up FLAC when opus path skipped

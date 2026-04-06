@@ -124,8 +124,11 @@ def should_convert_lossless(target_format: str | None) -> bool:
 
 
 def opus_conversion_decision(will_be_verified_lossless: bool,
-                             opus_conversion_enabled: bool) -> StageResult:
+                             opus_conversion_enabled: bool,
+                             target_format: str | None = None) -> StageResult:
     """Decide whether to convert verified lossless to Opus 128 (pure)."""
+    if target_format == "flac":
+        return StageResult(decision="skip_opus")
     if will_be_verified_lossless and opus_conversion_enabled:
         return StageResult(decision="opus_convert")
     return StageResult(decision="skip_opus")
@@ -720,7 +723,8 @@ def main():
         _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
     # --- Opus conversion (after V0 verdict, before import) ---
-    opus_stage = opus_conversion_decision(will_be_verified_lossless, args.opus_conversion)
+    opus_stage = opus_conversion_decision(will_be_verified_lossless, args.opus_conversion,
+                                         target_format=args.target_format)
     if opus_stage.decision == "opus_convert":
         _log(f"[OPUS] Converting verified lossless → Opus 128kbps")
         r.v0_verification_bitrate = post_conv_br
