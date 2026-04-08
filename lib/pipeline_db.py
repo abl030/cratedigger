@@ -110,6 +110,18 @@ CREATE TABLE IF NOT EXISTS download_log (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS search_log (
+    id SERIAL PRIMARY KEY,
+    request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
+    query TEXT,
+    result_count INTEGER,
+    elapsed_s REAL,
+    outcome TEXT NOT NULL CHECK(outcome IN (
+        'found', 'no_match', 'no_results', 'timeout', 'error', 'empty_query'
+    )),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS source_denylist (
     id SERIAL PRIMARY KEY,
     request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
@@ -124,6 +136,7 @@ CREATE INDEX IF NOT EXISTS idx_requests_mb_release ON album_requests(mb_release_
 CREATE INDEX IF NOT EXISTS idx_requests_source ON album_requests(source);
 CREATE INDEX IF NOT EXISTS idx_tracks_request ON album_tracks(request_id);
 CREATE INDEX IF NOT EXISTS idx_download_log_request ON download_log(request_id);
+CREATE INDEX IF NOT EXISTS idx_search_log_request ON search_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
 """
 
@@ -689,6 +702,51 @@ class PipelineDB:
                 result[rid] = []
             result[rid].append(r)
         return result
+
+    # -- Search log -----------------------------------------------------------
+
+    def log_search(self, request_id: int, query: str | None = None,
+                   result_count: int | None = None, elapsed_s: float | None = None,
+                   outcome: str = "error") -> None:
+        """Record one search attempt for an album request."""
+        self._execute("""
+            INSERT INTO search_log (request_id, query, result_count, elapsed_s, outcome)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (request_id, query, result_count, elapsed_s, outcome))
+        self.conn.commit()
+
+    def get_search_history(self, request_id: int) -> list[dict[str, object]]:
+        """Return all search_log rows for a single request_id, newest first."""
+        cur = self._execute("""
+            SELECT * FROM search_log
+            WHERE request_id = %s
+            ORDER BY id DESC
+        """, (request_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_search_history_batch(self, request_ids: list[int]) -> dict[int, list[dict[str, object]]]:
+        """Batch fetch search history for multiple request IDs.
+
+        Returns dict of request_id → list of history rows (most recent first).
+        """
+        if not request_ids:
+            return {}
+        ph = ",".join(["%s"] * len(request_ids))
+        cur = self._execute(
+            f"SELECT * FROM search_log WHERE request_id IN ({ph}) ORDER BY id DESC",
+            tuple(request_ids),
+        )
+        result: dict[int, list[dict[str, object]]] = {}
+        for row in cur.fetchall():
+            r = dict(row)
+            rid = r["request_id"]
+            assert isinstance(rid, int)
+            if rid not in result:
+                result[rid] = []
+            result[rid].append(r)
+        return result
+
+    # -- Track counts --------------------------------------------------------
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
         """Batch fetch track counts for multiple request IDs.
