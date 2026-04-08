@@ -311,6 +311,20 @@ class PipelineDB:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$;
             """)
+            # Rename "flac" tier to "lossless" (issue #35)
+            cur.execute("""
+                UPDATE album_requests SET search_filetype_override = 'lossless'
+                WHERE search_filetype_override = 'flac';
+            """)
+            cur.execute("""
+                UPDATE album_requests SET target_format = 'lossless'
+                WHERE target_format = 'flac';
+            """)
+            # Clean up nonsensical target_format values from old upgrade intent
+            cur.execute("""
+                UPDATE album_requests SET target_format = NULL
+                WHERE target_format LIKE '%,%';
+            """)
         mig_conn.close()
 
     def close(self):

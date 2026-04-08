@@ -254,12 +254,19 @@ class TestServerEndpoints(unittest.TestCase):
     def test_post_set_intent_success(self):
         """POST /api/pipeline/set-intent returns ok with required fields."""
         status, data = self._post("/api/pipeline/set-intent",
-                                  {"id": 100, "intent": "flac_only"})
+                                  {"id": 100, "intent": "lossless"})
         self.assertEqual(status, 200)
         for key in ("status", "id", "intent", "target_format", "requeued"):
             self.assertIn(key, data, f"Missing key '{key}' in set-intent response")
         self.assertEqual(data["status"], "ok")
-        self.assertEqual(data["intent"], "flac_only")
+        self.assertEqual(data["intent"], "lossless")
+
+    def test_post_set_intent_backward_compat(self):
+        """Old 'flac_only' intent is aliased to 'lossless'."""
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"id": 100, "intent": "flac_only"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["intent"], "lossless")
 
     def test_post_set_intent_invalid(self):
         """POST /api/pipeline/set-intent with bad intent returns 400."""
@@ -271,7 +278,7 @@ class TestServerEndpoints(unittest.TestCase):
     def test_post_set_intent_missing_id(self):
         """POST /api/pipeline/set-intent without id returns 400."""
         status, data = self._post("/api/pipeline/set-intent",
-                                  {"intent": "flac_only"})
+                                  {"intent": "lossless"})
         self.assertEqual(status, 400)
 
     def test_unknown_post_returns_404(self):

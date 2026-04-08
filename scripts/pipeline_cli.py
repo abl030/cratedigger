@@ -198,18 +198,15 @@ def cmd_set(db, args):
 
 
 def cmd_set_intent(db, args):
-    """Set quality intent for a request."""
-    from lib.quality import QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS
+    """Toggle lossless-on-disk intent for a request.
+
+    'lossless' — keep lossless on disk (overrides global verified_lossless_target)
+    'default'  — pipeline decides (uses global verified_lossless_target)
+    """
+    from lib.quality import QUALITY_LOSSLESS
     from lib.transitions import apply_transition
 
-    _INTENT_MAP: dict[str, str | None] = {
-        "lossless": QUALITY_LOSSLESS,
-        "flac": QUALITY_LOSSLESS,       # backward compat alias
-        "flac_only": QUALITY_LOSSLESS,  # backward compat alias
-        "upgrade": QUALITY_UPGRADE_TIERS,
-        "best_effort": None,
-        "default": None,
-    }
+    target_format = QUALITY_LOSSLESS if args.intent == "lossless" else None
 
     req = db.get_request(args.id)
     if not req:
@@ -218,28 +215,28 @@ def cmd_set_intent(db, args):
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return
-    target_format = _INTENT_MAP[args.intent]
     old_target = req.get("target_format")
+    label = f"{req['artist_name']} - {req['album_title']}"
 
-    if req["status"] == "imported":
+    if req["status"] == "imported" and target_format:
+        # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
         apply_transition(db, args.id, "wanted", from_status="imported",
-                         search_filetype_override=target_format,
+                         search_filetype_override=QUALITY_LOSSLESS,
                          min_bitrate=min_br)
-        # Persist the user intent separately
         db._execute(
             "UPDATE album_requests SET target_format = %s WHERE id = %s",
             (target_format, args.id),
         )
-        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={args.intent}, re-queued for search")
+        print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
         db._execute(
             "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
             (target_format, args.id),
         )
-        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={args.intent} (target_format: {old_target} → {target_format})")
+        action = "lossless on disk" if target_format else "default (pipeline decides)"
+        print(f"  [{args.id}] {label}: {action} "
+              f"(target_format: {old_target} → {target_format})")
 
 
 def _fmt_br(kbps):
@@ -936,10 +933,10 @@ def main():
     p_quality.add_argument("id", type=int, help="Request ID")
 
     # set-intent
-    p_intent = sub.add_parser("set-intent", help="Set quality intent for a request")
+    p_intent = sub.add_parser("set-intent", help="Toggle lossless-on-disk for a request")
     p_intent.add_argument("id", type=int, help="Request ID")
-    p_intent.add_argument("intent", choices=["best_effort", "flac_only", "flac", "upgrade"],
-                          help="Quality intent")
+    p_intent.add_argument("intent", choices=["lossless", "default"],
+                          help="'lossless' = keep lossless on disk, 'default' = pipeline decides")
 
     # force-import
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
