@@ -126,6 +126,31 @@ class TestRunImport(unittest.TestCase):
         idx = cmd.index("--override-min-bitrate")
         self.assertEqual(cmd[idx + 1], "245")
 
+    @patch("lib.import_service.subprocess.run")
+    @patch("lib.import_service.os.path.isdir", return_value=True)
+    def test_verified_lossless_target_passed_explicitly(self, _isdir, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        run_import("/tmp/test", "mbid", request_id=1,
+                   import_one_path="/fake",
+                   verified_lossless_target="opus 128")
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--verified-lossless-target", cmd)
+        idx = cmd.index("--verified-lossless-target")
+        self.assertEqual(cmd[idx + 1], "opus 128")
+
+    @patch("lib.import_service.subprocess.run")
+    @patch("lib.import_service.os.path.isdir", return_value=True)
+    @patch("lib.import_service.read_verified_lossless_target", return_value="aac 128")
+    def test_verified_lossless_target_loaded_from_runtime_config(
+        self, _runtime_target, _isdir, mock_run
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        run_import("/tmp/test", "mbid", request_id=1, import_one_path="/fake")
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--verified-lossless-target", cmd)
+        idx = cmd.index("--verified-lossless-target")
+        self.assertEqual(cmd[idx + 1], "aac 128")
+
 
 class TestLogAndUpdateImport(unittest.TestCase):
     def test_success_logs_and_updates(self):

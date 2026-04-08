@@ -590,14 +590,14 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
 
 
 class TestOpusConversionDispatch(unittest.TestCase):
-    """Test --opus-conversion flag passing and Opus dl_info population."""
+    """Test --verified-lossless-target flag passing and target dl_info population."""
 
-    def _get_cmd(self, opus_conversion=False):
+    def _get_cmd(self, verified_lossless_target=""):
         """Run dispatch_import, capture the cmd passed to sp.run."""
         from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         ctx = _make_ctx()
-        ctx.cfg.opus_conversion = opus_conversion
+        ctx.cfg.verified_lossless_target = verified_lossless_target
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="flac")
         ir = _make_import_result(decision="import", was_converted=True,
@@ -614,13 +614,15 @@ class TestOpusConversionDispatch(unittest.TestCase):
                             42, ctx)
             return mock_run.call_args[0][0]
 
-    def test_opus_flag_passed_when_enabled(self):
-        cmd = self._get_cmd(opus_conversion=True)
-        self.assertIn("--opus-conversion", cmd)
+    def test_target_flag_passed_when_set(self):
+        cmd = self._get_cmd(verified_lossless_target="opus 128")
+        self.assertIn("--verified-lossless-target", cmd)
+        idx = cmd.index("--verified-lossless-target")
+        self.assertEqual(cmd[idx + 1], "opus 128")
 
-    def test_opus_flag_not_passed_when_disabled(self):
-        cmd = self._get_cmd(opus_conversion=False)
-        self.assertNotIn("--opus-conversion", cmd)
+    def test_target_flag_not_passed_when_empty(self):
+        cmd = self._get_cmd(verified_lossless_target="")
+        self.assertNotIn("--verified-lossless-target", cmd)
 
     def test_opus_import_result_populates_dl_info(self):
         """ImportResult with final_format='opus 128' should update dl_info."""
@@ -653,7 +655,7 @@ class TestTargetFormatDispatch(unittest.TestCase):
         album_data = _make_album_data()
         album_data.db_target_format = target_format
         ctx = _make_ctx()
-        ctx.cfg.opus_conversion = False
+        ctx.cfg.verified_lossless_target = ""
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="flac")
         ir = _make_import_result(decision="import")

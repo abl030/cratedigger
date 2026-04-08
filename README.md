@@ -46,7 +46,7 @@ All quality decisions are pure functions in `lib/quality.py` with full unit test
 2. **`import_quality_decision()`** -- Is this an upgrade or downgrade? Genuine FLAC->V0 always wins.
 3. **`transcode_detection()`** -- Post-FLAC-conversion: was the FLAC a transcode?
 4. **`quality_gate_decision()`** -- Post-import: accept, or re-queue for better quality?
-5. **`is_verified_lossless()`** -- Was this imported from a spectral-verified genuine FLAC?
+5. **`determine_verified_lossless()`** -- Single source of truth for verified lossless status.
 
 ## Audit trail
 
@@ -55,7 +55,7 @@ Every download stores two JSONB blobs in `download_log` for complete auditabilit
 **`import_result`** -- from `import_one.py` via `ImportResult` dataclass:
 - Decision (import/downgrade/transcode_upgrade/transcode_downgrade/error)
 - Per-track spectral analysis (grade, HF deficit, cliff detection per track)
-- Conversion details (FLAC->V0, post-conversion bitrate)
+- Conversion details (FLAC->V0 or configurable target format, post-conversion bitrate)
 - Quality comparison (new vs existing bitrate, verified_lossless flag)
 - Postflight verification (beets ID, track count, imported path)
 
@@ -108,7 +108,7 @@ pipeline-cli query --json "SELECT id, outcome, import_result FROM download_log O
 - **PostgreSQL pipeline DB** replaces Lidarr as the source of truth
 - **Web UI** (`music.ablz.au`) for browsing MusicBrainz and adding albums
 - **Beets validation** -- every download validated against target MusicBrainz release ID
-- **Auto-import** with FLAC->V0 conversion (or keep FLAC on disk via `target_format`), spectral analysis, quality gating
+- **Auto-import** with FLAC->V0 conversion (or configurable target: Opus, MP3 V2, AAC, FLAC on disk), spectral analysis, quality gating
 - **Async downloads** -- non-blocking: enqueue downloads, persist state to DB, poll on next run. Downloads span multiple 5-minute cycles. No more blocking `while True` loop.
 - **Parallel Soulseek searches** -- `ThreadPoolExecutor` fires all searches concurrently, ~2x speedup (see `docs/parallel-search.md`)
 - **Typed decision pipeline** -- pure functions in `quality.py`, typed dataclasses throughout
@@ -130,6 +130,32 @@ curl -s "http://192.168.1.35:5200/ws/2/release?query=artist:radiohead+AND+releas
 # Get release with tracks
 curl -s "http://192.168.1.35:5200/ws/2/release/<MBID>?inc=recordings+media&fmt=json"
 ```
+
+## Verified lossless target format
+
+After verifying a FLAC download is genuine (via spectral analysis + V0 conversion), the pipeline can convert to a configurable target format instead of keeping V0. Set in `config.ini`:
+
+```ini
+[Beets Validation]
+# Target format after verified lossless. Empty = keep V0 (default).
+# The V0 conversion always runs first as a verification step.
+# Examples: "opus 128", "opus 96", "mp3 v2", "mp3 192", "aac 128"
+verified_lossless_target = opus 128
+```
+
+Supported formats:
+
+| Config value | ffmpeg codec | Output | Notes |
+|---|---|---|---|
+| `opus 128` | libopus VBR 128kbps | `.opus` | ~half the bitrate of V0 at equivalent quality |
+| `opus 96` | libopus VBR 96kbps | `.opus` | Good for space-constrained libraries |
+| `mp3 v0` | LAME VBR quality 0 | `.mp3` | Same as default (no target needed) |
+| `mp3 v2` | LAME VBR quality 2 | `.mp3` | ~190kbps, smaller than V0 |
+| `mp3 192` | LAME CBR 192kbps | `.mp3` | Fixed bitrate |
+| `aac 128` | AAC VBR 128kbps | `.m4a` | Apple ecosystem |
+| *(empty)* | *(none)* | `.mp3` | Keep V0 — the default |
+
+The V0 verification step always runs first regardless of target format. The V0 bitrate proves the FLAC was genuine lossless (>210kbps = genuine, <210kbps = transcode). Only after verification does the target conversion run from the original FLAC. If the FLAC is a transcode, the target conversion is skipped and V0 is kept.
 
 ## Running tests
 

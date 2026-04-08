@@ -235,8 +235,8 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
     try:
         cmd = [sys.executable, import_script, dest, mb_id,
                "--request-id", str(request_id)]
-        if ctx.cfg.opus_conversion:
-            cmd.append("--opus-conversion")
+        if ctx.cfg.verified_lossless_target:
+            cmd.extend(["--verified-lossless-target", ctx.cfg.verified_lossless_target])
         if album_data.db_target_format:
             cmd.extend(["--target-format", album_data.db_target_format])
         try:

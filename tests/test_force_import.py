@@ -49,7 +49,7 @@ class TestImportOneForceFlag(unittest.TestCase):
         self.assertTrue(hasattr(import_one, 'run_import'))
 
     @patch("import_one.run_import")
-    @patch("import_one.convert_lossless_to_v0", return_value=(0, 0, None))
+    @patch("import_one.convert_lossless", return_value=(0, 0, None))
     @patch("import_one._get_folder_min_bitrate", return_value=256)
     @patch("import_one.BeetsDB")
     def test_force_sets_high_max_distance(self, mock_beets_cls, mock_br,

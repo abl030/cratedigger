@@ -90,8 +90,11 @@ harness/
   import_one.py         — One-shot beets import: emits ImportResult JSON on stdout.
                            Pure stage decisions: StageResult, preflight_decision(),
                            conversion_decision(), quality_decision_stage(), final_exit_decision(),
-                           should_convert_lossless() (target_format="flac" skips conversion).
-                           Flags: --force, --override-min-bitrate, --request-id, --target-format, --dry-run
+                           conversion_target(), target_cleanup_decision().
+                           ConversionSpec + parse_verified_lossless_target() for format config.
+                           Single convert_lossless(path, spec) for all format conversions.
+                           Flags: --force, --override-min-bitrate, --request-id, --target-format,
+                           --verified-lossless-target, --dry-run
 scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, quality, query,
                            force-import, manual-import, set-intent, repair-spectral
@@ -293,17 +296,18 @@ After every import, the quality gate decides what to do next. It checks these co
 ### Two Key Concepts (don't confuse them)
 
 - **`spectral_grade`**: "Does this file look like a transcode?" — answers whether spectral analysis found cliff artifacts or high-frequency deficits. Works on any file type. A CBR 320 with `spectral_grade=genuine` just means "no cliff detected" — it does NOT mean the source was lossless. On `album_requests`, split into `last_download_spectral_grade` (from the download) and `current_spectral_grade` (what's on disk). On `download_log`, just `spectral_grade` (point-in-time snapshot).
-- **`verified_lossless`** (on `album_requests` only): "Did we verify this from a genuine FLAC?" — only set `TRUE` when: downloaded FLAC + spectral analysis said genuine + converted to V0. This is the only way to prove source quality.
+- **`verified_lossless`** (on `album_requests` only): "Did we verify this from a genuine FLAC?" — only set `TRUE` when: downloaded FLAC + spectral analysis said genuine + converted to V0 (or target format). This is the only way to prove source quality.
 
 ### How Downloads Flow by Type
 
 **FLAC downloads** (in `import_one.py`):
 1. Spectral check on raw FLAC → grade stored on album_requests
-2. Convert FLAC → V0 via ffmpeg (`-q:a 0`)
+2. Convert FLAC → V0 via `convert_lossless(path, V0_SPEC)` for verification
 3. Transcode detection: spectral grade is authoritative (genuine/marginal = not transcode, suspect = transcode). Bitrate < 210kbps threshold is fallback only when spectral unavailable.
 4. Compare new V0 bitrate against existing on disk (override = `min(pipeline DB min_bitrate, current_spectral_bitrate)` — catches fake 320s)
-5. If upgrade → import to beets. `verified_lossless` set by import_one.py's verdict (not re-derived). When verified lossless, `current_spectral_bitrate` = actual V0 min bitrate (not spectral cliff estimate).
-6. Quality gate accepts regardless of bitrate if verified_lossless
+5. If verified lossless AND `verified_lossless_target` configured (e.g. "opus 128"): convert original FLAC → target format, discard V0 (ephemeral verification artifact)
+6. If upgrade → import to beets. `verified_lossless` set by import_one.py's verdict (not re-derived). When verified lossless, `current_spectral_bitrate` = actual min bitrate (not spectral cliff estimate).
+7. Quality gate accepts regardless of bitrate if verified_lossless
 
 **MP3 VBR downloads** (V0/V2):
 1. No spectral check needed — VBR bitrate IS the quality signal
@@ -353,7 +357,8 @@ Uses `sox` bandpass filtering to detect transcodes. Measures RMS energy in 16 x 
 - `--override-min-bitrate` arg: `dispatch_import()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128kbps but the container says 320kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
 - `mark_done()` respects `verified_lossless_override` from import_one.py instead of re-deriving via `is_verified_lossless()`. When verified lossless, `current_spectral_bitrate` is set to the actual V0 min bitrate (not the spectral cliff estimate, which can miscalibrate on genuine files).
 - Spectral state writes always go through `RequestSpectralStateUpdate` — grade and bitrate are always written together (including explicit NULLs for genuine files with no cliff). This prevents stale spectral data from persisting after an upgrade.
-- `--target-format` flag: when `target_format="flac"`, skips FLAC→V0/Opus conversion and keeps FLAC on disk as-is. Genuine FLAC on disk is marked `verified_lossless`. Passed from `dispatch_import()` when `album_data.db_target_format` is set.
+- `--target-format` flag: when `target_format="flac"`, skips FLAC→V0 conversion and keeps FLAC on disk as-is. Genuine FLAC on disk is marked `verified_lossless`. Passed from `dispatch_import()` when `album_data.db_target_format` is set.
+- `--verified-lossless-target` flag: target format after verified lossless (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade, 6=transcode (may or may not have imported as upgrade)
 

@@ -48,6 +48,7 @@ from lib.beets_db import BeetsDB
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, ImportResult,
                          PostflightInfo, TRANSCODE_MIN_BITRATE_KBPS,
+                         determine_verified_lossless,
                          import_quality_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
@@ -117,35 +118,147 @@ def quality_decision_stage(
 
 def conversion_target(target_format: str | None,
                       will_be_verified_lossless: bool,
-                      opus_conversion_enabled: bool) -> str:
+                      verified_lossless_target: str | None) -> str | None:
     """What should lossless files become on disk? (pure)
 
-    Returns: "flac" (keep as-is), "opus" (Opus 128), "v0" (MP3 V0).
-    Easy to extend: add new formats as early returns.
+    Returns:
+        "flac" — keep lossless as-is (user intent via target_format)
+        str    — verified_lossless_target spec (e.g. "opus 128", "mp3 v2")
+        None   — keep V0 (default, or not verified lossless)
     """
     if target_format == "flac":
         return "flac"
     if not will_be_verified_lossless:
-        return "v0"
-    if opus_conversion_enabled:
-        return "opus"
-    return "v0"
+        return None
+    if verified_lossless_target:
+        return verified_lossless_target
+    return None
 
 
-def opus_cleanup_decision(opus_skipped: bool, opus_conversion_enabled: bool,
-                          converted: int) -> bool:
-    """Should we clean up kept FLAC files after opus was skipped? (pure)
+def target_cleanup_decision(target_achieved: bool,
+                            target_was_configured: bool,
+                            sources_kept: int) -> bool:
+    """Should we clean up kept source files after target conversion? (pure)
 
-    When --opus-conversion was passed, convert_lossless_to_v0() kept the
-    source files. If opus conversion was then skipped (transcode detected),
-    we must remove the FLAC files so beets only sees V0 MP3s.
+    When a target format was configured, convert_lossless(V0_SPEC)
+    kept source files for the second conversion pass. If that second
+    conversion was skipped (transcode detected → not verified lossless),
+    we must remove the source files so beets only sees V0 MP3s.
     """
-    return opus_skipped and opus_conversion_enabled and converted > 0
+    return not target_achieved and target_was_configured and sources_kept > 0
 
 
 def final_exit_decision(is_transcode: bool) -> int:
     """Determine the final exit code after a successful import."""
     return 6 if is_transcode else 0
+
+
+# ---------------------------------------------------------------------------
+# Conversion spec — parameterized ffmpeg conversion
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConversionSpec:
+    """ffmpeg conversion parameters for lossless → lossy conversion.
+
+    Carries everything needed to convert a lossless file to a specific
+    lossy format via ffmpeg. Used by convert_lossless() for both V0
+    verification and final target format conversion.
+    """
+    codec: str                              # ffmpeg codec name: "libmp3lame", "libopus", "aac"
+    codec_args: tuple[str, ...] = ()        # quality/bitrate args: ("-q:a", "0") or ("-b:a", "128k")
+    extension: str = "mp3"                  # output file extension (without dot)
+    label: str = "mp3 v0"                   # human-readable label for logging/display
+    metadata_args: tuple[str, ...] = ("-map_metadata", "0")  # metadata handling
+
+
+# V0 verification spec — always used as the first conversion step for FLAC
+V0_SPEC = ConversionSpec(
+    codec="libmp3lame",
+    codec_args=("-q:a", "0"),
+    extension="mp3",
+    label="mp3 v0",
+    metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+)
+
+
+def parse_verified_lossless_target(spec: str) -> ConversionSpec:
+    """Parse a target format string into a ConversionSpec.
+
+    Supported formats:
+        "opus 128"  → libopus VBR 128kbps
+        "opus 96"   → libopus VBR 96kbps
+        "mp3 v0"    → LAME VBR quality 0
+        "mp3 v2"    → LAME VBR quality 2
+        "mp3 192"   → LAME CBR 192kbps
+        "aac 128"   → AAC VBR 128kbps
+
+    Raises ValueError for unrecognised formats.
+    """
+    spec = spec.strip().lower()
+    if not spec:
+        raise ValueError("empty target format spec")
+
+    parts = spec.split(None, 1)
+    if len(parts) != 2:
+        raise ValueError(f"expected 'codec quality', got: {spec!r}")
+
+    codec_name, quality = parts
+
+    if codec_name == "opus":
+        if not quality.isdigit():
+            raise ValueError(f"opus requires numeric bitrate, got: {quality!r}")
+        bitrate = int(quality)
+        if bitrate < 6 or bitrate > 510:
+            raise ValueError(f"opus bitrate must be 6-510, got: {bitrate}")
+        return ConversionSpec(
+            codec="libopus",
+            codec_args=("-b:a", f"{quality}k"),
+            extension="opus",
+            label=spec,
+        )
+    elif codec_name == "mp3":
+        if quality.startswith("v") and quality[1:].isdigit():
+            # VBR quality: v0-v9
+            q_num = int(quality[1:])
+            if q_num > 9:
+                raise ValueError(f"mp3 VBR quality must be v0-v9, got: v{q_num}")
+            return ConversionSpec(
+                codec="libmp3lame",
+                codec_args=("-q:a", str(q_num)),
+                extension="mp3",
+                label=spec,
+                metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+            )
+        elif quality.isdigit():
+            # CBR bitrate
+            bitrate = int(quality)
+            if bitrate < 32 or bitrate > 320:
+                raise ValueError(f"mp3 CBR bitrate must be 32-320, got: {bitrate}")
+            return ConversionSpec(
+                codec="libmp3lame",
+                codec_args=("-b:a", f"{quality}k"),
+                extension="mp3",
+                label=spec,
+                metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+            )
+        else:
+            raise ValueError(f"mp3 quality must be 'vN' or numeric bitrate, got: {quality!r}")
+    elif codec_name == "aac":
+        if not quality.isdigit():
+            raise ValueError(f"aac requires numeric bitrate, got: {quality!r}")
+        bitrate = int(quality)
+        if bitrate < 16 or bitrate > 512:
+            raise ValueError(f"aac bitrate must be 16-512, got: {bitrate}")
+        return ConversionSpec(
+            codec="aac",
+            codec_args=("-b:a", f"{quality}k"),
+            extension="m4a",
+            label=spec,
+        )
+    else:
+        raise ValueError(f"unsupported codec: {codec_name!r} (supported: opus, mp3, aac)")
 
 
 # ---------------------------------------------------------------------------
@@ -229,114 +342,100 @@ def _is_lossless_file(fname: str, folder: str = "") -> bool:
     return False
 
 
-def convert_lossless_to_v0(album_path, dry_run=False, keep_source=False):
-    """Convert all lossless files (FLAC, ALAC/m4a, WAV) to MP3 VBR V0.
+def _remove_files_by_ext(folder: str, ext: str) -> None:
+    """Remove all files with the given extension from a directory."""
+    for fname in os.listdir(folder):
+        if fname.lower().endswith(ext):
+            os.remove(os.path.join(folder, fname))
+
+
+def _remove_lossless_files(folder: str) -> None:
+    """Remove all lossless files from a directory."""
+    for fname in os.listdir(folder):
+        if _is_lossless_file(fname, folder):
+            os.remove(os.path.join(folder, fname))
+
+
+def convert_lossless(album_path: str, spec: ConversionSpec,
+                     dry_run: bool = False,
+                     keep_source: bool = False) -> tuple[int, int, str | None]:
+    """Convert all lossless files using the given ConversionSpec.
+
+    Single conversion function — replaces both convert_lossless_to_v0()
+    and convert_lossless_to_opus(). The spec carries ffmpeg args, output
+    extension, and metadata handling.
 
     Returns (converted, failed, original_filetype) where original_filetype
-    is the extension of the source files (e.g. "flac", "m4a", "wav").
+    is the extension of the first source file (e.g. "flac", "m4a", "wav"),
+    or None if no lossless files were found.
 
-    When keep_source=True, the original lossless files are preserved
-    (used by Opus path which needs them for a second conversion).
+    When keep_source=True, original lossless files are preserved (used when
+    a second conversion pass will run from the originals). If the target uses
+    the same path as the source (ALAC .m4a → AAC .m4a), conversion runs through
+    a temporary file first so the source is not silently skipped.
     """
-    lossless_files = sorted(f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
+    lossless_files = sorted(
+        f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
     if not lossless_files:
         return 0, 0, None
 
-    # Track the original filetype from the first file
     original_ext = os.path.splitext(lossless_files[0])[1].lstrip(".").lower()
 
     converted = 0
     failed = 0
     for fname in lossless_files:
         src_path = os.path.join(album_path, fname)
-        mp3_path = os.path.splitext(src_path)[0] + ".mp3"
+        out_path = os.path.splitext(src_path)[0] + "." + spec.extension
+        same_path_output = os.path.normpath(src_path) == os.path.normpath(out_path)
+        temp_out_path = (
+            os.path.splitext(src_path)[0] + ".tmp." + spec.extension
+            if same_path_output else out_path
+        )
 
-        if os.path.exists(mp3_path):
+        if not same_path_output and os.path.exists(out_path):
             continue
 
         if dry_run:
-            print(f"  [DRY] {fname} → {os.path.basename(mp3_path)}", file=sys.stderr)
+            print(f"  [DRY] {fname} → {os.path.basename(out_path)}",
+                  file=sys.stderr)
             converted += 1
             continue
 
+        cmd = ["ffmpeg", "-i", src_path,
+               "-c:a", spec.codec, *spec.codec_args,
+               *spec.metadata_args,
+               "-y", temp_out_path]
         try:
-            result = subprocess.run([
-                "ffmpeg", "-i", src_path,
-                "-codec:a", "libmp3lame", "-q:a", "0",
-                "-map_metadata", "0", "-id3v2_version", "3",
-                "-y", mp3_path,
-            ], capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=300)
         except subprocess.TimeoutExpired:
-            print(f"  [FAIL] {fname}: ffmpeg timed out after 300s", file=sys.stderr)
-            if os.path.exists(mp3_path):
-                os.remove(mp3_path)
+            print(f"  [FAIL] {fname}: ffmpeg timed out after 300s",
+                  file=sys.stderr)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
             failed += 1
             continue
 
-        if result.returncode != 0 or not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
-            print(f"  [FAIL] {fname}: {result.stderr[-200:]}", file=sys.stderr)
-            if os.path.exists(mp3_path):
-                os.remove(mp3_path)
+        if (result.returncode != 0 or not os.path.exists(temp_out_path)
+                or os.path.getsize(temp_out_path) == 0):
+            print(f"  [FAIL] {fname}: {result.stderr[-200:]}",
+                  file=sys.stderr)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
             failed += 1
         else:
-            if not keep_source:
+            if same_path_output:
+                backup_path = os.path.splitext(src_path)[0] + ".source" + os.path.splitext(src_path)[1]
+                if keep_source:
+                    os.replace(src_path, backup_path)
+                else:
+                    os.remove(src_path)
+                os.replace(temp_out_path, out_path)
+            elif not keep_source:
                 os.remove(src_path)
             converted += 1
 
     return converted, failed, original_ext
-
-
-def convert_lossless_to_opus(album_path, dry_run=False):
-    """Convert all lossless files to Opus 128kbps.
-
-    Returns (converted, failed). Does NOT delete source files —
-    the caller manages the lifecycle of lossless originals.
-
-    Note: embedded cover art from FLAC does not transfer to Opus (Ogg
-    containers don't support attached pictures via ffmpeg). Beets'
-    fetchart plugin re-fetches art from Cover Art Archive during import.
-    """
-    lossless_files = sorted(f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
-    if not lossless_files:
-        return 0, 0
-
-    converted = 0
-    failed = 0
-    for fname in lossless_files:
-        src_path = os.path.join(album_path, fname)
-        opus_path = os.path.splitext(src_path)[0] + ".opus"
-
-        if os.path.exists(opus_path):
-            continue
-
-        if dry_run:
-            print(f"  [DRY] {fname} → {os.path.basename(opus_path)}", file=sys.stderr)
-            converted += 1
-            continue
-
-        try:
-            result = subprocess.run([
-                "ffmpeg", "-i", src_path,
-                "-c:a", "libopus", "-b:a", "128k",
-                "-map_metadata", "0",
-                "-y", opus_path,
-            ], capture_output=True, text=True, timeout=300)
-        except subprocess.TimeoutExpired:
-            print(f"  [FAIL] {fname}: ffmpeg timed out after 300s", file=sys.stderr)
-            if os.path.exists(opus_path):
-                os.remove(opus_path)
-            failed += 1
-            continue
-
-        if result.returncode != 0 or not os.path.exists(opus_path) or os.path.getsize(opus_path) == 0:
-            print(f"  [FAIL] {fname}: {result.stderr[-200:]}", file=sys.stderr)
-            if os.path.exists(opus_path):
-                os.remove(opus_path)
-            failed += 1
-        else:
-            converted += 1
-
-    return converted, failed
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +618,8 @@ def main():
                         help="Override existing min bitrate for downgrade check (kbps)")
     parser.add_argument("--force", action="store_true",
                         help="Skip distance check (for force-importing rejected albums)")
-    parser.add_argument("--opus-conversion", action="store_true",
-                        help="Convert verified lossless to Opus 128 instead of keeping V0")
+    parser.add_argument("--verified-lossless-target", default=None,
+                        help="Target format after verified lossless (e.g. 'opus 128', 'mp3 v2')")
     parser.add_argument("--target-format", default=None,
                         help="Desired format on disk (e.g. 'flac' to skip conversion)")
     parser.add_argument("--dry-run", action="store_true")
@@ -619,11 +718,12 @@ def main():
     post_conv_br = None
     is_transcode = False
 
+    has_target = bool(args.verified_lossless_target)
     if args.target_format != "flac":
         _log(f"[CONVERT] {args.path}")
-        converted, failed, original_ext = convert_lossless_to_v0(
-            args.path, dry_run=args.dry_run,
-            keep_source=args.opus_conversion)
+        converted, failed, original_ext = convert_lossless(
+            args.path, V0_SPEC, dry_run=args.dry_run,
+            keep_source=has_target)
         r.conversion.converted = converted
         r.conversion.failed = failed
         if converted > 0:
@@ -641,7 +741,7 @@ def main():
 
         # --- Transcode detection ---
         # When keep_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
-        v0_ext_filter = {".mp3"} if args.opus_conversion and converted > 0 else None
+        v0_ext_filter = {".mp3"} if has_target and converted > 0 else None
         post_conv_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter) if converted > 0 else None
         r.conversion.post_conversion_min_bitrate = post_conv_br
         is_transcode = transcode_detection(converted, post_conv_br,
@@ -673,11 +773,9 @@ def main():
     if new_min_br is not None:
         _log(f"  new_min_bitrate={new_min_br}")
 
-    # Verified lossless: genuine FLAC kept on disk counts as verified
-    if args.target_format == "flac":
-        will_be_verified_lossless = spectral_grade in ("genuine", "marginal", None)
-    else:
-        will_be_verified_lossless = (converted > 0 and not is_transcode)
+    # Verified lossless: single source of truth in quality.py
+    will_be_verified_lossless = determine_verified_lossless(
+        args.target_format, spectral_grade, converted, is_transcode)
 
     # --- Build measurements ---
     new_m = AudioQualityMeasurement(
@@ -720,48 +818,52 @@ def main():
     elif decision == "transcode_first":
         _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
-    # --- Opus conversion (after V0 verdict, before import) ---
-    conv = conversion_target(args.target_format, will_be_verified_lossless, args.opus_conversion)
-    if conv == "opus":
-        _log(f"[OPUS] Converting verified lossless → Opus 128kbps")
+    # --- Target format conversion (after V0 verdict, before import) ---
+    conv_target = conversion_target(args.target_format, will_be_verified_lossless,
+                                    args.verified_lossless_target)
+    target_achieved = False
+    if conv_target and conv_target != "flac":
+        target_spec = parse_verified_lossless_target(conv_target)
+        _log(f"[TARGET] Converting verified lossless → {target_spec.label}")
         r.v0_verification_bitrate = post_conv_br
-        opus_converted, opus_failed = convert_lossless_to_opus(args.path, dry_run=args.dry_run)
-        if opus_failed > 0:
+        # If target has same extension as V0 (.mp3), remove V0 files first
+        # so convert_lossless doesn't skip due to existing output files.
+        if target_spec.extension == V0_SPEC.extension:
+            _remove_files_by_ext(args.path, "." + V0_SPEC.extension)
+        target_converted, target_failed, _ = convert_lossless(
+            args.path, target_spec, dry_run=args.dry_run, keep_source=True)
+        if target_failed > 0:
             r.exit_code = 1
-            r.decision = "opus_conversion_failed"
-            r.error = f"{opus_failed} Opus conversions failed"
+            r.decision = "target_conversion_failed"
+            r.error = f"{target_failed} {target_spec.label} conversions failed"
             _log(f"[ERROR] {r.error}")
             _emit_and_exit(r)
-        # Remove V0 temp files (they were ephemeral verification artifacts)
-        for fname in os.listdir(args.path):
-            if fname.lower().endswith(".mp3"):
-                os.remove(os.path.join(args.path, fname))
-        # Remove original lossless files
-        for fname in os.listdir(args.path):
-            if _is_lossless_file(fname, args.path):
-                os.remove(os.path.join(args.path, fname))
-        # Update measurements and conversion info for Opus
-        opus_min_br = _get_folder_min_bitrate(args.path)
+        target_achieved = True
+        # Remove V0 temp files (ephemeral verification artifacts) —
+        # may already be gone if target had the same extension
+        if target_spec.extension != V0_SPEC.extension:
+            _remove_files_by_ext(args.path, "." + V0_SPEC.extension)
+        # Remove original lossless files (consumed by target conversion)
+        _remove_lossless_files(args.path)
+        # Update measurements for target format
+        target_min_br = _get_folder_min_bitrate(args.path)
         r.new_measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=opus_min_br,
+            min_bitrate_kbps=target_min_br,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
             verified_lossless=True,
             was_converted_from=(original_ext or "flac"),
         )
-        r.conversion.target_filetype = "opus"
-        r.conversion.final_format = "opus 128"
-        r.final_format = "opus 128"
-        _log(f"  Opus conversion complete: {opus_converted} files, min_bitrate={opus_min_br}kbps")
+        r.conversion.target_filetype = target_spec.extension
+        r.final_format = target_spec.label
+        _log(f"  {target_spec.label} conversion complete: {target_converted} files, "
+             f"min_bitrate={target_min_br}kbps")
         _log(f"  V0 verification bitrate: {post_conv_br}kbps")
 
-    # --- Clean up kept FLAC files if opus was skipped (transcode path) ---
-    if opus_cleanup_decision(conv != "opus",
-                             args.opus_conversion, converted):
-        for fname in os.listdir(args.path):
-            if _is_lossless_file(fname, args.path):
-                os.remove(os.path.join(args.path, fname))
-        _log(f"  [CLEANUP] Removed lossless originals (opus skipped, not verified lossless)")
+    # --- Clean up kept source files if target was skipped (transcode path) ---
+    if target_cleanup_decision(target_achieved, has_target, converted):
+        _remove_lossless_files(args.path)
+        _log(f"  [CLEANUP] Removed lossless originals (target skipped, not verified lossless)")
 
     # --- Import ---
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")

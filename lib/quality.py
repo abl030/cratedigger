@@ -503,7 +503,7 @@ class DownloadInfo:
     import_result: Optional[str] = None
     # Full validation result (JSON string)
     validation_result: Optional[str] = None
-    # Final format on disk (e.g. "opus 128" when Opus conversion used)
+    # Final format on disk after verified-lossless target conversion
     final_format: Optional[str] = None
 
 
@@ -549,7 +549,7 @@ class ConversionInfo:
     target_filetype: Optional[str] = None
     post_conversion_min_bitrate: Optional[int] = None  # min bitrate after lossless→V0
     is_transcode: bool = False  # True if FLAC was actually a transcode
-    final_format: Optional[str] = None  # "opus 128" when Opus conversion used
+    final_format: Optional[str] = None  # e.g. "opus 128", "mp3 v2", "aac 128"
 
 
 @dataclass
@@ -599,9 +599,9 @@ class ImportResult:
     postflight: PostflightInfo = field(default_factory=PostflightInfo)
     beets_log: list[str] = field(default_factory=list)  # beets stderr lines from import
     error: Optional[str] = None
-    # Opus audit trail — V0 bitrate that proved genuineness, final format on disk
+    # Target-conversion audit trail — V0 bitrate that proved genuineness
     v0_verification_bitrate: Optional[int] = None
-    final_format: Optional[str] = None  # "opus 128", None means V0/MP3 as before
+    final_format: Optional[str] = None  # configured target, None means keep V0/MP3
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -839,25 +839,43 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
 # Verified lossless derivation (post-import, used by album_source.py)
 # ---------------------------------------------------------------------------
 
+_LOSSLESS_EXTS = {"flac", "m4a", "wav", "alac"}
+
+
+def determine_verified_lossless(
+    target_format: Optional[str],
+    spectral_grade: Optional[str],
+    converted_count: int,
+    is_transcode: bool,
+) -> bool:
+    """Single source of truth for verified lossless status (pure).
+
+    Two paths:
+    1. target_format="flac" (FLAC kept on disk): verified if spectral says
+       genuine or marginal, or if no spectral ran (None). The FLAC IS the
+       lossless source — no conversion needed to prove it.
+    2. Default (FLAC→V0/target): verified if we actually converted lossless
+       files AND spectral didn't flag them as transcodes.
+    """
+    if target_format == "flac":
+        return spectral_grade in ("genuine", "marginal", None)
+    return converted_count > 0 and not is_transcode
+
+
 def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
                          spectral_grade: Optional[str]) -> bool:
-    """Determine if an import should be marked as verified lossless.
+    """Legacy derivation for album_source.py fallback path.
 
-    True when we converted a genuine lossless source to V0 — the gold standard.
-    Accepts any lossless format: flac, m4a (ALAC), wav.
+    Used when import_one.py didn't set verified_lossless_override
+    (old download_log rows). Delegates to determine_verified_lossless
+    for the standard (non-FLAC-on-disk) case.
 
-    Inputs:
-        was_converted:     True if lossless files were converted to MP3 V0
-        original_filetype: filetype before conversion (e.g. "flac", "m4a", "wav")
-        spectral_grade:    spectral analysis grade of the source files
+    Stricter than determine_verified_lossless: requires spectral_grade="genuine"
+    exactly, and validates the original filetype was lossless.
     """
     if not was_converted or original_filetype is None or spectral_grade != "genuine":
         return False
-    ext = original_filetype.lower()
-    # Extensions that are lossless — includes m4a (ALAC) since the pipeline
-    # only converts m4a files that were downloaded as ALAC
-    lossless_exts = {"flac", "m4a", "wav", "alac"}
-    return ext in lossless_exts
+    return original_filetype.lower() in _LOSSLESS_EXTS
 
 
 # ---------------------------------------------------------------------------
@@ -1340,24 +1358,24 @@ def get_decision_tree() -> dict[str, Any]:
                 ],
             },
             {
-                "id": "opus_conversion",
-                "title": "Opus Conversion (Optional)",
+                "id": "target_conversion",
+                "title": "Target Conversion (Optional)",
                 "path": "flac",
-                "function": "convert_lossless_to_opus",
-                "when": "After verified lossless, if opus_conversion enabled",
-                "inputs": ["verified_lossless", "opus_conversion config",
-                           "original FLAC files"],
+                "function": "convert_lossless",
+                "when": "After verified lossless, if verified_lossless_target is set",
+                "inputs": ["verified_lossless", "verified_lossless_target",
+                           "original lossless files"],
                 "rules": [
-                    {"condition": "verified_lossless AND opus_conversion enabled",
-                     "result": "FLAC → Opus 128kbps (V0 discarded)",
+                    {"condition": "verified_lossless AND target configured",
+                     "result": "lossless → configured target (V0 discarded)",
                      "color": "green",
                      "effect": "V0 bitrate stored as v0_verification_bitrate"},
-                    {"condition": "NOT verified_lossless OR opus disabled",
+                    {"condition": "NOT verified_lossless OR no target configured",
                      "result": "Keep V0 files (standard path)",
                      "color": "amber"},
                 ],
-                "note": "V0 exists only to verify genuineness. "
-                        "Opus 128 is ~50% smaller than V0 for identical quality.",
+                "note": "V0 exists only to verify genuineness. The final target "
+                        "may be Opus, MP3, AAC, or any other supported format.",
             },
             {
                 "id": "mp3_spectral",
@@ -1511,8 +1529,8 @@ def full_pipeline_decision(
     converted_count=0,
     # Pipeline state
     verified_lossless=False,
-    # Opus conversion
-    opus_conversion=False,
+    # Verified lossless target format (e.g. "opus 128", "mp3 v2")
+    verified_lossless_target=None,
     # Target format (user intent — "flac" skips conversion)
     target_format=None,
 ):
@@ -1540,7 +1558,7 @@ def full_pipeline_decision(
         "imported": False,
         "denylisted": False,
         "keep_searching": False,
-        "opus_final_format": None,
+        "target_final_format": None,
     }
 
     # --- Stage 1: Pre-import spectral (MP3/CBR path) ---
@@ -1617,9 +1635,9 @@ def full_pipeline_decision(
                 spectral_grade in ("genuine", "marginal", None)):
             verified_lossless = True
 
-        # Opus conversion: if verified lossless + enabled, final format is Opus 128
-        if verified_lossless and opus_conversion:
-            result["opus_final_format"] = "opus 128"
+        # Target format conversion: if verified lossless + target configured
+        if verified_lossless and verified_lossless_target:
+            result["target_final_format"] = verified_lossless_target
 
         # Use post-conversion bitrate for quality gate
         gate_bitrate = post_conversion_min_bitrate or min_bitrate

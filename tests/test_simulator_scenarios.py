@@ -154,7 +154,7 @@ DL_MAP = {s.name: s for s in DOWNLOAD_SCENARIOS}
 # ============================================================================
 
 def simulate(album: AlbumState, download: DownloadScenario,
-             opus_conversion: bool = False) -> SimResult:
+             verified_lossless_target: str | None = None) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
     existing_min_bitrate = album.min_bitrate
@@ -170,7 +170,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
         existing_spectral_bitrate=existing_spectral_bitrate,
         override_min_bitrate=override,
         verified_lossless=album.verified_lossless,
-        opus_conversion=opus_conversion,
+        verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
         **download.dl_params(),
     )

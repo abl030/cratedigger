@@ -182,6 +182,17 @@ export function renderSimulatorForm() {
           <option value="true">Yes</option>
         </select>
       </div>
+      <div class="ds-field">
+        <label>Target format on disk</label>
+        <select id="ds-target_format">
+          <option value="">Default (convert if needed)</option>
+          <option value="flac">flac</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Verified lossless target</label>
+        <input type="text" id="ds-verified_lossless_target" placeholder="e.g. opus 128">
+      </div>
       <div class="ds-run"><button onclick="window.runSimulator()">Run Pipeline</button></div>
     </div>
     <div id="ds-results"></div>
@@ -196,6 +207,7 @@ export const DS_PRESETS = {
     existing_min_bitrate: '192', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
     converted_count: '12', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
   },
   mtngoats: {
     is_flac: 'false', min_bitrate: '138', is_cbr: 'false',
@@ -203,6 +215,7 @@ export const DS_PRESETS = {
     existing_min_bitrate: '173', existing_spectral_bitrate: '128',
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
   },
   genuine_flac: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false',
@@ -210,6 +223,7 @@ export const DS_PRESETS = {
     existing_min_bitrate: '192', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
     converted_count: '12', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: 'opus 128',
   },
   cbr320: {
     is_flac: 'false', min_bitrate: '320', is_cbr: 'true',
@@ -217,6 +231,7 @@ export const DS_PRESETS = {
     existing_min_bitrate: '', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
   },
   vbr_v0: {
     is_flac: 'false', min_bitrate: '245', is_cbr: 'false',
@@ -224,6 +239,7 @@ export const DS_PRESETS = {
     existing_min_bitrate: '', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
   },
 };
 
@@ -247,7 +263,8 @@ export function dsPreset(name) {
 export async function runSimulator() {
   const fields = ['is_flac','min_bitrate','is_cbr','spectral_grade','spectral_bitrate',
     'existing_min_bitrate','existing_spectral_bitrate','override_min_bitrate',
-    'post_conversion_min_bitrate','converted_count','verified_lossless'];
+    'post_conversion_min_bitrate','converted_count','verified_lossless',
+    'target_format','verified_lossless_target'];
   const params = new URLSearchParams();
   for (const f of fields) {
     const v = /** @type {HTMLInputElement|null} */ (document.getElementById('ds-' + f))?.value;
@@ -298,6 +315,8 @@ export function renderSimulatorResults(r) {
       <span class="ds-outcome ${r.final_status === 'imported' ? 'ds-green' : 'ds-amber'}">${r.final_status || 'none'}</span></div>
     <div class="ds-summary-row"><span class="ds-summary-label">Imported to beets?</span>
       ${boolBadge(r.imported, 'yes', 'no')}</div>
+    <div class="ds-summary-row"><span class="ds-summary-label">Final target format</span>
+      <span class="ds-outcome ${r.target_final_format ? 'ds-green' : 'ds-skip'}">${esc(r.target_final_format || 'keep V0/default')}</span></div>
     <div class="ds-summary-row"><span class="ds-summary-label">Source denylisted?</span>
       ${boolBadge(!r.denylisted, 'no', 'yes')}</div>
     <div class="ds-summary-row"><span class="ds-summary-label">Keep searching?</span>

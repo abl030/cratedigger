@@ -740,6 +740,7 @@ def cmd_force_import(db, args):
         import_one_path=IMPORT_ONE,
         force=True,
         override_min_bitrate=req["min_bitrate"],
+        verified_lossless_target=getattr(args, "verified_lossless_target", None),
     )
     log_and_update_import(db, request_id, outcome,
                           outcome_label="force_import",
@@ -777,6 +778,7 @@ def cmd_manual_import(db, args):
         request_id=request_id,
         import_one_path=IMPORT_ONE,
         override_min_bitrate=req["min_bitrate"],
+        verified_lossless_target=getattr(args, "verified_lossless_target", None),
     )
     log_and_update_import(db, request_id, outcome,
                           outcome_label="manual_import",
@@ -932,11 +934,15 @@ def main():
     # force-import
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
     p_force.add_argument("download_log_id", type=int, help="Download log ID")
+    p_force.add_argument("--verified-lossless-target",
+                         help="Override the runtime verified-lossless target for this import")
 
     # manual-import
     p_manual = sub.add_parser("manual-import", help="Import a local folder as a pipeline request")
     p_manual.add_argument("id", type=int, help="Pipeline request ID")
     p_manual.add_argument("path", help="Path to album folder")
+    p_manual.add_argument("--verified-lossless-target",
+                          help="Override the runtime verified-lossless target for this import")
 
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
