@@ -222,7 +222,7 @@ class TestFinalExitDecision(unittest.TestCase):
 
 
 # ============================================================================
-# convert_lossless_to_v0 keep_source parameter
+# convert_lossless keep_source parameter
 # ============================================================================
 
 # ============================================================================

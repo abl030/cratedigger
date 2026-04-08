@@ -48,6 +48,7 @@ from lib.beets_db import BeetsDB
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, ImportResult,
                          PostflightInfo, TRANSCODE_MIN_BITRATE_KBPS,
+                         determine_verified_lossless,
                          import_quality_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
@@ -765,7 +766,6 @@ def main():
         _log(f"  new_min_bitrate={new_min_br}")
 
     # Verified lossless: single source of truth in quality.py
-    from lib.quality import determine_verified_lossless
     will_be_verified_lossless = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode)
 
