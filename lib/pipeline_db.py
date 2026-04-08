@@ -311,10 +311,16 @@ class PipelineDB:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$;
             """)
-            # Rename "flac" tier to "lossless" (issue #35)
+            # Rename legacy FLAC tiers to "lossless" (issue #35)
             cur.execute("""
-                UPDATE album_requests SET search_filetype_override = 'lossless'
-                WHERE search_filetype_override = 'flac';
+                UPDATE album_requests
+                   SET search_filetype_override = regexp_replace(
+                       search_filetype_override,
+                       '(^|,\\s*)flac(\\s*,|$)',
+                       '\\1lossless\\2',
+                       'g'
+                   )
+                 WHERE search_filetype_override ~ '(^|,\\s*)flac(\\s*,|$)';
             """)
             cur.execute("""
                 UPDATE album_requests SET target_format = 'lossless'

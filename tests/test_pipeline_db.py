@@ -58,6 +58,28 @@ class TestSchemaCreation(unittest.TestCase):
         db.init_schema()  # second call should be safe
         db.close()
 
+    def test_migrates_legacy_flac_tiers_to_lossless(self):
+        db = make_db()
+        req_id = db.add_request(
+            mb_release_id="migrate-lossless",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db.update_request_fields(
+            req_id,
+            search_filetype_override="flac,mp3 v0,mp3 320",
+            target_format="flac",
+        )
+
+        db.init_schema()
+
+        req = db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["search_filetype_override"], "lossless,mp3 v0,mp3 320")
+        self.assertEqual(req["target_format"], "lossless")
+        db.close()
+
 
 @requires_postgres
 class TestAddAndGetRequest(unittest.TestCase):

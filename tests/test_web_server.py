@@ -268,6 +268,21 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["intent"], "lossless")
 
+    def test_post_set_intent_default_clears_stale_lossless_override(self):
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted", artist_name="Test Artist",
+            album_title="Test Album", target_format="lossless",
+            search_filetype_override="lossless",
+        )
+        self.mock_db.update_request_fields.reset_mock()
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"id": 100, "intent": "default"})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["requeued"])
+        self.mock_db.update_request_fields.assert_called_once_with(
+            100, target_format=None, search_filetype_override=None)
+        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+
     def test_post_set_intent_invalid(self):
         """POST /api/pipeline/set-intent with bad intent returns 400."""
         status, data = self._post("/api/pipeline/set-intent",

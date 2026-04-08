@@ -365,10 +365,7 @@ class TestCmdSetIntent(unittest.TestCase):
         )
         args = MagicMock(id=1, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db._execute.assert_called_once()
-        call_args = db._execute.call_args[0]
-        self.assertIn("target_format", call_args[0])
-        self.assertEqual(call_args[1][0], "lossless")
+        db.update_request_fields.assert_called_once_with(1, target_format="lossless")
 
     @patch("builtins.print")
     def test_set_default_clears_target(self, _mock_print):
@@ -378,9 +375,7 @@ class TestCmdSetIntent(unittest.TestCase):
         )
         args = MagicMock(id=1, intent="default")
         pipeline_cli.cmd_set_intent(db, args)
-        db._execute.assert_called_once()
-        call_args = db._execute.call_args[0]
-        self.assertIsNone(call_args[1][0])
+        db.update_request_fields.assert_called_once_with(1, target_format=None)
 
     @patch("builtins.print")
     @patch("lib.transitions.apply_transition")
@@ -395,6 +390,19 @@ class TestCmdSetIntent(unittest.TestCase):
         mock_transition.assert_called_once()
         call_kwargs = mock_transition.call_args.kwargs or mock_transition.call_args[1]
         self.assertEqual(call_kwargs.get("search_filetype_override"), "lossless")
+        db.update_request_fields.assert_called_once_with(2, target_format="lossless")
+
+    @patch("builtins.print")
+    def test_set_default_clears_stale_lossless_override(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=4, status="wanted", artist_name="A", album_title="B",
+            target_format="lossless", search_filetype_override="lossless",
+        )
+        args = MagicMock(id=4, intent="default")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.update_request_fields.assert_called_once_with(
+            4, target_format=None, search_filetype_override=None)
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):
@@ -404,7 +412,7 @@ class TestCmdSetIntent(unittest.TestCase):
         )
         args = MagicMock(id=3, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db._execute.assert_not_called()
+        db.update_request_fields.assert_not_called()
 
     @patch("builtins.print")
     def test_set_intent_not_found(self, _mock_print):
@@ -412,7 +420,7 @@ class TestCmdSetIntent(unittest.TestCase):
         db.get_request.return_value = None
         args = MagicMock(id=99, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db._execute.assert_not_called()
+        db.update_request_fields.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -135,6 +135,15 @@ def conversion_target(target_format: str | None,
     return None
 
 
+def should_run_target_conversion(conv_target: str | None) -> bool:
+    """Should we run the second conversion pass for a target format? (pure)
+
+    The "lossless" sentinel means "keep lossless on disk" and must not be
+    passed to parse_verified_lossless_target().
+    """
+    return conv_target not in (None, "lossless")
+
+
 def target_cleanup_decision(target_achieved: bool,
                             target_was_configured: bool,
                             sources_kept: int) -> bool:
@@ -855,7 +864,8 @@ def main():
     conv_target = conversion_target(args.target_format, will_be_verified_lossless,
                                     args.verified_lossless_target)
     target_achieved = False
-    if conv_target and conv_target != "flac":
+    if should_run_target_conversion(conv_target):
+        assert conv_target is not None
         target_spec = parse_verified_lossless_target(conv_target)
         _log(f"[TARGET] Converting verified lossless → {target_spec.label}")
         r.v0_verification_bitrate = post_conv_br

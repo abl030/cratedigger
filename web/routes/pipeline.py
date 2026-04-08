@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.import_service import run_import, log_and_update_import  # type: ignore[import-not-found]
-from lib.quality import QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS  # type: ignore[import-not-found]
+from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
+                         should_clear_lossless_search_override)
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
 from quality import get_decision_tree, full_pipeline_decision  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
@@ -470,10 +471,7 @@ def post_pipeline_set_intent(h, body: dict) -> None:
                          from_status="imported",
                          search_filetype_override=QUALITY_LOSSLESS,
                          min_bitrate=min_br)
-        s._db()._execute(
-            "UPDATE album_requests SET target_format = %s WHERE id = %s",
-            (target_format, int(req_id)),
-        )
+        s._db().update_request_fields(int(req_id), target_format=target_format)
         h._json({
             "status": "ok",
             "id": int(req_id),
@@ -483,10 +481,14 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         })
     else:
         # Just update the persistent intent for next search (wanted or manual)
-        s._db()._execute(
-            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
-            (target_format, int(req_id)),
-        )
+        update_fields = {"target_format": target_format}
+        if should_clear_lossless_search_override(
+            new_target_format=target_format,
+            old_target_format=req.get("target_format"),
+            search_filetype_override=req.get("search_filetype_override"),
+        ):
+            update_fields["search_filetype_override"] = None
+        s._db().update_request_fields(int(req_id), **update_fields)
         h._json({
             "status": "ok",
             "id": int(req_id),

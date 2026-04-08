@@ -6,6 +6,7 @@ from lib.quality import (
     QUALITY_UPGRADE_TIERS,
     QUALITY_FLAC_ONLY,
     search_tiers,
+    should_clear_lossless_search_override,
     narrow_override_on_downgrade,
     DownloadInfo,
 )
@@ -91,6 +92,38 @@ class TestEffectiveSearchTiers(unittest.TestCase):
             "", "flac", ["flac", "mp3 v0", "mp3 320"])
         self.assertEqual(tiers, ["flac"])
         self.assertFalse(catch_all)
+
+
+class TestClearLosslessOverride(unittest.TestCase):
+    """Clearing default intent should only remove user-triggered lossless search."""
+
+    def test_default_clears_previous_lossless_toggle_override(self):
+        self.assertTrue(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="lossless",
+            search_filetype_override="lossless",
+        ))
+
+    def test_default_clears_legacy_flac_target_override(self):
+        self.assertTrue(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="flac",
+            search_filetype_override="lossless",
+        ))
+
+    def test_default_preserves_upgrade_override(self):
+        self.assertFalse(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="lossless",
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        ))
+
+    def test_lossless_intent_never_clears_override(self):
+        self.assertFalse(should_clear_lossless_search_override(
+            new_target_format="lossless",
+            old_target_format="lossless",
+            search_filetype_override="lossless",
+        ))
 
 
 class TestNarrowSearchContract(unittest.TestCase):

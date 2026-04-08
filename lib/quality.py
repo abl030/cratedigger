@@ -44,6 +44,25 @@ def effective_search_tiers(
     return search_tiers(None, config_allowed)
 
 
+def should_clear_lossless_search_override(
+    *,
+    new_target_format: str | None,
+    old_target_format: str | None,
+    search_filetype_override: str | None,
+) -> bool:
+    """Should changing intent clear a stale lossless-only search override?
+
+    This only clears the transient override when the user is explicitly
+    turning off a previously requested lossless-on-disk intent.
+    """
+    old_keep_lossless = old_target_format in ("flac", "lossless")
+    return (
+        new_target_format is None
+        and old_keep_lossless
+        and search_filetype_override == QUALITY_LOSSLESS
+    )
+
+
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 

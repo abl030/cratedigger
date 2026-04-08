@@ -203,7 +203,7 @@ def cmd_set_intent(db, args):
     'lossless' — keep lossless on disk (overrides global verified_lossless_target)
     'default'  — pipeline decides (uses global verified_lossless_target)
     """
-    from lib.quality import QUALITY_LOSSLESS
+    from lib.quality import QUALITY_LOSSLESS, should_clear_lossless_search_override
     from lib.transitions import apply_transition
 
     target_format = QUALITY_LOSSLESS if args.intent == "lossless" else None
@@ -224,16 +224,17 @@ def cmd_set_intent(db, args):
         apply_transition(db, args.id, "wanted", from_status="imported",
                          search_filetype_override=QUALITY_LOSSLESS,
                          min_bitrate=min_br)
-        db._execute(
-            "UPDATE album_requests SET target_format = %s WHERE id = %s",
-            (target_format, args.id),
-        )
+        db.update_request_fields(args.id, target_format=target_format)
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
-        db._execute(
-            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
-            (target_format, args.id),
-        )
+        update_fields = {"target_format": target_format}
+        if should_clear_lossless_search_override(
+            new_target_format=target_format,
+            old_target_format=old_target,
+            search_filetype_override=req.get("search_filetype_override"),
+        ):
+            update_fields["search_filetype_override"] = None
+        db.update_request_fields(args.id, **update_fields)
         action = "lossless on disk" if target_format else "default (pipeline decides)"
         print(f"  [{args.id}] {label}: {action} "
               f"(target_format: {old_target} → {target_format})")
