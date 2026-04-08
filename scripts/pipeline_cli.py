@@ -479,6 +479,17 @@ def cmd_show(db, args):
             dur = f"{t['length_seconds']:.0f}s" if t['length_seconds'] else "?"
             print(f"    {t['disc_number']}.{t['track_number']:02d} {t['title']} ({dur})")
 
+    searches = db.get_search_history(req['id'])
+    if searches:
+        print(f"\n  Search History ({len(searches)}):")
+        for s in searches:
+            q = s['query'] or "(no query)"
+            rc = s['result_count']
+            rc_str = f"{rc} results" if rc is not None else "n/a"
+            el = s['elapsed_s']
+            el_str = f"{el:.1f}s" if el is not None else ""
+            print(f"    [{s['created_at']}] {s['outcome']:12s} {rc_str:>12s} {el_str:>6s}  {q}")
+
     history = db.get_download_history(req['id'])
     if history:
         print(f"\n  Download History ({len(history)}):")
