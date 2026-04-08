@@ -46,10 +46,13 @@ MAX_SEARCH_TOKENS = 4
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
 
-    Apostrophes, brackets, and other special characters cause
-    0 results or wrong matches.
+    Keeps only alphanumeric characters, hyphens, and whitespace.
+    Everything else (commas, periods, colons, brackets, etc.)
+    is replaced with a space.
     """
-    clean = re.sub(r"['\"\(\)\[\]\{\}!@#$%^&*_]", " ", text)
+    clean = re.sub(r"[^\w\s-]", " ", text)
+    # Also strip underscores (matched by \w but unwanted)
+    clean = clean.replace("_", " ")
     return " ".join(clean.split())
 
 

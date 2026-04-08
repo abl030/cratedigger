@@ -23,8 +23,37 @@ class TestStripSpecialChars(unittest.TestCase):
     def test_underscores(self):
         self.assertEqual(strip_special_chars("Euro_EP"), "Euro EP")
 
+    def test_commas(self):
+        self.assertEqual(strip_special_chars("Picture a Hum, Can't Hear a Sound"),
+                         "Picture a Hum Can t Hear a Sound")
+
+    def test_periods(self):
+        self.assertEqual(strip_special_chars("Vol. 2"), "Vol 2")
+
+    def test_colons(self):
+        self.assertEqual(strip_special_chars("Ambient 3: Day of Radiance"),
+                         "Ambient 3 Day of Radiance")
+
+    def test_semicolons(self):
+        self.assertEqual(strip_special_chars("A; B"), "A B")
+
+    def test_plus_tilde_pipe(self):
+        self.assertEqual(strip_special_chars("A + B ~ C | D"), "A B C D")
+
+    def test_ellipsis(self):
+        self.assertEqual(strip_special_chars("...I Care Because You Do"),
+                         "I Care Because You Do")
+
+    def test_slash(self):
+        self.assertEqual(strip_special_chars("Smile / Karma Package Deal"),
+                         "Smile Karma Package Deal")
+
     def test_clean_passthrough(self):
         self.assertEqual(strip_special_chars("Mountain Goats"), "Mountain Goats")
+
+    def test_hyphens_preserved(self):
+        """Hyphens are common in titles and don't poison searches."""
+        self.assertEqual(strip_special_chars("Self-Titled"), "Self-Titled")
 
     def test_multiple_spaces_collapsed(self):
         self.assertEqual(strip_special_chars("A  &  B"), "A B")
@@ -182,6 +211,18 @@ class TestBuildQuery(unittest.TestCase):
         assert q is not None
         self.assertEqual(q, "Shelflife Collection")
         self.assertNotIn("*arious", q)
+
+    def test_comma_in_title_stripped(self):
+        """78 Saab bug: comma in 'Hum,' caused 0 search results."""
+        q = build_query("78 Saab", "Picture a Hum, Can't Hear a Sound")
+        assert q is not None
+        self.assertNotIn(",", q)
+        self.assertIn("*aab", q)
+
+    def test_ellipsis_in_title(self):
+        q = build_query("Aphex Twin", "...I Care Because You Do")
+        assert q is not None
+        self.assertNotIn(".", q)
 
     def test_no_prepend(self):
         q = build_query("The Beatles", "Abbey Road", prepend_artist=False)
