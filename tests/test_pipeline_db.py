@@ -32,7 +32,7 @@ def make_db():
     import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN, run_migrations=True)
     # Truncate all tables for a clean slate
-    for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
+    for table in ["source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -50,6 +50,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("album_requests", table_names)
         self.assertIn("album_tracks", table_names)
         self.assertIn("download_log", table_names)
+        self.assertIn("search_log", table_names)
         self.assertIn("source_denylist", table_names)
         db.close()
 
@@ -355,6 +356,73 @@ class TestDownloadLog(unittest.TestCase):
         history = self.db.get_download_history(self.req_id)
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["soulseek_username"], "user2")
+
+
+@requires_postgres
+class TestSearchLog(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="search-log-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_log_and_get_search(self):
+        self.db.log_search(
+            request_id=self.req_id,
+            query="*rtist Album",
+            result_count=42,
+            elapsed_s=3.2,
+            outcome="found",
+        )
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["query"], "*rtist Album")
+        self.assertEqual(history[0]["result_count"], 42)
+        self.assertAlmostEqual(history[0]["elapsed_s"], 3.2, places=1)
+        self.assertEqual(history[0]["outcome"], "found")
+
+    def test_multiple_searches_newest_first(self):
+        self.db.log_search(self.req_id, query="q1", outcome="no_results")
+        self.db.log_search(self.req_id, query="q2", result_count=5,
+                           elapsed_s=2.0, outcome="no_match")
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["outcome"], "no_match")  # most recent first
+        self.assertEqual(history[1]["outcome"], "no_results")
+
+    def test_empty_query_outcome(self):
+        self.db.log_search(self.req_id, query=None, outcome="empty_query")
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        self.assertIsNone(history[0]["query"])
+        self.assertEqual(history[0]["outcome"], "empty_query")
+
+    def test_batch_fetch(self):
+        req2 = self.db.add_request(
+            mb_release_id="search-log-uuid-2",
+            artist_name="C",
+            album_title="D",
+            source="request",
+        )
+        self.db.log_search(self.req_id, query="q1", outcome="found")
+        self.db.log_search(req2, query="q2", outcome="timeout")
+        batch = self.db.get_search_history_batch([self.req_id, req2])
+        self.assertIn(self.req_id, batch)
+        self.assertIn(req2, batch)
+        self.assertEqual(len(batch[self.req_id]), 1)
+        self.assertEqual(batch[req2][0]["outcome"], "timeout")
+
+    def test_all_outcomes_valid(self):
+        for outcome in ("found", "no_match", "no_results", "timeout", "error", "empty_query"):
+            self.db.log_search(self.req_id, query="q", outcome=outcome)
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(history), 6)
 
 
 @requires_postgres
