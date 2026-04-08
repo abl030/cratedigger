@@ -41,6 +41,13 @@
 - Run the simulator against real albums in the live DB (not mocked state) to verify. Pick albums that represent the edge case: e.g. CBR 320 with no spectral, verified lossless lo-fi, suspect FLAC transcodes.
 - The simulator must show the full rejection cycle: import/reject decision → spectral propagation → backfill decision → next search tiers. Not just the import decision in isolation.
 
+## Pipeline Bug Reproduction — Red/Green on Real Code Paths
+- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `_apply_spectral_decision`) with mocked album state matching the live scenario.
+- **RED first**: reproduce the exact live scenario as a test. Mock up the album state from `pipeline-cli show <id>` (status, spectral fields, min_bitrate). Run the test and confirm it fails with the same symptom as production.
+- **GREEN**: fix the production code, confirm the test passes.
+- **Guard both directions**: add a test for the fixed case AND a test that the original valid behavior still works (e.g. propagation still works when an album IS on disk but lacks spectral data).
+- This catches bugs that pure function tests miss — state mutations, propagation ordering, in-memory corruption before the decision function runs.
+
 ## Frontend (JavaScript)
 - ES6 modules in `web/js/` — no inline `<script>` in HTML
 - `// @ts-check` + JSDoc types on all exported functions

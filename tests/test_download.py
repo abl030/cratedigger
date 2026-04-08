@@ -492,6 +492,68 @@ class TestApplySpectralDecision(unittest.TestCase):
         )
 
 
+    def test_new_album_transcode_not_rejected_by_self_propagation(self):
+        """Bug: new album with nothing on disk gets spectral propagated from
+        download, then spectral_import_decision sees download quality as
+        existing quality and rejects it as 'not better than existing'.
+
+        Expected: a suspect 96kbps download with nothing on disk should get
+        'import_no_exist', not 'reject'.
+        """
+        from lib.download import _apply_spectral_decision
+
+        album = _make_album_data()
+        ctx = _make_ctx()
+        cast(Any, ctx.pipeline_db_source._get_db).return_value
+        bv_result = MagicMock(valid=True)
+        # Nothing on disk: all existing fields are None
+        spec_ctx = SpectralContext(
+            needs_check=True,
+            grade="likely_transcode",
+            bitrate=96,
+            existing_min_bitrate=None,
+            existing_spectral_grade=None,
+            existing_spectral_bitrate=None,
+        )
+
+        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
+
+        # The download should NOT be rejected — there's nothing on disk
+        self.assertTrue(bv_result.valid,
+                        "A suspect download with nothing on disk should not be rejected; "
+                        "expected 'import_no_exist' not 'reject'")
+
+    def test_propagation_still_works_when_album_on_disk_lacks_spectral(self):
+        """When an album IS on disk (min_bitrate set) but has no spectral data,
+        propagation should still adopt the download's spectral as current."""
+        from lib.download import _apply_spectral_decision
+        from lib.pipeline_db import RequestSpectralStateUpdate
+
+        album = _make_album_data()
+        ctx = _make_ctx()
+        db = cast(Any, ctx.pipeline_db_source._get_db).return_value
+        bv_result = MagicMock(valid=True)
+        # Album on disk at 256kbps, no spectral data yet
+        spec_ctx = SpectralContext(
+            needs_check=True,
+            grade="suspect",
+            bitrate=192,
+            existing_min_bitrate=256,
+            existing_spectral_grade=None,
+            existing_spectral_bitrate=None,
+        )
+
+        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
+
+        # Should propagate download spectral as current and write to DB
+        db.update_spectral_state.assert_called_once_with(
+            album.db_request_id,
+            RequestSpectralStateUpdate(
+                current=SpectralMeasurement(grade="suspect", bitrate_kbps=192),
+            ),
+        )
+
+
 class TestGrabMostWanted(unittest.TestCase):
     """grab_most_wanted enqueues and persists state, no blocking monitor."""
 
