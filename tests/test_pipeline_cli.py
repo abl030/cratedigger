@@ -175,6 +175,28 @@ class TestCmdManualImport(unittest.TestCase):
         self.assertEqual(kwargs["outcome"], "failed")
         self.assertEqual(kwargs["staged_path"], "/tmp/Album")
 
+    @patch("builtins.print")
+    def test_manual_import_passes_verified_lossless_target_override(self, _mock_print):
+        from lib.import_service import ImportOutcome
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=123, status="manual", min_bitrate=320,
+            mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        )
+
+        mock_outcome = ImportOutcome(success=True, exit_code=0, message="ok")
+        with patch("lib.import_service.run_import", return_value=mock_outcome) as mock_run:
+            args = MagicMock(
+                id=123,
+                path="/tmp/Album",
+                verified_lossless_target="mp3 v2",
+            )
+            pipeline_cli.cmd_manual_import(db, args)
+
+        self.assertEqual(
+            mock_run.call_args.kwargs["verified_lossless_target"], "mp3 v2"
+        )
+
 
 class TestCmdQuery(unittest.TestCase):
     def test_query_renders_table_output_in_read_only_mode(self):

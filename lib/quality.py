@@ -503,7 +503,7 @@ class DownloadInfo:
     import_result: Optional[str] = None
     # Full validation result (JSON string)
     validation_result: Optional[str] = None
-    # Final format on disk (e.g. "opus 128" when Opus conversion used)
+    # Final format on disk after verified-lossless target conversion
     final_format: Optional[str] = None
 
 
@@ -549,7 +549,7 @@ class ConversionInfo:
     target_filetype: Optional[str] = None
     post_conversion_min_bitrate: Optional[int] = None  # min bitrate after lossless→V0
     is_transcode: bool = False  # True if FLAC was actually a transcode
-    final_format: Optional[str] = None  # "opus 128" when Opus conversion used
+    final_format: Optional[str] = None  # e.g. "opus 128", "mp3 v2", "aac 128"
 
 
 @dataclass
@@ -599,9 +599,9 @@ class ImportResult:
     postflight: PostflightInfo = field(default_factory=PostflightInfo)
     beets_log: list[str] = field(default_factory=list)  # beets stderr lines from import
     error: Optional[str] = None
-    # Opus audit trail — V0 bitrate that proved genuineness, final format on disk
+    # Target-conversion audit trail — V0 bitrate that proved genuineness
     v0_verification_bitrate: Optional[int] = None
-    final_format: Optional[str] = None  # "opus 128", None means V0/MP3 as before
+    final_format: Optional[str] = None  # configured target, None means keep V0/MP3
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -1358,24 +1358,24 @@ def get_decision_tree() -> dict[str, Any]:
                 ],
             },
             {
-                "id": "opus_conversion",
-                "title": "Opus Conversion (Optional)",
+                "id": "target_conversion",
+                "title": "Target Conversion (Optional)",
                 "path": "flac",
-                "function": "convert_lossless_to_opus",
-                "when": "After verified lossless, if opus_conversion enabled",
-                "inputs": ["verified_lossless", "opus_conversion config",
-                           "original FLAC files"],
+                "function": "convert_lossless",
+                "when": "After verified lossless, if verified_lossless_target is set",
+                "inputs": ["verified_lossless", "verified_lossless_target",
+                           "original lossless files"],
                 "rules": [
-                    {"condition": "verified_lossless AND opus_conversion enabled",
-                     "result": "FLAC → Opus 128kbps (V0 discarded)",
+                    {"condition": "verified_lossless AND target configured",
+                     "result": "lossless → configured target (V0 discarded)",
                      "color": "green",
                      "effect": "V0 bitrate stored as v0_verification_bitrate"},
-                    {"condition": "NOT verified_lossless OR opus disabled",
+                    {"condition": "NOT verified_lossless OR no target configured",
                      "result": "Keep V0 files (standard path)",
                      "color": "amber"},
                 ],
-                "note": "V0 exists only to verify genuineness. "
-                        "Opus 128 is ~50% smaller than V0 for identical quality.",
+                "note": "V0 exists only to verify genuineness. The final target "
+                        "may be Opus, MP3, AAC, or any other supported format.",
             },
             {
                 "id": "mp3_spectral",
@@ -1529,8 +1529,6 @@ def full_pipeline_decision(
     converted_count=0,
     # Pipeline state
     verified_lossless=False,
-    # Opus conversion (deprecated, use verified_lossless_target)
-    opus_conversion=False,
     # Verified lossless target format (e.g. "opus 128", "mp3 v2")
     verified_lossless_target=None,
     # Target format (user intent — "flac" skips conversion)
@@ -1560,7 +1558,7 @@ def full_pipeline_decision(
         "imported": False,
         "denylisted": False,
         "keep_searching": False,
-        "opus_final_format": None,
+        "target_final_format": None,
     }
 
     # --- Stage 1: Pre-import spectral (MP3/CBR path) ---
@@ -1638,9 +1636,8 @@ def full_pipeline_decision(
             verified_lossless = True
 
         # Target format conversion: if verified lossless + target configured
-        effective_target = verified_lossless_target or ("opus 128" if opus_conversion else None)
-        if verified_lossless and effective_target:
-            result["opus_final_format"] = effective_target
+        if verified_lossless and verified_lossless_target:
+            result["target_final_format"] = verified_lossless_target
 
         # Use post-conversion bitrate for quality gate
         gate_bitrate = post_conversion_min_bitrate or min_bitrate

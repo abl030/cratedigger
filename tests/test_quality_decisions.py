@@ -495,7 +495,7 @@ import inspect
 EXPECTED_RESULT_KEYS = {
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
-    "opus_final_format",
+    "target_final_format",
 }
 
 # Valid values for each stage (None means stage was skipped)
@@ -513,8 +513,7 @@ EXPECTED_PARAMS = {
     "existing_min_bitrate", "existing_spectral_bitrate",
     "override_min_bitrate",
     "post_conversion_min_bitrate", "converted_count",
-    "verified_lossless", "opus_conversion",
-    "verified_lossless_target",
+    "verified_lossless", "verified_lossless_target",
     "target_format",
 }
 
@@ -610,7 +609,7 @@ class TestFullPipelineContract(unittest.TestCase):
         tree = get_decision_tree()
         ids = [s["id"] for s in tree["stages"]]
         self.assertEqual(ids, ["flac_spectral", "flac_convert", "transcode",
-                               "verified_lossless", "opus_conversion",
+                               "verified_lossless", "target_conversion",
                                "mp3_spectral", "mp3_vbr_note",
                                "import_decision", "quality_gate", "dispatch"])
 
@@ -655,39 +654,41 @@ class TestFullPipelineContract(unittest.TestCase):
             self.assertIn(stage.get("path"), valid_paths,
                           f"Stage {stage['id']} has invalid path")
 
-    def test_opus_conversion_genuine_flac(self):
-        """Genuine FLAC + opus_conversion → Opus 128, accepted."""
+    def test_target_conversion_genuine_flac(self):
+        """Genuine FLAC + verified_lossless_target → target format, accepted."""
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine", converted_count=10,
-            post_conversion_min_bitrate=245, opus_conversion=True)
-        self.assertEqual(r["opus_final_format"], "opus 128")
+            post_conversion_min_bitrate=245,
+            verified_lossless_target="opus 128")
+        self.assertEqual(r["target_final_format"], "opus 128")
         self.assertTrue(r["imported"])
         self.assertEqual(r["stage3_quality_gate"], "accept")
 
-    def test_opus_conversion_disabled(self):
-        """Genuine FLAC without opus_conversion → no Opus."""
+    def test_target_conversion_disabled(self):
+        """Genuine FLAC without verified_lossless_target → keep V0."""
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine", converted_count=10,
-            post_conversion_min_bitrate=245, opus_conversion=False)
-        self.assertIsNone(r["opus_final_format"])
+            post_conversion_min_bitrate=245, verified_lossless_target=None)
+        self.assertIsNone(r["target_final_format"])
         self.assertTrue(r["imported"])
 
-    def test_opus_conversion_transcode_skips(self):
-        """Transcode FLAC + opus_conversion → no Opus (not verified)."""
+    def test_target_conversion_transcode_skips(self):
+        """Transcode FLAC + verified_lossless_target → no target conversion."""
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect", converted_count=10,
-            post_conversion_min_bitrate=190, opus_conversion=True)
-        self.assertIsNone(r["opus_final_format"])
+            post_conversion_min_bitrate=190,
+            verified_lossless_target="aac 128")
+        self.assertIsNone(r["target_final_format"])
 
-    def test_opus_conversion_mp3_skips(self):
-        """MP3 path + opus_conversion → no Opus (not lossless)."""
+    def test_target_conversion_mp3_skips(self):
+        """MP3 path + verified_lossless_target → no target conversion."""
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=245, is_cbr=False,
-            opus_conversion=True)
-        self.assertIsNone(r["opus_final_format"])
+            verified_lossless_target="mp3 v2")
+        self.assertIsNone(r["target_final_format"])
 
 
 # ============================================================================
@@ -834,12 +835,6 @@ class TestDispatchAction(unittest.TestCase):
     def test_target_conversion_failed_marks_failed(self):
         """Target conversion failure falls into catch-all → mark_failed."""
         a = self._action("target_conversion_failed")
-        self.assertTrue(a.mark_failed)
-        self.assertFalse(a.denylist)
-
-    def test_opus_conversion_failed_marks_failed(self):
-        """Legacy opus_conversion_failed also falls into catch-all."""
-        a = self._action("opus_conversion_failed")
         self.assertTrue(a.mark_failed)
         self.assertFalse(a.denylist)
 

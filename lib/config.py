@@ -64,7 +64,6 @@ class SoularrConfig:
     beets_staging_dir: str = ""
     audio_check_mode: str = "normal"
     beets_tracking_file: str = ""
-    opus_conversion: bool = False  # Deprecated: use verified_lossless_target
     verified_lossless_target: str = ""  # Target format after verified lossless (e.g. "opus 128", "mp3 v2")
 
     # --- Pipeline DB ---
@@ -184,7 +183,6 @@ class SoularrConfig:
             beets_staging_dir=get("Beets Validation", "staging_dir", ""),
             audio_check_mode=get("Beets Validation", "audio_check", "normal"),
             beets_tracking_file=get("Beets Validation", "tracking_file", ""),
-            opus_conversion=getbool("Beets Validation", "opus_conversion", False),
             verified_lossless_target=get("Beets Validation", "verified_lossless_target", ""),
             # Pipeline DB
             pipeline_db_enabled=getbool("Pipeline DB", "enabled", False),
@@ -203,3 +201,24 @@ class SoularrConfig:
             lock_file_path=os.path.join(var_dir, ".soularr.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
         )
+
+
+def read_verified_lossless_target(config_path: str | None = None) -> str:
+    """Read verified_lossless_target from the runtime config file.
+
+    Manual-import and force-import run outside the main soularr process, so they
+    need a small helper to discover the same runtime setting. Callers may pass an
+    explicit path, otherwise the standard doc2 runtime config is used.
+    """
+    path = config_path or os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
+    if not path or not os.path.exists(path):
+        return ""
+
+    parser = configparser.ConfigParser(
+        interpolation=configparser.BasicInterpolation()
+    )
+    try:
+        parser.read(path)
+    except (configparser.Error, OSError):
+        return ""
+    return parser.get("Beets Validation", "verified_lossless_target", fallback="").strip()

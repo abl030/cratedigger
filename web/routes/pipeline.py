@@ -202,7 +202,6 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
         post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
         converted_count=_int("converted_count") or 0,
         verified_lossless=_bool("verified_lossless"),
-        opus_conversion=_bool("opus_conversion"),
         verified_lossless_target=_str("verified_lossless_target"),
     )
     h._json(result)

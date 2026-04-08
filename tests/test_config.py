@@ -3,11 +3,12 @@
 import configparser
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.config import SoularrConfig
+from lib.config import SoularrConfig, read_verified_lossless_target
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 TEST_CONFIG = os.path.join(FIXTURES_DIR, "test_config.ini")
@@ -226,23 +227,6 @@ class TestConfigDefaults(unittest.TestCase):
         cfg = SoularrConfig.from_ini(config)
         self.assertEqual(cfg.allowed_filetypes, ("flac",))
 
-    def test_opus_conversion_default_false(self):
-        config = configparser.ConfigParser()
-        for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
-            config.add_section(section)
-        cfg = SoularrConfig.from_ini(config)
-        self.assertFalse(cfg.opus_conversion)
-
-    def test_opus_conversion_enabled(self):
-        config = configparser.ConfigParser()
-        for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
-            config.add_section(section)
-        config.set("Beets Validation", "opus_conversion", "true")
-        cfg = SoularrConfig.from_ini(config)
-        self.assertTrue(cfg.opus_conversion)
-
     def test_verified_lossless_target_default_empty(self):
         config = configparser.ConfigParser()
         for section in ["Slskd", "Search Settings", "Release Settings",
@@ -259,6 +243,20 @@ class TestConfigDefaults(unittest.TestCase):
         config.set("Beets Validation", "verified_lossless_target", "opus 128")
         cfg = SoularrConfig.from_ini(config)
         self.assertEqual(cfg.verified_lossless_target, "opus 128")
+
+
+class TestReadVerifiedLosslessTarget(unittest.TestCase):
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(
+            read_verified_lossless_target("/nonexistent/soularr-config.ini"), ""
+        )
+
+    def test_reads_runtime_value_from_config_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("[Beets Validation]\nverified_lossless_target = aac 128\n")
+            self.assertEqual(read_verified_lossless_target(path), "aac 128")
 
 
 if __name__ == "__main__":

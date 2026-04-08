@@ -257,6 +257,14 @@ class TestConvertLosslessE2E(unittest.TestCase):
             counts[ext] = counts.get(ext, 0) + 1
         return counts
 
+    def _get_codec_name(self, path):
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return result.stdout.strip().lower()
+
     def test_v0_conversion_genuine(self):
         """Genuine FLAC → V0: only .mp3 files on disk, bitrate > 210."""
         from import_one import convert_lossless, V0_SPEC
@@ -340,6 +348,39 @@ class TestConvertLosslessE2E(unittest.TestCase):
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".m4a", 0), 2)
             self.assertNotIn(".flac", exts)
+
+    def test_aac_target_handles_alac_same_extension_collision(self):
+        """ALAC .m4a → AAC .m4a should replace the source, not skip it."""
+        from import_one import (
+            V0_SPEC,
+            _remove_files_by_ext,
+            _remove_lossless_files,
+            convert_lossless,
+            parse_verified_lossless_target,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            os.makedirs(album)
+            src = os.path.join(album, "01 - Track 1.m4a")
+            subprocess.run(
+                ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                 "-c:a", "alac", "-y", src],
+                capture_output=True, check=True, timeout=30,
+            )
+
+            converted, failed, _ = convert_lossless(album, V0_SPEC, keep_source=True)
+            self.assertEqual((converted, failed), (1, 0))
+
+            target_spec = parse_verified_lossless_target("aac 128")
+            converted, failed, _ = convert_lossless(album, target_spec, keep_source=True)
+            self.assertEqual((converted, failed), (1, 0))
+
+            _remove_files_by_ext(album, "." + V0_SPEC.extension)
+            _remove_lossless_files(album)
+
+            files = sorted(os.listdir(album))
+            self.assertEqual(files, ["01 - Track 1.m4a"])
+            self.assertEqual(self._get_codec_name(os.path.join(album, files[0])), "aac")
 
     def test_no_lossless_files_noop(self):
         """Directory with only MP3s → no conversion."""

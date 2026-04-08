@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+from lib.config import read_verified_lossless_target
 from lib.quality import ImportResult
 
 logger = logging.getLogger("soularr")
@@ -161,6 +162,7 @@ def run_import(
     import_one_path: str,
     force: bool = False,
     override_min_bitrate: int | None = None,
+    verified_lossless_target: str | None = None,
 ) -> ImportOutcome:
     """Run import_one.py and return a typed outcome.
 
@@ -177,10 +179,17 @@ def run_import(
         path, mb_release_id,
         "--request-id", str(request_id),
     ]
+    effective_target = (
+        verified_lossless_target
+        if verified_lossless_target is not None
+        else read_verified_lossless_target()
+    )
     if force:
         cmd.append("--force")
     if override_min_bitrate is not None:
         cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
+    if effective_target:
+        cmd.extend(["--verified-lossless-target", effective_target])
 
     logger.info("IMPORT-SERVICE: running %s", " ".join(cmd))
 

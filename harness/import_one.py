@@ -370,7 +370,9 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
     or None if no lossless files were found.
 
     When keep_source=True, original lossless files are preserved (used when
-    a second conversion pass will run from the originals).
+    a second conversion pass will run from the originals). If the target uses
+    the same path as the source (ALAC .m4a → AAC .m4a), conversion runs through
+    a temporary file first so the source is not silently skipped.
     """
     lossless_files = sorted(
         f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
@@ -384,8 +386,13 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
     for fname in lossless_files:
         src_path = os.path.join(album_path, fname)
         out_path = os.path.splitext(src_path)[0] + "." + spec.extension
+        same_path_output = os.path.normpath(src_path) == os.path.normpath(out_path)
+        temp_out_path = (
+            os.path.splitext(src_path)[0] + ".tmp." + spec.extension
+            if same_path_output else out_path
+        )
 
-        if os.path.exists(out_path):
+        if not same_path_output and os.path.exists(out_path):
             continue
 
         if dry_run:
@@ -397,27 +404,34 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
         cmd = ["ffmpeg", "-i", src_path,
                "-c:a", spec.codec, *spec.codec_args,
                *spec.metadata_args,
-               "-y", out_path]
+               "-y", temp_out_path]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=300)
         except subprocess.TimeoutExpired:
             print(f"  [FAIL] {fname}: ffmpeg timed out after 300s",
                   file=sys.stderr)
-            if os.path.exists(out_path):
-                os.remove(out_path)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
             failed += 1
             continue
 
-        if (result.returncode != 0 or not os.path.exists(out_path)
-                or os.path.getsize(out_path) == 0):
+        if (result.returncode != 0 or not os.path.exists(temp_out_path)
+                or os.path.getsize(temp_out_path) == 0):
             print(f"  [FAIL] {fname}: {result.stderr[-200:]}",
                   file=sys.stderr)
-            if os.path.exists(out_path):
-                os.remove(out_path)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
             failed += 1
         else:
-            if not keep_source:
+            if same_path_output:
+                backup_path = os.path.splitext(src_path)[0] + ".source" + os.path.splitext(src_path)[1]
+                if keep_source:
+                    os.replace(src_path, backup_path)
+                else:
+                    os.remove(src_path)
+                os.replace(temp_out_path, out_path)
+            elif not keep_source:
                 os.remove(src_path)
             converted += 1
 
@@ -604,8 +618,6 @@ def main():
                         help="Override existing min bitrate for downgrade check (kbps)")
     parser.add_argument("--force", action="store_true",
                         help="Skip distance check (for force-importing rejected albums)")
-    parser.add_argument("--opus-conversion", action="store_true",
-                        help="(deprecated, use --verified-lossless-target)")
     parser.add_argument("--verified-lossless-target", default=None,
                         help="Target format after verified lossless (e.g. 'opus 128', 'mp3 v2')")
     parser.add_argument("--target-format", default=None,
@@ -615,10 +627,6 @@ def main():
 
     mbid = args.mb_release_id
     request_id = args.request_id
-
-    # Normalize: --opus-conversion → --verified-lossless-target "opus 128"
-    if args.opus_conversion and not args.verified_lossless_target:
-        args.verified_lossless_target = "opus 128"
 
     # --force: raise distance threshold so high-distance candidates are accepted
     global MAX_DISTANCE
