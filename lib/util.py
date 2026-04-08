@@ -415,21 +415,14 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
 
 # === Misc utilities ===
 
-def is_docker() -> bool:
-    return os.getenv("IN_DOCKER") is not None
-
-
 
 def setup_logging(config: Any) -> None:
-    DEFAULT_LOGGING_CONF = {
+    _DEFAULT = {
         "level": "INFO",
         "format": "[%(levelname)s|%(module)s|L%(lineno)d] %(asctime)s: %(message)s",
         "datefmt": "%Y-%m-%dT%H:%M:%S%z",
     }
-    if "Logging" in config:
-        log_config = config["Logging"]
-    else:
-        log_config = DEFAULT_LOGGING_CONF
+    log_config = config["Logging"] if "Logging" in config else _DEFAULT
     logging.basicConfig(**log_config)  # type: ignore
 
 

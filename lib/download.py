@@ -351,7 +351,12 @@ def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationRes
     if request_id and ctx.pipeline_db_source:
         try:
             spectral_to_write = album_data.current_spectral
-            if spectral_to_write is None and album_data.download_spectral is not None:
+            if (spectral_to_write is None
+                    and album_data.download_spectral is not None
+                    and album_data.current_min_bitrate is not None):
+                # Only propagate when something IS on disk but lacks spectral data.
+                # Without the min_bitrate guard, a new album (nothing on disk) would
+                # adopt the download's spectral as "existing", then reject itself.
                 spectral_to_write = album_data.download_spectral
                 album_data.current_spectral = spectral_to_write
                 logger.info(

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import configparser
+import logging
 import os
 import sys
 import time
-import configparser
-import logging
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
+
 import slskd_api
 
 if TYPE_CHECKING:
@@ -41,31 +42,11 @@ class SlskdDirectory(TypedDict):
     files: list[SlskdFile]
 
 
-class EnvInterpolation(configparser.ExtendedInterpolation):
-    """
-    Interpolation which expands environment variables in values.
-    Borrowed from https://stackoverflow.com/a/68068943
-    """
-
-    def before_read(self, parser, section, option, value):
-        value = super().before_read(parser, section, option, value)
-        return os.path.expandvars(value)
-
-
-# Allows backwards compatibility for users updating an older version of Soularr
-# without using the new [Logging] section in the config.ini file.
-DEFAULT_LOGGING_CONF = {
-    "level": "INFO",
-    "format": "[%(levelname)s|%(module)s|L%(lineno)d] %(asctime)s: %(message)s",
-    "datefmt": "%Y-%m-%dT%H:%M:%S%z",
-}
-
 # === Typed Config (populated in main() via SoularrConfig.from_ini()) ===
 cfg: SoularrConfig = None  # type: ignore[assignment]  # Set in main()
 
 # === API Clients & Logging ===
 slskd: slskd_api.SlskdClient = None  # type: ignore[assignment]  # Set in main()
-config = None
 logger = logging.getLogger("soularr")
 
 # === API client instances (set in main()) ===
@@ -103,31 +84,20 @@ from lib.matching import (
 )
 
 
-def is_blacklisted(title: str, title_blacklist: Sequence[str]) -> bool:
-    for word in title_blacklist:
-        if word and word.lower() in title.lower():
-            logger.info(f"Skipping {title} due to blacklisted word: {word}")
-            return True
-    return False
-
-
-def filter_list(albums, filter_cfg: SoularrConfig):
-    """
-    Helper to do all the various filtering in one go and in one place. Same net effect as the previous multi-stage approach
-    Just neater and easier to work on.
-    """
-    list_to_download = []
+def filter_list(albums: Sequence[Any], filter_cfg: SoularrConfig) -> list[Any] | None:
+    """Filter albums against the title blacklist. Returns None if nothing passes."""
+    result = []
     for album in albums:
-        if is_blacklisted(album.title, filter_cfg.title_blacklist):
-            logger.info(f"Skipping blacklisted album: {album.artist_name} - {album.title} (ID: {album.id}")
-            continue
+        title_lower = album.title.lower()
+        blocked = next(
+            (w for w in filter_cfg.title_blacklist if w and w.lower() in title_lower),
+            None,
+        )
+        if blocked:
+            logger.info(f"Skipping blacklisted album: {album.artist_name} - {album.title} (word: {blocked})")
         else:
-            list_to_download.append(album)
-
-    if len(list_to_download) > 0:
-        return list_to_download
-    else:
-        return None
+            result.append(album)
+    return result or None
 
 
 def _build_search_cache(
@@ -520,86 +490,48 @@ def grab_most_wanted(albums):
 
 
 from lib.util import (_track_titles_cross_check,
-                      is_docker, setup_logging)
+                      setup_logging)
 
 
 def main():
     global \
         cfg, \
         slskd, \
-        config, \
         pipeline_db_source, \
         _module_ctx
 
-    # Let's allow some overrides to be passed to the script
-    parser = argparse.ArgumentParser(description="""Soularr downloads wanted albums from Soulseek via slskd""")
-
-    default_data_directory = os.getcwd()
-
-    if is_docker():
-        default_data_directory = "/data"
-
-    parser.add_argument(
-        "-c",
-        "--config-dir",
-        default=default_data_directory,
-        const=default_data_directory,
-        nargs="?",
-        type=str,
-        help="Config directory (default: %(default)s)",
-    )
-
-    parser.add_argument(
-        "-v",
-        "--var-dir",
-        default=default_data_directory,
-        const=default_data_directory,
-        nargs="?",
-        type=str,
-        help="Var directory (default: %(default)s)",
-    )
-
-    parser.add_argument(
-        "--no-lock-file",
-        action="store_false",
-        dest="lock_file",
-        default=True,
-        help="Disable lock file creation",
-    )
-
+    parser = argparse.ArgumentParser(description="Soularr music download pipeline")
+    parser.add_argument("-c", "--config-dir", default=os.getcwd(),
+                        help="Config directory (default: cwd)")
+    parser.add_argument("-v", "--var-dir", default=os.getcwd(),
+                        help="Var directory for lock file and caches (default: cwd)")
+    parser.add_argument("--no-lock-file", action="store_true",
+                        help="Disable lock file creation")
     args = parser.parse_args()
 
     lock_file_path = os.path.join(args.var_dir, ".soularr.lock")
     config_file_path = os.path.join(args.config_dir, "config.ini")
 
-    if not is_docker() and os.path.exists(lock_file_path) and args.lock_file:
-        logger.info(f"Soularr instance is already running.")
+    if not args.no_lock_file and os.path.exists(lock_file_path):
+        logger.info("Soularr instance is already running.")
         sys.exit(1)
 
     try:
-        if not is_docker() and args.lock_file:
-            with open(lock_file_path, "w") as lock_file:
-                lock_file.write("locked")
+        if not args.no_lock_file:
+            with open(lock_file_path, "w") as f:
+                f.write("locked")
 
-        # Disable interpolation to make storing logging formats in the config file much easier
-        config = configparser.ConfigParser(interpolation=EnvInterpolation())
+        config = configparser.RawConfigParser()
 
         if os.path.exists(config_file_path):
             config.read(config_file_path)
         else:
-            if is_docker():
-                logger.error(
-                    'Config file does not exist! Please mount "/data" and place your "config.ini" file there. Alternatively, pass `--config-dir /directory/of/your/liking` as post arguments to store the config somewhere else.'
-                )
-                logger.error("See: https://github.com/mrusse/soularr/blob/main/config.ini for an example config file.")
-            else:
-                logger.error(
-                    "Config file does not exist! Please place it in the working directory. Alternatively, pass `--config-dir /directory/of/your/liking` as post arguments to store the config somewhere else."
-                )
-                logger.error("See: https://github.com/mrusse/soularr/blob/main/config.ini for an example config file.")
-            if os.path.exists(lock_file_path) and not is_docker():
-                os.remove(lock_file_path)
-            sys.exit(0)
+            logger.error(
+                f"Config file not found at {config_file_path}. "
+                "Pass --config-dir to specify its location. "
+                "See config.ini in the repo for an example."
+            )
+            sys.exit(1)
 
         # --- Parse config into typed dataclass ---
         from lib.config import SoularrConfig
@@ -711,7 +643,7 @@ def main():
             except Exception:
                 pass
         # Remove the lock file after activity is done
-        if os.path.exists(lock_file_path) and not is_docker():
+        if not args.no_lock_file and os.path.exists(lock_file_path):
             os.remove(lock_file_path)
 
 

@@ -101,7 +101,7 @@ class SoularrConfig:
         return self._allowed_specs
 
     @classmethod
-    def from_ini(cls, config: configparser.ConfigParser,
+    def from_ini(cls, config: configparser.RawConfigParser,
                  config_dir: str = ".", var_dir: str = ".") -> "SoularrConfig":
         """Parse a ConfigParser into a SoularrConfig.
 
