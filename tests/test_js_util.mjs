@@ -77,13 +77,13 @@ assertEqual(esc(undefined), '', 'undefined returns empty');
 
 // --- overrideToIntent tests ---
 console.log('overrideToIntent()');
-assertEqual(overrideToIntent(null), 'best_effort', 'null → best_effort');
-assertEqual(overrideToIntent(undefined), 'best_effort', 'undefined → best_effort');
-assertEqual(overrideToIntent(''), 'best_effort', 'empty string → best_effort');
-assertEqual(overrideToIntent('flac'), 'flac_only', '"flac" → flac_only');
-assertEqual(overrideToIntent('flac_preferred'), 'upgrade', '"flac_preferred" (legacy) → upgrade');
-assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'upgrade', 'CSV upgrade tiers → upgrade');
-assertEqual(overrideToIntent('flac,mp3 v0'), 'upgrade', 'partial CSV → upgrade');
+assertEqual(overrideToIntent(null), 'default', 'null → default');
+assertEqual(overrideToIntent(undefined), 'default', 'undefined → default');
+assertEqual(overrideToIntent(''), 'default', 'empty string → default');
+assertEqual(overrideToIntent('lossless'), 'lossless', '"lossless" → lossless');
+assertEqual(overrideToIntent('flac'), 'lossless', '"flac" (backward compat) → lossless');
+assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'default', 'CSV → default');
+assertEqual(overrideToIntent('unknown'), 'default', 'unknown → default');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

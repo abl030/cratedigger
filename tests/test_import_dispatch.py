@@ -401,9 +401,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         # Should NOT have denylisted anyone
         db.add_denylist.assert_not_called()
 
-    def test_requeue_flac_uses_intent(self):
-        """requeue_flac should use quality constants(flac_only)."""
-        db = self._run_quality_gate("requeue_flac")
+    def test_requeue_lossless_uses_intent(self):
+        """requeue_lossless should use quality constants(lossless)."""
+        db = self._run_quality_gate("requeue_lossless")
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
             call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),

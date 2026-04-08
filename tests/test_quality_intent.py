@@ -1,12 +1,12 @@
-"""Tests for search_tiers, INTENT_NAMES, and quality override narrowing contracts."""
+"""Tests for search_tiers and quality override narrowing contracts."""
 
 import unittest
 
 from lib.quality import (
     QUALITY_UPGRADE_TIERS,
     QUALITY_FLAC_ONLY,
-    INTENT_NAMES,
     search_tiers,
+    should_clear_lossless_search_override,
     narrow_override_on_downgrade,
     DownloadInfo,
 )
@@ -47,27 +47,6 @@ class TestSearchTiers(unittest.TestCase):
     def test_config_order_preserved(self):
         tiers, _ = search_tiers(None, ["mp3", "flac"])
         self.assertEqual(tiers, ["mp3", "flac"])
-
-
-class TestIntentNames(unittest.TestCase):
-    """INTENT_NAMES maps friendly CLI/web names to DB values."""
-
-    def test_best_effort_is_none(self):
-        self.assertIsNone(INTENT_NAMES["best_effort"])
-
-    def test_flac_only(self):
-        self.assertEqual(INTENT_NAMES["flac_only"], QUALITY_FLAC_ONLY)
-
-    def test_flac_alias(self):
-        self.assertEqual(INTENT_NAMES["flac"], QUALITY_FLAC_ONLY)
-
-    def test_upgrade(self):
-        self.assertEqual(INTENT_NAMES["upgrade"], QUALITY_UPGRADE_TIERS)
-
-    def test_all_values_are_string_or_none(self):
-        for name, val in INTENT_NAMES.items():
-            self.assertTrue(val is None or isinstance(val, str),
-                            f"{name!r} has value {val!r}")
 
 
 class TestEffectiveSearchTiers(unittest.TestCase):
@@ -113,6 +92,38 @@ class TestEffectiveSearchTiers(unittest.TestCase):
             "", "flac", ["flac", "mp3 v0", "mp3 320"])
         self.assertEqual(tiers, ["flac"])
         self.assertFalse(catch_all)
+
+
+class TestClearLosslessOverride(unittest.TestCase):
+    """Clearing default intent should only remove user-triggered lossless search."""
+
+    def test_default_clears_previous_lossless_toggle_override(self):
+        self.assertTrue(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="lossless",
+            search_filetype_override="lossless",
+        ))
+
+    def test_default_clears_legacy_flac_target_override(self):
+        self.assertTrue(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="flac",
+            search_filetype_override="lossless",
+        ))
+
+    def test_default_preserves_upgrade_override(self):
+        self.assertFalse(should_clear_lossless_search_override(
+            new_target_format=None,
+            old_target_format="lossless",
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        ))
+
+    def test_lossless_intent_never_clears_override(self):
+        self.assertFalse(should_clear_lossless_search_override(
+            new_target_format="lossless",
+            old_target_format="lossless",
+            search_filetype_override="lossless",
+        ))
 
 
 class TestNarrowSearchContract(unittest.TestCase):

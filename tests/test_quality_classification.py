@@ -12,7 +12,7 @@ The quality gate decision tree (from soularr.py _check_quality_gate):
 
   1. verified_lossless=TRUE + any bitrate  → ACCEPT
   2. gate_bitrate < 210kbps                → REQUEUE_UPGRADE
-  3. CBR + not verified_lossless           → REQUEUE_FLAC
+  3. CBR + not verified_lossless           → REQUEUE_LOSSLESS
   4. VBR >= 210kbps                        → ACCEPT
 
 This test suite exercises that tree with real files so we can detect
@@ -43,7 +43,7 @@ class QualityDecision(Enum):
     """What the quality gate decides to do with an album."""
     ACCEPT = "accept"                    # imported, done
     REQUEUE_UPGRADE = "requeue_upgrade"  # below 210kbps, search for better
-    REQUEUE_FLAC = "requeue_flac"        # CBR above 210, search for FLAC to verify
+    REQUEUE_LOSSLESS = "requeue_lossless"  # CBR above 210, search for lossless to verify
 
 
 @dataclass
@@ -271,11 +271,11 @@ ALBUM_EXPECTATIONS = [
 
     # --- CBR (unverifiable, always re-queue for FLAC) ---
     ("04_cbr_320", "CBR 320kbps",
-     QualityDecision.REQUEUE_FLAC,
+     QualityDecision.REQUEUE_LOSSLESS,
      {"is_cbr": True, "min_bitrate_above": 210}),
 
     ("05_cbr_256", "CBR 256kbps",
-     # CBR 256 is above 210kbps, so normally REQUEUE_FLAC.
+     # CBR 256 is above 210kbps, so normally REQUEUE_LOSSLESS.
      # However, spectral analysis may detect a cliff on some tracks and
      # set spectral_bitrate < 210 → REQUEUE_UPGRADE instead.
      # Either outcome is correct — both trigger a re-search.
@@ -622,7 +622,7 @@ class TestLiveBugReproductions(unittest.TestCase):
 
         When cliff detection doesn't fire, spectral_bitrate=None.
         The quality gate has nothing to override with, so CBR 320
-        passes through as "requeue_flac" at best.
+        passes through as "requeue_lossless" at best.
         """
         r = full_pipeline_decision(
             is_flac=False,

@@ -48,9 +48,9 @@ export function awstDateTime(isoStr) { return toAWST(isoStr).slice(0, 16).replac
  * @returns {string}
  */
 export function overrideToIntent(override) {
-  if (!override) return 'best_effort';
-  if (override === 'flac') return 'flac_only';
-  return 'upgrade';  // CSV like "flac,mp3 v0,mp3 320"
+  if (!override) return 'default';
+  if (override === 'lossless' || override === 'flac') return 'lossless';
+  return 'default';
 }
 
 /**

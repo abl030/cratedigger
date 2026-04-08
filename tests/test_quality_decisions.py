@@ -333,15 +333,15 @@ class TestQualityGateDecision(unittest.TestCase):
         m = AudioQualityMeasurement(min_bitrate_kbps=192, spectral_bitrate_kbps=256)
         self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
 
-    # --- requeue_flac cases ---
+    # --- requeue_lossless cases ---
 
-    def test_cbr_above_threshold_requeues_flac(self):
+    def test_cbr_above_threshold_requeues_lossless(self):
         m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_flac")
+        self.assertEqual(quality_gate_decision(m), "requeue_lossless")
 
-    def test_cbr_256_requeues_flac(self):
+    def test_cbr_256_requeues_lossless(self):
         m = AudioQualityMeasurement(min_bitrate_kbps=256, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_flac")
+        self.assertEqual(quality_gate_decision(m), "requeue_lossless")
 
     # --- edge: CBR below threshold → requeue_upgrade (not flac) ---
 
@@ -503,7 +503,7 @@ VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
                 "transcode_downgrade", "transcode_first",
                 "preflight_existing"}
-VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_flac"}
+VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_lossless"}
 VALID_FINAL_STATUS = {None, "imported", "wanted"}
 
 # The exact parameter names the simulator form submits
@@ -921,13 +921,13 @@ class TestRejectedDownloadTier(unittest.TestCase):
 
     def test_flac(self):
         dl = DownloadInfo(slskd_filetype="flac", is_vbr=False, bitrate=1411000)
-        self.assertEqual(rejected_download_tier(dl), "flac")
+        self.assertEqual(rejected_download_tier(dl), "lossless")
 
     def test_converted_flac(self):
-        """FLAC converted to V0 — tier is 'flac' (the source format)."""
+        """FLAC converted to V0 — tier is 'lossless' (the source format)."""
         dl = DownloadInfo(slskd_filetype="flac", was_converted=True,
                           is_vbr=True, bitrate=245000)
-        self.assertEqual(rejected_download_tier(dl), "flac")
+        self.assertEqual(rejected_download_tier(dl), "lossless")
 
     def test_empty_dl_info(self):
         dl = DownloadInfo()
@@ -942,25 +942,25 @@ class TestNarrowOverrideOnDowngrade(unittest.TestCase):
     """Test narrowing quality_override after downgrade rejection."""
 
     def test_removes_320_from_upgrade_tiers(self):
-        """Standard case: 'flac,mp3 v0,mp3 320' + 320 → 'flac,mp3 v0'."""
+        """Standard case: 'lossless,mp3 v0,mp3 320' + 320 → 'lossless,mp3 v0'."""
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
-        result = narrow_override_on_downgrade("flac,mp3 v0,mp3 320", dl)
-        self.assertEqual(result, "flac,mp3 v0")
+        result = narrow_override_on_downgrade("lossless,mp3 v0,mp3 320", dl)
+        self.assertEqual(result, "lossless,mp3 v0")
 
-    def test_removes_flac_from_override(self):
+    def test_removes_lossless_from_override(self):
         dl = DownloadInfo(slskd_filetype="flac", is_vbr=False)
-        result = narrow_override_on_downgrade("flac,mp3 v0", dl)
+        result = narrow_override_on_downgrade("lossless,mp3 v0", dl)
         self.assertEqual(result, "mp3 v0")
 
     def test_removes_v0_from_override(self):
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=True, bitrate=245000)
-        result = narrow_override_on_downgrade("flac,mp3 v0,mp3 320", dl)
-        self.assertEqual(result, "flac,mp3 320")
+        result = narrow_override_on_downgrade("lossless,mp3 v0,mp3 320", dl)
+        self.assertEqual(result, "lossless,mp3 320")
 
     def test_no_change_when_tier_not_in_override(self):
-        """320 download but override is 'flac' only → no change."""
+        """320 download but override is 'lossless' only → no change."""
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
-        result = narrow_override_on_downgrade("flac", dl)
+        result = narrow_override_on_downgrade("lossless", dl)
         self.assertIsNone(result)
 
     def test_no_change_when_no_override(self):
@@ -976,8 +976,8 @@ class TestNarrowOverrideOnDowngrade(unittest.TestCase):
 
     def test_handles_whitespace_in_override(self):
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
-        result = narrow_override_on_downgrade("flac, mp3 v0, mp3 320", dl)
-        self.assertEqual(result, "flac,mp3 v0")
+        result = narrow_override_on_downgrade("lossless, mp3 v0, mp3 320", dl)
+        self.assertEqual(result, "lossless,mp3 v0")
 
 
 class TestRejectionBackfillOverride(unittest.TestCase):

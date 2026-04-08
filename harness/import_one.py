@@ -122,17 +122,26 @@ def conversion_target(target_format: str | None,
     """What should lossless files become on disk? (pure)
 
     Returns:
-        "flac" — keep lossless as-is (user intent via target_format)
-        str    — verified_lossless_target spec (e.g. "opus 128", "mp3 v2")
-        None   — keep V0 (default, or not verified lossless)
+        "lossless" — keep lossless on disk (user intent via target_format)
+        str        — verified_lossless_target spec (e.g. "opus 128", "mp3 v2")
+        None       — keep V0 (default, or not verified lossless)
     """
-    if target_format == "flac":
-        return "flac"
+    if target_format in ("flac", "lossless"):
+        return "lossless"
     if not will_be_verified_lossless:
         return None
     if verified_lossless_target:
         return verified_lossless_target
     return None
+
+
+def should_run_target_conversion(conv_target: str | None) -> bool:
+    """Should we run the second conversion pass for a target format? (pure)
+
+    The "lossless" sentinel means "keep lossless on disk" and must not be
+    passed to parse_verified_lossless_target().
+    """
+    return conv_target not in (None, "lossless")
 
 
 def target_cleanup_decision(target_achieved: bool,
@@ -172,6 +181,14 @@ class ConversionSpec:
     label: str = "mp3 v0"                   # human-readable label for logging/display
     metadata_args: tuple[str, ...] = ("-map_metadata", "0")  # metadata handling
 
+
+# FLAC normalization spec — converts ALAC/WAV → FLAC when keeping lossless on disk
+FLAC_SPEC = ConversionSpec(
+    codec="flac",
+    codec_args=(),
+    extension="flac",
+    label="flac",
+)
 
 # V0 verification spec — always used as the first conversion step for FLAC
 V0_SPEC = ConversionSpec(
@@ -710,7 +727,8 @@ def main():
     except Exception as e:
         _log(f"  [SPECTRAL] error: {e}")
 
-    # --- Convert lossless → V0 (unless target_format=flac) ---
+    # --- Convert lossless → V0 (unless keeping lossless on disk) ---
+    keep_lossless = args.target_format in ("flac", "lossless")
     converted = 0
     failed = 0
     original_ext = None
@@ -719,7 +737,7 @@ def main():
     is_transcode = False
 
     has_target = bool(args.verified_lossless_target)
-    if args.target_format != "flac":
+    if not keep_lossless:
         _log(f"[CONVERT] {args.path}")
         converted, failed, original_ext = convert_lossless(
             args.path, V0_SPEC, dry_run=args.dry_run,
@@ -753,8 +771,32 @@ def main():
         if post_conv_br is not None:
             _log(f"  post_conversion_min_bitrate={post_conv_br}")
     else:
-        _log(f"[CONVERT] Skipping conversion (target_format={args.target_format})")
-        r.final_format = args.target_format
+        # Keeping lossless on disk — normalize ALAC/WAV → FLAC if needed
+        lossless_files = sorted(
+            f for f in os.listdir(args.path) if _is_lossless_file(f, args.path))
+        has_non_flac = any(
+            not f.lower().endswith(".flac") for f in lossless_files)
+        if has_non_flac and not args.dry_run:
+            _log(f"[NORMALIZE] Converting non-FLAC lossless → FLAC")
+            converted, failed, original_ext = convert_lossless(
+                args.path, FLAC_SPEC)
+            r.conversion.converted = converted
+            r.conversion.failed = failed
+            if converted > 0:
+                r.conversion.was_converted = True
+                r.conversion.original_filetype = original_ext
+                r.conversion.target_filetype = "flac"
+            _log(f"  Normalized {converted} files, failed {failed}")
+            cd = conversion_decision(converted, failed)
+            if cd.is_terminal:
+                r.exit_code = cd.exit_code
+                r.decision = cd.decision
+                r.error = cd.error
+                _log(f"[ERROR] {r.error}")
+                _emit_and_exit(r)
+        else:
+            _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
+        r.final_format = "flac"
 
     if args.dry_run:
         r.decision = "dry_run"
@@ -822,7 +864,8 @@ def main():
     conv_target = conversion_target(args.target_format, will_be_verified_lossless,
                                     args.verified_lossless_target)
     target_achieved = False
-    if conv_target and conv_target != "flac":
+    if should_run_target_conversion(conv_target):
+        assert conv_target is not None
         target_spec = parse_verified_lossless_target(conv_target)
         _log(f"[TARGET] Converting verified lossless → {target_spec.label}")
         r.v0_verification_bitrate = post_conv_br

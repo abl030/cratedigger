@@ -355,33 +355,54 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
 
 
 class TestCmdSetIntent(unittest.TestCase):
-    """Tests for cmd_set_intent — quality intent CLI command."""
+    """Tests for cmd_set_intent — lossless-on-disk toggle."""
 
     @patch("builtins.print")
-    def test_set_intent_on_wanted(self, _mock_print):
+    def test_set_lossless_on_wanted(self, _mock_print):
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=1, status="wanted", artist_name="A", album_title="B",
         )
-        args = MagicMock(id=1, intent="flac_only")
+        args = MagicMock(id=1, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db._execute.assert_called_once()
-        call_args = db._execute.call_args[0]
-        self.assertIn("target_format", call_args[0])
-        self.assertEqual(call_args[1][0], "flac")
+        db.update_request_fields.assert_called_once_with(1, target_format="lossless")
 
     @patch("builtins.print")
-    def test_set_intent_on_imported_requeues(self, _mock_print):
+    def test_set_default_clears_target(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=1, status="wanted", artist_name="A", album_title="B",
+        )
+        args = MagicMock(id=1, intent="default")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.update_request_fields.assert_called_once_with(1, target_format=None)
+
+    @patch("builtins.print")
+    @patch("lib.transitions.apply_transition")
+    def test_set_lossless_on_imported_requeues(self, mock_transition, _mock_print):
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=2, status="imported", artist_name="A", album_title="B",
             min_bitrate=245,
         )
-        args = MagicMock(id=2, intent="upgrade")
+        args = MagicMock(id=2, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db.reset_to_wanted.assert_called_once()
-        call_kwargs = db.reset_to_wanted.call_args.kwargs if db.reset_to_wanted.call_args.kwargs else db.reset_to_wanted.call_args[1]
-        self.assertEqual(call_kwargs.get("search_filetype_override"), "flac,mp3 v0,mp3 320")
+        mock_transition.assert_called_once()
+        call_kwargs = mock_transition.call_args.kwargs or mock_transition.call_args[1]
+        self.assertEqual(call_kwargs.get("search_filetype_override"), "lossless")
+        db.update_request_fields.assert_called_once_with(2, target_format="lossless")
+
+    @patch("builtins.print")
+    def test_set_default_clears_stale_lossless_override(self, _mock_print):
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=4, status="wanted", artist_name="A", album_title="B",
+            target_format="lossless", search_filetype_override="lossless",
+        )
+        args = MagicMock(id=4, intent="default")
+        pipeline_cli.cmd_set_intent(db, args)
+        db.update_request_fields.assert_called_once_with(
+            4, target_format=None, search_filetype_override=None)
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):
@@ -389,19 +410,17 @@ class TestCmdSetIntent(unittest.TestCase):
         db.get_request.return_value = make_request_row(
             id=3, status="downloading", artist_name="A", album_title="B",
         )
-        args = MagicMock(id=3, intent="flac_only")
+        args = MagicMock(id=3, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db.reset_to_wanted.assert_not_called()
-        db._execute.assert_not_called()
+        db.update_request_fields.assert_not_called()
 
     @patch("builtins.print")
     def test_set_intent_not_found(self, _mock_print):
         db = MagicMock()
         db.get_request.return_value = None
-        args = MagicMock(id=99, intent="upgrade")
+        args = MagicMock(id=99, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        db.reset_to_wanted.assert_not_called()
-        db._execute.assert_not_called()
+        db.update_request_fields.assert_not_called()
 
 
 if __name__ == "__main__":

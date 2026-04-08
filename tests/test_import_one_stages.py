@@ -240,12 +240,15 @@ class TestConversionTarget(unittest.TestCase):
         """No target configured, not verified → None (keep V0)."""
         self.assertIsNone(self._target())
 
-    def test_target_format_flac_keeps_flac(self):
-        self.assertEqual(self._target(target_format="flac"), "flac")
+    def test_target_format_flac_keeps_lossless(self):
+        self.assertEqual(self._target(target_format="flac"), "lossless")
 
     def test_target_format_flac_overrides_target(self):
         self.assertEqual(self._target(target_format="flac", verified=True,
-                                      vl_target="opus 128"), "flac")
+                                      vl_target="opus 128"), "lossless")
+
+    def test_target_format_lossless_keeps_lossless(self):
+        self.assertEqual(self._target(target_format="lossless"), "lossless")
 
     def test_verified_with_target_returns_target(self):
         self.assertEqual(self._target(verified=True, vl_target="opus 128"),
@@ -256,6 +259,22 @@ class TestConversionTarget(unittest.TestCase):
 
     def test_not_verified_with_target_returns_none(self):
         self.assertIsNone(self._target(verified=False, vl_target="opus 128"))
+
+
+class TestShouldRunTargetConversion(unittest.TestCase):
+    """Second conversion pass should skip the keep-lossless sentinel."""
+
+    def test_none_skips_target_conversion(self):
+        from import_one import should_run_target_conversion
+        self.assertFalse(should_run_target_conversion(None))
+
+    def test_lossless_sentinel_skips_target_conversion(self):
+        from import_one import should_run_target_conversion
+        self.assertFalse(should_run_target_conversion("lossless"))
+
+    def test_real_target_runs_second_pass(self):
+        from import_one import should_run_target_conversion
+        self.assertTrue(should_run_target_conversion("opus 128"))
 
 
 # ============================================================================

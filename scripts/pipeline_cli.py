@@ -198,9 +198,16 @@ def cmd_set(db, args):
 
 
 def cmd_set_intent(db, args):
-    """Set quality intent for a request."""
-    from lib.quality import INTENT_NAMES
+    """Toggle lossless-on-disk intent for a request.
+
+    'lossless' — keep lossless on disk (overrides global verified_lossless_target)
+    'default'  — pipeline decides (uses global verified_lossless_target)
+    """
+    from lib.quality import QUALITY_LOSSLESS, should_clear_lossless_search_override
     from lib.transitions import apply_transition
+
+    target_format = QUALITY_LOSSLESS if args.intent == "lossless" else None
+
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
@@ -208,28 +215,29 @@ def cmd_set_intent(db, args):
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return
-    target_format = INTENT_NAMES[args.intent]
     old_target = req.get("target_format")
+    label = f"{req['artist_name']} - {req['album_title']}"
 
-    if req["status"] == "imported":
+    if req["status"] == "imported" and target_format:
+        # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
         apply_transition(db, args.id, "wanted", from_status="imported",
-                         search_filetype_override=target_format,
+                         search_filetype_override=QUALITY_LOSSLESS,
                          min_bitrate=min_br)
-        # Persist the user intent separately
-        db._execute(
-            "UPDATE album_requests SET target_format = %s WHERE id = %s",
-            (target_format, args.id),
-        )
-        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={args.intent}, re-queued for search")
+        db.update_request_fields(args.id, target_format=target_format)
+        print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
-        db._execute(
-            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
-            (target_format, args.id),
-        )
-        print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: "
-              f"intent={args.intent} (target_format: {old_target} → {target_format})")
+        update_fields = {"target_format": target_format}
+        if should_clear_lossless_search_override(
+            new_target_format=target_format,
+            old_target_format=old_target,
+            search_filetype_override=req.get("search_filetype_override"),
+        ):
+            update_fields["search_filetype_override"] = None
+        db.update_request_fields(args.id, **update_fields)
+        action = "lossless on disk" if target_format else "default (pipeline decides)"
+        print(f"  [{args.id}] {label}: {action} "
+              f"(target_format: {old_target} → {target_format})")
 
 
 def _fmt_br(kbps):
@@ -529,7 +537,7 @@ def cmd_quality(db, args):
             spectral_bitrate_kbps=current_br)
         gate = quality_gate_decision(current)
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
-                      "requeue_flac": "NEEDS FLAC"}[gate]
+                      "requeue_lossless": "NEEDS LOSSLESS"}[gate]
         print(f"  Quality gate:  {gate_label}")
         print(f"    min_bitrate={_fmt_br(min_br)}, verified_lossless={verified}, "
               f"is_cbr={is_cbr}")
@@ -926,10 +934,10 @@ def main():
     p_quality.add_argument("id", type=int, help="Request ID")
 
     # set-intent
-    p_intent = sub.add_parser("set-intent", help="Set quality intent for a request")
+    p_intent = sub.add_parser("set-intent", help="Toggle lossless-on-disk for a request")
     p_intent.add_argument("id", type=int, help="Request ID")
-    p_intent.add_argument("intent", choices=["best_effort", "flac_only", "flac", "upgrade"],
-                          help="Quality intent")
+    p_intent.add_argument("intent", choices=["lossless", "default"],
+                          help="'lossless' = keep lossless on disk, 'default' = pipeline decides")
 
     # force-import
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")

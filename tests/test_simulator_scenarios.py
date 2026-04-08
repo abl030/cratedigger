@@ -87,8 +87,8 @@ ALBUM_STATES = [
     AlbumState("cbr_320_no_spectral", 320, True, None, None, False, None),
     AlbumState("cbr_320_genuine", 320, True, "genuine", None, False, None),
     AlbumState("cbr_320_suspect", 320, True, "suspect", None, False, None),
-    AlbumState("cbr_320_genuine_flac_override", 320, True, "genuine", None, False, "flac"),
-    AlbumState("cbr_320_genuine_spectral96", 320, True, "genuine", 96, False, "flac"),
+    AlbumState("cbr_320_genuine_flac_override", 320, True, "genuine", None, False, "lossless"),
+    AlbumState("cbr_320_genuine_spectral96", 320, True, "genuine", 96, False, "lossless"),
     AlbumState("vbr_v0_genuine", 240, False, "genuine", None, False, None),
     AlbumState("vbr_v0_no_spectral", 240, False, None, None, False, None),
     AlbumState("vbr_low_205", 205, False, None, None, False, None),
@@ -192,7 +192,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     # This mirrors _check_quality_gate() in import_dispatch.py:
     # - accept → search_filetype_override=None (clears transient override)
     # - requeue_upgrade → search_filetype_override=upgrade tiers
-    # - requeue_flac → search_filetype_override="flac"
+    # - requeue_lossless → search_filetype_override="lossless"
     # - rejection (not imported) → preserve existing override
     # target_format (persistent user intent) is NEVER touched by the pipeline.
     gate = result["stage3_quality_gate"]
@@ -202,9 +202,9 @@ def simulate(album: AlbumState, download: DownloadScenario,
     elif gate == "accept":
         override_after = None  # production clears search_filetype_override on accept
     elif gate == "requeue_upgrade":
-        override_after = "flac,mp3 v0,mp3 320"
-    elif gate == "requeue_flac":
-        override_after = "flac"
+        override_after = "lossless,mp3 v0,mp3 320"
+    elif gate == "requeue_lossless":
+        override_after = "lossless"
     else:
         override_after = album.quality_override
 
@@ -331,7 +331,7 @@ class TestSimulatorInvariants(unittest.TestCase):
                             r.stage2_import in ("transcode_upgrade",
                                                 "transcode_first"),
                             r.stage3_quality_gate in ("requeue_upgrade",
-                                                      "requeue_flac"),
+                                                      "requeue_lossless"),
                         )
                         self.assertTrue(any(causes),
                                         f"Imported + searching without cause: {r}")
@@ -356,12 +356,12 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertFalse(r.imported)
         self.assertEqual(r.stage2_import, "downgrade")
         self.assertTrue(r.keep_searching)
-        self.assertEqual(r.backfill_override, "flac",
+        self.assertEqual(r.backfill_override, "lossless",
                          "Genuine CBR 320 must backfill to flac-only on rejection")
 
-        # Verify the flac override narrows search tiers
-        tiers, allow_catch_all = search_tiers("flac", [])
-        self.assertEqual(tiers, ["flac"])
+        # Verify the lossless override narrows search tiers
+        tiers, allow_catch_all = search_tiers("lossless", [])
+        self.assertEqual(tiers, ["lossless"])
         self.assertFalse(allow_catch_all)
 
     def test_springsteen_genuine_but_96kbps(self):
@@ -401,7 +401,7 @@ class TestNamedRegressions(unittest.TestCase):
 
         self.assertFalse(r.imported)
         self.assertEqual(r.stage2_import, "downgrade")
-        self.assertEqual(r.backfill_override, "flac",
+        self.assertEqual(r.backfill_override, "lossless",
                          "Download's genuine spectral must propagate to break CBR loop")
 
     def test_scientists_suspect_download_no_backfill(self):
@@ -448,7 +448,7 @@ class TestNamedRegressions(unittest.TestCase):
         """
         # Album with user-set flac intent: "I want FLAC sources"
         album = AlbumState("cbr_320_genuine_user_flac", 320, True,
-                           "genuine", None, False, "flac", target_format="flac")
+                           "genuine", None, False, "lossless", target_format="flac")
         dl = DL_MAP["flac_genuine_raw"]
         r = simulate(album, dl)
 
@@ -520,7 +520,7 @@ class TestNamedRegressions(unittest.TestCase):
             with self.subTest(dl=dl_name):
                 r = simulate(album, DL_MAP[dl_name])
                 self.assertFalse(r.imported)
-                self.assertEqual(r.backfill_override, "flac",
+                self.assertEqual(r.backfill_override, "lossless",
                                  f"{dl_name} must propagate genuine spectral -> backfill")
 
 
@@ -610,7 +610,7 @@ class TestFreshRequestOutcomes(unittest.TestCase):
         self.assertFalse(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_flac")
+        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
 
     def test_cbr_256_no_spectral(self):
         r = self._sim("cbr_256_no_spectral")
@@ -618,7 +618,7 @@ class TestFreshRequestOutcomes(unittest.TestCase):
         self.assertFalse(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_flac")
+        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
 
     def test_cbr_192_no_spectral(self):
         r = self._sim("cbr_192_no_spectral")
@@ -636,7 +636,7 @@ class TestFreshRequestOutcomes(unittest.TestCase):
         self.assertFalse(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_flac")
+        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
 
     def test_cbr_320_suspect_128(self):
         r = self._sim("cbr_320_suspect_128")
@@ -660,7 +660,7 @@ class TestFreshRequestOutcomes(unittest.TestCase):
         self.assertFalse(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_flac")
+        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
 
     def test_cbr_192_genuine(self):
         r = self._sim("cbr_192_genuine")
@@ -770,7 +770,7 @@ class TestBackfillPropagation(unittest.TestCase):
         for dl_name in ("cbr_320_genuine", "cbr_256_genuine", "cbr_192_genuine"):
             with self.subTest(dl=dl_name):
                 r = simulate(album, DL_MAP[dl_name])
-                self.assertEqual(r.backfill_override, "flac")
+                self.assertEqual(r.backfill_override, "lossless")
 
     def test_suspect_download_does_not_propagate_backfill(self):
         """Suspect spectral grade does not trigger backfill."""
@@ -784,7 +784,7 @@ class TestBackfillPropagation(unittest.TestCase):
         """Downloads without spectral fall back to album's grade for backfill."""
         album = ALBUM_MAP["cbr_320_genuine"]
         r = simulate(album, DL_MAP["mp3_v0_240"])
-        self.assertEqual(r.backfill_override, "flac",
+        self.assertEqual(r.backfill_override, "lossless",
                          "Album's genuine grade used when download has no spectral")
 
     def test_no_spectral_either_side_no_backfill(self):
@@ -843,7 +843,7 @@ class TestBackfillPropagation(unittest.TestCase):
 
         # WITH propagation (current behavior): uses download's genuine grade
         r = simulate(album, dl)
-        self.assertEqual(r.backfill_override, "flac",
+        self.assertEqual(r.backfill_override, "lossless",
                          "With propagation, download's genuine grade enables backfill")
 
 

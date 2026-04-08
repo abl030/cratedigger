@@ -17,7 +17,7 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          SpectralMeasurement,
                          ValidationResult,
                          QUALITY_MIN_BITRATE_KBPS,
-                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
+                         QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, narrow_override_on_downgrade,
                          rejection_backfill_override)
@@ -177,17 +177,17 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {upgrade_override})")
-        elif decision == "requeue_flac":
-            flac_override = QUALITY_FLAC_ONLY
+        elif decision == "requeue_lossless":
+            lossless_override = QUALITY_LOSSLESS
             db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
-                             search_filetype_override=flac_override,
+                             search_filetype_override=lossless_override,
                              min_bitrate=min_br_kbps)
             logger.info(
                 f"QUALITY GATE: {label} "
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
-                f"searching for FLAC to verify")
+                f"searching for lossless to verify")
         else:  # accept
             db = ctx.pipeline_db_source._get_db()
             apply_transition(

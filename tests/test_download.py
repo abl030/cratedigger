@@ -168,10 +168,10 @@ class TestCheckQualityGateDecision(unittest.TestCase):
         m = AudioQualityMeasurement(min_bitrate_kbps=190)
         self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
 
-    def test_cbr_requeues_flac(self):
+    def test_cbr_requeues_lossless(self):
         from lib.quality import quality_gate_decision, AudioQualityMeasurement
         m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_flac")
+        self.assertEqual(quality_gate_decision(m), "requeue_lossless")
 
     def test_vbr_above_threshold_accepts(self):
         from lib.quality import quality_gate_decision, AudioQualityMeasurement

@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.import_service import run_import, log_and_update_import  # type: ignore[import-not-found]
-from lib.quality import QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY, INTENT_NAMES  # type: ignore[import-not-found]
+from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
+                         should_clear_lossless_search_override)
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
 from quality import get_decision_tree, full_pipeline_decision  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
@@ -431,7 +432,11 @@ def post_pipeline_set_quality(h, body: dict) -> None:
 
 
 def post_pipeline_set_intent(h, body: dict) -> None:
-    """Set quality intent for a pipeline request."""
+    """Toggle lossless-on-disk intent for a pipeline request.
+
+    Accepts intent: "lossless" (keep lossless on disk) or "default" (pipeline decides).
+    Backward compat: "flac", "flac_only" → "lossless"; "best_effort" → "default".
+    """
     s = _server()
     req_id = body.get("id")
     intent_str = body.get("intent", "").strip()
@@ -440,33 +445,33 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         h._error("Missing id")
         return
 
-    if intent_str not in INTENT_NAMES:
-        h._error(f"Invalid intent: {intent_str!r}. Valid: {list(INTENT_NAMES)}")
+    # Normalize to toggle: lossless or default
+    _ALIASES = {"flac": "lossless", "flac_only": "lossless",
+                "best_effort": "default", "upgrade": "default"}
+    intent_str = _ALIASES.get(intent_str, intent_str)
+    if intent_str not in ("lossless", "default"):
+        h._error(f"Invalid intent: {intent_str!r}. Valid: lossless, default")
         return
+
+    target_format = QUALITY_LOSSLESS if intent_str == "lossless" else None
 
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
         return
 
-    target_format = INTENT_NAMES[intent_str]
-
     if req["status"] == "downloading":
         h._error("Cannot set intent while album is downloading")
         return
 
-    if req["status"] == "imported":
-        # Re-queue for search with the new intent
+    if req["status"] == "imported" and target_format:
+        # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
         apply_transition(s._db(), int(req_id), "wanted",
                          from_status="imported",
-                         search_filetype_override=target_format,
+                         search_filetype_override=QUALITY_LOSSLESS,
                          min_bitrate=min_br)
-        # Persist the user intent separately
-        s._db()._execute(
-            "UPDATE album_requests SET target_format = %s WHERE id = %s",
-            (target_format, int(req_id)),
-        )
+        s._db().update_request_fields(int(req_id), target_format=target_format)
         h._json({
             "status": "ok",
             "id": int(req_id),
@@ -476,10 +481,14 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         })
     else:
         # Just update the persistent intent for next search (wanted or manual)
-        s._db()._execute(
-            "UPDATE album_requests SET target_format = %s, updated_at = NOW() WHERE id = %s",
-            (target_format, int(req_id)),
-        )
+        update_fields = {"target_format": target_format}
+        if should_clear_lossless_search_override(
+            new_target_format=target_format,
+            old_target_format=req.get("target_format"),
+            search_filetype_override=req.get("search_filetype_override"),
+        ):
+            update_fields["search_filetype_override"] = None
+        s._db().update_request_fields(int(req_id), **update_fields)
         h._json({
             "status": "ok",
             "id": int(req_id),

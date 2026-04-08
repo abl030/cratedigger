@@ -240,6 +240,102 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
         self.assertTrue(self._dvl(spectral_grade="suspect",
                                   converted_count=12, is_transcode=False))
 
+    # --- "lossless" target_format (same as "flac") ---
+
+    def test_lossless_genuine_is_verified(self):
+        self.assertTrue(self._dvl(target_format="lossless", spectral_grade="genuine"))
+
+    def test_lossless_no_spectral_is_verified(self):
+        self.assertTrue(self._dvl(target_format="lossless", spectral_grade=None))
+
+    def test_lossless_suspect_is_not_verified(self):
+        self.assertFalse(self._dvl(target_format="lossless", spectral_grade="suspect"))
+
+
+# ============================================================================
+# Lossless virtual tier matching
+# ============================================================================
+
+class TestLosslessTierMatching(unittest.TestCase):
+    """The 'lossless' tier should match flac, alac, and wav files."""
+
+    def test_lossless_matches_flac(self):
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        flac = file_identity({"filename": "track.flac", "bitRate": 900})
+        self.assertTrue(filetype_matches(flac, lossless))
+
+    def test_lossless_matches_alac(self):
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        alac = file_identity({"filename": "track.m4a", "bitRate": 900, "bitDepth": 16})
+        self.assertTrue(filetype_matches(alac, lossless))
+
+    def test_lossless_matches_wav(self):
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        wav = file_identity({"filename": "track.wav", "bitRate": 1411})
+        self.assertTrue(filetype_matches(wav, lossless))
+
+    def test_lossless_rejects_mp3(self):
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        mp3 = file_identity({"filename": "track.mp3", "bitRate": 320})
+        self.assertFalse(filetype_matches(mp3, lossless))
+
+    def test_lossless_rejects_opus(self):
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        opus = file_identity({"filename": "track.opus", "bitRate": 128})
+        self.assertFalse(filetype_matches(opus, lossless))
+
+    def test_lossless_rejects_aac(self):
+        """AAC (lossy m4a) should not match lossless tier."""
+        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        lossless = parse_filetype_config("lossless")
+        aac = file_identity({"filename": "track.m4a", "bitRate": 256})
+        self.assertFalse(filetype_matches(aac, lossless))
+
+    def test_verify_filetype_lossless_flac(self):
+        """verify_filetype with 'lossless' spec matches FLAC."""
+        from lib.quality import verify_filetype
+        self.assertTrue(verify_filetype(
+            {"filename": "track.flac", "bitRate": 900}, "lossless"))
+
+    def test_verify_filetype_lossless_wav(self):
+        from lib.quality import verify_filetype
+        self.assertTrue(verify_filetype(
+            {"filename": "track.wav", "bitRate": 1411}, "lossless"))
+
+    def test_verify_filetype_lossless_rejects_mp3(self):
+        from lib.quality import verify_filetype
+        self.assertFalse(verify_filetype(
+            {"filename": "track.mp3", "bitRate": 320}, "lossless"))
+
+
+# ============================================================================
+# FLAC_SPEC and conversion_target with "lossless"
+# ============================================================================
+
+class TestFlacSpec(unittest.TestCase):
+    def test_flac_spec_values(self):
+        from import_one import FLAC_SPEC
+        self.assertEqual(FLAC_SPEC.codec, "flac")
+        self.assertEqual(FLAC_SPEC.codec_args, ())
+        self.assertEqual(FLAC_SPEC.extension, "flac")
+
+    def test_conversion_target_lossless(self):
+        """target_format='lossless' should return 'lossless' (keep on disk)."""
+        from import_one import conversion_target
+        self.assertEqual(
+            conversion_target("lossless", True, "opus 128"), "lossless")
+
+    def test_conversion_target_flac_backward_compat(self):
+        """target_format='flac' still works (backward compat with old DB rows)."""
+        from import_one import conversion_target
+        self.assertEqual(
+            conversion_target("flac", True, "opus 128"), "lossless")
+
 
 # ============================================================================
 # E2E conversion tests — real files through convert_lossless
@@ -381,6 +477,61 @@ class TestConvertLosslessE2E(unittest.TestCase):
             files = sorted(os.listdir(album))
             self.assertEqual(files, ["01 - Track 1.m4a"])
             self.assertEqual(self._get_codec_name(os.path.join(album, files[0])), "aac")
+
+    def test_wav_to_flac_normalization(self):
+        """WAV → FLAC via FLAC_SPEC: .flac files on disk, WAV removed."""
+        from import_one import convert_lossless, FLAC_SPEC
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            os.makedirs(album)
+            wav = os.path.join(album, "01 - Track 1.wav")
+            subprocess.run(
+                ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                 "-y", wav],
+                capture_output=True, check=True, timeout=30)
+            converted, failed, orig_ext = convert_lossless(album, FLAC_SPEC)
+            self.assertEqual(converted, 1)
+            self.assertEqual(failed, 0)
+            self.assertEqual(orig_ext, "wav")
+            exts = self._count_by_ext(album)
+            self.assertEqual(exts.get(".flac", 0), 1)
+            self.assertNotIn(".wav", exts)
+
+    def test_alac_to_flac_normalization(self):
+        """ALAC .m4a → FLAC via FLAC_SPEC: .flac on disk, .m4a removed."""
+        from import_one import convert_lossless, FLAC_SPEC
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            os.makedirs(album)
+            src = os.path.join(album, "01 - Track 1.m4a")
+            subprocess.run(
+                ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                 "-c:a", "alac", "-y", src],
+                capture_output=True, check=True, timeout=30)
+            converted, failed, orig_ext = convert_lossless(album, FLAC_SPEC)
+            self.assertEqual(converted, 1)
+            self.assertEqual(orig_ext, "m4a")
+            exts = self._count_by_ext(album)
+            self.assertEqual(exts.get(".flac", 0), 1)
+            self.assertNotIn(".m4a", exts)
+            # Verify it's actually FLAC codec
+            flac_file = os.path.join(album, "01 - Track 1.flac")
+            self.assertEqual(self._get_codec_name(flac_file), "flac")
+
+    def test_flac_to_flac_recompresses(self):
+        """FLAC → FLAC via FLAC_SPEC: re-compresses (lossless, no quality loss).
+
+        This is harmless — the normalization path in import_one.py main()
+        only calls FLAC_SPEC for non-FLAC sources (ALAC/WAV).
+        """
+        from import_one import convert_lossless, FLAC_SPEC
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            make_test_album(album, track_count=1, cutoff_hz=15500)
+            converted, failed, _ = convert_lossless(album, FLAC_SPEC)
+            self.assertEqual(converted, 1)  # re-compresses via temp file
+            exts = self._count_by_ext(album)
+            self.assertEqual(exts.get(".flac", 0), 1)
 
     def test_no_lossless_files_noop(self):
         """Directory with only MP3s → no conversion."""
