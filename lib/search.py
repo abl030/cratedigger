@@ -37,6 +37,7 @@ class SearchResult:
     query: str = ""
     result_count: int = 0
     elapsed_s: float = 0.0
+    outcome: str = ""  # found, no_match, no_results, timeout, error, empty_query
 
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.

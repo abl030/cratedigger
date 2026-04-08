@@ -143,16 +143,18 @@ def _build_search_cache(
 
 
 def search_for_album(album, ctx):
-    from lib.search import build_query
+    """Search slskd for an album. Returns SearchResult (always non-None)."""
+    from lib.search import build_query, SearchResult
 
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
+    t0 = time.time()
     query = build_query(artist_name, album_title, prepend_artist=cfg.album_prepend_artist)
 
     if not query:
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
-        return False
+        return SearchResult(album_id=album_id, success=False, outcome="empty_query")
 
     logger.info(f"Searching for album: {query} "
                 f"(from '{artist_name} - {album_title}')")
@@ -166,7 +168,8 @@ def search_for_album(album, ctx):
         )
     except Exception:
         logger.exception(f"Failed to perform search via SLSKD: {query}")
-        return False
+        return SearchResult(album_id=album_id, success=False, query=query,
+                            elapsed_s=time.time() - t0, outcome="error")
 
     # Wait for slskd to process the search. Searches go through:
     #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
@@ -183,17 +186,19 @@ def search_for_album(album, ctx):
         time.sleep(1)
         if (time.time() - start_time) > poll_timeout_s:
             logger.error("Failed to perform search via SLSKD due to timeout on search results.")
-            return False
+            return SearchResult(album_id=album_id, success=False, query=query,
+                                elapsed_s=time.time() - t0, outcome="timeout")
 
     search_results = slskd.searches.search_responses(search["id"])
+    elapsed = time.time() - t0
     logger.info(f"Search returned {len(search_results)} results")
     if cfg.delete_searches:
         slskd.searches.delete(search["id"])
 
     if not len(search_results) > 0:
-        return False
+        return SearchResult(album_id=album_id, success=False, query=query,
+                            result_count=0, elapsed_s=elapsed, outcome="no_results")
 
-    from lib.search import SearchResult
     filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
     cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
         search_results, filter_specs
@@ -201,14 +206,18 @@ def search_for_album(album, ctx):
     for username in cache_entries:
         logger.info(f"Caching and truncating results for user: {username}")
 
-    # Reuse the same merge path as the parallel pipeline
-    _merge_search_result(SearchResult(
+    result = SearchResult(
         album_id=album_id, success=True,
         cache_entries=cache_entries,
         upload_speeds=upload_speeds,
         dir_audio_counts=dir_audio_counts,
-    ), ctx)
-    return True
+        query=query,
+        result_count=len(search_results),
+        elapsed_s=elapsed,
+    )
+    # Reuse the same merge path as the parallel pipeline
+    _merge_search_result(result, ctx)
+    return result
 
 
 def _submit_search(album, search_cfg, slskd_client):
@@ -294,7 +303,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         if (time.time() - start_time) > timeout_s:
             logger.error(f"Search timed out for {query}")
             return SearchResult(album_id=album_id, success=False, query=query,
-                                elapsed_s=time.time() - t0)
+                                elapsed_s=time.time() - t0, outcome="timeout")
 
     search_results = slskd_client.searches.search_responses(search_id)
     elapsed = time.time() - t0
@@ -304,7 +313,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
 
     if not len(search_results) > 0:
         return SearchResult(album_id=album_id, success=False, query=query,
-                            result_count=0, elapsed_s=elapsed)
+                            result_count=0, elapsed_s=elapsed, outcome="no_results")
 
     filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
     cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
@@ -356,6 +365,24 @@ def _merge_search_result(result, ctx):
             ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
 
 
+def _log_search_result(album, result, ctx) -> None:
+    """Persist search outcome to search_log and record_attempt on failure."""
+    request_id = getattr(album, "db_request_id", None)
+    if not request_id:
+        return
+    db = ctx.pipeline_db_source._get_db()
+    db.log_search(
+        request_id=request_id,
+        query=result.query or None,
+        result_count=result.result_count if result.result_count else None,
+        elapsed_s=result.elapsed_s if result.elapsed_s else None,
+        outcome=result.outcome or "error",
+    )
+    # Increment search_attempts + backoff for any non-found outcome
+    if result.outcome != "found":
+        db.record_attempt(request_id, "search")
+
+
 def search_and_queue(albums, ctx):
     if cfg.parallel_searches > 1 and len(albums) > 1:
         return _search_and_queue_parallel(albums, ctx)
@@ -365,12 +392,16 @@ def search_and_queue(albums, ctx):
     total = len(albums)
     for i, album in enumerate(albums, 1):
         logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
-        if search_for_album(album, ctx):
-            if not find_download(album, grab_list, ctx):
+        result = search_for_album(album, ctx)
+        if result.success:
+            if find_download(album, grab_list, ctx):
+                result.outcome = "found"
+            else:
+                result.outcome = "no_match"
                 failed_grab.append(album)
-
         else:
             failed_search.append(album)
+        _log_search_result(album, result, ctx)
     return grab_list, failed_search, failed_grab
 
 
@@ -408,11 +439,21 @@ def _search_and_queue_parallel(albums, ctx):
         """Submit the next album from the queue. Returns (future, album) or None."""
         while album_queue:
             album = album_queue.pop(0)
-            result = _submit_search(album, cfg, slskd)
-            if result is None:
+            submit_result = _submit_search(album, cfg, slskd)
+            if submit_result is None:
+                # Log the submission failure — reconstruct query for the log
+                from lib.search import build_query, SearchResult
+                query = build_query(album.artist_name, album.title,
+                                    prepend_artist=cfg.album_prepend_artist)
+                sr = SearchResult(
+                    album_id=album.id, success=False,
+                    query=query or "",
+                    outcome="empty_query" if not query else "error",
+                )
+                _log_search_result(album, sr, ctx)
                 failed_search.append(album)
                 continue
-            search_id, query, album_id = result
+            search_id, query, album_id = submit_result
             future = pool.submit(
                 _collect_search_results, search_id, query, album_id, cfg, slskd
             )
@@ -436,6 +477,9 @@ def _search_and_queue_parallel(albums, ctx):
                     result = future.result()
                 except Exception:
                     logger.exception(f"Search collection crashed for {album.title}")
+                    from lib.search import SearchResult
+                    sr = SearchResult(album_id=album.id, success=False, outcome="error")
+                    _log_search_result(album, sr, ctx)
                     failed_search.append(album)
                 else:
                     done_count = len(grab_list) + len(failed_grab) + len(failed_search)
@@ -445,10 +489,14 @@ def _search_and_queue_parallel(albums, ctx):
                     )
                     if result.success:
                         _merge_search_result(result, ctx)
-                        if not find_download(album, grab_list, ctx):
+                        if find_download(album, grab_list, ctx):
+                            result.outcome = "found"
+                        else:
+                            result.outcome = "no_match"
                             failed_grab.append(album)
                     else:
                         failed_search.append(album)
+                    _log_search_result(album, result, ctx)
 
                 # Refill: submit next search to keep pipeline full
                 submitted = _submit_next()
