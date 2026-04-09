@@ -622,6 +622,8 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to load user cooldowns: {e}")
 
+        cycle_start = time.time()
+
         # --- Phase 1 + Phase 2 run concurrently ---
         # Phase 1 (poll downloads) operates on status='downloading' rows.
         # Phase 2 (search + enqueue) operates on status='wanted' rows.
@@ -680,6 +682,9 @@ def main():
 
         # Clean up completed transfer UI entries
         slskd.transfers.remove_completed_downloads()
+
+        elapsed = time.time() - cycle_start
+        logger.info(f"Soularr cycle complete in {elapsed:.1f}s")
 
     finally:
         # Save caches for next run
