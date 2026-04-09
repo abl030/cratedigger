@@ -60,13 +60,16 @@ function renderWrongMatches(data, el) {
     const filesBadge = e.files_exist
       ? '<span class="badge badge-library">files on disk</span>'
       : '<span class="badge badge-failed">files missing</span>';
+    const upgradeBadge = e.in_library
+      ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">upgrade</span>'
+      : '';
 
     return `
     <div class="p-item" onclick="window.toggleWrongMatchDetail('wm-${e.download_log_id}')">
       <div class="p-top">
         <div>
           <span class="p-title">${esc(e.artist)} — ${esc(e.album)}</span>
-          ${filesBadge}
+          ${filesBadge}${upgradeBadge}
         </div>
       </div>
       <div class="p-meta">

@@ -31,20 +31,18 @@ def _parse_validation_result(vr_raw: object) -> dict[str, object]:
     return json.loads(str(vr_raw))
 
 
-def _is_album_in_beets(
+def _is_in_beets(
     row: dict[str, object],
     beets_info: dict[str, dict[str, object]],
 ) -> bool:
-    """Match wrong-match entries against the live beets library."""
+    """Check if the album exists in the beets library."""
     mbid = row.get("mb_release_id")
     if isinstance(mbid, str) and mbid and mbid in beets_info:
         return True
-
     artist = row.get("artist_name")
     album = row.get("album_title")
     if not isinstance(artist, str) or not isinstance(album, str):
         return False
-
     return _server().check_beets_by_artist_album(artist, album) is not None
 
 
@@ -152,7 +150,7 @@ def post_manual_import(h, body: dict) -> None:
 
 
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
-    """List wrong-match rejections for albums not yet in beets."""
+    """List wrong-match rejections with files still on disk."""
     srv = _server()
     pdb = srv._db()
     rows = pdb.get_wrong_matches()
@@ -165,9 +163,6 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
 
     entries = []
     for row in rows:
-        if _is_album_in_beets(row, beets_info):
-            continue
-
         vr = _parse_validation_result(row.get("validation_result"))
         failed_path_raw = vr.get("failed_path")
         failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
@@ -189,6 +184,7 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 or vr.get("soulseek_username"),
             "candidate": target,
             "local_items": vr.get("items", []),
+            "in_library": _is_in_beets(row, beets_info),
         })
 
     h._json({"entries": entries})

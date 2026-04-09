@@ -551,7 +551,7 @@ class TestWrongMatchesContract(unittest.TestCase):
     REQUIRED_FIELDS = {
         "download_log_id", "request_id", "artist", "album", "mb_release_id",
         "failed_path", "files_exist", "distance", "scenario", "detail",
-        "soulseek_username", "candidate", "local_items",
+        "soulseek_username", "candidate", "local_items", "in_library",
     }
 
     def test_response_has_entries_with_required_fields(self):
@@ -607,12 +607,12 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         mock_rmtree.assert_called_once_with("/mnt/virtio/music/slskd/failed_imports/Test")
 
-    @patch("web.server.check_beets_library_detail", return_value={"abc-123": {"beets_tracks": 10}})
-    def test_entries_already_in_beets_are_filtered_out(self, _mock_beets_detail):
+    def test_entries_in_beets_still_shown(self):
+        """Wrong matches should appear even if the album is already in beets."""
         status, data = self._get("/api/wrong-matches")
 
         self.assertEqual(status, 200)
-        self.assertEqual(data["entries"], [])
+        self.assertGreater(len(data["entries"]), 0)
 
 
 class TestLibraryArtistContract(unittest.TestCase):
