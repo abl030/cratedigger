@@ -421,6 +421,14 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
         return db
 
+    def test_no_mb_id_returns_early(self):
+        """Empty mb_id should return without doing anything."""
+        from lib.import_dispatch import _check_quality_gate_core
+        db = MagicMock()
+        _check_quality_gate_core(
+            mb_id="", label="Test", request_id=42, files=[], db=db)
+        db.get_request.assert_not_called()
+
     def test_requeue_upgrade_uses_intent(self):
         """requeue_upgrade should use quality constants(upgrade)."""
         db = self._run_quality_gate("requeue_upgrade")
