@@ -88,6 +88,36 @@ class DownloadVerdict:
     reason: str = ""
 
 
+# --- User cooldown system (issue #39) ---
+
+@dataclass(frozen=True)
+class CooldownConfig:
+    """Tunables for global user cooldown system.
+
+    All cooldown thresholds and durations live here so they're trivial to tune.
+    """
+    failure_threshold: int = 5
+    cooldown_days: int = 3
+    failure_outcomes: frozenset[str] = frozenset({"timeout", "failed", "rejected"})
+    lookback_window: int = 5
+
+
+def should_cooldown(outcomes: list[str],
+                    config: CooldownConfig = CooldownConfig()) -> bool:
+    """Decide whether a user should be put on cooldown.
+
+    Args:
+        outcomes: Recent download outcomes for this user, newest first.
+        config: Tunable thresholds.
+
+    Returns True if the first `lookback_window` outcomes are all failures.
+    """
+    window = outcomes[:config.lookback_window]
+    if len(window) < config.failure_threshold:
+        return False
+    return all(o in config.failure_outcomes for o in window)
+
+
 def decide_download_action(
     *,
     album_done: bool,
