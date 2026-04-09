@@ -85,6 +85,51 @@ class TestMoveFailedImport(unittest.TestCase):
         self.assertTrue(os.path.isdir(result))
         self.assertFalse(os.path.exists(src))
 
+    def test_bad_files_subdir_for_corrupt(self):
+        """audio_corrupt and spectral_reject go to failed_imports/bad_files/."""
+        from lib.util import move_failed_import
+        src = os.path.join(self.tmpdir, "Artist - Album (2020)")
+        os.makedirs(src)
+        open(os.path.join(src, "track.mp3"), "w").close()
+        result = move_failed_import(src, scenario="audio_corrupt")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn(os.path.join("failed_imports", "bad_files"), result)
+        self.assertTrue(os.path.isdir(result))
+
+    def test_bad_files_subdir_for_spectral_reject(self):
+        from lib.util import move_failed_import
+        src = os.path.join(self.tmpdir, "Artist - Album (2020)")
+        os.makedirs(src)
+        open(os.path.join(src, "track.mp3"), "w").close()
+        result = move_failed_import(src, scenario="spectral_reject")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn(os.path.join("failed_imports", "bad_files"), result)
+
+    def test_wrong_match_stays_in_failed_imports(self):
+        """Non-bad-file scenarios stay in failed_imports/ root."""
+        from lib.util import move_failed_import
+        src = os.path.join(self.tmpdir, "Artist - Album (2020)")
+        os.makedirs(src)
+        open(os.path.join(src, "track.mp3"), "w").close()
+        result = move_failed_import(src, scenario="high_distance")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("failed_imports", result)
+        self.assertNotIn("bad_files", result)
+
+    def test_no_scenario_stays_in_failed_imports(self):
+        """No scenario (default) stays in failed_imports/ root."""
+        from lib.util import move_failed_import
+        src = os.path.join(self.tmpdir, "Artist - Album (2020)")
+        os.makedirs(src)
+        open(os.path.join(src, "track.mp3"), "w").close()
+        result = move_failed_import(src)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotIn("bad_files", result)
+
 
 class TestStageToAi(unittest.TestCase):
 

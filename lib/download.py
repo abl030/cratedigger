@@ -455,7 +455,7 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
                             import_folder_fullpath: str,
                             ctx: SoularrContext) -> None:
     """Handle a rejected beets validation result."""
-    failed_dest = move_failed_import(import_folder_fullpath)
+    failed_dest = move_failed_import(import_folder_fullpath, scenario=bv_result.scenario)
     bv_result.failed_path = failed_dest
     log_validation_result(album_data, bv_result, ctx.cfg)
     usernames = set(f.username for f in album_data.files)
