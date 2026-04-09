@@ -233,20 +233,11 @@ class TestServerEndpoints(unittest.TestCase):
 
     def test_pipeline_all_includes_downloading(self):
         """get_pipeline_all returns downloading albums in the response."""
-        downloading_row = {
-            "id": 200, "album_title": "Downloading Album", "artist_name": "DL Artist",
-            "mb_release_id": "dl-uuid", "status": "downloading",
-            "year": 2024, "country": "US", "format": None,
-            "source": "request", "search_filetype_override": None, "target_format": None,
-            "created_at": "2026-04-03T12:00:00+00:00",
-            "updated_at": "2026-04-03T12:00:00+00:00",
-            "min_bitrate": None, "prev_min_bitrate": None,
-            "verified_lossless": False, "last_download_spectral_grade": None,
-            "last_download_spectral_bitrate": None, "current_spectral_grade": None,
-            "current_spectral_bitrate": None,
-            "imported_path": None, "reasoning": None,
-            "active_download_state": {"filetype": "flac", "enqueued_at": "now", "files": []},
-        }
+        downloading_row = make_request_row(
+            id=200, album_title="Downloading Album", artist_name="DL Artist",
+            mb_release_id="dl-uuid", status="downloading",
+            active_download_state={"filetype": "flac", "enqueued_at": "now", "files": []},
+        )
         self.mock_db.get_by_status.side_effect = lambda s: [downloading_row] if s == "downloading" else []
         self.mock_db.count_by_status.return_value = {"downloading": 1}
         self.mock_db.get_download_history_batch.return_value = {}
