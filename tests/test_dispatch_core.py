@@ -1,82 +1,58 @@
-"""Tests for dispatch_import_core — the plain-params core of dispatch_import.
+"""Tests for dispatch_import_core — orchestration outcomes with FakePipelineDB.
 
-Tests behavioral outcomes: mark_done/mark_failed called correctly,
-quality gate runs, meelo triggers, downgrade prevention, outcome labels.
+Orchestration tests assert domain state: request status, download_log rows,
+denylist entries, requeue behavior. Seam tests (argv, flag forwarding) are
+in a separate class and explicitly labeled.
 """
 
-import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import SoularrConfig
-from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
-                         AudioQualityMeasurement, PostflightInfo,
-                         QUALITY_UPGRADE_TIERS)
-from tests.helpers import make_request_row
+from lib.quality import DownloadInfo
+from tests.helpers import make_request_row, make_import_result
+from tests.fakes import FakePipelineDB
 
 
-def _make_import_result(decision="import", new_min_bitrate=245,
-                        prev_min_bitrate=None, was_converted=False,
-                        original_filetype=None, target_filetype=None,
-                        spectral_grade="genuine", spectral_bitrate=None,
-                        verified_lossless=None, error=None):
-    if verified_lossless is None:
-        verified_lossless = was_converted and spectral_grade == "genuine"
-    return ImportResult(
-        decision=decision,
-        error=error,
-        new_measurement=AudioQualityMeasurement(
-            min_bitrate_kbps=new_min_bitrate,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            verified_lossless=verified_lossless,
-            was_converted_from=original_filetype if was_converted else None,
-        ),
-        existing_measurement=(AudioQualityMeasurement(min_bitrate_kbps=prev_min_bitrate)
-                              if prev_min_bitrate is not None else None),
-        conversion=ConversionInfo(
-            was_converted=was_converted,
-            original_filetype=original_filetype or "",
-            target_filetype=target_filetype or "",
-        ),
-        postflight=PostflightInfo(),
-    )
+_HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 
-class TestDispatchImportCore(unittest.TestCase):
-    """dispatch_import_core must handle the full import pipeline with plain params."""
+class TestDispatchCoreOrchestration(unittest.TestCase):
+    """Orchestration tests — assert domain state via FakePipelineDB."""
 
     def _dispatch(self, ir=None, force=False, outcome_label="success",
                   requeue_on_failure=True, override_min_bitrate=None,
                   source_username=None, target_format=None,
-                  verified_lossless_target=""):
+                  verified_lossless_target="",
+                  request_overrides=None):
         from lib.import_dispatch import dispatch_import_core
         if ir is None:
-            ir = _make_import_result(decision="import", new_min_bitrate=245)
+            ir = make_import_result(decision="import", new_min_bitrate=245)
 
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        req = make_request_row(
             id=42, status="downloading",
             min_bitrate=180, current_spectral_bitrate=128,
+            **(request_overrides or {}),
         )
+        db.seed_request(req)
+
         cfg = SoularrConfig(
-            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+            beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             verified_lossless_target=verified_lossless_target,
         )
-        files = [MagicMock(username=source_username or "user1",
-                           filename="01 - Track.mp3")]
         dl_info = DownloadInfo(username=source_username)
 
         tmpdir = tempfile.mkdtemp()
         try:
             with patch("lib.import_dispatch.sp.run") as mock_run, \
-                 patch("lib.import_dispatch._cleanup_staged_dir") as mock_cleanup, \
-                 patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
+                 patch("lib.import_dispatch._cleanup_staged_dir"), \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.util.trigger_meelo_scan") as mock_meelo, \
-                 patch("lib.util.trigger_plex_scan") as mock_plex, \
+                 patch("lib.util.trigger_meelo_scan"), \
+                 patch("lib.util.trigger_plex_scan"), \
                  patch("lib.import_dispatch.cleanup_disambiguation_orphans",
                        return_value=[]):
                 mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -90,11 +66,12 @@ class TestDispatchImportCore(unittest.TestCase):
                     target_format=target_format,
                     verified_lossless_target=verified_lossless_target,
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,
+                    db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
                     distance=0.05,
                     scenario="strong_match",
-                    files=files,
+                    files=[MagicMock(username=source_username or "user1",
+                                     filename="01 - Track.mp3")],
                     cfg=cfg,
                     outcome_label=outcome_label,
                     requeue_on_failure=requeue_on_failure,
@@ -109,114 +86,160 @@ class TestDispatchImportCore(unittest.TestCase):
             "cmd": cmd,
             "db": db,
             "path": tmpdir,
-            "mock_meelo": mock_meelo,
-            "mock_plex": mock_plex,
-            "mock_gate": mock_gate,
-            "mock_cleanup": mock_cleanup,
-            "dl_info": dl_info,
         }
 
-    def test_successful_import_returns_success(self):
+    # --- Success path ---
+
+    def test_successful_import_marks_imported(self):
         r = self._dispatch()
         self.assertTrue(r["result"].success)
+        self.assertEqual(r["db"].request(42)["status"], "imported")
 
-    def test_successful_import_logs_download(self):
+    def test_successful_import_creates_one_log_row(self):
         r = self._dispatch()
-        r["db"].log_download.assert_called_once()
-        self.assertEqual(r["db"].log_download.call_args.kwargs["outcome"], "success")
-
-    def test_quality_gate_runs(self):
-        r = self._dispatch()
-        r["mock_gate"].assert_called_once()
-
-    def test_meelo_scan_triggered(self):
-        r = self._dispatch()
-        r["mock_meelo"].assert_called_once()
-
-    def test_cleanup_runs(self):
-        r = self._dispatch()
-        r["mock_cleanup"].assert_called_once()
-
-    def test_force_flag_passed(self):
-        r = self._dispatch(force=True)
-        self.assertIn("--force", r["cmd"])
-
-    def test_no_force_flag_by_default(self):
-        r = self._dispatch(force=False)
-        self.assertNotIn("--force", r["cmd"])
-
-    def test_override_min_bitrate_passed(self):
-        r = self._dispatch(override_min_bitrate=128)
-        idx = r["cmd"].index("--override-min-bitrate")
-        self.assertEqual(r["cmd"][idx + 1], "128")
+        self.assertEqual(len(r["db"].download_logs), 1)
+        self.assertEqual(r["db"].download_logs[0].outcome, "success")
 
     def test_outcome_label_in_download_log(self):
-        """Custom outcome_label (e.g. force_import) must appear in download_log."""
         r = self._dispatch(outcome_label="force_import")
-        self.assertEqual(r["db"].log_download.call_args.kwargs["outcome"], "force_import")
+        self.assertEqual(r["db"].download_logs[0].outcome, "force_import")
+
+    # --- Downgrade prevention ---
 
     def test_downgrade_prevented(self):
-        ir = _make_import_result(decision="downgrade",
-                                 new_min_bitrate=128, prev_min_bitrate=180)
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir)
         self.assertFalse(r["result"].success)
 
+    def test_downgrade_logs_rejection(self):
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(ir=ir)
+        self.assertEqual(len(r["db"].download_logs), 1)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertIn("quality_downgrade", r["db"].download_logs[0].beets_scenario or "")
+
     def test_downgrade_denylists_user(self):
-        ir = _make_import_result(decision="downgrade",
-                                 new_min_bitrate=128, prev_min_bitrate=180)
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir, source_username="baduser")
-        r["db"].add_denylist.assert_called()
+        denylisted = [e.username for e in r["db"].denylist]
+        self.assertIn("baduser", denylisted)
 
-    def test_failed_no_requeue(self):
-        """When requeue_on_failure=False, failed import must NOT transition to wanted."""
-        ir = _make_import_result(decision="downgrade",
-                                 new_min_bitrate=128, prev_min_bitrate=180)
+    def test_downgrade_preserves_validation_result_and_staged_path(self):
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir, requeue_on_failure=False)
-        r["db"].reset_to_wanted.assert_not_called()
+        log = r["db"].download_logs[0]
+        self.assertEqual(log.staged_path, r["path"])
+        self.assertIsNotNone(log.validation_result)
+        self.assertIn("quality_downgrade", log.validation_result or "")
 
-    def test_failed_with_requeue(self):
-        """When requeue_on_failure=True (default), failed import transitions to wanted."""
-        ir = _make_import_result(decision="downgrade",
-                                 new_min_bitrate=128, prev_min_bitrate=180)
+    # --- Requeue behavior ---
+
+    def test_failed_no_requeue_stays_downloading(self):
+        """When requeue_on_failure=False, status should not change to wanted."""
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(ir=ir, requeue_on_failure=False)
+        # Should NOT have transitioned to wanted
+        self.assertNotEqual(r["db"].request(42)["status"], "wanted")
+
+    def test_failed_with_requeue_transitions_to_wanted(self):
+        """When requeue_on_failure=True, failed import requeues to wanted."""
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir, requeue_on_failure=True)
-        r["db"].log_download.assert_called()
+        self.assertEqual(r["db"].request(42)["status"], "wanted")
 
-    def test_transcode_downgrade_no_requeue_when_disabled(self):
-        """Failure requeue flag must suppress action.requeue for failed outcomes."""
-        ir = _make_import_result(decision="transcode_downgrade",
-                                 new_min_bitrate=190, prev_min_bitrate=320)
-        r = self._dispatch(ir=ir, requeue_on_failure=False)
-        r["db"].reset_to_wanted.assert_not_called()
+    # --- Transcode paths ---
 
-    def test_failed_log_includes_validation_result_and_staged_path(self):
-        """Failure logs must preserve typed audit payloads when no prior validation JSON exists."""
-        ir = _make_import_result(decision="downgrade",
-                                 new_min_bitrate=128, prev_min_bitrate=180)
-        r = self._dispatch(ir=ir, requeue_on_failure=False)
-        log_kwargs = r["db"].log_download.call_args.kwargs
-        self.assertEqual(log_kwargs["staged_path"], r["path"])
-        self.assertIsNotNone(log_kwargs["validation_result"])
-        self.assertIn("quality_downgrade", log_kwargs["validation_result"])
-
-    def test_transcode_upgrade_requeues(self):
-        ir = _make_import_result(decision="transcode_upgrade",
-                                 new_min_bitrate=227)
+    def test_transcode_upgrade_requeues_for_better(self):
+        ir = make_import_result(decision="transcode_upgrade",
+                                new_min_bitrate=227)
         r = self._dispatch(ir=ir)
         self.assertTrue(r["result"].success)
-        r["db"].add_denylist.assert_called()
-        r["db"].reset_to_wanted.assert_called_once()
+        # Should be requeued to wanted for upgrade search
+        self.assertEqual(r["db"].request(42)["status"], "wanted")
+
+    def test_transcode_upgrade_denylists_user(self):
+        ir = make_import_result(decision="transcode_upgrade",
+                                new_min_bitrate=227)
+        r = self._dispatch(ir=ir, source_username="transuser")
+        denylisted = [e.username for e in r["db"].denylist]
+        self.assertIn("transuser", denylisted)
+
+    def test_transcode_downgrade_no_requeue_when_disabled(self):
+        ir = make_import_result(decision="transcode_downgrade",
+                                new_min_bitrate=190, prev_min_bitrate=320)
+        r = self._dispatch(ir=ir, requeue_on_failure=False)
+        self.assertNotEqual(r["db"].request(42)["status"], "wanted")
+
+
+class TestDispatchCoreSeams(unittest.TestCase):
+    """Seam tests — assert subprocess argv construction."""
+
+    def _get_cmd(self, **kwargs):
+        from lib.import_dispatch import dispatch_import_core
+        ir = kwargs.pop("ir", make_import_result())
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch("lib.import_dispatch.sp.run") as mock_run, \
+                 patch("lib.import_dispatch._cleanup_staged_dir"), \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.util.trigger_meelo_scan"), \
+                 patch("lib.util.trigger_plex_scan"), \
+                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
+                       return_value=[]):
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(),
+                    cfg=cfg,
+                    **kwargs,
+                )
+                return mock_run.call_args[0][0] if mock_run.call_args else []
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_force_flag_passed(self):
+        cmd = self._get_cmd(force=True)
+        self.assertIn("--force", cmd)
+
+    def test_no_force_by_default(self):
+        cmd = self._get_cmd(force=False)
+        self.assertNotIn("--force", cmd)
+
+    def test_override_min_bitrate_passed(self):
+        cmd = self._get_cmd(override_min_bitrate=128)
+        idx = cmd.index("--override-min-bitrate")
+        self.assertEqual(cmd[idx + 1], "128")
 
     def test_verified_lossless_target_flag(self):
-        r = self._dispatch(verified_lossless_target="opus 128")
-        self.assertIn("--verified-lossless-target", r["cmd"])
-        idx = r["cmd"].index("--verified-lossless-target")
-        self.assertEqual(r["cmd"][idx + 1], "opus 128")
+        cmd = self._get_cmd(verified_lossless_target="opus 128")
+        self.assertIn("--verified-lossless-target", cmd)
+        idx = cmd.index("--verified-lossless-target")
+        self.assertEqual(cmd[idx + 1], "opus 128")
 
     def test_target_format_flag(self):
-        r = self._dispatch(target_format="flac")
-        self.assertIn("--target-format", r["cmd"])
-        idx = r["cmd"].index("--target-format")
-        self.assertEqual(r["cmd"][idx + 1], "flac")
+        cmd = self._get_cmd(target_format="flac")
+        self.assertIn("--target-format", cmd)
+        idx = cmd.index("--target-format")
+        self.assertEqual(cmd[idx + 1], "flac")
 
 
 if __name__ == "__main__":
