@@ -18,7 +18,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from lib.quality import SpectralMeasurement
+from lib.quality import CooldownConfig, SpectralMeasurement
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
 
@@ -131,6 +131,14 @@ CREATE TABLE IF NOT EXISTS source_denylist (
     UNIQUE(request_id, username)
 );
 
+CREATE TABLE IF NOT EXISTS user_cooldowns (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    cooldown_until TIMESTAMPTZ NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_requests_status ON album_requests(status);
 CREATE INDEX IF NOT EXISTS idx_requests_mb_release ON album_requests(mb_release_id);
 CREATE INDEX IF NOT EXISTS idx_requests_source ON album_requests(source);
@@ -138,6 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_request ON album_tracks(request_id);
 CREATE INDEX IF NOT EXISTS idx_download_log_request ON download_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_search_log_request ON search_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
+CREATE INDEX IF NOT EXISTS idx_cooldown_username ON user_cooldowns(username);
 """
 
 
@@ -782,6 +791,67 @@ class PipelineDB:
             ORDER BY created_at ASC
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
+
+    # --- User cooldowns (issue #39) ---
+
+    def add_cooldown(self, username: str, cooldown_until: datetime,
+                     reason: str | None = None) -> None:
+        """Insert or update a user cooldown (upsert by username)."""
+        self._execute("""
+            INSERT INTO user_cooldowns (username, cooldown_until, reason)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (username) DO UPDATE
+                SET cooldown_until = EXCLUDED.cooldown_until,
+                    reason = EXCLUDED.reason
+        """, (username, cooldown_until, reason))
+        self.conn.commit()
+
+    def get_cooled_down_users(self) -> list[str]:
+        """Return usernames with active (non-expired) cooldowns."""
+        now = datetime.now(timezone.utc)
+        cur = self._execute("""
+            SELECT username FROM user_cooldowns
+            WHERE cooldown_until > %s
+        """, (now,))
+        return [r["username"] for r in cur.fetchall()]
+
+    def get_user_cooldowns(self) -> list[dict[str, Any]]:
+        """Return all cooldown rows (including expired) for display."""
+        cur = self._execute("""
+            SELECT username, cooldown_until, reason, created_at
+            FROM user_cooldowns
+            ORDER BY cooldown_until DESC
+        """)
+        return [dict(r) for r in cur.fetchall()]
+
+    def check_and_apply_cooldown(
+        self,
+        username: str,
+        config: CooldownConfig | None = None,
+    ) -> bool:
+        """Check a user's recent outcomes and apply cooldown if warranted.
+
+        Queries the last N download_log outcomes for this user globally
+        (across all requests), then delegates to should_cooldown().
+        Returns True if a cooldown was applied.
+        """
+        from lib.quality import should_cooldown as _should_cooldown
+        cfg = config or CooldownConfig()
+        cur = self._execute("""
+            SELECT outcome FROM download_log
+            WHERE soulseek_username = %s AND outcome IS NOT NULL
+            ORDER BY id DESC
+            LIMIT %s
+        """, (username, cfg.lookback_window))
+        outcomes = [r["outcome"] for r in cur.fetchall()]
+        if not _should_cooldown(outcomes, cfg):
+            return False
+        cooldown_until = datetime.now(timezone.utc) + timedelta(days=cfg.cooldown_days)
+        self.add_cooldown(
+            username, cooldown_until,
+            f"{cfg.failure_threshold} consecutive failures",
+        )
+        return True
 
     # --- Retry logic ---
 

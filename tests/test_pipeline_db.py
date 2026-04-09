@@ -32,7 +32,7 @@ def make_db():
     import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN, run_migrations=True)
     # Truncate all tables for a clean slate
-    for table in ["source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -52,6 +52,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("download_log", table_names)
         self.assertIn("search_log", table_names)
         self.assertIn("source_denylist", table_names)
+        self.assertIn("user_cooldowns", table_names)
         db.close()
 
     def test_idempotent_init(self):
@@ -384,7 +385,9 @@ class TestSearchLog(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["query"], "*rtist Album")
         self.assertEqual(history[0]["result_count"], 42)
-        self.assertAlmostEqual(history[0]["elapsed_s"], 3.2, places=1)
+        elapsed = history[0]["elapsed_s"]
+        assert isinstance(elapsed, (int, float))
+        self.assertAlmostEqual(elapsed, 3.2, places=1)
         self.assertEqual(history[0]["outcome"], "found")
 
     def test_multiple_searches_newest_first(self):
@@ -1061,6 +1064,87 @@ class TestDownloadingStatus(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertIsNone(req["active_download_state"])
+
+
+@requires_postgres
+class TestUserCooldowns(unittest.TestCase):
+    """Tests for global user cooldown system (issue #39)."""
+
+    def setUp(self):
+        self.db = make_db()
+        # Create two requests for cross-request cooldown testing
+        self.req1 = self.db.add_request(
+            mb_release_id="cool-1", artist_name="A", album_title="B", source="request")
+        self.req2 = self.db.add_request(
+            mb_release_id="cool-2", artist_name="C", album_title="D", source="request")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_user_cooldowns_table_exists(self):
+        cur = self.db._execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'user_cooldowns'
+        """)
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["table_name"], "user_cooldowns")
+
+    def test_add_and_get_cooldown(self):
+        from datetime import datetime, timedelta, timezone
+        until = datetime.now(timezone.utc) + timedelta(days=3)
+        self.db.add_cooldown("deaduser", until, "5 consecutive timeouts")
+        cooled = self.db.get_cooled_down_users()
+        self.assertIn("deaduser", cooled)
+
+    def test_expired_cooldown_not_returned(self):
+        from datetime import datetime, timedelta, timezone
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        self.db.add_cooldown("expireduser", past, "old timeout")
+        cooled = self.db.get_cooled_down_users()
+        self.assertNotIn("expireduser", cooled)
+
+    def test_upsert_extends_cooldown(self):
+        from datetime import datetime, timedelta, timezone
+        until1 = datetime.now(timezone.utc) + timedelta(days=1)
+        until2 = datetime.now(timezone.utc) + timedelta(days=5)
+        self.db.add_cooldown("user1", until1, "first")
+        self.db.add_cooldown("user1", until2, "extended")
+        cooldowns = self.db.get_user_cooldowns()
+        user1_rows = [c for c in cooldowns if c["username"] == "user1"]
+        self.assertEqual(len(user1_rows), 1)
+        # Should have the later date
+        self.assertGreater(user1_rows[0]["cooldown_until"], until1)
+
+    def test_check_and_apply_cooldown_triggers(self):
+        """5 timeouts across different requests → cooldown applied."""
+        for i in range(5):
+            req = self.req1 if i < 3 else self.req2
+            self.db.log_download(request_id=req, soulseek_username="baduser",
+                                 outcome="timeout")
+        result = self.db.check_and_apply_cooldown("baduser")
+        self.assertTrue(result)
+        cooled = self.db.get_cooled_down_users()
+        self.assertIn("baduser", cooled)
+
+    def test_check_and_apply_cooldown_mixed_no_trigger(self):
+        """3 timeouts + 2 successes → no cooldown."""
+        for outcome in ["timeout", "timeout", "success", "timeout", "success"]:
+            self.db.log_download(request_id=self.req1, soulseek_username="mixeduser",
+                                 outcome=outcome)
+        result = self.db.check_and_apply_cooldown("mixeduser")
+        self.assertFalse(result)
+        cooled = self.db.get_cooled_down_users()
+        self.assertNotIn("mixeduser", cooled)
+
+    def test_check_and_apply_cooldown_below_threshold(self):
+        """Only 2 outcomes → not enough data → no cooldown."""
+        self.db.log_download(request_id=self.req1, soulseek_username="newuser",
+                             outcome="timeout")
+        self.db.log_download(request_id=self.req1, soulseek_username="newuser",
+                             outcome="timeout")
+        result = self.db.check_and_apply_cooldown("newuser")
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":
