@@ -354,31 +354,6 @@ def _check_quality_gate_core(
         logger.exception("QUALITY GATE: failed to check quality")
 
 
-def _check_quality_gate(album_data: "GrabListEntry", request_id: int,
-                        ctx: "SoularrContext") -> None:
-    """Post-import quality gate — wrapper that extracts plain params from heavyweight objects."""
-    if not ctx.cfg.pipeline_db_enabled or ctx.pipeline_db_source is None:
-        return
-    _check_quality_gate_core(
-        mb_id=album_data.mb_release_id or "",
-        label=f"{album_data.artist} - {album_data.title}",
-        request_id=request_id,
-        files=album_data.files,
-        db=ctx.pipeline_db_source._get_db(),
-    )
-
-
-def trigger_meelo_scan(ctx: "SoularrContext") -> None:
-    """Trigger Meelo scan via lib.util — wrapper that passes cfg."""
-    from lib.util import trigger_meelo_scan as _trigger
-    _trigger(ctx.cfg)
-
-
-def trigger_plex_scan(ctx: "SoularrContext", imported_path: str | None = None) -> None:
-    """Trigger Plex partial scan via lib.util — wrapper that passes cfg."""
-    from lib.util import trigger_plex_scan as _trigger
-    _trigger(ctx.cfg, imported_path)
-
 
 def dispatch_import_core(
     *,

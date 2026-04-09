@@ -8,11 +8,10 @@ import shutil
 import subprocess as sp
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement, PostflightInfo,
-                         SpectralMeasurement,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
 from tests.helpers import make_request_row
 
@@ -394,14 +393,12 @@ class TestOverrideMinBitrate(unittest.TestCase):
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):
-    """Verify _check_quality_gate uses quality constants."""
+    """Verify _check_quality_gate_core uses quality constants."""
 
     def _run_quality_gate(self, gate_decision, **extra_req_fields):
-        """Run _check_quality_gate with a mocked quality_gate_decision."""
-        from lib.import_dispatch import _check_quality_gate
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db.return_value
+        """Run _check_quality_gate_core with plain params."""
+        from lib.import_dispatch import _check_quality_gate_core
+        db = MagicMock()
         merged = {"current_spectral_bitrate": None, "verified_lossless": False}
         merged.update(extra_req_fields)
         db.get_request.return_value = make_request_row(**merged)
@@ -415,7 +412,12 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mock_beets.get_album_info.return_value = MagicMock(
                 min_bitrate_kbps=192, is_cbr=True)
             mock_beets_cls.return_value = mock_beets
-            _check_quality_gate(album_data, 42, ctx)
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42,
+                files=[MagicMock(username="user1", filename="01.mp3")],
+                db=db,
+            )
 
         return db
 
@@ -448,11 +450,8 @@ class TestQualityGateUsesIntent(unittest.TestCase):
     def test_quality_gate_reads_current_spectral_not_last_download(self):
         """Quality gate must use current_spectral_bitrate (what's on disk),
         not last_download_spectral_bitrate (stale from a previous download)."""
-        from lib.import_dispatch import _check_quality_gate
-        from lib.quality import AudioQualityMeasurement
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db.return_value
+        from lib.import_dispatch import _check_quality_gate_core
+        db = MagicMock()
         # current is None (genuine, no cliff) but last_download is stale 192
         db.get_request.return_value = make_request_row(
             last_download_spectral_bitrate=192,  # stale from old download
@@ -474,7 +473,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mock_beets.get_album_info.return_value = MagicMock(
                 min_bitrate_kbps=226, is_cbr=False)
             mock_beets_cls.return_value = mock_beets
-            _check_quality_gate(album_data, 42, ctx)
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42, files=[], db=db)
 
         m = captured_measurement["m"]
         # spectral_bitrate_kbps on the measurement should be None (from current),
@@ -485,29 +486,25 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
     def test_genuine_v0_replacing_transcode_accepted(self):
         """Contract test: genuine V0 replacing a transcode should be accepted
-        by the quality gate, not requeued. Tests the full mark_done → quality
-        gate data flow. Regression test for issue #18."""
-        from lib.import_dispatch import _check_quality_gate
-        from lib.quality import quality_gate_decision, AudioQualityMeasurement
+        by the quality gate, not requeued. Regression test for issue #18."""
+        from lib.import_dispatch import _check_quality_gate_core
+        from lib.quality import quality_gate_decision
 
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db.return_value
+        db = MagicMock()
 
         # After mark_done fix: genuine import clears stale spectral data
         db.get_request.return_value = make_request_row(
-            last_download_spectral_bitrate=None,  # cleared by mark_done (was 192)
+            last_download_spectral_bitrate=None,
             last_download_spectral_grade="genuine",
-            current_spectral_bitrate=None,        # cleared by mark_done (was 192)
+            current_spectral_bitrate=None,
             current_spectral_grade="genuine",
-            verified_lossless=False,          # MP3 V0, not from FLAC
+            verified_lossless=False,
         )
 
         captured = {}
 
         def capture_and_decide(measurement):
             captured["m"] = measurement
-            # Run the REAL decision function
             return quality_gate_decision(measurement)
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
@@ -519,7 +516,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mock_beets.get_album_info.return_value = MagicMock(
                 min_bitrate_kbps=226, is_cbr=False)
             mock_beets_cls.return_value = mock_beets
-            _check_quality_gate(album_data, 42, ctx)
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42, files=[], db=db)
 
         m = captured["m"]
         # Should see: 226kbps VBR, no spectral drag, not verified lossless
@@ -573,11 +572,9 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
     """
 
     def _run_quality_gate_accept(self, target_format="flac"):
-        """Run _check_quality_gate with accept decision and target_format set."""
-        from lib.import_dispatch import _check_quality_gate
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db.return_value
+        """Run _check_quality_gate_core with accept decision and target_format set."""
+        from lib.import_dispatch import _check_quality_gate_core
+        db = MagicMock()
         db.get_request.return_value = make_request_row(
             status="imported",
             target_format=target_format,
@@ -594,7 +591,9 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
             mock_beets.get_album_info.return_value = MagicMock(
                 min_bitrate_kbps=255, is_cbr=False)
             mock_beets_cls.return_value = mock_beets
-            _check_quality_gate(album_data, 42, ctx)
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42, files=[], db=db)
 
         return db
 
