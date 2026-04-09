@@ -207,7 +207,9 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         )
 
         mock_db = MagicMock()
-        mock_db.check_and_apply_cooldown.side_effect = [True, False]
+        mock_db.check_and_apply_cooldown.side_effect = (
+            lambda u: u == "disc1user"  # only disc1user triggers cooldown
+        )
         mock_source = MagicMock()
         mock_source._get_db.return_value = mock_db
         ctx = SoularrContext(
