@@ -74,7 +74,9 @@
 - The agent should check: correctness bugs, test gaps, callers you missed, type errors, unfinished wiring.
 - Fix everything it finds before committing. This is not optional.
 
-## Commits
+## Commits & PRs
 - One logical change per commit
 - Run full test suite + pyright before committing
-- Deploy and verify live after pushing
+- Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
+- PRs are merged via **rebase merge** (squash and merge commits are disabled). This preserves individual commit messages on main, so write them well.
+- Deploy and verify live after merging
