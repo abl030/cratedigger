@@ -1,8 +1,21 @@
-"""Shared test helpers — canonical mock data builders."""
+"""Shared test helpers — canonical mock data builders.
+
+Builders for structured data used across tests. Use these instead of
+hand-rolling dicts or dataclass constructors with many fields.
+"""
 
 from __future__ import annotations
 
 from typing import Any
+
+from lib.quality import (
+    AudioQualityMeasurement,
+    ConversionInfo,
+    DownloadInfo,
+    ImportResult,
+    PostflightInfo,
+    SpectralMeasurement,
+)
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:
@@ -51,3 +64,69 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def make_import_result(
+    decision: str = "import",
+    new_min_bitrate: int = 245,
+    prev_min_bitrate: int | None = None,
+    was_converted: bool = False,
+    original_filetype: str | None = None,
+    target_filetype: str | None = None,
+    spectral_grade: str = "genuine",
+    spectral_bitrate: int | None = None,
+    verified_lossless: bool | None = None,
+    error: str | None = None,
+    imported_path: str | None = None,
+    disambiguated: bool = False,
+    final_format: str | None = None,
+) -> ImportResult:
+    """Build an ImportResult with sensible defaults."""
+    if verified_lossless is None:
+        verified_lossless = was_converted and spectral_grade == "genuine"
+    return ImportResult(
+        decision=decision,
+        error=error,
+        new_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=new_min_bitrate,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+            verified_lossless=verified_lossless,
+            was_converted_from=original_filetype if was_converted else None,
+        ),
+        existing_measurement=(AudioQualityMeasurement(min_bitrate_kbps=prev_min_bitrate)
+                              if prev_min_bitrate is not None else None),
+        conversion=ConversionInfo(
+            was_converted=was_converted,
+            original_filetype=original_filetype or "",
+            target_filetype=target_filetype or "",
+        ),
+        postflight=PostflightInfo(
+            imported_path=imported_path,
+            disambiguated=disambiguated,
+        ),
+        final_format=final_format,
+    )
+
+
+def make_download_info(
+    username: str | None = None,
+    filetype: str | None = None,
+    bitrate: int | None = None,
+    download_spectral: SpectralMeasurement | None = None,
+    current_spectral: SpectralMeasurement | None = None,
+    existing_min_bitrate: int | None = None,
+    **overrides: Any,
+) -> DownloadInfo:
+    """Build a DownloadInfo with sensible defaults."""
+    di = DownloadInfo(
+        username=username,
+        filetype=filetype,
+        bitrate=bitrate,
+        download_spectral=download_spectral,
+        current_spectral=current_spectral,
+        existing_min_bitrate=existing_min_bitrate,
+    )
+    for k, v in overrides.items():
+        setattr(di, k, v)
+    return di
