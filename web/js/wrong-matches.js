@@ -6,6 +6,17 @@ import { esc } from './util.js';
 let _loaded = false;
 
 /**
+ * Format seconds as m:ss.
+ * @param {number} s
+ * @returns {string}
+ */
+function fmtLen(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.round(s % 60);
+  return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
+/**
  * Load and display wrong-match rejections from failed_imports.
  */
 export async function loadWrongMatches() {
@@ -80,40 +91,58 @@ function renderWrongMatches(data, el) {
 function renderWrongMatchDetail(e) {
   let html = '';
 
-  // Detail / scenario
-  if (e.detail) {
-    html += `<div class="p-detail-row"><span class="p-detail-label">Detail</span><span class="p-detail-value">${esc(e.detail)}</span></div>`;
+  const c = e.candidate;
+
+  // Candidate match info
+  if (c) {
+    html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${c.year})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
+    if (c.label) html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(c.label)}${c.catalognum ? ` / ${esc(c.catalognum)}` : ''}</span></div>`;
   }
   if (e.mb_release_id) {
-    html += `<div class="p-detail-row"><span class="p-detail-label">Target MBID</span><span class="p-detail-value" style="font-family:monospace;font-size:0.8em;">${esc(e.mb_release_id)}</span></div>`;
+    html += `<div class="p-detail-row"><span class="p-detail-label">Target MBID</span><span class="p-detail-value"><a href="https://musicbrainz.org/release/${esc(e.mb_release_id)}" target="_blank" style="color:#6af;font-family:monospace;font-size:0.85em;">${esc(e.mb_release_id)}</a></span></div>`;
   }
   if (e.failed_path) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.failed_path)}</span></div>`;
   }
 
-  // Distance breakdown
-  const c = e.candidate;
-  if (c && c.distance_breakdown) {
-    html += '<div style="margin-top:8px;"><span class="p-detail-label">Distance breakdown</span></div>';
-    html += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:0.8em;padding:4px 0 4px 8px;">';
-    const sorted = Object.entries(c.distance_breakdown).sort((a, b) => /** @type {number} */ (b[1]) - /** @type {number} */ (a[1]));
-    for (const [field, value] of sorted) {
-      const v = typeof value === 'number' ? value.toFixed(3) : String(value);
-      const color = /** @type {number} */ (value) > 0.05 ? '#f88' : '#888';
-      html += `<span style="color:#666;">${esc(field)}</span><span style="color:${color};">${v}</span>`;
+  // Distance breakdown — non-zero fields + summary of matched fields
+  if (c) {
+    const ALL_FIELDS = ['tracks', 'album', 'artist', 'album_id', 'year', 'country', 'label', 'catalognum', 'media', 'mediums', 'albumdisambig', 'missing_tracks', 'unmatched_tracks'];
+    const bd = c.distance_breakdown || {};
+    const nonZero = ALL_FIELDS.filter(f => (bd[f] || 0) > 0).sort((a, b) => (bd[b] || 0) - (bd[a] || 0));
+    const zero = ALL_FIELDS.filter(f => !(bd[f] || 0));
+    html += `<div style="margin-top:8px;"><span class="p-detail-label">Distance breakdown</span> <span style="color:#666;font-size:0.75em;">(total: ${e.distance != null ? e.distance.toFixed(3) : '?'})</span></div>`;
+    html += '<div style="display:grid;grid-template-columns:auto 1fr auto;gap:2px 12px;font-size:0.8em;padding:4px 0 4px 8px;">';
+    for (const field of nonZero) {
+      const value = bd[field] || 0;
+      const pct = e.distance ? Math.round((value / e.distance) * 100) : 0;
+      const color = value > 0.05 ? '#f88' : '#da6';
+      html += `<span style="color:#666;">${esc(field)}</span><span style="color:${color};">${value.toFixed(3)}</span><span style="color:#555;font-size:0.85em;">${pct}%</span>`;
     }
     html += '</div>';
+    if (zero.length > 0) {
+      html += `<div style="font-size:0.75em;color:#444;padding-left:8px;">Matched: ${zero.join(', ')}</div>`;
+    }
   }
 
-  // Track mapping
+  // Track mapping — two-column: MB target (left) ↔ On disk (right)
   if (c && c.mapping && c.mapping.length > 0) {
-    html += '<div style="margin-top:8px;"><span class="p-detail-label">Track mapping</span></div>';
-    html += '<div style="font-size:0.78em;padding:4px 0 4px 8px;">';
+    html += `<div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:0.78em;">`;
+    html += `<div style="color:#6a9;font-weight:600;font-size:0.9em;padding-bottom:4px;">MB target</div>`;
+    html += `<div style="color:#da6;font-weight:600;font-size:0.9em;padding-bottom:4px;">On disk</div>`;
     for (const m of c.mapping) {
-      const localTitle = m.item?.title || m.item?.path || '?';
+      const mbNum = m.track?.medium_index || m.track?.index || '?';
       const mbTitle = m.track?.title || '?';
-      const mbNum = m.track?.track || '?';
-      html += `<div class="lib-track"><span>${mbNum}. ${esc(mbTitle)}</span><span class="lib-track-meta">← ${esc(localTitle)}</span></div>`;
+      const mbLen = m.track?.length ? fmtLen(m.track.length) : '';
+      const localTitle = m.item?.title || m.item?.path || '?';
+      const localLen = m.item?.length ? fmtLen(m.item.length) : '';
+      const localFmt = m.item?.format ? ` ${m.item.format}` : '';
+      const localBr = m.item?.bitrate ? ` ${Math.round(m.item.bitrate / 1000)}k` : '';
+      // Highlight title mismatches
+      const titleMatch = mbTitle.toLowerCase().replace(/\s*\(demo\)\s*/g, '').trim() === (localTitle || '').toLowerCase().trim();
+      const mismatchStyle = titleMatch ? '' : 'color:#f88;';
+      html += `<div style="padding:1px 0;color:#aaa;">${mbNum}. ${esc(mbTitle)} <span style="color:#555;">${mbLen}</span></div>`;
+      html += `<div style="padding:1px 0;${mismatchStyle}">${esc(localTitle)}<span style="color:#555;"> ${localLen}${localFmt}${localBr}</span></div>`;
     }
     html += '</div>';
   }
@@ -133,7 +162,8 @@ function renderWrongMatchDetail(e) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#f88;">Missing MB tracks (${c.extra_tracks.length}):</div>`;
     html += '<div style="font-size:0.75em;padding-left:8px;color:#888;">';
     for (const t of c.extra_tracks) {
-      html += `<div>${t.track || '?'}. ${esc(t.title || '?')}</div>`;
+      const num = t.medium_index || t.index || t.track || '?';
+      html += `<div>${num}. ${esc(t.title || '?')}</div>`;
     }
     html += '</div>';
   }
