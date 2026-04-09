@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES
+from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
 
 
 def _utcnow() -> datetime:
@@ -178,8 +178,35 @@ class FakePipelineDB:
             )
             row["next_retry_after"] = now + timedelta(minutes=backoff_minutes)
 
+    def update_spectral_state(self, request_id: int,
+                              update: RequestSpectralStateUpdate) -> None:
+        row = self._requests.get(request_id)
+        if row:
+            fields = update.as_update_fields()
+            row.update(fields)
+            row["updated_at"] = _utcnow()
+
+    def get_downloading(self) -> list[dict[str, Any]]:
+        return [copy.deepcopy(r) for r in self._requests.values()
+                if r.get("status") == "downloading"]
+
     def update_request_fields(self, request_id: int, **fields: Any) -> None:
         row = self._requests.get(request_id)
         if row:
             row.update(fields)
             row["updated_at"] = _utcnow()
+
+    def assert_log(self, test: Any, index: int, **expected: Any) -> None:
+        """Assert fields on a download_log entry at the given index.
+
+        Usage: db.assert_log(self, 0, outcome="success", request_id=42)
+        """
+        test.assertGreater(len(self.download_logs), index,
+                           f"Expected at least {index + 1} download_log entries, "
+                           f"got {len(self.download_logs)}")
+        entry = self.download_logs[index]
+        for field, value in expected.items():
+            actual = getattr(entry, field, entry.extra.get(field))
+            test.assertEqual(actual, value,
+                             f"download_log[{index}].{field}: "
+                             f"expected {value!r}, got {actual!r}")
