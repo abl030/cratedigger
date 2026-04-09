@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 from lib.context import SoularrContext
 from lib.quality import CooldownConfig, should_cooldown
 from soularr import TrackRecord
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_download_file, make_grab_list_entry, make_request_row
 
 
 class TestShouldCooldown(unittest.TestCase):
@@ -144,123 +146,84 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
 class TestCooldownTriggerOnTimeout(unittest.TestCase):
     """_timeout_album() should call check_and_apply_cooldown after logging."""
 
+    def _make_ctx_with_db(self, fake_db):
+        mock_source = MagicMock()
+        mock_source._get_db.return_value = fake_db
+        return SoularrContext(
+            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=mock_source)
+
     def test_timeout_triggers_cooldown_check(self):
         from lib.download import _timeout_album
-        from lib.grab_list import GrabListEntry, DownloadFile
 
-        entry = GrabListEntry(
-            album_id=1,
-            files=[DownloadFile(
-                filename="01.flac", id="xfer-1", file_dir="Music\\Album",
-                username="deaduser", size=50000000,
-            )],
-            filetype="flac",
-            title="Album",
-            artist="Artist",
-            year="2020",
-            mb_release_id="mb-uuid",
-            db_request_id=42,
+        entry = make_grab_list_entry(
+            files=[make_download_file(filename="01.flac", id="xfer-1",
+                                      file_dir="Music\\Album",
+                                      username="deaduser", size=50000000)],
+            filetype="flac", title="Album", artist="Artist",
+            mb_release_id="mb-uuid", db_request_id=42,
         )
-
-        mock_db = MagicMock()
-        mock_db.check_and_apply_cooldown.return_value = True
-        mock_source = MagicMock()
-        mock_source._get_db.return_value = mock_db
-        ctx = SoularrContext(
-            cfg=MagicMock(),
-            slskd=MagicMock(),
-            pipeline_db_source=mock_source,
-        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.set_cooldown_result(True)
+        ctx = self._make_ctx_with_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):
             _timeout_album(entry, 42, "stalled", ctx)
 
-        mock_db.log_download.assert_called_once()
-        self.assertEqual(mock_db.log_download.call_args.kwargs["outcome"], "timeout")
-        mock_db.check_and_apply_cooldown.assert_called_once_with("deaduser")
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(self, 0, outcome="timeout")
+        self.assertIn("deaduser", db.cooldowns_applied)
         self.assertEqual(ctx.cooled_down_users, {"deaduser"})
 
     def test_timeout_checks_each_user_for_multi_user_download(self):
         """Multi-user downloads should evaluate cooldown per source user."""
         from lib.download import _timeout_album
-        from lib.grab_list import GrabListEntry, DownloadFile
 
-        entry = GrabListEntry(
-            album_id=1,
+        entry = make_grab_list_entry(
             files=[
-                DownloadFile(
-                    filename="01.flac", id="xfer-1", file_dir="Music\\Disc 1",
-                    username="disc1user", size=50000000,
-                ),
-                DownloadFile(
-                    filename="02.flac", id="xfer-2", file_dir="Music\\Disc 2",
-                    username="disc2user", size=50000000,
-                ),
+                make_download_file(filename="01.flac", id="xfer-1",
+                                   file_dir="Music\\Disc 1",
+                                   username="disc1user", size=50000000),
+                make_download_file(filename="02.flac", id="xfer-2",
+                                   file_dir="Music\\Disc 2",
+                                   username="disc2user", size=50000000),
             ],
-            filetype="flac",
-            title="Album",
-            artist="Artist",
-            year="2020",
-            mb_release_id="mb-uuid",
-            db_request_id=42,
+            filetype="flac", title="Album", artist="Artist",
+            mb_release_id="mb-uuid", db_request_id=42,
         )
-
-        mock_db = MagicMock()
-        mock_db.check_and_apply_cooldown.side_effect = (
-            lambda u: u == "disc1user"  # only disc1user triggers cooldown
-        )
-        mock_source = MagicMock()
-        mock_source._get_db.return_value = mock_db
-        ctx = SoularrContext(
-            cfg=MagicMock(),
-            slskd=MagicMock(),
-            pipeline_db_source=mock_source,
-        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.set_cooldown_result(lambda u: u == "disc1user")
+        ctx = self._make_ctx_with_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):
             _timeout_album(entry, 42, "stalled", ctx)
 
-        cooldown_calls = {
-            args[0] for args, _kwargs in mock_db.check_and_apply_cooldown.call_args_list
-        }
-        self.assertEqual(cooldown_calls, {"disc1user", "disc2user"})
+        self.assertEqual(set(db.cooldowns_applied), {"disc1user", "disc2user"})
         self.assertEqual(ctx.cooled_down_users, {"disc1user"})
 
     def test_timeout_no_cooldown_when_no_username(self):
         """If username is empty/None, don't call cooldown check."""
         from lib.download import _timeout_album
-        from lib.grab_list import GrabListEntry, DownloadFile
 
-        entry = GrabListEntry(
-            album_id=1,
-            files=[DownloadFile(
-                filename="01.flac", id="xfer-1", file_dir="Music\\Album",
-                username="", size=50000000,
-            )],
-            filetype="flac",
-            title="Album",
-            artist="Artist",
-            year="2020",
-            mb_release_id="mb-uuid",
-            db_request_id=42,
+        entry = make_grab_list_entry(
+            files=[make_download_file(filename="01.flac", id="xfer-1",
+                                      file_dir="Music\\Album",
+                                      username="", size=50000000)],
+            filetype="flac", title="Album", artist="Artist",
+            mb_release_id="mb-uuid", db_request_id=42,
         )
-
-        mock_db = MagicMock()
-        mock_source = MagicMock()
-        mock_source._get_db.return_value = mock_db
-        ctx = SoularrContext(
-            cfg=MagicMock(),
-            slskd=MagicMock(),
-            pipeline_db_source=mock_source,
-        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ctx = self._make_ctx_with_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):
             _timeout_album(entry, 42, "stalled", ctx)
 
-        mock_db.check_and_apply_cooldown.assert_not_called()
+        self.assertEqual(db.cooldowns_applied, [])
 
 
 class TestCooldownTriggerOnRejection(unittest.TestCase):

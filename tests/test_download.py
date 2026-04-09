@@ -12,18 +12,29 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
-from lib.quality import DownloadInfo, SpectralContext, SpectralMeasurement
+from lib.quality import SpectralContext
+from tests.helpers import (
+    make_download_file,
+    make_grab_list_entry,
+    make_spectral_context,
+)
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _make_file(filename="01 - Track.mp3", username="user1",
-               bitRate=320, sampleRate=44100, bitDepth=None,
-               isVariableBitRate=None, file_dir="user1\\Music",
-               size=5000000, bytes_transferred=None, last_state=None):
-    """Build a mock DownloadFile."""
+def _make_transfer_mock(filename="01 - Track.mp3", username="user1",
+                        bitRate=320, sampleRate=44100, bitDepth=None,
+                        isVariableBitRate=None, file_dir="user1\\Music",
+                        size=5000000, bytes_transferred=None, last_state=None):
+    """Build a mock slskd transfer object with runtime state attributes.
+
+    Use this ONLY for tests that need runtime attributes like status,
+    bytes_transferred, last_state, import_path — these don't exist on
+    the real DownloadFile dataclass. For tests that only need DownloadFile
+    fields, use make_download_file() from tests.helpers instead.
+    """
     f = MagicMock()
     f.filename = filename
     f.username = username
@@ -42,26 +53,6 @@ def _make_file(filename="01 - Track.mp3", username="user1",
     f.disk_no = None
     f.disk_count = None
     return f
-
-
-def _make_album_data(files=None, filetype="mp3", is_vbr=False,
-                     mb_release_id: str | None = "test-mbid", artist="Test Artist",
-                     title="Test Album", year="2020"):
-    """Build a mock GrabListEntry."""
-    mock = MagicMock()
-    mock.files = files or [_make_file()]
-    mock.artist = artist
-    mock.title = title
-    mock.year = year
-    mock.mb_release_id = mb_release_id
-    mock.filetype = filetype
-    mock.download_spectral = None
-    mock.current_spectral = None
-    mock.current_min_bitrate = None
-    mock.album_id = 123
-    mock.db_request_id = 1
-    mock.db_source = "request"
-    return mock
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
@@ -93,8 +84,8 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_basic(self):
         from lib.import_dispatch import _build_download_info
-        files = [_make_file(bitRate=320, sampleRate=44100)]
-        album = _make_album_data(files=files)
+        files = [make_download_file(bitRate=320, sampleRate=44100)]
+        album = make_grab_list_entry(files=files)
         dl = _build_download_info(album)
         self.assertEqual(dl.username, "user1")
         self.assertEqual(dl.filetype, "mp3")
@@ -103,19 +94,18 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_empty_files(self):
         from lib.import_dispatch import _build_download_info
-        mock = MagicMock()
-        mock.files = []
-        dl = _build_download_info(mock)
+        album = make_grab_list_entry(files=[])
+        dl = _build_download_info(album)
         self.assertIsNone(dl.username)
         self.assertIsNone(dl.filetype)
 
     def test_multi_user(self):
         from lib.import_dispatch import _build_download_info
         files = [
-            _make_file(username="beta_user"),
-            _make_file(username="alpha_user"),
+            make_download_file(username="beta_user"),
+            make_download_file(username="alpha_user"),
         ]
-        album = _make_album_data(files=files)
+        album = make_grab_list_entry(files=files)
         dl = _build_download_info(album)
         self.assertEqual(dl.username, "alpha_user, beta_user")
 
@@ -134,7 +124,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_all_succeeded(self):
         from lib.download import downloads_all_done
-        files = [_make_file(), _make_file()]
+        files = [_make_transfer_mock(), _make_transfer_mock()]
         files[0].status = {"state": "Completed, Succeeded"}
         files[1].status = {"state": "Completed, Succeeded"}
         done, problems, queued = downloads_all_done(files)
@@ -144,7 +134,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_one_errored(self):
         from lib.download import downloads_all_done
-        files = [_make_file(), _make_file()]
+        files = [_make_transfer_mock(), _make_transfer_mock()]
         files[0].status = {"state": "Completed, Succeeded"}
         files[1].status = {"state": "Completed, Errored"}
         done, problems, queued = downloads_all_done(files)
@@ -156,7 +146,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_queued_remotely(self):
         from lib.download import downloads_all_done
-        files = [_make_file(), _make_file()]
+        files = [_make_transfer_mock(), _make_transfer_mock()]
         files[0].status = {"state": "Completed, Succeeded"}
         files[1].status = {"state": "Queued, Remotely"}
         done, problems, queued = downloads_all_done(files)
@@ -175,7 +165,7 @@ class TestDownloadsAllDone(unittest.TestCase):
             "Completed, Aborted",
         ]
         for state in error_states:
-            files = [_make_file()]
+            files = [_make_transfer_mock()]
             files[0].status = {"state": state}
             done, problems, _ = downloads_all_done(files)
             self.assertFalse(done, f"state={state} should not be done")
@@ -183,7 +173,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_none_status_skipped(self):
         from lib.download import downloads_all_done
-        files = [_make_file()]
+        files = [_make_transfer_mock()]
         files[0].status = None
         done, problems, queued = downloads_all_done(files)
         # None status means we can't confirm done
@@ -197,7 +187,7 @@ class TestCancelAndDelete(unittest.TestCase):
     def test_cancels_and_removes_dir(self):
         from lib.download import cancel_and_delete
         ctx = _make_ctx()
-        f = _make_file(file_dir="someuser\\Album Folder")
+        f = _make_transfer_mock(file_dir="someuser\\Album Folder")
         with patch("os.path.isdir", return_value=True), \
              patch("shutil.rmtree") as mock_rm:
             cancel_and_delete([f], ctx)
@@ -210,7 +200,7 @@ class TestCancelAndDelete(unittest.TestCase):
         from lib.download import cancel_and_delete
         ctx = _make_ctx()
         ctx.slskd.transfers.cancel_download.side_effect = Exception("network error")
-        f = _make_file()
+        f = _make_transfer_mock()
         with patch("os.path.exists", return_value=False), \
              patch("os.chdir"):
             cancel_and_delete([f], ctx)  # should not raise
@@ -222,7 +212,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         from lib.download import slskd_download_status
         ctx = _make_ctx()
         ctx.slskd.transfers.get_download.return_value = {"state": "Completed, Succeeded"}
-        f = _make_file()
+        f = _make_transfer_mock()
         ok = slskd_download_status([f], ctx)
         self.assertTrue(ok)
         self.assertEqual(f.status["state"], "Completed, Succeeded")
@@ -231,7 +221,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         from lib.download import slskd_download_status
         ctx = _make_ctx()
         ctx.slskd.transfers.get_download.side_effect = Exception("fail")
-        f = _make_file()
+        f = _make_transfer_mock()
         ok = slskd_download_status([f], ctx)
         self.assertFalse(ok)
         self.assertIsNone(f.status)
@@ -240,7 +230,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         """When snapshot is provided, use match_transfer instead of per-file API."""
         from lib.download import slskd_download_status
         ctx = _make_ctx()
-        f = _make_file(filename="Music\\01 - Track.mp3", username="user1")
+        f = _make_transfer_mock(filename="Music\\01 - Track.mp3", username="user1")
         snapshot = [{
             "username": "user1",
             "directories": [{"files": [{
@@ -260,7 +250,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         """When snapshot doesn't contain the file, status is None, returns False."""
         from lib.download import slskd_download_status
         ctx = _make_ctx()
-        f = _make_file(filename="Music\\missing.mp3", username="user1")
+        f = _make_transfer_mock(filename="Music\\missing.mp3", username="user1")
         snapshot = [{"username": "user1", "directories": [{"files": []}]}]
         ok = slskd_download_status([f], ctx, snapshot=snapshot)
         self.assertFalse(ok)
@@ -348,8 +338,8 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
 
     def test_flac_returns_no_check(self):
         from lib.download import _gather_spectral_context
-        files = [_make_file(filename="01.flac", isVariableBitRate=False)]
-        album = _make_album_data(files=files, filetype="flac")
+        files = [make_download_file(filename="01.flac", isVariableBitRate=False)]
+        album = make_grab_list_entry(files=files, filetype="flac")
         ctx = _make_ctx()
         result = _gather_spectral_context(album, "/tmp/folder", ctx)
         self.assertIsInstance(result, SpectralContext)
@@ -357,8 +347,8 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
 
     def test_vbr_mp3_returns_no_check(self):
         from lib.download import _gather_spectral_context
-        files = [_make_file(isVariableBitRate=True)]
-        album = _make_album_data(files=files, filetype="mp3", is_vbr=True)
+        files = [make_download_file(isVariableBitRate=True)]
+        album = make_grab_list_entry(files=files, filetype="mp3")
         ctx = _make_ctx()
         result = _gather_spectral_context(album, "/tmp/folder", ctx)
         self.assertFalse(result.needs_check)
@@ -368,9 +358,9 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
         from lib.download import _gather_spectral_context
         mock_spectral.return_value = MagicMock(
             grade="genuine", estimated_bitrate_kbps=320, suspect_pct=0.0)
-        files = [_make_file(bitRate=320, isVariableBitRate=False)]
-        album = _make_album_data(files=files, filetype="mp3", is_vbr=False,
-                                 mb_release_id=None)
+        files = [make_download_file(bitRate=320, isVariableBitRate=False)]
+        album = make_grab_list_entry(files=files, filetype="mp3",
+                                     mb_release_id="")
         ctx = _make_ctx()
         result = _gather_spectral_context(album, "/tmp/folder", ctx)
         self.assertTrue(result.needs_check)
@@ -392,8 +382,8 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
         mock_beets.__exit__ = MagicMock(return_value=False)
         mock_beets_cls.return_value = mock_beets
 
-        files = [_make_file(bitRate=320, isVariableBitRate=False)]
-        album = _make_album_data(files=files, filetype="mp3", is_vbr=False)
+        files = [make_download_file(bitRate=320, isVariableBitRate=False)]
+        album = make_grab_list_entry(files=files, filetype="mp3")
         ctx = _make_ctx()
 
         with patch("os.path.isdir", return_value=True):
@@ -410,96 +400,85 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
 
 
 class TestApplySpectralDecision(unittest.TestCase):
-    """Tests the DB write contract for spectral state updates."""
+    """Tests spectral state propagation via FakePipelineDB."""
+
+    def _make_ctx_with_fake_db(self, fake_db):
+        """Build SoularrContext wired to a FakePipelineDB."""
+        ctx = _make_ctx()
+        cast(Any, ctx.pipeline_db_source)._get_db.return_value = fake_db
+        return ctx
 
     @patch("lib.download.spectral_import_decision", return_value="accept")
     def test_existing_genuine_state_propagates_none_bitrate(self, _mock_decision):
         from lib.download import _apply_spectral_decision
-        from lib.pipeline_db import RequestSpectralStateUpdate
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row, make_validation_result
 
-        album = _make_album_data()
-        ctx = _make_ctx()
-        db = cast(Any, ctx.pipeline_db_source._get_db).return_value
-        bv_result = MagicMock(valid=True)
-        spec_ctx = SpectralContext(
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=1))
+        album = make_grab_list_entry(db_request_id=1, db_source="request")
+        ctx = self._make_ctx_with_fake_db(fake_db)
+        bv_result = make_validation_result()
+        spec_ctx = make_spectral_context(
             needs_check=True,
             grade="genuine",
-            bitrate=None,
             existing_min_bitrate=226,
             existing_spectral_grade="genuine",
-            existing_spectral_bitrate=None,
         )
 
         _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
 
-        db.update_spectral_state.assert_called_once_with(
-            album.db_request_id,
-            RequestSpectralStateUpdate(
-                current=SpectralMeasurement(grade="genuine", bitrate_kbps=None),
-            ),
-        )
-
+        row = fake_db.request(1)
+        self.assertEqual(row["current_spectral_grade"], "genuine")
+        self.assertIsNone(row["current_spectral_bitrate"])
 
     def test_new_album_transcode_not_rejected_by_self_propagation(self):
-        """Bug: new album with nothing on disk gets spectral propagated from
-        download, then spectral_import_decision sees download quality as
-        existing quality and rejects it as 'not better than existing'.
-
-        Expected: a suspect 96kbps download with nothing on disk should get
-        'import_no_exist', not 'reject'.
-        """
+        """A suspect 96kbps download with nothing on disk should not be rejected."""
         from lib.download import _apply_spectral_decision
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row, make_validation_result
 
-        album = _make_album_data()
-        ctx = _make_ctx()
-        cast(Any, ctx.pipeline_db_source._get_db).return_value
-        bv_result = MagicMock(valid=True)
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=1))
+        album = make_grab_list_entry(db_request_id=1, db_source="request")
+        ctx = self._make_ctx_with_fake_db(fake_db)
+        bv_result = make_validation_result()
         # Nothing on disk: all existing fields are None
-        spec_ctx = SpectralContext(
+        spec_ctx = make_spectral_context(
             needs_check=True,
             grade="likely_transcode",
             bitrate=96,
-            existing_min_bitrate=None,
-            existing_spectral_grade=None,
-            existing_spectral_bitrate=None,
         )
 
         _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
 
-        # The download should NOT be rejected — there's nothing on disk
         self.assertTrue(bv_result.valid,
-                        "A suspect download with nothing on disk should not be rejected; "
-                        "expected 'import_no_exist' not 'reject'")
+                        "A suspect download with nothing on disk should not be rejected")
 
     def test_propagation_still_works_when_album_on_disk_lacks_spectral(self):
-        """When an album IS on disk (min_bitrate set) but has no spectral data,
-        propagation should still adopt the download's spectral as current."""
+        """Album on disk with no spectral adopts download's spectral as current."""
         from lib.download import _apply_spectral_decision
-        from lib.pipeline_db import RequestSpectralStateUpdate
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row, make_validation_result
 
-        album = _make_album_data()
-        ctx = _make_ctx()
-        db = cast(Any, ctx.pipeline_db_source._get_db).return_value
-        bv_result = MagicMock(valid=True)
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=1))
+        album = make_grab_list_entry(db_request_id=1, db_source="request")
+        ctx = self._make_ctx_with_fake_db(fake_db)
+        bv_result = make_validation_result()
         # Album on disk at 256kbps, no spectral data yet
-        spec_ctx = SpectralContext(
+        spec_ctx = make_spectral_context(
             needs_check=True,
             grade="suspect",
             bitrate=192,
             existing_min_bitrate=256,
-            existing_spectral_grade=None,
-            existing_spectral_bitrate=None,
         )
 
         _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
 
-        # Should propagate download spectral as current and write to DB
-        db.update_spectral_state.assert_called_once_with(
-            album.db_request_id,
-            RequestSpectralStateUpdate(
-                current=SpectralMeasurement(grade="suspect", bitrate_kbps=192),
-            ),
-        )
+        row = fake_db.request(1)
+        self.assertEqual(row["current_spectral_grade"], "suspect")
+        self.assertEqual(row["current_spectral_bitrate"], 192)
 
 
 class TestGrabMostWanted(unittest.TestCase):
@@ -874,9 +853,9 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             with open(src_file, "w") as f:
                 f.write("fake audio")
 
-            files = [_make_file(filename="source_dir\\01 - Track.mp3",
-                                file_dir="source_dir")]
-            album = _make_album_data(files=files, mb_release_id=None)
+            files = [make_download_file(filename="source_dir\\01 - Track.mp3",
+                                        file_dir="source_dir")]
+            album = make_grab_list_entry(files=files, mb_release_id="")
             ctx = _make_ctx()
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
@@ -891,9 +870,9 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             # Source dir exists but file doesn't — move will fail
-            files = [_make_file(filename="nonexistent_dir\\01 - Track.mp3",
-                                file_dir="nonexistent_dir")]
-            album = _make_album_data(files=files, mb_release_id=None)
+            files = [make_download_file(filename="nonexistent_dir\\01 - Track.mp3",
+                                        file_dir="nonexistent_dir")]
+            album = make_grab_list_entry(files=files, mb_release_id="")
             ctx = _make_ctx()
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir

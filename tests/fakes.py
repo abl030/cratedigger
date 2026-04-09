@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
 
@@ -66,7 +66,7 @@ class FakePipelineDB:
         self.denylist: list[DenylistEntry] = []
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
-        self._cooldown_result: bool = False
+        self._cooldown_result: bool | Callable[[str], bool] = False
 
     # --- Seeding ---
 
@@ -79,8 +79,12 @@ class FakePipelineDB:
         """Get a request row (for test assertions). Raises KeyError if missing."""
         return self._requests[request_id]
 
-    def set_cooldown_result(self, result: bool) -> None:
-        """Configure what check_and_apply_cooldown returns."""
+    def set_cooldown_result(self, result: bool | Callable[[str], bool]) -> None:
+        """Configure what check_and_apply_cooldown returns.
+
+        Pass a bool for a fixed result, or a callable(username) -> bool
+        for per-user conditional results.
+        """
         self._cooldown_result = result
 
     # --- PipelineDB interface methods ---
@@ -161,6 +165,8 @@ class FakePipelineDB:
     def check_and_apply_cooldown(self, username: str,
                                   config: Any = None) -> bool:  # noqa: ARG002
         self.cooldowns_applied.append(username)
+        if callable(self._cooldown_result):
+            return self._cooldown_result(username)
         return self._cooldown_result
 
     def record_attempt(self, request_id: int, attempt_type: str) -> None:
