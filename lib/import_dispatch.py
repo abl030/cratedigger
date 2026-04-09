@@ -27,6 +27,7 @@ from lib.transitions import apply_transition
 from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
 
 if TYPE_CHECKING:
+    from lib.config import SoularrConfig
     from lib.context import SoularrContext
     from lib.grab_list import GrabListEntry
 
@@ -432,38 +433,22 @@ class DispatchOutcome:
     message: str
 
 
-def _local_beets_harness_path() -> str:
-    """Resolve the harness path from the checked-out source tree."""
-    return os.path.abspath(os.path.join(
-        os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
-    ))
+def _read_runtime_config() -> "SoularrConfig":
+    """Read the full runtime config for force/manual import.
 
-
-def _read_minimal_config() -> dict[str, str]:
-    """Resolve the local harness path and read runtime verified_lossless_target.
-
-    Used by dispatch_import_from_db which runs outside the main soularr process.
+    Same config.ini that the main soularr process uses, so force-import
+    behaves identically (Plex, Meelo, quality settings, etc.).
     """
+    from lib.config import SoularrConfig
     path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
-    local_harness_path = _local_beets_harness_path()
-    result = {
-        "beets_harness_path": local_harness_path if os.path.exists(local_harness_path) else "",
-        "verified_lossless_target": "",
-    }
     if not os.path.exists(path):
-        return result
+        return SoularrConfig()
     parser = configparser.ConfigParser(interpolation=configparser.BasicInterpolation())
     try:
         parser.read(path)
     except (configparser.Error, OSError):
-        return result
-    config_harness_path = parser.get(
-        "Beets Validation", "harness_path", fallback="").strip()
-    if not result["beets_harness_path"] and config_harness_path:
-        result["beets_harness_path"] = config_harness_path
-    result["verified_lossless_target"] = parser.get(
-        "Beets Validation", "verified_lossless_target", fallback="").strip()
-    return result
+        return SoularrConfig()
+    return SoularrConfig.from_ini(parser, var_dir=os.path.dirname(path))
 
 
 def dispatch_import_from_db(
@@ -490,7 +475,6 @@ def dispatch_import_from_db(
         source_username: Original Soulseek username for force-import audit/denylist flows
     """
     from album_source import DatabaseSource
-    from lib.config import SoularrConfig
     from lib.context import SoularrContext
     from lib.grab_list import DownloadFile, GrabListEntry
 
@@ -506,8 +490,8 @@ def dispatch_import_from_db(
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
 
-    # Read minimal config for import_one.py flags
-    cfg_values = _read_minimal_config()
+    # Read the FULL runtime config — same config.ini the main process uses
+    cfg = _read_runtime_config()
 
     files = ([DownloadFile(
         filename="",
@@ -517,7 +501,7 @@ def dispatch_import_from_db(
         size=0,
     )] if source_username else [])
 
-    # Construct minimal GrabListEntry
+    # Construct GrabListEntry from DB state
     album_data = GrabListEntry(
         album_id=0,
         files=files,
@@ -531,19 +515,11 @@ def dispatch_import_from_db(
         db_target_format=req.get("target_format"),
     )
 
-    # Construct minimal SoularrConfig
-    cfg = SoularrConfig(
-        beets_harness_path=cfg_values["beets_harness_path"],
-        verified_lossless_target=cfg_values["verified_lossless_target"],
-        pipeline_db_enabled=True,
-    )
-
-    # Construct minimal DatabaseSource wrapping the existing PipelineDB
+    # Wrap the existing PipelineDB in a DatabaseSource
     db_source = DatabaseSource.__new__(DatabaseSource)
-    db_source.dsn = ""
+    db_source.dsn = cfg.pipeline_db_dsn
     db_source._db = db  # type: ignore[attr-defined]
 
-    # Construct minimal SoularrContext
     ctx = SoularrContext(
         cfg=cfg,
         slskd=None,

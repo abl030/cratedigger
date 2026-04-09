@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from lib.config import SoularrConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement, PostflightInfo)
 from tests.helpers import make_request_row
@@ -148,10 +149,10 @@ class TestDispatchImportFromDb(unittest.TestCase):
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.import_dispatch.trigger_plex_scan"), \
                  patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]), \
-                 patch("lib.import_dispatch._read_minimal_config", return_value={
-                     "beets_harness_path": "/nix/store/fake/harness/run_beets_harness.sh",
-                     "verified_lossless_target": "",
-                 }):
+                 patch("lib.import_dispatch._read_runtime_config", return_value=SoularrConfig(
+                     beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                     pipeline_db_enabled=True,
+                 )):
                 mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,
@@ -267,40 +268,38 @@ class TestDispatchImportFromDb(unittest.TestCase):
                          f"Expected 1 log_download call, got {len(log_calls)}")
 
 
-class TestReadMinimalConfig(unittest.TestCase):
-    def test_missing_runtime_config_falls_back_to_repo_harness(self):
-        from lib.import_dispatch import _read_minimal_config
-
-        expected_harness = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
-        ))
+class TestReadRuntimeConfig(unittest.TestCase):
+    def test_missing_config_returns_default(self):
+        from lib.import_dispatch import _read_runtime_config
         with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": "/nonexistent/config.ini"}):
-            values = _read_minimal_config()
+            cfg = _read_runtime_config()
+        self.assertEqual(cfg.beets_harness_path, "")
 
-        self.assertEqual(values["beets_harness_path"], expected_harness)
-        self.assertEqual(values["verified_lossless_target"], "")
-
-    def test_runtime_config_does_not_override_repo_harness_path(self):
-        from lib.import_dispatch import _read_minimal_config
-
-        expected_harness = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
-        ))
-        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+    def test_reads_full_config(self):
+        from lib.import_dispatch import _read_runtime_config
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
             tmp.write(
                 "[Beets Validation]\n"
-                "harness_path = /nix/store/stale/run_beets_harness.sh\n"
+                "harness_path = /nix/store/test/run_beets_harness.sh\n"
                 "verified_lossless_target = opus 128\n"
+                "[Meelo]\n"
+                "url = http://meelo.test\n"
+                "[Plex]\n"
+                "url = http://plex.test\n"
+                "token = test-token\n"
             )
             config_path = tmp.name
         try:
             with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": config_path}):
-                values = _read_minimal_config()
+                cfg = _read_runtime_config()
         finally:
             os.unlink(config_path)
 
-        self.assertEqual(values["beets_harness_path"], expected_harness)
-        self.assertEqual(values["verified_lossless_target"], "opus 128")
+        self.assertEqual(cfg.beets_harness_path, "/nix/store/test/run_beets_harness.sh")
+        self.assertEqual(cfg.verified_lossless_target, "opus 128")
+        self.assertEqual(cfg.meelo_url, "http://meelo.test")
+        self.assertEqual(cfg.plex_url, "http://plex.test")
+        self.assertEqual(cfg.plex_token, "test-token")
 
 
 if __name__ == "__main__":
