@@ -6,11 +6,13 @@ that runs import_one.py and dispatches on the ImportResult decision.
 
 from __future__ import annotations
 
+import configparser
 import logging
 import os
 import shutil
 import subprocess as sp
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
@@ -220,21 +222,25 @@ def trigger_plex_scan(ctx: "SoularrContext", imported_path: str | None = None) -
 
 def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest: str,
                     dl_info: DownloadInfo, request_id: int,
-                    ctx: "SoularrContext") -> None:
-    """Auto-import decision tree: run import_one.py and dispatch on result.
+                    ctx: "SoularrContext", *, force: bool = False) -> None:
+    """Import decision tree: run import_one.py and dispatch on result.
 
-    Called from process_completed_album() when source=request and
-    distance <= threshold.
+    Called from process_completed_album() for auto-import, and from
+    dispatch_import_from_db() for force-import and manual-import.
+    When force=True, --force is passed to import_one.py (bypasses distance check).
     """
     import_script = os.path.join(
         os.path.dirname(ctx.cfg.beets_harness_path), "import_one.py")
     mb_id = album_data.mb_release_id or ""
     label = f"{album_data.artist} - {album_data.title}"
-    logger.info(f"AUTO-IMPORT: {label} "
+    mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
+    logger.info(f"{mode}: {label} "
                 f"(source=request, dist={bv_result.distance:.4f})")
     try:
         cmd = [sys.executable, import_script, dest, mb_id,
                "--request-id", str(request_id)]
+        if force:
+            cmd.append("--force")
         if ctx.cfg.verified_lossless_target:
             cmd.extend(["--verified-lossless-target", ctx.cfg.verified_lossless_target])
         if album_data.db_target_format:
@@ -258,7 +264,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
         ir = parse_import_result(result.stdout or "")
         if ir is None:
             logger.error(
-                f"AUTO-IMPORT FAILED (no JSON, rc={result.returncode}): {label}")
+                f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
             for line in (result.stdout or "").strip().split("\n"):
                 logger.error(f"  {line}")
             ctx.pipeline_db_source.mark_failed(
@@ -282,7 +288,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
 
             # --- Mark done or failed with decision-specific details ---
             if action.mark_done:
-                logger.info(f"AUTO-IMPORT OK: {label} (decision={decision})")
+                logger.info(f"{mode} OK: {label} (decision={decision})")
                 ctx.pipeline_db_source.mark_done(
                     album_data, bv_result, dest_path=dest, download_info=dl_info)
                 if decision in ("import", "preflight_existing"):
@@ -310,7 +316,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 else:
                     scenario = decision or "import_error"
                     detail = ir.error
-                    logger.error(f"AUTO-IMPORT FAILED: {label} "
+                    logger.error(f"{mode} FAILED: {label} "
                                  f"(decision={decision}, error={ir.error})")
                 if decision == "downgrade" and ctx.pipeline_db_source is not None:
                     try:
@@ -393,7 +399,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 if removed:
                     trigger_meelo_clean(ctx.cfg)
     except sp.TimeoutExpired:
-        logger.error(f"AUTO-IMPORT TIMEOUT: {label}")
+        logger.error(f"{mode} TIMEOUT: {label}")
         timeout_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
@@ -403,7 +409,7 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             download_info=timeout_dl,
             cooled_down_users=ctx.cooled_down_users)
     except Exception:
-        logger.exception(f"AUTO-IMPORT ERROR: {label}")
+        logger.exception(f"{mode} ERROR: {label}")
         err_dl = _build_download_info(album_data)
         ctx.pipeline_db_source.mark_failed(
             album_data,
@@ -413,3 +419,161 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                              error="exception"),
             download_info=err_dl,
             cooled_down_users=ctx.cooled_down_users)
+
+
+@dataclass(frozen=True)
+class DispatchOutcome:
+    """Result of dispatch_import_from_db — typed return for web/CLI callers."""
+    success: bool
+    message: str
+
+
+def _read_minimal_config() -> dict[str, str]:
+    """Read beets_harness_path and verified_lossless_target from runtime config.
+
+    Used by dispatch_import_from_db which runs outside the main soularr process.
+    """
+    path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
+    result = {"beets_harness_path": "", "verified_lossless_target": ""}
+    if not os.path.exists(path):
+        return result
+    parser = configparser.ConfigParser(interpolation=configparser.BasicInterpolation())
+    try:
+        parser.read(path)
+    except (configparser.Error, OSError):
+        return result
+    result["beets_harness_path"] = parser.get(
+        "Beets Validation", "harness_path", fallback="")
+    result["verified_lossless_target"] = parser.get(
+        "Beets Validation", "verified_lossless_target", fallback="").strip()
+    return result
+
+
+def dispatch_import_from_db(
+    db: object,
+    request_id: int,
+    failed_path: str,
+    *,
+    force: bool = False,
+    outcome_label: str = "force_import",
+) -> DispatchOutcome:
+    """Run a force-import or manual-import through the full dispatch pipeline.
+
+    Constructs the lightweight wrappers needed by dispatch_import() from DB
+    state, then delegates. All quality checks (downgrade prevention, quality
+    gate, meelo scan, denylist) run identically to auto-import.
+
+    Args:
+        db: PipelineDB instance
+        request_id: Album request ID
+        failed_path: Path to the files on disk
+        force: Pass --force to import_one.py (bypass distance check)
+        outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
+    """
+    from album_source import DatabaseSource
+    from lib.config import SoularrConfig
+    from lib.context import SoularrContext
+    from lib.grab_list import GrabListEntry
+
+    # Look up album request
+    req = db.get_request(request_id)  # type: ignore[union-attr]
+    if not req:
+        return DispatchOutcome(success=False, message=f"Request {request_id} not found")
+
+    mbid = req.get("mb_release_id", "")
+    if not mbid:
+        return DispatchOutcome(success=False, message="No MusicBrainz release ID")
+
+    if not os.path.isdir(failed_path):
+        return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
+
+    # Read minimal config for import_one.py flags
+    cfg_values = _read_minimal_config()
+
+    # Construct minimal GrabListEntry
+    album_data = GrabListEntry(
+        album_id=0,
+        files=[],
+        filetype="",
+        title=req.get("album_title", ""),
+        artist=req.get("artist_name", ""),
+        year=str(req.get("year", "")),
+        mb_release_id=mbid,
+        db_request_id=request_id,
+        db_source="request",
+        db_target_format=req.get("target_format"),
+    )
+
+    # Construct minimal SoularrConfig
+    cfg = SoularrConfig(
+        beets_harness_path=cfg_values["beets_harness_path"],
+        verified_lossless_target=cfg_values["verified_lossless_target"],
+        pipeline_db_enabled=True,
+    )
+
+    # Construct minimal DatabaseSource wrapping the existing PipelineDB
+    db_source = DatabaseSource.__new__(DatabaseSource)
+    db_source.dsn = ""
+    db_source._db = db  # type: ignore[attr-defined]
+
+    # Construct minimal SoularrContext
+    ctx = SoularrContext(
+        cfg=cfg,
+        slskd=None,
+        pipeline_db_source=db_source,
+    )
+
+    # Build validation result from original distance (if available)
+    bv_result = ValidationResult(
+        distance=0.0,
+        scenario="force_import" if force else "manual_import",
+    )
+    dl_info = DownloadInfo()
+
+    # Capture whether dispatch_import marks done or failed
+    original_mark_done = db_source.mark_done
+    original_mark_failed = db_source.mark_failed
+    outcome = {"success": False, "message": ""}
+
+    def tracking_mark_done(album_record, bv, dest_path=None, download_info=None):
+        outcome["success"] = True
+        outcome["message"] = "Import successful"
+        # Log with force_import/manual_import outcome label
+        dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
+        from lib.import_service import extract_import_log_fields
+        log_fields = extract_import_log_fields(dl.import_result)
+        db.log_download(  # type: ignore[union-attr]
+            request_id=request_id,
+            outcome=outcome_label,
+            import_result=dl.import_result,
+            staged_path=failed_path,
+            **log_fields,
+        )
+        # Delegate status update to original
+        original_mark_done(album_record, bv, dest_path=dest_path,
+                           download_info=download_info)
+
+    def tracking_mark_failed(album_record, bv, usernames=None,
+                             download_info=None, search_filetype_override=None,
+                             cooled_down_users=None):
+        outcome["success"] = False
+        outcome["message"] = f"Rejected: {bv.scenario} — {bv.detail}"
+        original_mark_failed(album_record, bv, usernames=usernames,
+                             download_info=download_info,
+                             search_filetype_override=search_filetype_override,
+                             cooled_down_users=cooled_down_users)
+
+    db_source.mark_done = tracking_mark_done  # type: ignore[method-assign]
+    db_source.mark_failed = tracking_mark_failed  # type: ignore[method-assign]
+
+    dispatch_import(album_data, bv_result, failed_path, dl_info,
+                    request_id, ctx, force=force)
+
+    if outcome["success"]:
+        return DispatchOutcome(success=True, message=str(outcome["message"]))
+    elif outcome["message"]:
+        return DispatchOutcome(success=False, message=str(outcome["message"]))
+    else:
+        # dispatch_import may have logged but not called mark_done/mark_failed
+        # (e.g. timeout/exception paths that go through _build_download_info)
+        return DispatchOutcome(success=False, message="Import did not complete")

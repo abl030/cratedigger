@@ -137,19 +137,29 @@ class TestDispatchImportFromDb(unittest.TestCase):
         if ir is None:
             ir = _make_import_result(decision="import", new_min_bitrate=320)
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan") as mock_meelo, \
-             patch("lib.import_dispatch._check_quality_gate") as mock_gate, \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.trigger_plex_scan"), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = dispatch_import_from_db(
-                db, request_id=42, failed_path="/tmp/failed/test",
-                force=force,
-            )
-            cmd = mock_run.call_args[0][0]
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch("lib.import_dispatch.sp.run") as mock_run, \
+                 patch("lib.import_dispatch._cleanup_staged_dir"), \
+                 patch("lib.import_dispatch.trigger_meelo_scan") as mock_meelo, \
+                 patch("lib.import_dispatch._check_quality_gate") as mock_gate, \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.import_dispatch.trigger_plex_scan"), \
+                 patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]), \
+                 patch("lib.import_dispatch._read_minimal_config", return_value={
+                     "beets_harness_path": "/nix/store/fake/harness/run_beets_harness.sh",
+                     "verified_lossless_target": "",
+                 }):
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                result = dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,
+                    force=force,
+                )
+                cmd = mock_run.call_args[0][0] if mock_run.call_args else []
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
         return {
             "result": result,
