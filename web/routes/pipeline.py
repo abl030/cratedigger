@@ -581,6 +581,7 @@ def post_pipeline_force_import(h, body: dict) -> None:
     outcome = dispatch_import_from_db(
         s._db(), request_id=request_id, failed_path=resolved_path,
         force=True, outcome_label="force_import",
+        source_username=entry.get("soulseek_username"),
     )
 
     h._json({

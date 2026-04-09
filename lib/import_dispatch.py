@@ -233,7 +233,11 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
         os.path.dirname(ctx.cfg.beets_harness_path), "import_one.py")
     mb_id = album_data.mb_release_id or ""
     label = f"{album_data.artist} - {album_data.title}"
-    mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
+    mode = (
+        "FORCE-IMPORT" if force
+        else "MANUAL-IMPORT" if bv_result.scenario == "manual_import"
+        else "AUTO-IMPORT"
+    )
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={bv_result.distance:.4f})")
     try:
@@ -428,13 +432,24 @@ class DispatchOutcome:
     message: str
 
 
+def _local_beets_harness_path() -> str:
+    """Resolve the harness path from the checked-out source tree."""
+    return os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
+    ))
+
+
 def _read_minimal_config() -> dict[str, str]:
-    """Read beets_harness_path and verified_lossless_target from runtime config.
+    """Resolve the local harness path and read runtime verified_lossless_target.
 
     Used by dispatch_import_from_db which runs outside the main soularr process.
     """
     path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
-    result = {"beets_harness_path": "", "verified_lossless_target": ""}
+    local_harness_path = _local_beets_harness_path()
+    result = {
+        "beets_harness_path": local_harness_path if os.path.exists(local_harness_path) else "",
+        "verified_lossless_target": "",
+    }
     if not os.path.exists(path):
         return result
     parser = configparser.ConfigParser(interpolation=configparser.BasicInterpolation())
@@ -442,8 +457,10 @@ def _read_minimal_config() -> dict[str, str]:
         parser.read(path)
     except (configparser.Error, OSError):
         return result
-    result["beets_harness_path"] = parser.get(
-        "Beets Validation", "harness_path", fallback="")
+    config_harness_path = parser.get(
+        "Beets Validation", "harness_path", fallback="").strip()
+    if not result["beets_harness_path"] and config_harness_path:
+        result["beets_harness_path"] = config_harness_path
     result["verified_lossless_target"] = parser.get(
         "Beets Validation", "verified_lossless_target", fallback="").strip()
     return result
@@ -456,6 +473,7 @@ def dispatch_import_from_db(
     *,
     force: bool = False,
     outcome_label: str = "force_import",
+    source_username: str | None = None,
 ) -> DispatchOutcome:
     """Run a force-import or manual-import through the full dispatch pipeline.
 
@@ -469,11 +487,12 @@ def dispatch_import_from_db(
         failed_path: Path to the files on disk
         force: Pass --force to import_one.py (bypass distance check)
         outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
+        source_username: Original Soulseek username for force-import audit/denylist flows
     """
     from album_source import DatabaseSource
     from lib.config import SoularrConfig
     from lib.context import SoularrContext
-    from lib.grab_list import GrabListEntry
+    from lib.grab_list import DownloadFile, GrabListEntry
 
     # Look up album request
     req = db.get_request(request_id)  # type: ignore[union-attr]
@@ -490,10 +509,18 @@ def dispatch_import_from_db(
     # Read minimal config for import_one.py flags
     cfg_values = _read_minimal_config()
 
+    files = ([DownloadFile(
+        filename="",
+        id="",
+        file_dir="",
+        username=source_username,
+        size=0,
+    )] if source_username else [])
+
     # Construct minimal GrabListEntry
     album_data = GrabListEntry(
         album_id=0,
-        files=[],
+        files=files,
         filetype="",
         title=req.get("album_title", ""),
         artist=req.get("artist_name", ""),
@@ -528,7 +555,7 @@ def dispatch_import_from_db(
         distance=0.0,
         scenario="force_import" if force else "manual_import",
     )
-    dl_info = DownloadInfo()
+    dl_info = DownloadInfo(username=source_username)
 
     # Intercept mark_done/mark_failed to:
     # 1. Track success/failure for the return value
@@ -573,8 +600,14 @@ def dispatch_import_from_db(
         log_fields = extract_import_log_fields(dl.import_result)
         original_log_download(
             request_id=request_id,
+            soulseek_username=dl.username,
+            beets_distance=getattr(bv_result, "distance", None),
+            beets_scenario=scenario,
+            beets_detail=str(detail) if detail else None,
             outcome="failed",
             import_result=dl.import_result,
+            validation_result=(bv_result.to_json()
+                               if isinstance(bv_result, ValidationResult) else None),
             staged_path=failed_path,
             error_message=str(detail) if detail else None,
             **log_fields,

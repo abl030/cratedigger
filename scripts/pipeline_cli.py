@@ -754,6 +754,7 @@ def cmd_force_import(db, args):
     outcome = dispatch_import_from_db(
         db, request_id=request_id, failed_path=failed_path,
         force=True, outcome_label="force_import",
+        source_username=entry.get("soulseek_username"),
     )
     if outcome.success:
         print(f"  [OK] {outcome.message}")

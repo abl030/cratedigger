@@ -310,6 +310,35 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["intent"], "lossless")
 
+    @patch("routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("lib.import_dispatch.dispatch_import_from_db")
+    def test_post_force_import_passes_source_username(self, mock_dispatch, _mock_resolve):
+        self.mock_db.get_download_log_entry.return_value = {
+            "id": 42,
+            "request_id": 100,
+            "soulseek_username": "baduser",
+            "validation_result": {
+                "failed_path": "/tmp/Test Album",
+                "scenario": "high_distance",
+            },
+        }
+        mock_dispatch.return_value = MagicMock(success=True, message="Import successful")
+
+        status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["artist"], _MOCK_PIPELINE_REQUEST["artist_name"])
+        self.assertEqual(data["album"], _MOCK_PIPELINE_REQUEST["album_title"])
+        mock_dispatch.assert_called_once_with(
+            self.mock_db,
+            request_id=100,
+            failed_path="/tmp/Test Album",
+            force=True,
+            outcome_label="force_import",
+            source_username="baduser",
+        )
+
     def test_post_set_intent_default_clears_stale_lossless_override(self):
         self.mock_db.get_request.return_value = make_request_row(
             id=100, status="wanted", artist_name="Test Artist",
