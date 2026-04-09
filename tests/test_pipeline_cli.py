@@ -151,6 +151,36 @@ class TestTracksFromMbRelease(unittest.TestCase):
         self.assertAlmostEqual(tracks[0]["length_seconds"], 200.0)
 
 
+class TestCmdForceImport(unittest.TestCase):
+    @patch("builtins.print")
+    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Test Album")
+    def test_force_import_passes_source_username_to_dispatch(self, _mock_resolve, _mock_print):
+        from lib.import_dispatch import DispatchOutcome
+
+        db = MagicMock()
+        db.get_download_log_entry.return_value = {
+            "request_id": 123,
+            "soulseek_username": "baduser",
+            "validation_result": {"failed_path": "/tmp/Test Album"},
+        }
+        db.get_request.return_value = make_request_row(
+            id=123, status="manual", min_bitrate=320,
+            mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        )
+
+        mock_outcome = DispatchOutcome(success=True, message="ok")
+        with patch("lib.import_dispatch.dispatch_import_from_db",
+                    return_value=mock_outcome) as mock_dispatch:
+            args = MagicMock(download_log_id=42)
+            pipeline_cli.cmd_force_import(db, args)
+
+        mock_dispatch.assert_called_once_with(
+            db, request_id=123, failed_path="/tmp/Test Album",
+            force=True, outcome_label="force_import",
+            source_username="baduser",
+        )
+
+
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
     def test_failed_manual_import_prints_error(self, _mock_print):

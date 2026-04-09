@@ -5,6 +5,8 @@ force-import and manual-import go through the same decision pipeline as
 auto-import (dispatch_action, quality gate, downgrade prevention, meelo scan).
 """
 
+import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -129,14 +131,14 @@ class TestDispatchImportFromDb(unittest.TestCase):
         db.get_request.return_value = request_row
         return db
 
-    def _dispatch(self, db=None, force=True, ir=None, **req_overrides):
+    def _dispatch(self, db=None, force=True, ir=None,
+                  source_username=None, **req_overrides):
         from lib.import_dispatch import dispatch_import_from_db
         if db is None:
             db = self._make_db(**req_overrides)
         if ir is None:
             ir = _make_import_result(decision="import", new_min_bitrate=320)
 
-        import tempfile
         tmpdir = tempfile.mkdtemp()
         try:
             with patch("lib.import_dispatch.sp.run") as mock_run, \
@@ -154,6 +156,7 @@ class TestDispatchImportFromDb(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,
                     force=force,
+                    source_username=source_username,
                 )
                 cmd = mock_run.call_args[0][0] if mock_run.call_args else []
         finally:
@@ -208,6 +211,15 @@ class TestDispatchImportFromDb(unittest.TestCase):
         # Result should indicate failure (downgrade prevented)
         self.assertFalse(r["result"].success)
 
+    def test_force_import_preserves_source_username_for_denylist(self):
+        """Force-import should carry the original Soulseek username into denylisting."""
+        ir = _make_import_result(decision="downgrade",
+                                 new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(ir=ir, source_username="baduser")
+        r["db"].add_denylist.assert_called_once_with(
+            42, "baduser", "quality downgrade prevented"
+        )
+
     def test_returns_typed_result(self):
         """Must return a typed result with success, message, exit_code."""
         r = self._dispatch()
@@ -253,6 +265,42 @@ class TestDispatchImportFromDb(unittest.TestCase):
                      if c.kwargs.get("request_id") == 42]
         self.assertEqual(len(log_calls), 1,
                          f"Expected 1 log_download call, got {len(log_calls)}")
+
+
+class TestReadMinimalConfig(unittest.TestCase):
+    def test_missing_runtime_config_falls_back_to_repo_harness(self):
+        from lib.import_dispatch import _read_minimal_config
+
+        expected_harness = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
+        ))
+        with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": "/nonexistent/config.ini"}):
+            values = _read_minimal_config()
+
+        self.assertEqual(values["beets_harness_path"], expected_harness)
+        self.assertEqual(values["verified_lossless_target"], "")
+
+    def test_runtime_config_does_not_override_repo_harness_path(self):
+        from lib.import_dispatch import _read_minimal_config
+
+        expected_harness = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh"
+        ))
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write(
+                "[Beets Validation]\n"
+                "harness_path = /nix/store/stale/run_beets_harness.sh\n"
+                "verified_lossless_target = opus 128\n"
+            )
+            config_path = tmp.name
+        try:
+            with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": config_path}):
+                values = _read_minimal_config()
+        finally:
+            os.unlink(config_path)
+
+        self.assertEqual(values["beets_harness_path"], expected_harness)
+        self.assertEqual(values["verified_lossless_target"], "opus 128")
 
 
 if __name__ == "__main__":
