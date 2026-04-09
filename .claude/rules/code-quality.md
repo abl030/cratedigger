@@ -75,8 +75,10 @@
 - Before adding a new function that "does roughly what X does but simpler," check if X can be called with an adapter. The adapter may be ugly — that's a signal to improve X's interface, not to duplicate X.
 
 ## Test Behaviors Not Implementations
-- Tests for import/pipeline paths must assert **pipeline behaviors** (quality gate runs, meelo triggers, downgrade prevented, denylist applied), not implementation details (correct subprocess args). If a test only verifies that function A calls function B with the right args, it locks in the implementation without protecting the behavior.
+- Tests for import/pipeline paths must assert **pipeline behaviors** (quality gate runs, meelo triggers, downgrade prevented, denylist applied), not implementation details (correct subprocess args). If a test only verifies that function A calls function B with the right args — and would still pass if function B were a no-op — it locks in the implementation without protecting the behavior.
 - When you write a test for a new entry point (force-import, manual-import, web API), ask: "if someone replaced this with a simpler function that skips the quality gate, would this test catch it?" If not, the test is testing plumbing, not behavior.
+- Pure function tests (input → output) are exempt — the rule targets orchestration and pipeline paths. "Every pure function must have direct unit tests" still applies.
+- Use `make_request_row()` from `tests/helpers.py` for album_requests dicts. Hand-rolled dicts with 20+ fields drift silently when the schema evolves.
 
 ## Pre-Commit Review Gate
 - For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
