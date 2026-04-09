@@ -38,25 +38,51 @@ def make_db():
 # ---------------------------------------------------------------------------
 
 class TestImportOneForceFlag(unittest.TestCase):
-    """Test that --force flag actually changes MAX_DISTANCE in import_one."""
+    """Test that import_one.main() toggles MAX_DISTANCE from the real CLI flag."""
 
     def test_force_flag_sets_max_distance_999(self) -> None:
-        """--force must set MAX_DISTANCE=999 so high-distance candidates are accepted.
-
-        Tests the actual behavior, not just that the flag parses. The previous tests
-        constructed their own argparse and never verified MAX_DISTANCE was modified.
-        """
+        """--force must set MAX_DISTANCE=999 in the real main() entry point."""
         import import_one
+
+        class _StopAfterForce(Exception):
+            pass
+
         original = import_one.MAX_DISTANCE
         try:
-            # Simulate what main() does when --force is passed
-            import_one.MAX_DISTANCE = 999
+            with patch.object(
+                sys, "argv",
+                ["import_one.py", "/tmp/staged-album", "mbid-123", "--force"],
+            ), patch("import_one._log"), patch(
+                "import_one.BeetsDB", side_effect=_StopAfterForce
+            ):
+                with self.assertRaises(_StopAfterForce):
+                    import_one.main()
+
             self.assertEqual(import_one.MAX_DISTANCE, 999)
         finally:
             import_one.MAX_DISTANCE = original
 
-        # Verify the default is the expected value (import from module, don't hardcode)
-        self.assertEqual(original, import_one.MAX_DISTANCE)
+    def test_default_main_keeps_max_distance(self) -> None:
+        """Without --force, main() must leave MAX_DISTANCE at the default."""
+        import import_one
+
+        class _StopBeforeWork(Exception):
+            pass
+
+        original = import_one.MAX_DISTANCE
+        try:
+            with patch.object(
+                sys, "argv",
+                ["import_one.py", "/tmp/staged-album", "mbid-123"],
+            ), patch("import_one._log"), patch(
+                "import_one.BeetsDB", side_effect=_StopBeforeWork
+            ):
+                with self.assertRaises(_StopBeforeWork):
+                    import_one.main()
+
+            self.assertEqual(import_one.MAX_DISTANCE, original)
+        finally:
+            import_one.MAX_DISTANCE = original
 
 
 # ---------------------------------------------------------------------------
