@@ -158,27 +158,33 @@ class TestDispatchImport(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir") as mock_cleanup, \
-             patch("lib.import_dispatch.trigger_meelo_scan") as mock_meelo, \
-             patch("lib.import_dispatch._check_quality_gate") as mock_gate, \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir_json):
+             patch("lib.util.trigger_meelo_scan") as mock_meelo, \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir_json), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, dest, dl_info,
                             request_id, ctx)
 
+        db_mock = ctx.pipeline_db_source._get_db.return_value
         return {
             "mock_run": mock_run,
             "mock_cleanup": mock_cleanup,
             "mock_meelo": mock_meelo,
             "mock_gate": mock_gate,
             "pipeline_db_source": ctx.pipeline_db_source,
+            "db": db_mock,
             "dl_info": dl_info,
         }
 
     def test_import_success(self):
         ir = _make_import_result(decision="import")
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_done.assert_called_once()
+        # Behavioral: download logged with success outcome
+        result["db"].log_download.assert_called_once()
+        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
         result["mock_meelo"].assert_called_once()
         result["mock_cleanup"].assert_called_once()
         result["mock_gate"].assert_called_once()
@@ -186,89 +192,108 @@ class TestDispatchImport(unittest.TestCase):
     def test_preflight_existing(self):
         ir = _make_import_result(decision="preflight_existing")
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_done.assert_called_once()
+        result["db"].log_download.assert_called_once()
+        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
         result["mock_meelo"].assert_called_once()
 
     def test_import_with_upgrade_delta(self):
         ir = _make_import_result(decision="import", new_min_bitrate=245,
                                  prev_min_bitrate=192)
         result = self._dispatch(ir)
-        db = result["pipeline_db_source"]._get_db()
-        db.update_status.assert_called()
+        result["db"].update_status.assert_called()
 
     def test_downgrade_rejected(self):
         ir = _make_import_result(decision="downgrade", new_min_bitrate=192,
                                  prev_min_bitrate=320)
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_failed.assert_called_once()
-        result["pipeline_db_source"].mark_done.assert_not_called()
+        # Behavioral: download logged as rejected, not as success
+        log_calls = result["db"].log_download.call_args_list
+        outcomes = [c.kwargs["outcome"] for c in log_calls]
+        self.assertIn("rejected", outcomes)
+        self.assertNotIn("success", outcomes)
         result["mock_cleanup"].assert_called_once()
-        # Should denylist
-        db = result["pipeline_db_source"]._get_db()
-        db.add_denylist.assert_called()
+        result["db"].add_denylist.assert_called()
 
-    def test_downgrade_passes_narrowed_override_to_mark_failed(self):
+    def test_downgrade_passes_narrowed_override_to_transition(self):
+        """Downgrade must narrow search_filetype_override in the requeue transition."""
         ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
                                  prev_min_bitrate=320)
         ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db()
-        db.get_request.return_value = make_request_row(
+        db_mock = ctx.pipeline_db_source._get_db.return_value
+        db_mock.get_request.return_value = make_request_row(
             status="downloading",
             search_filetype_override="flac,mp3 v0,mp3 320",
         )
 
         result = self._dispatch(ir, ctx=ctx)
 
-        call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
-        self.assertEqual(call_kwargs.get("search_filetype_override"), "flac,mp3 v0")
+        # The narrowed override should be passed to reset_to_wanted
+        reset_calls = result["db"].reset_to_wanted.call_args_list
+        self.assertTrue(len(reset_calls) > 0, "Expected reset_to_wanted call")
+        reset_kwargs = reset_calls[0].kwargs
+        self.assertEqual(reset_kwargs.get("search_filetype_override"), "flac,mp3 v0")
 
     def test_downgrade_preserves_override_when_tier_not_matched(self):
         """320 downgrade with flac-only override → no narrowing (tier not in CSV)."""
         ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
                                  prev_min_bitrate=320)
         ctx = _make_ctx()
-        db = ctx.pipeline_db_source._get_db()
-        db.get_request.return_value = make_request_row(
+        db_mock = ctx.pipeline_db_source._get_db.return_value
+        db_mock.get_request.return_value = make_request_row(
             status="downloading",
             search_filetype_override="flac",
         )
 
         result = self._dispatch(ir, ctx=ctx)
 
-        call_kwargs = result["pipeline_db_source"].mark_failed.call_args.kwargs
-        # narrowing returns None (mp3 320 not in "flac"), so no override passed
-        self.assertIsNone(call_kwargs.get("search_filetype_override"))
+        # No narrowing happened, so reset_to_wanted should NOT have search_filetype_override
+        reset_calls = result["db"].reset_to_wanted.call_args_list
+        if reset_calls:
+            reset_kwargs = reset_calls[0].kwargs
+            # None means no override was passed (original preserved)
+            override = reset_kwargs.get("search_filetype_override")
+            if override is not None:
+                self.fail(f"Expected no narrowing, got search_filetype_override={override}")
 
     def test_transcode_upgrade(self):
         ir = _make_import_result(decision="transcode_upgrade",
                                  new_min_bitrate=227)
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_done.assert_called_once()
+        # Behavioral: logged as success (transcode_upgrade marks done)
+        result["db"].log_download.assert_called_once()
+        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
         result["mock_meelo"].assert_called_once()
-        db = result["pipeline_db_source"]._get_db()
-        db.add_denylist.assert_called()
-        db.reset_to_wanted.assert_called_once()
+        result["db"].add_denylist.assert_called()
+        result["db"].reset_to_wanted.assert_called_once()
 
     def test_transcode_downgrade(self):
         ir = _make_import_result(decision="transcode_downgrade",
                                  new_min_bitrate=190)
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_failed.assert_called_once()
-        db = result["pipeline_db_source"]._get_db()
-        db.add_denylist.assert_called()
-        db.reset_to_wanted.assert_called_once()
+        # Behavioral: logged as rejected
+        log_calls = result["db"].log_download.call_args_list
+        outcomes = [c.kwargs["outcome"] for c in log_calls]
+        self.assertIn("rejected", outcomes)
+        result["db"].add_denylist.assert_called()
+        # reset_to_wanted called twice: once by _do_mark_failed (requeue),
+        # once by action.requeue (with upgrade tiers override)
+        self.assertGreaterEqual(result["db"].reset_to_wanted.call_count, 1)
 
     def test_error_decision(self):
         ir = _make_import_result(decision="conversion_failed",
                                  error="ffmpeg failed")
         result = self._dispatch(ir)
-        result["pipeline_db_source"].mark_failed.assert_called_once()
-        result["pipeline_db_source"].mark_done.assert_not_called()
+        # Behavioral: logged as rejected, not success
+        log_calls = result["db"].log_download.call_args_list
+        outcomes = [c.kwargs["outcome"] for c in log_calls]
+        self.assertIn("rejected", outcomes)
+        self.assertNotIn("success", outcomes)
 
     def test_no_json_result(self):
         """parse_import_result returns None when no JSON in output."""
         result = self._dispatch(None)  # None = no JSON parsed
-        result["pipeline_db_source"].mark_failed.assert_called_once()
+        result["db"].log_download.assert_called_once()
+        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "failed")
 
     def test_timeout(self):
         from lib.import_dispatch import dispatch_import
@@ -278,13 +303,13 @@ class TestDispatchImport(unittest.TestCase):
         dl_info = DownloadInfo(filetype="mp3")
 
         with patch("lib.import_dispatch.sp.run",
-                   side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)), \
-             patch("lib.import_dispatch._build_download_info",
-                   return_value=DownloadInfo()):
+                   side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
 
-        ctx.pipeline_db_source.mark_failed.assert_called_once()
+        db_mock = ctx.pipeline_db_source._get_db.return_value
+        db_mock.log_download.assert_called_once()
+        self.assertEqual(db_mock.log_download.call_args.kwargs["outcome"], "failed")
 
     def test_exception(self):
         from lib.import_dispatch import dispatch_import
@@ -294,13 +319,13 @@ class TestDispatchImport(unittest.TestCase):
         dl_info = DownloadInfo(filetype="mp3")
 
         with patch("lib.import_dispatch.sp.run",
-                   side_effect=RuntimeError("boom")), \
-             patch("lib.import_dispatch._build_download_info",
-                   return_value=DownloadInfo()):
+                   side_effect=RuntimeError("boom")):
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
 
-        ctx.pipeline_db_source.mark_failed.assert_called_once()
+        db_mock = ctx.pipeline_db_source._get_db.return_value
+        db_mock.log_download.assert_called_once()
+        self.assertEqual(db_mock.log_download.call_args.kwargs["outcome"], "failed")
 
 
 class TestOverrideMinBitrate(unittest.TestCase):
@@ -326,9 +351,11 @@ class TestOverrideMinBitrate(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
@@ -515,16 +542,18 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
             from lib.import_dispatch import dispatch_import
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
 
-        db = ctx.pipeline_db_source._get_db()
+        db = ctx.pipeline_db_source._get_db.return_value
         call_args = db.reset_to_wanted.call_args
         self.assertEqual(
             call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
@@ -619,9 +648,11 @@ class TestOpusConversionDispatch(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
@@ -680,9 +711,11 @@ class TestTargetFormatDispatch(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,

@@ -129,13 +129,14 @@ def _do_mark_failed(
     requeue: bool = True,
     outcome_label: str = "rejected",
     search_filetype_override: str | None = None,
-    cooled_down_users: set[str] | None = None,
-    usernames: set[str] | None = None,
 ) -> None:
     """Log failure and optionally requeue — standalone version of DatabaseSource.mark_failed.
 
     When requeue=True (auto-import): transitions to "wanted", records attempt.
     When requeue=False (force/manual import): only logs to download_log.
+
+    Note: denylisting and cooldown are handled by the caller (dispatch_import_core)
+    via action.denylist, not here.
     """
     if requeue:
         transition_kwargs: dict[str, object] = dict(
@@ -177,13 +178,6 @@ def _do_mark_failed(
         import_result=dl_info.import_result,
         validation_result=dl_info.validation_result,
     )
-
-    if usernames:
-        for username in usernames:
-            db.add_denylist(request_id, username, "beets validation rejected")
-            if cooled_down_users is not None:
-                if db.check_and_apply_cooldown(username):
-                    cooled_down_users.add(username)
 
 
 def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
@@ -386,44 +380,62 @@ def trigger_plex_scan(ctx: "SoularrContext", imported_path: str | None = None) -
     _trigger(ctx.cfg, imported_path)
 
 
-def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest: str,
-                    dl_info: DownloadInfo, request_id: int,
-                    ctx: "SoularrContext", *, force: bool = False) -> None:
-    """Import decision tree: run import_one.py and dispatch on result.
+def dispatch_import_core(
+    *,
+    path: str,
+    mb_release_id: str,
+    request_id: int,
+    label: str,
+    force: bool = False,
+    override_min_bitrate: int | None = None,
+    target_format: str | None = None,
+    verified_lossless_target: str = "",
+    beets_harness_path: str,
+    db: "PipelineDB",
+    dl_info: DownloadInfo,
+    distance: float = 0.0,
+    scenario: str = "auto_import",
+    files: Sequence[object] | None = None,
+    cfg: "SoularrConfig | None" = None,
+    outcome_label: str = "success",
+    requeue_on_failure: bool = True,
+    cooled_down_users: set[str] | None = None,
+) -> "DispatchOutcome":
+    """Core import dispatch — takes plain params + PipelineDB directly.
 
-    Called from process_completed_album() for auto-import, and from
-    dispatch_import_from_db() for force-import and manual-import.
-    When force=True, --force is passed to import_one.py (bypasses distance check).
+    Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
+    denylist, quality gate, meelo/plex scan, cleanup). Returns DispatchOutcome.
+
+    Used by dispatch_import() (auto-import adapter) and dispatch_import_from_db()
+    (force/manual import) — eliminates the need for heavyweight wrapper objects.
     """
+    from lib.util import trigger_meelo_scan as _trigger_meelo
+    from lib.util import trigger_plex_scan as _trigger_plex
+
     import_script = os.path.join(
-        os.path.dirname(ctx.cfg.beets_harness_path), "import_one.py")
-    mb_id = album_data.mb_release_id or ""
-    label = f"{album_data.artist} - {album_data.title}"
+        os.path.dirname(beets_harness_path), "import_one.py")
     mode = (
         "FORCE-IMPORT" if force
-        else "MANUAL-IMPORT" if bv_result.scenario == "manual_import"
+        else "MANUAL-IMPORT" if scenario == "manual_import"
         else "AUTO-IMPORT"
     )
     logger.info(f"{mode}: {label} "
-                f"(source=request, dist={bv_result.distance:.4f})")
+                f"(source=request, dist={distance:.4f})")
+
+    outcome_success = False
+    outcome_message = ""
+
     try:
-        cmd = [sys.executable, import_script, dest, mb_id,
+        cmd = [sys.executable, import_script, path, mb_release_id,
                "--request-id", str(request_id)]
         if force:
             cmd.append("--force")
-        if ctx.cfg.verified_lossless_target:
-            cmd.extend(["--verified-lossless-target", ctx.cfg.verified_lossless_target])
-        if album_data.db_target_format:
-            cmd.extend(["--target-format", album_data.db_target_format])
-        try:
-            req = ctx.pipeline_db_source._get_db().get_request(request_id)
-            if req:
-                effective_br = compute_effective_override_bitrate(
-                    req.get("min_bitrate"), req.get("current_spectral_bitrate"))
-                if effective_br is not None:
-                    cmd.extend(["--override-min-bitrate", str(effective_br)])
-        except Exception:
-            logger.debug("DB lookup failed for override-min-bitrate")
+        if verified_lossless_target:
+            cmd.extend(["--verified-lossless-target", verified_lossless_target])
+        if target_format:
+            cmd.extend(["--target-format", target_format])
+        if override_min_bitrate is not None:
+            cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
         import_env = {**os.environ, "HOME": "/home/abl030"}
         result = sp.run(cmd, capture_output=True, text=True,
                         timeout=1800, env=import_env)
@@ -437,19 +449,21 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
             for line in (result.stdout or "").strip().split("\n"):
                 logger.error(f"  {line}")
-            ctx.pipeline_db_source.mark_failed(
-                album_data,
-                ValidationResult(distance=bv_result.distance,
-                                 scenario="no_json_result",
-                                 detail=f"import_one.py rc={result.returncode}, no JSON",
-                                 error=f"rc={result.returncode}"),
-                download_info=dl_info,
-                cooled_down_users=ctx.cooled_down_users)
+            _do_mark_failed(
+                db, request_id, dl_info,
+                distance=distance,
+                scenario="no_json_result",
+                detail=f"import_one.py rc={result.returncode}, no JSON",
+                error=f"rc={result.returncode}",
+                requeue=requeue_on_failure,
+                outcome_label="failed")
+            outcome_message = f"No JSON result (rc={result.returncode})"
         else:
             _populate_dl_info_from_import_result(dl_info, ir)
             decision = ir.decision or "unknown"
             action = dispatch_action(decision)
-            usernames = extract_usernames(album_data.files) if action.denylist else set()
+            file_list = files or []
+            usernames = extract_usernames(file_list) if action.denylist else set()
             narrowed_override = None
             current_override = None
 
@@ -459,49 +473,50 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
             # --- Mark done or failed with decision-specific details ---
             if action.mark_done:
                 logger.info(f"{mode} OK: {label} (decision={decision})")
-                ctx.pipeline_db_source.mark_done(
-                    album_data, bv_result, dest_path=dest, download_info=dl_info)
+                _do_mark_done(
+                    db, request_id, dl_info,
+                    distance=distance, scenario=scenario,
+                    dest_path=path, outcome_label=outcome_label)
                 if decision in ("import", "preflight_existing"):
                     if prev_br is not None or new_br is not None:
                         try:
-                            db = ctx.pipeline_db_source._get_db()
                             apply_transition(db, request_id, "imported",
                                              from_status="imported",
                                              prev_min_bitrate=prev_br,
                                              min_bitrate=new_br)
                         except Exception:
                             logger.exception("Failed to update upgrade delta")
+                outcome_success = True
+                outcome_message = "Import successful"
             elif action.mark_failed:
                 if decision == "downgrade":
-                    scenario = "quality_downgrade"
-                    detail = (f"new {new_br}kbps "
-                              f"<= existing {prev_br}kbps")
+                    fail_scenario = "quality_downgrade"
+                    fail_detail: str | None = (f"new {new_br}kbps "
+                                               f"<= existing {prev_br}kbps")
                     logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
                 elif decision == "transcode_downgrade":
-                    scenario = "transcode_downgrade"
-                    detail = (f"transcode {new_br}kbps "
-                              f"<= existing {prev_br}kbps")
+                    fail_scenario = "transcode_downgrade"
+                    fail_detail = (f"transcode {new_br}kbps "
+                                   f"<= existing {prev_br}kbps")
                     logger.warning(f"TRANSCODE REJECTED: {label} "
                                    f"at {new_br}kbps — not an upgrade")
                 else:
-                    scenario = decision or "import_error"
-                    detail = ir.error
+                    fail_scenario = decision or "import_error"
+                    fail_detail = ir.error
                     logger.error(f"{mode} FAILED: {label} "
                                  f"(decision={decision}, error={ir.error})")
-                if decision == "downgrade" and ctx.pipeline_db_source is not None:
+                fail_error = ir.error if decision not in ("downgrade", "transcode_downgrade") else None
+
+                if decision == "downgrade":
                     try:
-                        db = ctx.pipeline_db_source._get_db()
                         req_row = db.get_request(request_id)
                         current_override = req_row.get("search_filetype_override") if req_row else None
                         narrowed_override = narrow_override_on_downgrade(
                             current_override, dl_info)
-                        # Backfill: if no override exists yet, check if on-disk
-                        # state warrants one (breaks CBR 320 loops)
                         if narrowed_override is None and current_override is None and req_row:
                             from lib.beets_db import BeetsDB
                             with BeetsDB() as beets:
-                                beets_info = beets.get_album_info(
-                                    album_data.mb_release_id)
+                                beets_info = beets.get_album_info(mb_release_id)
                             if beets_info:
                                 narrowed_override = rejection_backfill_override(
                                     is_cbr=beets_info.is_cbr,
@@ -520,24 +535,24 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                     except Exception:
                         logger.debug(
                             "Failed to inspect search_filetype_override before downgrade reset")
-                ctx.pipeline_db_source.mark_failed(
-                    album_data,
-                    ValidationResult(
-                        distance=bv_result.distance, scenario=scenario,
-                        detail=detail,
-                        error=ir.error if decision not in ("downgrade", "transcode_downgrade") else None),
-                    usernames=usernames if action.denylist else None,
-                    download_info=dl_info,
-                    search_filetype_override=narrowed_override,
-                    cooled_down_users=ctx.cooled_down_users)
+
+                _do_mark_failed(
+                    db, request_id, dl_info,
+                    distance=distance,
+                    scenario=fail_scenario,
+                    detail=fail_detail,
+                    error=fail_error,
+                    requeue=requeue_on_failure,
+                    outcome_label="rejected",
+                    search_filetype_override=narrowed_override)
                 if narrowed_override is not None:
                     logger.info(
                         f"  Narrowed search_filetype_override '{current_override}'"
                         f" -> '{narrowed_override}' after downgrade")
+                outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
 
             # --- Common actions driven by flags ---
             if action.denylist:
-                db = ctx.pipeline_db_source._get_db()
                 if decision == "downgrade":
                     reason = "quality downgrade prevented"
                 elif decision.startswith("transcode"):
@@ -546,10 +561,12 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                     reason = f"rejected: {decision}"
                 for username in usernames:
                     db.add_denylist(request_id, username, reason)
+                    if cooled_down_users is not None:
+                        if db.check_and_apply_cooldown(username):
+                            cooled_down_users.add(username)
                 logger.info(f"  Denylisted {usernames} for request {request_id}")
 
             if action.requeue:
-                db = ctx.pipeline_db_source._get_db()
                 requeue_fields: dict[str, object] = {
                     "search_filetype_override": QUALITY_UPGRADE_TIERS,
                 }
@@ -558,37 +575,80 @@ def dispatch_import(album_data: GrabListEntry, bv_result: ValidationResult, dest
                 apply_transition(db, request_id, "wanted", **requeue_fields)
 
             if action.run_quality_gate:
-                _check_quality_gate(album_data, request_id, ctx)
-            if action.trigger_meelo:
-                trigger_meelo_scan(ctx)
-                trigger_plex_scan(ctx, ir.postflight.imported_path)
+                _check_quality_gate_core(
+                    mb_id=mb_release_id,
+                    label=label,
+                    request_id=request_id,
+                    files=list(file_list),
+                    db=db,
+                )
+            if action.trigger_meelo and cfg is not None:
+                _trigger_meelo(cfg)
+                _trigger_plex(cfg, ir.postflight.imported_path)
             if action.cleanup:
-                _cleanup_staged_dir(dest)
+                _cleanup_staged_dir(path)
             if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
                 removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
-                if removed:
-                    trigger_meelo_clean(ctx.cfg)
+                if removed and cfg is not None:
+                    trigger_meelo_clean(cfg)
     except sp.TimeoutExpired:
         logger.error(f"{mode} TIMEOUT: {label}")
-        timeout_dl = _build_download_info(album_data)
-        ctx.pipeline_db_source.mark_failed(
-            album_data,
-            ValidationResult(distance=bv_result.distance,
-                             scenario="timeout", detail="import_one.py timed out",
-                             error="timeout"),
-            download_info=timeout_dl,
-            cooled_down_users=ctx.cooled_down_users)
+        _do_mark_failed(
+            db, request_id, dl_info,
+            distance=distance, scenario="timeout",
+            detail="import_one.py timed out", error="timeout",
+            requeue=requeue_on_failure, outcome_label="failed")
+        outcome_message = "Import timed out"
     except Exception:
         logger.exception(f"{mode} ERROR: {label}")
-        err_dl = _build_download_info(album_data)
-        ctx.pipeline_db_source.mark_failed(
-            album_data,
-            ValidationResult(distance=bv_result.distance,
-                             scenario="exception",
-                             detail="unhandled exception in auto-import",
-                             error="exception"),
-            download_info=err_dl,
-            cooled_down_users=ctx.cooled_down_users)
+        _do_mark_failed(
+            db, request_id, dl_info,
+            distance=distance, scenario="exception",
+            detail="unhandled exception in auto-import", error="exception",
+            requeue=requeue_on_failure, outcome_label="failed")
+        outcome_message = "Unhandled exception"
+
+    return DispatchOutcome(success=outcome_success, message=outcome_message)
+
+
+def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, dest: str,
+                    dl_info: DownloadInfo, request_id: int,
+                    ctx: "SoularrContext", *, force: bool = False) -> None:
+    """Import decision tree — thin adapter extracting plain params for the core.
+
+    Called from process_completed_album() for auto-import.
+    """
+    db = ctx.pipeline_db_source._get_db()
+
+    # Compute override_min_bitrate from DB
+    override_min_bitrate: int | None = None
+    try:
+        req = db.get_request(request_id)
+        if req:
+            override_min_bitrate = compute_effective_override_bitrate(
+                req.get("min_bitrate"), req.get("current_spectral_bitrate"))
+    except Exception:
+        logger.debug("DB lookup failed for override-min-bitrate")
+
+    dispatch_import_core(
+        path=dest,
+        mb_release_id=album_data.mb_release_id or "",
+        request_id=request_id,
+        label=f"{album_data.artist} - {album_data.title}",
+        force=force,
+        override_min_bitrate=override_min_bitrate,
+        target_format=album_data.db_target_format,
+        verified_lossless_target=ctx.cfg.verified_lossless_target,
+        beets_harness_path=ctx.cfg.beets_harness_path,
+        db=db,
+        dl_info=dl_info,
+        distance=bv_result.distance if bv_result.distance is not None else 0.0,
+        scenario=bv_result.scenario or "auto_import",
+        files=album_data.files,
+        cfg=ctx.cfg,
+        requeue_on_failure=True,
+        cooled_down_users=ctx.cooled_down_users,
+    )
 
 
 @dataclass(frozen=True)
@@ -617,19 +677,19 @@ def _read_runtime_config() -> "SoularrConfig":
 
 
 def dispatch_import_from_db(
-    db: object,
+    db: "PipelineDB",
     request_id: int,
     failed_path: str,
     *,
     force: bool = False,
     outcome_label: str = "force_import",
     source_username: str | None = None,
-) -> DispatchOutcome:
+) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
-    Constructs the lightweight wrappers needed by dispatch_import() from DB
-    state, then delegates. All quality checks (downgrade prevention, quality
-    gate, meelo scan, denylist) run identically to auto-import.
+    Calls dispatch_import_core directly with plain params — no DatabaseSource
+    wrapper, no monkey-patching. All quality checks (downgrade prevention,
+    quality gate, meelo scan, denylist) run identically to auto-import.
 
     Args:
         db: PipelineDB instance
@@ -639,12 +699,9 @@ def dispatch_import_from_db(
         outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
         source_username: Original Soulseek username for force-import audit/denylist flows
     """
-    from album_source import DatabaseSource
-    from lib.context import SoularrContext
-    from lib.grab_list import DownloadFile, GrabListEntry
+    from lib.grab_list import DownloadFile
 
-    # Look up album request
-    req = db.get_request(request_id)  # type: ignore[union-attr]
+    req = db.get_request(request_id)
     if not req:
         return DispatchOutcome(success=False, message=f"Request {request_id} not found")
 
@@ -655,119 +712,35 @@ def dispatch_import_from_db(
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
 
-    # Read the FULL runtime config — same config.ini the main process uses
     cfg = _read_runtime_config()
 
-    files = ([DownloadFile(
-        filename="",
-        id="",
-        file_dir="",
-        username=source_username,
-        size=0,
-    )] if source_username else [])
+    files: list[DownloadFile] = []
+    if source_username:
+        files = [DownloadFile(
+            filename="", id="", file_dir="",
+            username=source_username, size=0,
+        )]
 
-    # Construct GrabListEntry from DB state
-    album_data = GrabListEntry(
-        album_id=0,
-        files=files,
-        filetype="",
-        title=req.get("album_title", ""),
-        artist=req.get("artist_name", ""),
-        year=str(req.get("year", "")),
+    # Compute override from DB state
+    override_min_bitrate = compute_effective_override_bitrate(
+        req.get("min_bitrate"), req.get("current_spectral_bitrate"))
+
+    return dispatch_import_core(
+        path=failed_path,
         mb_release_id=mbid,
-        db_request_id=request_id,
-        db_source="request",
-        db_target_format=req.get("target_format"),
-    )
-
-    # Wrap the existing PipelineDB in a DatabaseSource
-    db_source = DatabaseSource.__new__(DatabaseSource)
-    db_source.dsn = cfg.pipeline_db_dsn
-    db_source._db = db  # type: ignore[attr-defined]
-
-    ctx = SoularrContext(
-        cfg=cfg,
-        slskd=None,
-        pipeline_db_source=db_source,
-    )
-
-    # Build validation result from original distance (if available)
-    bv_result = ValidationResult(
+        request_id=request_id,
+        label=f"{req.get('artist_name', '')} - {req.get('album_title', '')}",
+        force=force,
+        override_min_bitrate=override_min_bitrate,
+        target_format=req.get("target_format"),
+        verified_lossless_target=cfg.verified_lossless_target,
+        beets_harness_path=cfg.beets_harness_path,
+        db=db,
+        dl_info=DownloadInfo(username=source_username),
         distance=0.0,
         scenario="force_import" if force else "manual_import",
+        files=files,
+        cfg=cfg,
+        outcome_label=outcome_label,
+        requeue_on_failure=False,
     )
-    dl_info = DownloadInfo(username=source_username)
-
-    # Intercept mark_done/mark_failed to:
-    # 1. Track success/failure for the return value
-    # 2. On success: rewrite download_log outcome from "success" to outcome_label
-    # 3. On failure: only log (don't requeue to "wanted" — user triggered this)
-    original_mark_done = db_source.mark_done
-    outcome = {"success": False, "message": ""}
-
-    # Intercept db.log_download to rewrite "success" → outcome_label
-    original_log_download = db.log_download  # type: ignore[union-attr]
-
-    def _log_with_label(**kwargs: object) -> None:
-        if kwargs.get("outcome") == "success":
-            kwargs["outcome"] = outcome_label
-        original_log_download(**kwargs)
-
-    db.log_download = _log_with_label  # type: ignore[union-attr]
-
-    def tracking_mark_done(album_record: object, bv_result: object,
-                           dest_path: str | None = None,
-                           download_info: object = None) -> None:
-        outcome["success"] = True
-        outcome["message"] = "Import successful"
-        # Delegate fully — mark_done handles transition + logging.
-        # The log_download intercept above rewrites the outcome label.
-        original_mark_done(album_record, bv_result, dest_path=dest_path,
-                           download_info=download_info)
-
-    def tracking_mark_failed(album_record: object, bv_result: object,
-                             usernames: object = None,
-                             download_info: object = None,
-                             search_filetype_override: object = None,
-                             cooled_down_users: set[str] | None = None) -> None:
-        outcome["success"] = False
-        scenario = getattr(bv_result, "scenario", "unknown")
-        detail = getattr(bv_result, "detail", "")
-        outcome["message"] = f"Rejected: {scenario} — {detail}"
-        # Only log the failure — do NOT requeue. Force/manual import failures
-        # should keep the album at its current status, not auto-requeue.
-        dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-        from lib.import_service import extract_import_log_fields
-        log_fields = extract_import_log_fields(dl.import_result)
-        original_log_download(
-            request_id=request_id,
-            soulseek_username=dl.username,
-            beets_distance=getattr(bv_result, "distance", None),
-            beets_scenario=scenario,
-            beets_detail=str(detail) if detail else None,
-            outcome="failed",
-            import_result=dl.import_result,
-            validation_result=(bv_result.to_json()
-                               if isinstance(bv_result, ValidationResult) else None),
-            staged_path=failed_path,
-            error_message=str(detail) if detail else None,
-            **log_fields,
-        )
-
-    db_source.mark_done = tracking_mark_done  # type: ignore[method-assign]
-    db_source.mark_failed = tracking_mark_failed  # type: ignore[method-assign]
-
-    try:
-        dispatch_import(album_data, bv_result, failed_path, dl_info,
-                        request_id, ctx, force=force)
-    finally:
-        db.log_download = original_log_download  # type: ignore[union-attr]
-
-    if outcome["success"]:
-        return DispatchOutcome(success=True, message=str(outcome["message"]))
-    elif outcome["message"]:
-        return DispatchOutcome(success=False, message=str(outcome["message"]))
-    else:
-        # dispatch_import may have logged but not called mark_done/mark_failed
-        # (e.g. timeout/exception paths that go through _build_download_info)
-        return DispatchOutcome(success=False, message="Import did not complete")

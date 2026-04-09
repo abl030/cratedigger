@@ -76,9 +76,11 @@ class TestDispatchImportForceFlag(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx, force=True)
@@ -109,9 +111,11 @@ class TestDispatchImportForceFlag(unittest.TestCase):
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.import_dispatch.trigger_meelo_scan"), \
-             patch("lib.import_dispatch._check_quality_gate"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.util.trigger_meelo_scan"), \
+             patch("lib.util.trigger_plex_scan"), \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
@@ -149,10 +153,10 @@ class TestDispatchImportFromDb(unittest.TestCase):
         try:
             with patch("lib.import_dispatch.sp.run") as mock_run, \
                  patch("lib.import_dispatch._cleanup_staged_dir"), \
-                 patch("lib.import_dispatch.trigger_meelo_scan") as mock_meelo, \
-                 patch("lib.import_dispatch._check_quality_gate") as mock_gate, \
+                 patch("lib.util.trigger_meelo_scan") as mock_meelo, \
+                 patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.import_dispatch.trigger_plex_scan"), \
+                 patch("lib.util.trigger_plex_scan"), \
                  patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]), \
                  patch("lib.import_dispatch._read_runtime_config", return_value=SoularrConfig(
                      beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",

@@ -86,12 +86,10 @@ class TestDoMarkFailed(unittest.TestCase):
     """_do_mark_failed must log failure, optionally requeue, handle cooldowns."""
 
     def _call(self, requeue=True, outcome_label="rejected",
-              search_filetype_override=None, cooled_down_users=None,
-              usernames=None, dl_info=None):
+              search_filetype_override=None, dl_info=None):
         from lib.import_dispatch import _do_mark_failed
         db = MagicMock()
         db.get_request.return_value = make_request_row(status="downloading")
-        db.check_and_apply_cooldown.return_value = False
         if dl_info is None:
             dl_info = DownloadInfo(username="baduser")
         _do_mark_failed(
@@ -105,8 +103,6 @@ class TestDoMarkFailed(unittest.TestCase):
             requeue=requeue,
             outcome_label=outcome_label,
             search_filetype_override=search_filetype_override,
-            cooled_down_users=cooled_down_users,
-            usernames=usernames,
         )
         return db
 
@@ -145,32 +141,6 @@ class TestDoMarkFailed(unittest.TestCase):
         """When not requeuing, must NOT record attempt (force/manual import)."""
         db = self._call(requeue=False)
         db.record_attempt.assert_not_called()
-
-    def test_denylists_usernames(self):
-        """Must denylist provided usernames."""
-        db = self._call(usernames={"baduser"}, requeue=True)
-        db.add_denylist.assert_called_once_with(42, "baduser", "beets validation rejected")
-
-    def test_cooldown_check_on_denylist(self):
-        """Must check cooldown after denylisting."""
-        cooled = set()
-        db = self._call(usernames={"baduser"}, cooled_down_users=cooled, requeue=True)
-        db.check_and_apply_cooldown.assert_called_once_with("baduser")
-
-    def test_cooldown_adds_to_set(self):
-        """When cooldown triggers, must add username to cooled_down_users set."""
-        from lib.import_dispatch import _do_mark_failed
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(status="downloading")
-        db.check_and_apply_cooldown.return_value = True  # cooldown triggered
-        cooled = set()
-        _do_mark_failed(
-            db=db, request_id=42, dl_info=DownloadInfo(username="baduser"),
-            distance=0.35, scenario="timeout", detail="timed out", error=None,
-            requeue=True, outcome_label="rejected",
-            usernames={"baduser"}, cooled_down_users=cooled,
-        )
-        self.assertIn("baduser", cooled)
 
     def test_search_override_passed_to_transition(self):
         """search_filetype_override must be forwarded to the transition."""
