@@ -216,5 +216,44 @@ class TestDispatchImportFromDb(unittest.TestCase):
         self.assertTrue(hasattr(result, "message"))
 
 
+    def test_success_logs_with_outcome_label(self):
+        """Successful force-import should log with 'force_import' outcome, not 'success'."""
+        r = self._dispatch()
+        db = r["db"]
+        # mark_done calls db.log_download — check the outcome was rewritten
+        log_calls = [c for c in db.log_download.call_args_list
+                     if c.kwargs.get("outcome") is not None]
+        self.assertTrue(len(log_calls) > 0, "Expected at least one log_download call")
+        # The outcome should be "force_import", not "success"
+        outcomes = [c.kwargs["outcome"] for c in log_calls]
+        self.assertIn("force_import", outcomes,
+                      f"Expected 'force_import' outcome, got: {outcomes}")
+        self.assertNotIn("success", outcomes,
+                         "Should not have a 'success' outcome — should be 'force_import'")
+
+    def test_failure_does_not_requeue(self):
+        """Failed force-import should NOT requeue the album to 'wanted'."""
+        ir = _make_import_result(decision="downgrade",
+                                 new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(ir=ir)
+        db = r["db"]
+        # Should NOT have called reset_to_wanted or update_status with "wanted"
+        db.reset_to_wanted.assert_not_called()
+        # Check that no transition to "wanted" happened
+        for call in db.update_status.call_args_list:
+            if call.args:
+                self.assertNotEqual(call.args[1] if len(call.args) > 1 else None, "wanted",
+                                    "Failed force-import should not requeue to wanted")
+
+    def test_no_double_download_log(self):
+        """Successful force-import should create exactly one download_log entry."""
+        r = self._dispatch()
+        db = r["db"]
+        log_calls = [c for c in db.log_download.call_args_list
+                     if c.kwargs.get("request_id") == 42]
+        self.assertEqual(len(log_calls), 1,
+                         f"Expected 1 log_download call, got {len(log_calls)}")
+
+
 if __name__ == "__main__":
     unittest.main()

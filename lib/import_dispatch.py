@@ -530,44 +530,64 @@ def dispatch_import_from_db(
     )
     dl_info = DownloadInfo()
 
-    # Capture whether dispatch_import marks done or failed
+    # Intercept mark_done/mark_failed to:
+    # 1. Track success/failure for the return value
+    # 2. On success: rewrite download_log outcome from "success" to outcome_label
+    # 3. On failure: only log (don't requeue to "wanted" — user triggered this)
     original_mark_done = db_source.mark_done
-    original_mark_failed = db_source.mark_failed
     outcome = {"success": False, "message": ""}
 
-    def tracking_mark_done(album_record, bv, dest_path=None, download_info=None):
+    # Intercept db.log_download to rewrite "success" → outcome_label
+    original_log_download = db.log_download  # type: ignore[union-attr]
+
+    def _log_with_label(**kwargs: object) -> None:
+        if kwargs.get("outcome") == "success":
+            kwargs["outcome"] = outcome_label
+        original_log_download(**kwargs)
+
+    db.log_download = _log_with_label  # type: ignore[union-attr]
+
+    def tracking_mark_done(album_record: object, bv_result: object,
+                           dest_path: str | None = None,
+                           download_info: object = None) -> None:
         outcome["success"] = True
         outcome["message"] = "Import successful"
-        # Log with force_import/manual_import outcome label
+        # Delegate fully — mark_done handles transition + logging.
+        # The log_download intercept above rewrites the outcome label.
+        original_mark_done(album_record, bv_result, dest_path=dest_path,
+                           download_info=download_info)
+
+    def tracking_mark_failed(album_record: object, bv_result: object,
+                             usernames: object = None,
+                             download_info: object = None,
+                             search_filetype_override: object = None,
+                             cooled_down_users: set[str] | None = None) -> None:
+        outcome["success"] = False
+        scenario = getattr(bv_result, "scenario", "unknown")
+        detail = getattr(bv_result, "detail", "")
+        outcome["message"] = f"Rejected: {scenario} — {detail}"
+        # Only log the failure — do NOT requeue. Force/manual import failures
+        # should keep the album at its current status, not auto-requeue.
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
         from lib.import_service import extract_import_log_fields
         log_fields = extract_import_log_fields(dl.import_result)
-        db.log_download(  # type: ignore[union-attr]
+        original_log_download(
             request_id=request_id,
-            outcome=outcome_label,
+            outcome="failed",
             import_result=dl.import_result,
             staged_path=failed_path,
+            error_message=str(detail) if detail else None,
             **log_fields,
         )
-        # Delegate status update to original
-        original_mark_done(album_record, bv, dest_path=dest_path,
-                           download_info=download_info)
-
-    def tracking_mark_failed(album_record, bv, usernames=None,
-                             download_info=None, search_filetype_override=None,
-                             cooled_down_users=None):
-        outcome["success"] = False
-        outcome["message"] = f"Rejected: {bv.scenario} — {bv.detail}"
-        original_mark_failed(album_record, bv, usernames=usernames,
-                             download_info=download_info,
-                             search_filetype_override=search_filetype_override,
-                             cooled_down_users=cooled_down_users)
 
     db_source.mark_done = tracking_mark_done  # type: ignore[method-assign]
     db_source.mark_failed = tracking_mark_failed  # type: ignore[method-assign]
 
-    dispatch_import(album_data, bv_result, failed_path, dl_info,
-                    request_id, ctx, force=force)
+    try:
+        dispatch_import(album_data, bv_result, failed_path, dl_info,
+                        request_id, ctx, force=force)
+    finally:
+        db.log_download = original_log_download  # type: ignore[union-attr]
 
     if outcome["success"]:
         return DispatchOutcome(success=True, message=str(outcome["message"]))
