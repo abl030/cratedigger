@@ -333,10 +333,11 @@ class DatabaseSource:
             validation_result=dl.validation_result,
         )
 
-        # Denylist source users
+        # Denylist source users + check cooldown
         if usernames:
             for username in usernames:
                 db.add_denylist(request_id, username, "beets validation rejected")
+                db.check_and_apply_cooldown(username)
 
     def get_denylisted_users(self, album_record):
         """Get denylisted usernames for an album."""

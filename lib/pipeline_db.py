@@ -18,7 +18,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from lib.quality import CooldownConfig, SpectralMeasurement
+from lib.quality import CooldownConfig, SpectralMeasurement, should_cooldown
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
 
@@ -816,7 +816,7 @@ class PipelineDB:
         return [r["username"] for r in cur.fetchall()]
 
     def get_user_cooldowns(self) -> list[dict[str, Any]]:
-        """Return all cooldown rows (including expired) for display."""
+        """Return all cooldown rows (including expired) for CLI/web display."""
         cur = self._execute("""
             SELECT username, cooldown_until, reason, created_at
             FROM user_cooldowns
@@ -835,7 +835,6 @@ class PipelineDB:
         (across all requests), then delegates to should_cooldown().
         Returns True if a cooldown was applied.
         """
-        from lib.quality import should_cooldown as _should_cooldown
         cfg = config or CooldownConfig()
         cur = self._execute("""
             SELECT outcome FROM download_log
@@ -844,7 +843,7 @@ class PipelineDB:
             LIMIT %s
         """, (username, cfg.lookback_window))
         outcomes = [r["outcome"] for r in cur.fetchall()]
-        if not _should_cooldown(outcomes, cfg):
+        if not should_cooldown(outcomes, cfg):
             return False
         cooldown_until = datetime.now(timezone.utc) + timedelta(days=cfg.cooldown_days)
         self.add_cooldown(

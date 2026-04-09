@@ -141,5 +141,109 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
                          "Should not log 'denylisted' for cooled-down users")
 
 
+class TestCooldownTriggerOnTimeout(unittest.TestCase):
+    """_timeout_album() should call check_and_apply_cooldown after logging."""
+
+    def test_timeout_triggers_cooldown_check(self):
+        from lib.download import _timeout_album
+        from lib.grab_list import GrabListEntry, DownloadFile
+
+        entry = GrabListEntry(
+            album_id=1,
+            files=[DownloadFile(
+                filename="01.flac", id="xfer-1", file_dir="Music\\Album",
+                username="deaduser", size=50000000,
+            )],
+            filetype="flac",
+            title="Album",
+            artist="Artist",
+            year="2020",
+            mb_release_id="mb-uuid",
+            db_request_id=42,
+        )
+
+        mock_db = MagicMock()
+        mock_source = MagicMock()
+        mock_source._get_db.return_value = mock_db
+        ctx = SoularrContext(
+            cfg=MagicMock(),
+            slskd=MagicMock(),
+            pipeline_db_source=mock_source,
+        )
+
+        with patch("lib.download.cancel_and_delete"), \
+             patch("lib.download.apply_transition"):
+            _timeout_album(entry, 42, "stalled", ctx)
+
+        mock_db.log_download.assert_called_once()
+        self.assertEqual(mock_db.log_download.call_args.kwargs["outcome"], "timeout")
+        mock_db.check_and_apply_cooldown.assert_called_once_with("deaduser")
+
+    def test_timeout_no_cooldown_when_no_username(self):
+        """If username is empty/None, don't call cooldown check."""
+        from lib.download import _timeout_album
+        from lib.grab_list import GrabListEntry, DownloadFile
+
+        entry = GrabListEntry(
+            album_id=1,
+            files=[DownloadFile(
+                filename="01.flac", id="xfer-1", file_dir="Music\\Album",
+                username="", size=50000000,
+            )],
+            filetype="flac",
+            title="Album",
+            artist="Artist",
+            year="2020",
+            mb_release_id="mb-uuid",
+            db_request_id=42,
+        )
+
+        mock_db = MagicMock()
+        mock_source = MagicMock()
+        mock_source._get_db.return_value = mock_db
+        ctx = SoularrContext(
+            cfg=MagicMock(),
+            slskd=MagicMock(),
+            pipeline_db_source=mock_source,
+        )
+
+        with patch("lib.download.cancel_and_delete"), \
+             patch("lib.download.apply_transition"):
+            _timeout_album(entry, 42, "stalled", ctx)
+
+        mock_db.check_and_apply_cooldown.assert_not_called()
+
+
+class TestCooldownTriggerOnRejection(unittest.TestCase):
+    """mark_failed() should call check_and_apply_cooldown after logging."""
+
+    def test_rejection_triggers_cooldown_check(self):
+        from album_source import DatabaseSource
+        from lib.quality import DownloadInfo
+
+        mock_db = MagicMock()
+        source = DatabaseSource.__new__(DatabaseSource)
+        source._db = mock_db
+
+        album_record = MagicMock()
+        album_record.db_request_id = 42
+
+        bv_result = MagicMock()
+        bv_result.distance = 0.5
+        bv_result.scenario = "bad_match"
+        bv_result.detail = "too different"
+        bv_result.error = "distance too high"
+
+        dl = DownloadInfo(username="baduser")
+
+        with patch("lib.transitions.apply_transition"):
+            source.mark_failed(album_record, bv_result,
+                               usernames=["baduser"], download_info=dl)
+
+        mock_db.log_download.assert_called_once()
+        self.assertEqual(mock_db.log_download.call_args.kwargs["outcome"], "rejected")
+        mock_db.check_and_apply_cooldown.assert_called_once_with("baduser")
+
+
 if __name__ == "__main__":
     unittest.main()

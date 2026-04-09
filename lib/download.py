@@ -764,6 +764,8 @@ def _timeout_album(
         outcome="timeout",
         error_message=reason,
     )
+    if dl_info.username:
+        db.check_and_apply_cooldown(dl_info.username)
     apply_transition(db, request_id, "wanted",
                      from_status="downloading",
                      attempt_type="download")
