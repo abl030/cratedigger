@@ -74,11 +74,46 @@
 - Never construct `SoularrConfig` with positional/keyword args for a subset of fields. Always use `SoularrConfig.from_ini()` with the runtime config file. Partial configs silently diverge when new config fields are added.
 - Before adding a new function that "does roughly what X does but simpler," check if X can be called with an adapter. The adapter may be ugly — that's a signal to improve X's interface, not to duplicate X.
 
-## Test Behaviors Not Implementations
-- Tests for import/pipeline paths must assert **pipeline behaviors** (quality gate runs, meelo triggers, downgrade prevented, denylist applied), not implementation details (correct subprocess args). If a test only verifies that function A calls function B with the right args — and would still pass if function B were a no-op — it locks in the implementation without protecting the behavior.
-- When you write a test for a new entry point (force-import, manual-import, web API), ask: "if someone replaced this with a simpler function that skips the quality gate, would this test catch it?" If not, the test is testing plumbing, not behavior.
-- Pure function tests (input → output) are exempt — the rule targets orchestration and pipeline paths. "Every pure function must have direct unit tests" still applies.
-- Use `make_request_row()` from `tests/helpers.py` for album_requests dicts. Hand-rolled dicts with 20+ fields drift silently when the schema evolves.
+## Test Taxonomy
+
+Four categories of tests. Each has different rules for what's acceptable.
+
+### 1. Pure function tests
+- Assert direct input → output. No mocks unless unavoidable for environment.
+- Should be exhaustive for decision logic (`dispatch_action`, `quality_gate_decision`, etc.).
+- Use `subTest()` tables for decision matrices — less copy/paste, easier to audit completeness.
+
+### 2. Seam / adapter tests
+- Protect interface boundaries: subprocess argv, config-to-flag wiring, SQL query shape, route contract fields, serialization formats.
+- Implementation assertions (call args, payload shape) are **acceptable and encouraged** here.
+- Examples: `--force` flag forwarded, `--override-min-bitrate` derived correctly, route returns required fields.
+- These are legitimate tests — do not delete them to satisfy an "assert behavior not implementation" rule.
+
+### 3. Orchestration tests
+- Must assert **domain outcomes**, not only helper call shapes.
+- At least one assertion per test must target persisted state or observable output:
+  - request status after the operation
+  - `download_log` rows (outcome, fields present)
+  - denylist entries written
+  - retry / requeue behavior (status transitions)
+  - attempt counters incremented
+  - `validation_result` / `import_result` preserved
+  - filesystem side effects (cleanup, staging)
+- Mocking is allowed for external edges (subprocess, meelo, plex), but the assertion target must be domain state.
+- Use `FakePipelineDB` from `tests/fakes.py` for stateful collaborators instead of MagicMock.
+- Use builders from `tests/helpers.py` (`make_request_row`, `make_import_result`, etc.) — never hand-roll 20-field dicts.
+
+### 4. Integration slice tests
+- Use real code paths with lightweight fakes or temp resources.
+- Patch only external edges that are truly expensive or unsafe (subprocess, network).
+- Required for complex stateful flows and regressions.
+- At least one per high-risk orchestration boundary (dispatch, quality gate, spectral propagation).
+
+### General test rules
+- **Fakes over mocks for stateful collaborators.** Use `MagicMock` for leaf seams. Use `FakePipelineDB` (or similar) when the test reasons about state transitions over time.
+- **Equivalence proof for deleted tests.** When removing a test, document in the commit message: what behavior was covered, where it's covered now, what branch is still protected.
+- **Short docstrings.** One-line docstrings are fine. Long `NOTE:` paragraphs justifying a test's existence are a smell — extract a helper, move the explanation to the PR, or restructure the test.
+- **Builders for structured data.** Use `make_request_row()`, `make_import_result()`, `make_download_info()` from `tests/helpers.py`. Hand-rolled dicts with many fields drift silently when the schema evolves.
 
 ## Pre-Commit Review Gate
 - For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
