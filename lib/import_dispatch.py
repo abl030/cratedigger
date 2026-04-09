@@ -13,7 +13,7 @@ import shutil
 import subprocess as sp
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Sequence, TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          SpectralMeasurement,
@@ -251,14 +251,22 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
     )
 
 
-def _check_quality_gate(album_data: GrabListEntry, request_id: int,
-                        ctx: "SoularrContext") -> None:
-    """Post-import quality gate: if min track bitrate is below V0, queue for upgrade."""
+def _check_quality_gate_core(
+    mb_id: str,
+    label: str,
+    request_id: int,
+    files: Sequence[object],
+    db: "PipelineDB",
+) -> None:
+    """Post-import quality gate — standalone version taking plain params + PipelineDB.
+
+    Reads beets DB for on-disk quality, runs quality_gate_decision, dispatches
+    requeue/accept. Used by both auto-import (via wrapper) and core dispatch.
+    """
     from lib.quality import quality_gate_decision, AudioQualityMeasurement
     from lib.beets_db import BeetsDB
 
-    mb_id = album_data.mb_release_id
-    if not mb_id or not ctx.cfg.pipeline_db_enabled or ctx.pipeline_db_source is None:
+    if not mb_id:
         return
     try:
         with BeetsDB() as beets:
@@ -271,13 +279,9 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
         spectral_br: int | None = None
         req = None
         try:
-            req = ctx.pipeline_db_source._get_db().get_request(request_id)
+            req = db.get_request(request_id)
             spectral_grade = req.get("current_spectral_grade") if req else None
             raw_br = req.get("current_spectral_bitrate") if req else None
-            # Only use spectral bitrate to override when grade is suspect —
-            # genuine files can have low spectral bitrate due to quiet/sparse
-            # music, not bad source quality (e.g. ambient at genuine 320kbps
-            # shows ~160kbps spectral estimate because the music has no HF)
             if spectral_grade == "suspect":
                 spectral_br = raw_br if isinstance(raw_br, int) else None
             if spectral_br is not None:
@@ -295,7 +299,6 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
             spectral_bitrate_kbps=spectral_br)
         decision = quality_gate_decision(current)
 
-        label = f"{album_data.artist} - {album_data.title}"
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
         if decision == "requeue_upgrade":
@@ -303,7 +306,6 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 logger.info(
                     f"QUALITY GATE: {label} gate_bitrate < {QUALITY_MIN_BITRATE_KBPS}kbps "
                     f"but verified_lossless=True — accepting")
-                db = ctx.pipeline_db_source._get_db()
                 apply_transition(
                     db,
                     request_id,
@@ -313,12 +315,11 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 )
                 return
             upgrade_override = QUALITY_UPGRADE_TIERS
-            db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
                              search_filetype_override=upgrade_override,
                              min_bitrate=min_br_kbps)
-            usernames = extract_usernames(album_data.files)
+            usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(min_br_kbps, spectral_br) or min_br_kbps
             if spectral_br and spectral_br < min_br_kbps:
                 reason = (f"quality gate: spectral {spectral_br}kbps "
@@ -334,7 +335,6 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            db = ctx.pipeline_db_source._get_db()
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
                              search_filetype_override=lossless_override,
@@ -344,7 +344,6 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            db = ctx.pipeline_db_source._get_db()
             apply_transition(
                 db,
                 request_id,
@@ -359,6 +358,20 @@ def _check_quality_gate(album_data: GrabListEntry, request_id: int,
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps VBR — quality OK")
     except Exception:
         logger.exception("QUALITY GATE: failed to check quality")
+
+
+def _check_quality_gate(album_data: "GrabListEntry", request_id: int,
+                        ctx: "SoularrContext") -> None:
+    """Post-import quality gate — wrapper that extracts plain params from heavyweight objects."""
+    if not ctx.cfg.pipeline_db_enabled or ctx.pipeline_db_source is None:
+        return
+    _check_quality_gate_core(
+        mb_id=album_data.mb_release_id or "",
+        label=f"{album_data.artist} - {album_data.title}",
+        request_id=request_id,
+        files=album_data.files,
+        db=ctx.pipeline_db_source._get_db(),
+    )
 
 
 def trigger_meelo_scan(ctx: "SoularrContext") -> None:
