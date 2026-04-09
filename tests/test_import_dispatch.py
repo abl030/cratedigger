@@ -1,6 +1,9 @@
 """Tests for lib/import_dispatch.py — auto-import decision tree.
 
-Tests each branch of dispatch_import() with mocked dependencies.
+Orchestration tests (TestDispatchImport, TestQualityGate*) use FakePipelineDB
+and assert domain state. Seam tests (TestOverrideMinBitrate, TestOpus*,
+TestTargetFormat*) test subprocess argv and adapter wiring via MagicMock.
+Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 
 import os
@@ -10,38 +13,15 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from lib.config import SoularrConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
-                         AudioQualityMeasurement, PostflightInfo,
+                         AudioQualityMeasurement,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
-from tests.helpers import make_request_row
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row, make_import_result
 
 
-def _make_import_result(decision="import", new_min_bitrate=245,
-                        prev_min_bitrate=None, was_converted=False,
-                        original_filetype=None, target_filetype=None,
-                        spectral_grade="genuine", spectral_bitrate=None,
-                        error=None):
-    """Build an ImportResult for testing."""
-    return ImportResult(
-        decision=decision,
-        error=error,
-        new_measurement=AudioQualityMeasurement(
-            min_bitrate_kbps=new_min_bitrate,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            verified_lossless=was_converted and spectral_grade == "genuine",
-            was_converted_from=original_filetype if was_converted else None,
-        ),
-        existing_measurement=(AudioQualityMeasurement(min_bitrate_kbps=prev_min_bitrate)
-                              if prev_min_bitrate is not None else None),
-        conversion=ConversionInfo(
-            was_converted=was_converted,
-            original_filetype=original_filetype or "",
-            target_filetype=target_filetype or "",
-        ),
-        postflight=PostflightInfo(),
-    )
-
+# --- Local helpers for seam tests that call dispatch_import() (adapter) ---
 
 def _make_album_data(artist="Test Artist", title="Test Album",
                      mb_release_id="test-mbid", db_request_id=42,
@@ -81,13 +61,16 @@ def _make_bv_result(distance=0.05):
     return mock
 
 
+_HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
 class TestPopulateDlInfoFromImportResult(unittest.TestCase):
 
     def test_converted_flac_to_v0(self):
         from lib.import_dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
-        ir = _make_import_result(was_converted=True, original_filetype="flac",
-                                 target_filetype="mp3", new_min_bitrate=245)
+        ir = make_import_result(was_converted=True, original_filetype="flac",
+                                target_filetype="mp3", new_min_bitrate=245)
         _populate_dl_info_from_import_result(dl, ir)
         self.assertTrue(dl.was_converted)
         self.assertEqual(dl.original_filetype, "flac")
@@ -101,7 +84,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_no_conversion(self):
         from lib.import_dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="mp3")
-        ir = _make_import_result(was_converted=False, new_min_bitrate=320)
+        ir = make_import_result(was_converted=False, new_min_bitrate=320)
         _populate_dl_info_from_import_result(dl, ir)
         self.assertFalse(dl.was_converted)
         self.assertEqual(dl.slskd_filetype, "mp3")
@@ -141,204 +124,190 @@ class TestCleanupStagedDir(unittest.TestCase):
 
 
 class TestDispatchImport(unittest.TestCase):
-    """Test the import decision tree branches."""
+    """Orchestration tests — assert domain state via FakePipelineDB."""
 
-    def _dispatch(self, ir_json, album_data=None, ctx=None, bv_result=None,
-                  dest="/tmp/fake/dest"):
-        from lib.import_dispatch import dispatch_import
-        if album_data is None:
-            album_data = _make_album_data()
-        if ctx is None:
-            ctx = _make_ctx()
-        if bv_result is None:
-            bv_result = _make_bv_result()
+    _SENTINEL = object()
+
+    def _dispatch(self, ir=_SENTINEL, request_overrides=None):
+        from lib.import_dispatch import dispatch_import_core
+        if ir is self._SENTINEL:
+            ir = make_import_result(decision="import")
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            **(request_overrides or {}),
+        ))
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
         dl_info = DownloadInfo(filetype="mp3")
-        request_id = album_data.db_request_id
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir") as mock_cleanup, \
-             patch("lib.util.trigger_meelo_scan") as mock_meelo, \
-             patch("lib.util.trigger_plex_scan"), \
-             patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir_json), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
-            dispatch_import(album_data, bv_result, dest, dl_info,
-                            request_id, ctx)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch("lib.import_dispatch.sp.run") as mock_run, \
+                 patch("lib.import_dispatch._cleanup_staged_dir") as mock_cleanup, \
+                 patch("lib.util.trigger_meelo_scan") as mock_meelo, \
+                 patch("lib.util.trigger_plex_scan"), \
+                 patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
+                       return_value=[]):
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-        db_mock = ctx.pipeline_db_source._get_db.return_value
         return {
-            "mock_run": mock_run,
+            "db": db,
             "mock_cleanup": mock_cleanup,
             "mock_meelo": mock_meelo,
             "mock_gate": mock_gate,
-            "pipeline_db_source": ctx.pipeline_db_source,
-            "db": db_mock,
-            "dl_info": dl_info,
         }
 
     def test_import_success(self):
-        ir = _make_import_result(decision="import")
-        result = self._dispatch(ir)
-        # Behavioral: download logged with success outcome
-        result["db"].log_download.assert_called_once()
-        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
-        result["mock_meelo"].assert_called_once()
-        result["mock_cleanup"].assert_called_once()
-        result["mock_gate"].assert_called_once()
+        ir = make_import_result(decision="import")
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].request(42)["status"], "imported")
+        self.assertEqual(len(r["db"].download_logs), 1)
+        self.assertEqual(r["db"].download_logs[0].outcome, "success")
+        r["mock_meelo"].assert_called_once()
+        r["mock_cleanup"].assert_called_once()
+        r["mock_gate"].assert_called_once()
 
     def test_preflight_existing(self):
-        ir = _make_import_result(decision="preflight_existing")
-        result = self._dispatch(ir)
-        result["db"].log_download.assert_called_once()
-        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
-        result["mock_meelo"].assert_called_once()
+        ir = make_import_result(decision="preflight_existing")
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].request(42)["status"], "imported")
+        self.assertEqual(r["db"].download_logs[0].outcome, "success")
+        r["mock_meelo"].assert_called_once()
 
     def test_import_with_upgrade_delta(self):
-        ir = _make_import_result(decision="import", new_min_bitrate=245,
-                                 prev_min_bitrate=192)
-        result = self._dispatch(ir)
-        result["db"].update_status.assert_called()
+        ir = make_import_result(decision="import", new_min_bitrate=245,
+                                prev_min_bitrate=192)
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].request(42)["status"], "imported")
 
     def test_downgrade_rejected(self):
-        ir = _make_import_result(decision="downgrade", new_min_bitrate=192,
-                                 prev_min_bitrate=320)
-        result = self._dispatch(ir)
-        # Behavioral: download logged as rejected, not as success
-        log_calls = result["db"].log_download.call_args_list
-        outcomes = [c.kwargs["outcome"] for c in log_calls]
-        self.assertIn("rejected", outcomes)
-        self.assertNotIn("success", outcomes)
-        result["mock_cleanup"].assert_called_once()
-        result["db"].add_denylist.assert_called()
+        ir = make_import_result(decision="downgrade", new_min_bitrate=192,
+                                prev_min_bitrate=320)
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertEqual(r["db"].request(42)["status"], "wanted")
+        self.assertTrue(len(r["db"].denylist) > 0)
+        r["mock_cleanup"].assert_called_once()
 
     def test_downgrade_passes_narrowed_override_to_transition(self):
-        """Downgrade must narrow search_filetype_override in the requeue transition."""
-        ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
-                                 prev_min_bitrate=320)
-        ctx = _make_ctx()
-        db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.get_request.return_value = make_request_row(
-            status="downloading",
-            search_filetype_override="flac,mp3 v0,mp3 320",
-        )
-
-        result = self._dispatch(ir, ctx=ctx)
-
-        # The narrowed override should be passed to reset_to_wanted
-        reset_calls = result["db"].reset_to_wanted.call_args_list
-        self.assertTrue(len(reset_calls) > 0, "Expected reset_to_wanted call")
-        reset_kwargs = reset_calls[0].kwargs
-        self.assertEqual(reset_kwargs.get("search_filetype_override"), "flac,mp3 v0")
+        ir = make_import_result(decision="downgrade", new_min_bitrate=320,
+                                prev_min_bitrate=320)
+        r = self._dispatch(ir, request_overrides={
+            "search_filetype_override": "flac,mp3 v0,mp3 320",
+        })
+        self.assertEqual(
+            r["db"].request(42)["search_filetype_override"], "flac,mp3 v0")
 
     def test_downgrade_preserves_override_when_tier_not_matched(self):
-        """320 downgrade with flac-only override → no narrowing (tier not in CSV)."""
-        ir = _make_import_result(decision="downgrade", new_min_bitrate=320,
-                                 prev_min_bitrate=320)
-        ctx = _make_ctx()
-        db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.get_request.return_value = make_request_row(
-            status="downloading",
-            search_filetype_override="flac",
-        )
-
-        result = self._dispatch(ir, ctx=ctx)
-
-        # No narrowing happened, so reset_to_wanted should NOT have search_filetype_override
-        reset_calls = result["db"].reset_to_wanted.call_args_list
-        if reset_calls:
-            reset_kwargs = reset_calls[0].kwargs
-            # None means no override was passed (original preserved)
-            override = reset_kwargs.get("search_filetype_override")
-            if override is not None:
-                self.fail(f"Expected no narrowing, got search_filetype_override={override}")
+        ir = make_import_result(decision="downgrade", new_min_bitrate=320,
+                                prev_min_bitrate=320)
+        r = self._dispatch(ir, request_overrides={
+            "search_filetype_override": "flac",
+        })
+        # No narrowing: "mp3 320" tier not in "flac"-only override
+        # reset_to_wanted without search_filetype_override → preserved
+        # The override should not have been changed from what reset_to_wanted sets
+        override = r["db"].request(42)["search_filetype_override"]
+        # narrowing returns None when no tier matches, so reset_to_wanted
+        # doesn't pass search_filetype_override, preserving the original "flac"
+        self.assertEqual(override, "flac")
 
     def test_transcode_upgrade(self):
-        ir = _make_import_result(decision="transcode_upgrade",
-                                 new_min_bitrate=227)
-        result = self._dispatch(ir)
-        # Behavioral: logged as success (transcode_upgrade marks done)
-        result["db"].log_download.assert_called_once()
-        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "success")
-        result["mock_meelo"].assert_called_once()
-        result["db"].add_denylist.assert_called()
-        result["db"].reset_to_wanted.assert_called_once()
+        ir = make_import_result(decision="transcode_upgrade",
+                                new_min_bitrate=227)
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].download_logs[0].outcome, "success")
+        self.assertEqual(r["db"].request(42)["status"], "wanted")
+        self.assertTrue(len(r["db"].denylist) > 0)
+        r["mock_meelo"].assert_called_once()
 
     def test_transcode_downgrade(self):
-        ir = _make_import_result(decision="transcode_downgrade",
-                                 new_min_bitrate=190)
-        result = self._dispatch(ir)
-        # Behavioral: logged as rejected
-        log_calls = result["db"].log_download.call_args_list
-        outcomes = [c.kwargs["outcome"] for c in log_calls]
-        self.assertIn("rejected", outcomes)
-        result["db"].add_denylist.assert_called()
-        # reset_to_wanted called twice: once by _do_mark_failed (requeue),
-        # once by action.requeue (with upgrade tiers override)
-        self.assertGreaterEqual(result["db"].reset_to_wanted.call_count, 1)
+        ir = make_import_result(decision="transcode_downgrade",
+                                new_min_bitrate=190)
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertTrue(len(r["db"].denylist) > 0)
+        self.assertEqual(r["db"].request(42)["status"], "wanted")
 
     def test_error_decision(self):
-        ir = _make_import_result(decision="conversion_failed",
-                                 error="ffmpeg failed")
-        result = self._dispatch(ir)
-        # Behavioral: logged as rejected, not success
-        log_calls = result["db"].log_download.call_args_list
-        outcomes = [c.kwargs["outcome"] for c in log_calls]
-        self.assertIn("rejected", outcomes)
-        self.assertNotIn("success", outcomes)
+        ir = make_import_result(decision="conversion_failed",
+                                error="ffmpeg failed")
+        r = self._dispatch(ir)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
 
     def test_no_json_result(self):
-        """parse_import_result returns None when no JSON in output."""
-        result = self._dispatch(None)  # None = no JSON parsed
-        result["db"].log_download.assert_called_once()
-        self.assertEqual(result["db"].log_download.call_args.kwargs["outcome"], "failed")
+        r = self._dispatch(None)
+        self.assertEqual(len(r["db"].download_logs), 1)
+        self.assertEqual(r["db"].download_logs[0].outcome, "failed")
 
     def test_timeout(self):
-        from lib.import_dispatch import dispatch_import
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="mp3")
+        from lib.import_dispatch import dispatch_import_core
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
 
         with patch("lib.import_dispatch.sp.run",
                    side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
+            dispatch_import_core(
+                path="/tmp/dest", mb_release_id="test-mbid",
+                request_id=42, label="Test",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+            )
 
-        db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.log_download.assert_called_once()
-        self.assertEqual(db_mock.log_download.call_args.kwargs["outcome"], "failed")
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(db.download_logs[0].outcome, "failed")
 
     def test_exception(self):
-        from lib.import_dispatch import dispatch_import
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="mp3")
+        from lib.import_dispatch import dispatch_import_core
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
 
         with patch("lib.import_dispatch.sp.run",
                    side_effect=RuntimeError("boom")):
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
+            dispatch_import_core(
+                path="/tmp/dest", mb_release_id="test-mbid",
+                request_id=42, label="Test",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+            )
 
-        db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.log_download.assert_called_once()
-        self.assertEqual(db_mock.log_download.call_args.kwargs["outcome"], "failed")
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(db.download_logs[0].outcome, "failed")
 
 
 class TestOverrideMinBitrate(unittest.TestCase):
-    """Test that dispatch_import passes the effective override bitrate to import_one.py.
+    """Seam tests — subprocess arg wiring for --override-min-bitrate.
 
-    NOTE: These test subprocess arg wiring, not the decision logic itself.
-    The pure decision function (compute_effective_override_bitrate) is tested
-    in test_quality_decisions.py. These tests will break if import_one becomes
-    a library call (#48) — that's acceptable; they should be replaced with
-    behavioral tests at that point.
+    Tests the dispatch_import() adapter's override computation. Will break
+    if import_one becomes a library call (#48).
     """
 
     def _get_override_value(self, db_fields):
-        """Run dispatch_import with a mock DB request, return the override passed."""
         from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         ctx = _make_ctx()
@@ -346,7 +315,7 @@ class TestOverrideMinBitrate(unittest.TestCase):
         db_mock.get_request.return_value = db_fields
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="mp3")
-        ir = _make_import_result(decision="import")
+        ir = make_import_result(decision="import")
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
@@ -361,47 +330,42 @@ class TestOverrideMinBitrate(unittest.TestCase):
                             42, ctx)
             cmd = mock_run.call_args[0][0]
 
-        # Find --override-min-bitrate value in cmd
         for i, arg in enumerate(cmd):
             if arg == "--override-min-bitrate" and i + 1 < len(cmd):
                 return int(cmd[i + 1])
         return None
 
     def test_uses_spectral_when_lower(self):
-        """Container says 320, spectral says 128 — should pass 128."""
         val = self._get_override_value(
             make_request_row(min_bitrate=320, current_spectral_bitrate=128))
         self.assertEqual(val, 128)
 
     def test_uses_container_when_no_spectral(self):
-        """No spectral data — should pass container bitrate."""
         val = self._get_override_value(
             make_request_row(min_bitrate=320, current_spectral_bitrate=None))
         self.assertEqual(val, 320)
 
     def test_uses_container_when_spectral_higher(self):
-        """Spectral is higher than container — use container (more conservative)."""
         val = self._get_override_value(
             make_request_row(min_bitrate=192, current_spectral_bitrate=256))
         self.assertEqual(val, 192)
 
     def test_no_override_when_no_bitrate(self):
-        """No min_bitrate and no spectral — no override passed."""
         val = self._get_override_value(
             make_request_row(min_bitrate=None, current_spectral_bitrate=None))
         self.assertIsNone(val)
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):
-    """Verify _check_quality_gate_core uses quality constants."""
+    """Orchestration tests for _check_quality_gate_core via FakePipelineDB."""
 
     def _run_quality_gate(self, gate_decision, **extra_req_fields):
-        """Run _check_quality_gate_core with plain params."""
         from lib.import_dispatch import _check_quality_gate_core
-        db = MagicMock()
-        merged = {"current_spectral_bitrate": None, "verified_lossless": False}
+        db = FakePipelineDB()
+        merged = {"status": "imported", "current_spectral_bitrate": None,
+                  "verified_lossless": False}
         merged.update(extra_req_fields)
-        db.get_request.return_value = make_request_row(**merged)
+        db.seed_request(make_request_row(id=42, **merged))
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
              patch("lib.quality.quality_gate_decision",
@@ -416,7 +380,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 mb_id="test-mbid", label="Test Artist - Test Album",
                 request_id=42,
                 files=[MagicMock(username="user1", filename="01.mp3")],
-                db=db,
+                db=db,  # type: ignore[arg-type]
             )
 
         return db
@@ -424,53 +388,49 @@ class TestQualityGateUsesIntent(unittest.TestCase):
     def test_no_mb_id_returns_early(self):
         """Empty mb_id should return without doing anything."""
         from lib.import_dispatch import _check_quality_gate_core
-        db = MagicMock()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
         _check_quality_gate_core(
-            mb_id="", label="Test", request_id=42, files=[], db=db)
-        db.get_request.assert_not_called()
+            mb_id="", label="Test", request_id=42, files=[],
+            db=db)  # type: ignore[arg-type]
+        # Status unchanged — gate returned early
+        self.assertEqual(db.request(42)["status"], "imported")
 
     def test_requeue_upgrade_uses_intent(self):
-        """requeue_upgrade should use quality constants(upgrade)."""
         db = self._run_quality_gate("requeue_upgrade")
-        call_args = db.reset_to_wanted.call_args
-        self.assertEqual(
-            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
-            QUALITY_UPGRADE_TIERS,
-        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
 
     def test_requeue_upgrade_verified_lossless_accepts(self):
-        """verified_lossless=True should accept, not requeue, even on requeue_upgrade."""
         db = self._run_quality_gate("requeue_upgrade", verified_lossless=True)
-        # Should NOT have called reset_to_wanted
-        db.reset_to_wanted.assert_not_called()
-        # Should NOT have denylisted anyone
-        db.add_denylist.assert_not_called()
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(len(db.denylist), 0)
 
     def test_requeue_lossless_uses_intent(self):
-        """requeue_lossless should use quality constants(lossless)."""
         db = self._run_quality_gate("requeue_lossless")
-        call_args = db.reset_to_wanted.call_args
-        self.assertEqual(
-            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
-            QUALITY_FLAC_ONLY,
-        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
 
     def test_quality_gate_reads_current_spectral_not_last_download(self):
         """Quality gate must use current_spectral_bitrate (what's on disk),
         not last_download_spectral_bitrate (stale from a previous download)."""
         from lib.import_dispatch import _check_quality_gate_core
-        db = MagicMock()
-        # current is None (genuine, no cliff) but last_download is stale 192
-        db.get_request.return_value = make_request_row(
-            last_download_spectral_bitrate=192,  # stale from old download
-            current_spectral_bitrate=None,       # genuine files, cleared by mark_done
-            verified_lossless=False)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="imported",
+            last_download_spectral_bitrate=192,
+            current_spectral_bitrate=None,
+            verified_lossless=False,
+        ))
 
         captured_measurement = {}
 
         def capture_decision(measurement):
             captured_measurement["m"] = measurement
-            return "accept"  # would be accept with no spectral drag
+            return "accept"
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
              patch("lib.quality.quality_gate_decision",
@@ -483,31 +443,28 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mock_beets_cls.return_value = mock_beets
             _check_quality_gate_core(
                 mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[], db=db)
+                request_id=42, files=[],
+                db=db)  # type: ignore[arg-type]
 
         m = captured_measurement["m"]
-        # spectral_bitrate_kbps on the measurement should be None (from current),
-        # NOT 192 (from stale download spectral)
         self.assertIsNone(m.spectral_bitrate_kbps,
                           "quality gate should use current_spectral_bitrate, "
                           "not stale last_download_spectral_bitrate")
 
     def test_genuine_v0_replacing_transcode_accepted(self):
-        """Contract test: genuine V0 replacing a transcode should be accepted
-        by the quality gate, not requeued. Regression test for issue #18."""
+        """Genuine V0 replacing a transcode should be accepted, not requeued."""
         from lib.import_dispatch import _check_quality_gate_core
         from lib.quality import quality_gate_decision
 
-        db = MagicMock()
-
-        # After mark_done fix: genuine import clears stale spectral data
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="imported",
             last_download_spectral_bitrate=None,
             last_download_spectral_grade="genuine",
             current_spectral_bitrate=None,
             current_spectral_grade="genuine",
             verified_lossless=False,
-        )
+        ))
 
         captured = {}
 
@@ -526,26 +483,24 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mock_beets_cls.return_value = mock_beets
             _check_quality_gate_core(
                 mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[], db=db)
+                request_id=42, files=[],
+                db=db)  # type: ignore[arg-type]
 
         m = captured["m"]
-        # Should see: 226kbps VBR, no spectral drag, not verified lossless
         self.assertEqual(m.min_bitrate_kbps, 226)
         self.assertFalse(m.is_cbr)
         self.assertIsNone(m.spectral_bitrate_kbps)
-        # Decision should be "accept" (VBR >= 210), NOT "requeue_upgrade"
         self.assertEqual(quality_gate_decision(m), "accept")
-        # Should NOT have called reset_to_wanted (no requeue)
-        db.reset_to_wanted.assert_not_called()
+        # Should stay imported (not requeued)
+        self.assertEqual(db.request(42)["status"], "imported")
 
     def test_dispatch_requeue_uses_intent(self):
-        """dispatch_import requeue path should use quality constants."""
-        ir = _make_import_result(decision="transcode_upgrade",
-                                 new_min_bitrate=227)
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="mp3")
+        """Transcode-upgrade requeue path uses quality constants."""
+        from lib.import_dispatch import dispatch_import_core
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ir = make_import_result(decision="transcode_upgrade",
+                                new_min_bitrate=227)
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
@@ -553,42 +508,37 @@ class TestQualityGateUsesIntent(unittest.TestCase):
              patch("lib.util.trigger_plex_scan"), \
              patch("lib.import_dispatch._check_quality_gate_core"), \
              patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
+             patch("lib.import_dispatch.cleanup_disambiguation_orphans",
+                   return_value=[]):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
-            from lib.import_dispatch import dispatch_import
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
+            dispatch_import_core(
+                path="/tmp/dest", mb_release_id="test-mbid",
+                request_id=42, label="Test",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                files=[MagicMock(username="user1", filename="01.mp3")],
+            )
 
-        db = ctx.pipeline_db_source._get_db.return_value
-        call_args = db.reset_to_wanted.call_args
-        self.assertEqual(
-            call_args.kwargs.get("search_filetype_override") or call_args[1].get("search_filetype_override"),
-            QUALITY_UPGRADE_TIERS,
-        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
 
 
 class TestQualityGatePreservesTargetFormat(unittest.TestCase):
-    """Quality gate accept must preserve target_format (user intent).
-
-    Bug (Deloris loop): quality_override="flac" (user intent: FLAC on disk)
-    was cleared to NULL on quality gate accept. User had to manually re-queue,
-    creating a loop.
-
-    After the split: search_filetype_override is cleared on accept (transient),
-    but target_format survives (persistent user intent).
-    """
+    """Quality gate accept must clear search_filetype_override but preserve target_format."""
 
     def _run_quality_gate_accept(self, target_format="flac"):
-        """Run _check_quality_gate_core with accept decision and target_format set."""
         from lib.import_dispatch import _check_quality_gate_core
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
-            status="imported",
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="imported",
             target_format=target_format,
             verified_lossless=True,
             current_spectral_bitrate=None,
-        )
+            search_filetype_override="lossless",  # should be cleared
+        ))
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
              patch("lib.quality.quality_gate_decision",
@@ -601,57 +551,34 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
             mock_beets_cls.return_value = mock_beets
             _check_quality_gate_core(
                 mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[], db=db)
+                request_id=42, files=[],
+                db=db)  # type: ignore[arg-type]
 
         return db
 
     def test_accept_clears_search_override_not_target_format(self):
-        """On accept, search_filetype_override=None but target_format preserved.
-
-        After refactor: quality_override is renamed to search_filetype_override.
-        The quality gate should write search_filetype_override=None (clearing
-        the transient search filter) and NOT touch target_format (preserving
-        user intent).
-
-        Current bug: quality_override=None clears everything including user intent.
-        """
         db = self._run_quality_gate_accept(target_format="flac")
-        call_args = db.update_status.call_args
-        if call_args is None:
-            self.fail("update_status not called")
-        kwargs = call_args.kwargs if call_args.kwargs else call_args[1]
-        # After refactor: quality_override should not exist anymore
-        self.assertNotIn("quality_override", kwargs,
-            "quality_override should be renamed to search_filetype_override")
-        # search_filetype_override should be explicitly cleared
-        self.assertIn("search_filetype_override", kwargs,
-            "quality gate accept must explicitly clear search_filetype_override")
-        self.assertIsNone(kwargs["search_filetype_override"])
-        # target_format should NOT be in the update (not touched)
-        self.assertNotIn("target_format", kwargs,
-            "target_format should not be written by quality gate accept — "
-            "omitting it preserves the user's value in the DB")
+        row = db.request(42)
+        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(row["target_format"], "flac")
+        self.assertEqual(row["status"], "imported")
 
 
 class TestOpusConversionDispatch(unittest.TestCase):
-    """Test --verified-lossless-target flag wiring and dl_info population.
+    """Seam tests — --verified-lossless-target flag wiring.
 
-    NOTE: Flag-passing tests (test_target_flag_*) test subprocess arg wiring.
-    They will break if import_one becomes a library call (#48). The dl_info
-    population test (test_opus_import_result_populates_dl_info) tests real
-    behavior and should survive any refactor.
+    Will break if import_one becomes a library call (#48).
     """
 
     def _get_cmd(self, verified_lossless_target=""):
-        """Run dispatch_import, capture the cmd passed to sp.run."""
         from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         ctx = _make_ctx()
         ctx.cfg.verified_lossless_target = verified_lossless_target
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="flac")
-        ir = _make_import_result(decision="import", was_converted=True,
-                                 original_filetype="flac", target_filetype="mp3")
+        ir = make_import_result(decision="import", was_converted=True,
+                                original_filetype="flac", target_filetype="mp3")
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
@@ -677,7 +604,6 @@ class TestOpusConversionDispatch(unittest.TestCase):
         self.assertNotIn("--verified-lossless-target", cmd)
 
     def test_opus_import_result_populates_dl_info(self):
-        """ImportResult with final_format='opus 128' should update dl_info."""
         from lib.import_dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
         ir = ImportResult(
@@ -700,10 +626,9 @@ class TestOpusConversionDispatch(unittest.TestCase):
 
 
 class TestTargetFormatDispatch(unittest.TestCase):
-    """Test --target-format flag wiring from dispatch_import to import_one.py.
+    """Seam tests — --target-format flag wiring.
 
-    NOTE: Subprocess arg wiring tests — will break if import_one becomes a
-    library call (#48).
+    Will break if import_one becomes a library call (#48).
     """
 
     def _get_cmd(self, target_format=None):
@@ -714,7 +639,7 @@ class TestTargetFormatDispatch(unittest.TestCase):
         ctx.cfg.verified_lossless_target = ""
         bv_result = _make_bv_result()
         dl_info = DownloadInfo(filetype="flac")
-        ir = _make_import_result(decision="import")
+        ir = make_import_result(decision="import")
 
         with patch("lib.import_dispatch.sp.run") as mock_run, \
              patch("lib.import_dispatch._cleanup_staged_dir"), \
