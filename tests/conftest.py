@@ -26,14 +26,21 @@ if not TEST_DSN and shutil.which("initdb") and shutil.which("pg_ctl"):
         TEST_DSN = _pg.dsn
         if TEST_DSN is not None:
             os.environ["TEST_DB_DSN"] = TEST_DSN
-            # Apply schema once at session start. Test helpers TRUNCATE
-            # between tests but don't re-migrate — the schema is created
-            # by the canonical migrator, exactly like prod.
-            from lib.migrator import apply_migrations
-            apply_migrations(TEST_DSN)
     except Exception as e:
         print(f"[WARN] Could not start ephemeral PostgreSQL: {e}", file=sys.stderr)
         _pg = None
+
+if TEST_DSN:
+    # Apply schema once at session start for either an externally supplied
+    # TEST_DB_DSN or the ephemeral DB above. Test helpers TRUNCATE between tests.
+    from lib.migrator import apply_migrations
+    try:
+        apply_migrations(TEST_DSN)
+    except Exception:
+        if _pg is not None:
+            _pg.stop()
+            _pg = None
+        raise
 
 # Save the real slskd_api before test_beets_validation mocks it
 try:
