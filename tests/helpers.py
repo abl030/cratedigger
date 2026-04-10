@@ -6,7 +6,10 @@ hand-rolling dicts or dataclass constructors with many fields.
 
 from __future__ import annotations
 
+import types
+from contextlib import contextmanager
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
@@ -228,3 +231,47 @@ def make_spectral_context(
         existing_spectral_bitrate=existing_spectral_bitrate,
         existing_spectral_grade=existing_spectral_grade,
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared context wiring
+# ---------------------------------------------------------------------------
+
+def make_ctx_with_fake_db(fake_db: Any, *, cfg: Any = None) -> Any:
+    """Build a SoularrContext wired to a FakePipelineDB.
+
+    The fake is wired via pipeline_db_source._get_db() so production code
+    that calls ctx.pipeline_db_source._get_db() gets the fake.
+    """
+    from lib.context import SoularrContext
+    mock_source = MagicMock()
+    mock_source._get_db.return_value = fake_db
+    return SoularrContext(
+        cfg=cfg if cfg is not None else MagicMock(),
+        slskd=MagicMock(),
+        pipeline_db_source=mock_source,
+    )
+
+
+@contextmanager
+def patch_dispatch_externals():
+    """Patch external edges shared by all dispatch_import_core tests.
+
+    Patches: sp.run, _cleanup_staged_dir, trigger_meelo_scan,
+    trigger_plex_scan, cleanup_disambiguation_orphans.
+
+    Does NOT patch parse_import_result, _check_quality_gate_core,
+    BeetsDB, or _read_runtime_config — callers nest those as needed.
+
+    Yields a SimpleNamespace with attributes: run, cleanup, meelo, plex, orphans.
+    run is pre-configured with returncode=0, stdout="", stderr="".
+    """
+    with patch("lib.import_dispatch.sp.run") as run, \
+         patch("lib.import_dispatch._cleanup_staged_dir") as cleanup, \
+         patch("lib.util.trigger_meelo_scan") as meelo, \
+         patch("lib.util.trigger_plex_scan") as plex, \
+         patch("lib.import_dispatch.cleanup_disambiguation_orphans",
+               return_value=[]) as orphans:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        yield types.SimpleNamespace(
+            run=run, cleanup=cleanup, meelo=meelo, plex=plex, orphans=orphans)

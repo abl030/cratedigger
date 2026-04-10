@@ -18,7 +18,7 @@ from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row, make_import_result
+from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 
 
 # --- Local helpers for seam tests that call dispatch_import() (adapter) ---
@@ -146,16 +146,9 @@ class TestDispatchImport(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch("lib.import_dispatch.sp.run") as mock_run, \
-                 patch("lib.import_dispatch._cleanup_staged_dir") as mock_cleanup, \
-                 patch("lib.util.trigger_meelo_scan") as mock_meelo, \
-                 patch("lib.util.trigger_plex_scan"), \
+            with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-                       return_value=[]):
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="", stderr="")
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -175,8 +168,8 @@ class TestDispatchImport(unittest.TestCase):
 
         return {
             "db": db,
-            "mock_cleanup": mock_cleanup,
-            "mock_meelo": mock_meelo,
+            "mock_cleanup": ext.cleanup,
+            "mock_meelo": ext.meelo,
             "mock_gate": mock_gate,
         }
 
@@ -317,18 +310,12 @@ class TestOverrideMinBitrate(unittest.TestCase):
         dl_info = DownloadInfo(filetype="mp3")
         ir = make_import_result(decision="import")
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.util.trigger_meelo_scan"), \
-             patch("lib.util.trigger_plex_scan"), \
+        with patch_dispatch_externals() as ext, \
              patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
-            cmd = mock_run.call_args[0][0]
+            cmd = ext.run.call_args[0][0]
 
         for i, arg in enumerate(cmd):
             if arg == "--override-min-bitrate" and i + 1 < len(cmd):
@@ -502,16 +489,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         ir = make_import_result(decision="transcode_upgrade",
                                 new_min_bitrate=227)
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.util.trigger_meelo_scan"), \
-             patch("lib.util.trigger_plex_scan"), \
+        with patch_dispatch_externals(), \
              patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-                   return_value=[]):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -580,18 +560,12 @@ class TestOpusConversionDispatch(unittest.TestCase):
         ir = make_import_result(decision="import", was_converted=True,
                                 original_filetype="flac", target_filetype="mp3")
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.util.trigger_meelo_scan"), \
-             patch("lib.util.trigger_plex_scan"), \
+        with patch_dispatch_externals() as ext, \
              patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
-            return mock_run.call_args[0][0]
+            return ext.run.call_args[0][0]
 
     def test_target_flag_passed_when_set(self):
         cmd = self._get_cmd(verified_lossless_target="opus 128")
@@ -641,18 +615,12 @@ class TestTargetFormatDispatch(unittest.TestCase):
         dl_info = DownloadInfo(filetype="flac")
         ir = make_import_result(decision="import")
 
-        with patch("lib.import_dispatch.sp.run") as mock_run, \
-             patch("lib.import_dispatch._cleanup_staged_dir"), \
-             patch("lib.util.trigger_meelo_scan"), \
-             patch("lib.util.trigger_plex_scan"), \
+        with patch_dispatch_externals() as ext, \
              patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-             patch("lib.import_dispatch.cleanup_disambiguation_orphans", return_value=[]):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
                             42, ctx)
-            return mock_run.call_args[0][0]
+            return ext.run.call_args[0][0]
 
     def test_target_format_passed_when_set(self):
         cmd = self._get_cmd(target_format="flac")

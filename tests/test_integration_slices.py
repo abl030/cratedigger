@@ -10,7 +10,6 @@ and _check_quality_gate_core run for real, not patched.
 
 import tempfile
 import unittest
-from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from lib.beets_db import AlbumInfo
@@ -23,7 +22,7 @@ from lib.quality import (
     ImportResult,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_import_result, make_request_row
+from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -34,27 +33,14 @@ def _make_stdout(ir: ImportResult) -> str:
     return f"some log output\n{IMPORT_RESULT_SENTINEL}{ir.to_json()}\n"
 
 
-@contextmanager
-def _patch_dispatch_externals(beets_info=None):
-    """Patch external edges for dispatch_import_core integration slices.
-
-    Patches: sp.run, cleanup, meelo, plex, disambiguation orphans, BeetsDB.
-    Does NOT patch parse_import_result or _check_quality_gate_core.
-    """
-    with patch("lib.import_dispatch.sp.run") as mock_run, \
-         patch("lib.import_dispatch._cleanup_staged_dir"), \
-         patch("lib.util.trigger_meelo_scan"), \
-         patch("lib.util.trigger_plex_scan"), \
-         patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-               return_value=[]), \
-         patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-        # Configure BeetsDB context manager
-        mock_beets_instance = MagicMock()
-        mock_beets_cls.return_value.__enter__ = MagicMock(
-            return_value=mock_beets_instance)
-        mock_beets_cls.return_value.__exit__ = MagicMock(return_value=False)
-        mock_beets_instance.get_album_info.return_value = beets_info
-        yield mock_run
+def _mock_beets_db(beets_info):
+    """Configure a mocked BeetsDB context manager returning beets_info."""
+    mock_beets_instance = MagicMock()
+    mock_beets_instance.get_album_info.return_value = beets_info
+    mock_cls = MagicMock()
+    mock_cls.return_value.__enter__ = MagicMock(return_value=mock_beets_instance)
+    mock_cls.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_cls
 
 
 class TestDispatchThroughQualityGate(unittest.TestCase):
@@ -85,8 +71,9 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            with _patch_dispatch_externals(beets_info=beets_info) as mock_run:
-                mock_run.return_value = MagicMock(
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 dispatch_import_core(
                     path=tmpdir,

@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from lib.quality import SpectralContext
 from tests.helpers import (
+    make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
     make_spectral_context,
@@ -402,12 +403,6 @@ class TestGatherSpectralContextFunction(unittest.TestCase):
 class TestApplySpectralDecision(unittest.TestCase):
     """Tests spectral state propagation via FakePipelineDB."""
 
-    def _make_ctx_with_fake_db(self, fake_db):
-        """Build SoularrContext wired to a FakePipelineDB."""
-        ctx = _make_ctx()
-        cast(Any, ctx.pipeline_db_source)._get_db.return_value = fake_db
-        return ctx
-
     @patch("lib.download.spectral_import_decision", return_value="accept")
     def test_existing_genuine_state_propagates_none_bitrate(self, _mock_decision):
         from lib.download import _apply_spectral_decision
@@ -417,7 +412,7 @@ class TestApplySpectralDecision(unittest.TestCase):
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=1))
         album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = self._make_ctx_with_fake_db(fake_db)
+        ctx = make_ctx_with_fake_db(fake_db)
         bv_result = make_validation_result()
         spec_ctx = make_spectral_context(
             needs_check=True,
@@ -441,7 +436,7 @@ class TestApplySpectralDecision(unittest.TestCase):
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=1))
         album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = self._make_ctx_with_fake_db(fake_db)
+        ctx = make_ctx_with_fake_db(fake_db)
         bv_result = make_validation_result()
         # Nothing on disk: all existing fields are None
         spec_ctx = make_spectral_context(
@@ -464,7 +459,7 @@ class TestApplySpectralDecision(unittest.TestCase):
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=1))
         album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = self._make_ctx_with_fake_db(fake_db)
+        ctx = make_ctx_with_fake_db(fake_db)
         bv_result = make_validation_result()
         # Album on disk at 256kbps, no spectral data yet
         spec_ctx = make_spectral_context(

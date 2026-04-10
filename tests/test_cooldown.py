@@ -8,7 +8,12 @@ from lib.context import SoularrContext
 from lib.quality import CooldownConfig, should_cooldown
 from soularr import TrackRecord
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_download_file, make_grab_list_entry, make_request_row
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_download_file,
+    make_grab_list_entry,
+    make_request_row,
+)
 
 
 class TestShouldCooldown(unittest.TestCase):
@@ -146,12 +151,6 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
 class TestCooldownTriggerOnTimeout(unittest.TestCase):
     """_timeout_album() should call check_and_apply_cooldown after logging."""
 
-    def _make_ctx_with_db(self, fake_db):
-        mock_source = MagicMock()
-        mock_source._get_db.return_value = fake_db
-        return SoularrContext(
-            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=mock_source)
-
     def test_timeout_triggers_cooldown_check(self):
         from lib.download import _timeout_album
 
@@ -165,7 +164,7 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         db.set_cooldown_result(True)
-        ctx = self._make_ctx_with_db(db)
+        ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):
@@ -195,7 +194,7 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         db.set_cooldown_result(lambda u: u == "disc1user")
-        ctx = self._make_ctx_with_db(db)
+        ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):
@@ -217,7 +216,7 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         )
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        ctx = self._make_ctx_with_db(db)
+        ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"), \
              patch("lib.download.apply_transition"):

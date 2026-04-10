@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 from lib.config import SoularrConfig
 from lib.quality import DownloadInfo
-from tests.helpers import make_request_row, make_import_result
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -47,15 +47,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch("lib.import_dispatch.sp.run") as mock_run, \
-                 patch("lib.import_dispatch._cleanup_staged_dir"), \
+            with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.util.trigger_meelo_scan"), \
-                 patch("lib.util.trigger_plex_scan"), \
-                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-                       return_value=[]):
-                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 result = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -76,7 +70,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     outcome_label=outcome_label,
                     requeue_on_failure=requeue_on_failure,
                 )
-                cmd = mock_run.call_args[0][0] if mock_run.call_args else []
+                cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -195,15 +189,9 @@ class TestDispatchCoreSeams(unittest.TestCase):
         )
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch("lib.import_dispatch.sp.run") as mock_run, \
-                 patch("lib.import_dispatch._cleanup_staged_dir"), \
+            with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.util.trigger_meelo_scan"), \
-                 patch("lib.util.trigger_plex_scan"), \
-                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-                       return_value=[]):
-                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -215,7 +203,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     cfg=cfg,
                     **kwargs,
                 )
-                return mock_run.call_args[0][0] if mock_run.call_args else []
+                return ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

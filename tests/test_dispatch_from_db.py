@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import SoularrConfig
-from tests.helpers import make_request_row, make_import_result
+from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 from tests.fakes import FakePipelineDB
 
 
@@ -40,26 +40,20 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch("lib.import_dispatch.sp.run") as mock_run, \
-                 patch("lib.import_dispatch._cleanup_staged_dir"), \
-                 patch("lib.util.trigger_meelo_scan") as mock_meelo, \
+            with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.util.trigger_plex_scan"), \
-                 patch("lib.import_dispatch.cleanup_disambiguation_orphans",
-                       return_value=[]), \
                  patch("lib.import_dispatch._read_runtime_config",
                        return_value=SoularrConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )):
-                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=force, source_username=source_username,
                     outcome_label=outcome_label,
                 )
-                cmd = mock_run.call_args[0][0] if mock_run.call_args else []
+                cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -70,7 +64,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "db": db,
             "path": tmpdir,
             "mock_gate": mock_gate,
-            "mock_meelo": mock_meelo,
+            "mock_meelo": ext.meelo,
         }
 
     # --- Success path ---
