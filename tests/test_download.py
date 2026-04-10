@@ -1388,16 +1388,23 @@ class TestPollActiveDownloads(unittest.TestCase):
             }
             for i in range(5)
         ]
-        cast(FakeSlskdAPI, ctx.slskd).set_downloads([{
+        slskd = cast(FakeSlskdAPI, ctx.slskd)
+        slskd.set_downloads([{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": slskd_files}],
         }])
+        slskd.transfers.enqueue_result = False
 
-        with patch("lib.download.slskd_do_enqueue", return_value=None):
+        with self.assertLogs("soularr", level="WARNING") as logs:
             poll_active_downloads(ctx)
 
         # Should NOT process — 7 files vanished (errored), album not complete
         mock_process.assert_not_called()
+        self.assertEqual(
+            "\n".join(logs.output).count("Failed to re-enqueue file"),
+            7,
+        )
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 7)
         self.assertEqual(fake_db.clear_download_state_calls, [])
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
@@ -1421,10 +1428,14 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[],
+        )
 
-        # All 3 files have transfers in slskd
-        cast(FakeSlskdAPI, ctx.slskd).set_downloads([{
+        # First snapshot is the poll cycle; second snapshot is the
+        # post-requeue transfer-id lookup.
+        poll_snapshot = [{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": [
                 {
@@ -1443,27 +1454,32 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "state": "Completed, Errored",
                 },
             ]}],
-        }])
+        }]
+        requeue_snapshot = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\03.flac",
+                "id": "new-tid-3",
+                "state": "Queued, Locally",
+            }]}],
+        }]
+        slskd = cast(FakeSlskdAPI, ctx.slskd)
+        slskd.queue_download_snapshots(poll_snapshot, requeue_snapshot)
 
-        requeue_file = make_download_file(
-            filename="user1\\Music\\03.flac",
-            id="new-tid-3",
-            file_dir="user1\\Music",
-            username="user1",
-            size=20000000,
-        )
-        with patch("lib.download.slskd_do_enqueue",
-                   return_value=[requeue_file]) as mock_enqueue:
+        with patch("time.sleep"):
             poll_active_downloads(ctx)
 
         # Should NOT process (not all done) and NOT timeout
         mock_process.assert_not_called()
         self.assertEqual(fake_db.download_logs, [])
         # Should re-enqueue the errored file
-        mock_enqueue.assert_called_once()
-        call_args = mock_enqueue.call_args
-        self.assertEqual(call_args[0][0], "user1")  # username
-        self.assertEqual(call_args[0][1][0]["filename"], "user1\\Music\\03.flac")
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 1)
+        enqueue_call = slskd.transfers.enqueue_calls[0]
+        self.assertEqual(enqueue_call.username, "user1")
+        self.assertEqual(
+            enqueue_call.files,
+            [{"filename": "user1\\Music\\03.flac", "size": 20000000}],
+        )
         persisted = self._download_state(fake_db)
         self.assertEqual(persisted["files"][2]["retry_count"], 1)
 
