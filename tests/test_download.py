@@ -189,24 +189,36 @@ class TestCancelAndDelete(unittest.TestCase):
 
     def test_cancels_and_removes_dir(self):
         from lib.download import cancel_and_delete
-        ctx = _make_ctx()
-        f = _make_transfer_mock(file_dir="someuser\\Album Folder")
+        slskd = FakeSlskdAPI()
+        ctx = _make_ctx(slskd=slskd)
+        f = make_download_file(file_dir="someuser\\Album Folder")
         with patch("os.path.isdir", return_value=True), \
              patch("shutil.rmtree") as mock_rm:
             cancel_and_delete([f], ctx)
-        ctx.slskd.transfers.cancel_download.assert_called_once_with(
-            username="user1", id="file-id-1")
-        mock_rm.assert_called_once()
+        self.assertEqual(
+            [(call.username, call.id)
+             for call in slskd.transfers.cancel_download_calls],
+            [("user1", "file-id-1")],
+        )
+        mock_rm.assert_called_once_with(
+            os.path.join("/tmp/test_downloads", "Album Folder"))
 
     def test_cancel_failure_continues(self):
         """Should not raise if cancel_download throws."""
         from lib.download import cancel_and_delete
-        ctx = _make_ctx()
-        ctx.slskd.transfers.cancel_download.side_effect = Exception("network error")
-        f = _make_transfer_mock()
-        with patch("os.path.exists", return_value=False), \
-             patch("os.chdir"):
+        slskd = FakeSlskdAPI()
+        slskd.transfers.cancel_download_error = Exception("network error")
+        ctx = _make_ctx(slskd=slskd)
+        f = make_download_file()
+        with self.assertLogs("soularr", level="WARNING") as logs, \
+             patch("os.path.isdir", return_value=False):
             cancel_and_delete([f], ctx)  # should not raise
+        self.assertIn("Failed to cancel download", "\n".join(logs.output))
+        self.assertEqual(
+            [(call.username, call.id)
+             for call in slskd.transfers.cancel_download_calls],
+            [("user1", "file-id-1")],
+        )
 
 
 class TestSlskdDownloadStatus(unittest.TestCase):
