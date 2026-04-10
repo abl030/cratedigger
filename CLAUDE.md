@@ -107,11 +107,30 @@ scripts/
                            force-import, manual-import, set-intent, repair-spectral
   populate_tracks.py    — Populate tracks from MusicBrainz API
   run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
-tests/                  — Comprehensive test suite. Run: nix-shell --run "bash scripts/run_tests.sh"
+tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash scripts/run_tests.sh"
+  fakes.py              — FakePipelineDB (full PipelineDB stand-in: requests, download_logs,
+                           denylist, cooldowns, status_history, spectral state, attempt counters,
+                           assert_log helper) and FakeSlskdAPI (stateful transfers + users:
+                           queued snapshots, add_transfer, set_directory, configurable errors,
+                           call recording). Use these instead of MagicMock for stateful tests.
+  helpers.py            — Shared builders + helpers: make_request_row, make_import_result,
+                           make_validation_result, make_download_info, make_download_file,
+                           make_grab_list_entry, make_spectral_context, make_ctx_with_fake_db,
+                           patch_dispatch_externals (5-patch context manager for dispatch tests).
+  test_fakes.py         — Self-tests for fakes.py and helpers.py builders.
+  test_integration_slices.py — Integration slices (TestDispatchThroughQualityGate,
+                           TestQualityGateVerifiedLosslessBypass, TestQualityGateSpectralOverride,
+                           TestDispatchNoJsonResult, TestForceImportSlice, TestSpectralPropagationSlice).
+                           Required for every new high-risk orchestration boundary.
+  test_web_server.py    — Web route contract tests with REQUIRED_FIELDS sets per endpoint, plus
+                           TestRouteContractAudit guard that introspects Handler._FUNC_*_ROUTES
+                           and fails if any route is unclassified — enforces contract coverage
+                           at test time, not at review time.
 test_soularr.py         — Legacy verify_filetype tests (imports from lib/quality)
 .claude/
   commands/beets-docs.md — Skill: look up beets RST docs from nix store
-  rules/code-quality.md  — Type safety, TDD, logging, decision purity standards
+  rules/code-quality.md  — Type safety, TDD, test taxonomy, fakes/builders inventory,
+                            new work checklist (which tests + infrastructure to use)
   rules/nix-shell.md     — Always use nix-shell for Python (path-scoped to *.py)
   rules/harness.md       — Never discard harness data, typed dataclasses (path-scoped)
 ```
@@ -525,6 +544,17 @@ For single test modules during development:
 nix-shell --run "python3 -m unittest tests.test_quality_decisions -v"
 nix-shell --run "python3 -m unittest tests.test_import_result -v"
 ```
+
+### Test Taxonomy & Shared Infrastructure
+
+The test suite is organized into 4 categories with established patterns. **`.claude/rules/code-quality.md` is the canonical reference** — read it before adding new tests or new production code paths. Key infrastructure:
+
+- **`tests/fakes.py`** — `FakePipelineDB` and `FakeSlskdAPI`: stateful fakes that record domain state. Use these instead of `MagicMock` for any test that reasons about state transitions.
+- **`tests/helpers.py`** — Shared builders (`make_request_row`, `make_import_result`, `make_grab_list_entry`, etc.) and the `patch_dispatch_externals()` context manager. Always use these instead of hand-rolling test data.
+- **`tests/test_integration_slices.py`** — End-to-end slices that exercise real code paths with minimal patching. Required for every new high-risk orchestration boundary.
+- **`tests/test_web_server.py`** — Contract tests with `REQUIRED_FIELDS` per endpoint plus `TestRouteContractAudit`, a guard test that fails at test time if a new route is added without contract coverage. **Adding a route to `web/routes/` without classifying it in `CLASSIFIED_ROUTES` will fail the suite.** This is intentional.
+
+**The "new work checklist" in `code-quality.md`** maps every kind of change (new pure function, new dispatch path, new web route, new slskd interaction, new dataclass, new PipelineDB method) to the tests you owe and the infrastructure you reuse. Read it before starting any non-trivial task.
 
 ### Pre-commit hook
 

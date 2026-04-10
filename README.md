@@ -56,7 +56,7 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Force-import** -- manually import rejected downloads via CLI or web API
 - **Full audit trail** -- every decision stored as queryable JSONB in PostgreSQL
 - **Typed decision pipeline** -- pure functions in `quality.py`, typed dataclasses throughout, pyright enforced
-- **Comprehensive test suite** -- 1375+ tests (`nix-shell --run "bash scripts/run_tests.sh"`)
+- **Comprehensive test suite** -- 1400+ tests (`nix-shell --run "bash scripts/run_tests.sh"`) with a 4-category taxonomy (pure / seam / orchestration / integration slice), shared `FakePipelineDB`/`FakeSlskdAPI` fakes, builders for typed data, and a route contract audit guard that fails at test time if a new web endpoint is added without frontend contract coverage
 
 ## Quality decision pipeline
 
@@ -168,6 +168,15 @@ The V0 verification step always runs first regardless of target format. The V0 b
 nix-shell --run "bash scripts/run_tests.sh"    # full suite, saves to /tmp/soularr-test-output.txt
 nix-shell --run "python3 -m unittest tests.<module> -v"  # single module
 ```
+
+The test layer follows a 4-category taxonomy documented in `.claude/rules/code-quality.md`:
+
+- **Pure function tests** — direct input → output, exhaustive subTest tables for decision matrices
+- **Seam tests** — interface boundaries (subprocess argv, route contract fields, SQL shape)
+- **Orchestration tests** — assert domain state via `FakePipelineDB`/`FakeSlskdAPI`, not mock call shapes
+- **Integration slices** — real code paths in `tests/test_integration_slices.py`, minimal patching, required for every high-risk orchestration boundary
+
+Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/helpers.py` (typed data builders + the `patch_dispatch_externals()` context manager). New web routes must be classified in `TestRouteContractAudit.CLASSIFIED_ROUTES` — the suite fails at test time if a route is added without contract coverage.
 
 ## Deployment
 

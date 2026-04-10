@@ -17,11 +17,12 @@
 
 ## API Contract Tests
 - Every API endpoint consumed by the frontend must have a contract test in `test_web_server.py`
-- Contract tests use a real in-memory SQLite beets DB (not mocks) to verify actual query results
+- Contract tests use a real `_WebServerCase` harness (HTTPServer on a random port + mocked DB) — see existing `TestPipelineRouteContracts`, `TestBrowseRouteContracts`, etc. as reference patterns
 - Define a `REQUIRED_FIELDS` set per endpoint — the fields the frontend JS relies on
-- Assert every returned dict includes all required fields with non-empty values
+- Assert every returned dict includes all required fields via `_assert_required_fields(self, payload, REQUIRED_FIELDS, "label")`
 - When adding a field the frontend needs, add it to `REQUIRED_FIELDS` first (RED), then fix the backend (GREEN)
-- See `TestLibraryArtistContract` as the reference pattern
+- **Every new route MUST be added to `TestRouteContractAudit.CLASSIFIED_ROUTES`** — this is the guard test that introspects `Handler._FUNC_GET_ROUTES`/`_FUNC_POST_ROUTES`/`_FUNC_GET_PATTERNS` and fails if a registered route is unclassified or a stale entry is missing. The audit makes contract coverage self-enforcing — you cannot ship a route without classifying it.
+- The `_WebServerCase` harness in `tests/test_web_server.py` exposes `self._get(path)` and `self._post(path, body)` helpers that hit the real server. Reuse these instead of building your own harness.
 
 ## Logging & Auditability
 - Every download outcome (success, rejection, timeout, crash) MUST create a download_log row
@@ -74,46 +75,90 @@
 - Never construct `SoularrConfig` with positional/keyword args for a subset of fields. Always use `SoularrConfig.from_ini()` with the runtime config file. Partial configs silently diverge when new config fields are added.
 - Before adding a new function that "does roughly what X does but simpler," check if X can be called with an adapter. The adapter may be ugly — that's a signal to improve X's interface, not to duplicate X.
 
+## New Work Checklist (read this first)
+
+Before writing any new code, decide which test types you owe and what infrastructure you'll reuse:
+
+| You're adding... | You owe... | Use this infrastructure |
+|------------------|-----------|-------------------------|
+| A new pure decision function in `lib/quality.py` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
+| A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
+| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` | `_WebServerCase`, `_assert_required_fields`, `tests/test_web_server.py` |
+| A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
+| A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
+| A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |
+
+Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
+
 ## Test Taxonomy
 
-Four categories of tests. Each has different rules for what's acceptable.
+Four categories of tests. Each has different rules for what's acceptable. **All four categories already have established patterns and shared infrastructure in this repo — use them. Do not invent parallel approaches.**
 
 ### 1. Pure function tests
 - Assert direct input → output. No mocks unless unavoidable for environment.
 - Should be exhaustive for decision logic (`dispatch_action`, `quality_gate_decision`, etc.).
-- Use `subTest()` tables for decision matrices — less copy/paste, easier to audit completeness.
+- **Use `subTest()` tables for decision matrices.** See `TestSpectralImportDecision`, `TestImportQualityDecision`, `TestTranscodeDetection`, `TestQualityGateDecision`, `TestDispatchAction`, `TestIsVerifiedLossless` in `tests/test_quality_decisions.py` as reference patterns. Pattern: `CASES = [(desc, ...args, expected), ...]` then one `test_X` method using `for ... in self.CASES: with self.subTest(desc=desc):`. Each new branch is one row, not one method.
 
 ### 2. Seam / adapter tests
 - Protect interface boundaries: subprocess argv, config-to-flag wiring, SQL query shape, route contract fields, serialization formats.
 - Implementation assertions (call args, payload shape) are **acceptable and encouraged** here.
 - Examples: `--force` flag forwarded, `--override-min-bitrate` derived correctly, route returns required fields.
 - These are legitimate tests — do not delete them to satisfy an "assert behavior not implementation" rule.
+- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 5 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_meelo_scan`, `trigger_plex_scan`, `cleanup_disambiguation_orphans`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
 
 ### 3. Orchestration tests
 - Must assert **domain outcomes**, not only helper call shapes.
 - At least one assertion per test must target persisted state or observable output:
-  - request status after the operation
-  - `download_log` rows (outcome, fields present)
-  - denylist entries written
-  - retry / requeue behavior (status transitions)
-  - attempt counters incremented
+  - request status after the operation (`db.request(42)["status"]`)
+  - `download_log` rows (`db.download_logs[0].outcome`, or `db.assert_log(self, 0, outcome="success")`)
+  - denylist entries written (`db.denylist[0].username`)
+  - retry / requeue behavior (status transitions via `db.status_history`)
+  - attempt counters incremented (`row["validation_attempts"]`)
   - `validation_result` / `import_result` preserved
   - filesystem side effects (cleanup, staging)
 - Mocking is allowed for external edges (subprocess, meelo, plex), but the assertion target must be domain state.
-- Use `FakePipelineDB` from `tests/fakes.py` for stateful collaborators instead of MagicMock.
-- Use builders from `tests/helpers.py` (`make_request_row`, `make_import_result`, etc.) — never hand-roll 20-field dicts.
+- **Use `FakePipelineDB` from `tests/fakes.py` for stateful collaborators instead of MagicMock.** It records request rows, download_logs, denylist entries, cooldowns, status history, spectral state updates. See `tests/test_fakes.py` for the full API.
+- **Use `FakeSlskdAPI` from `tests/fakes.py` for slskd interactions.** Stateful `transfers` and `users` fakes with `add_transfer()`, `queue_download_snapshots()`, `set_directory()`, `set_directory_error()`, configurable errors, and call recording.
+- Use `make_ctx_with_fake_db(fake_db)` from `tests/helpers.py` to wire `FakePipelineDB` into a `SoularrContext`.
+- Use builders from `tests/helpers.py` — never hand-roll 20-field dicts.
 
 ### 4. Integration slice tests
 - Use real code paths with lightweight fakes or temp resources.
-- Patch only external edges that are truly expensive or unsafe (subprocess, network).
-- Required for complex stateful flows and regressions.
-- At least one per high-risk orchestration boundary (dispatch, quality gate, spectral propagation).
+- Patch only external edges that are truly expensive or unsafe (subprocess, network, BeetsDB).
+- Live in `tests/test_integration_slices.py`. Existing slices to model new ones on:
+  - `TestDispatchThroughQualityGate` — runs dispatch_import_core → real parse_import_result → real _check_quality_gate_core
+  - `TestQualityGateVerifiedLosslessBypass`, `TestQualityGateSpectralOverride`
+  - `TestDispatchNoJsonResult`, `TestForceImportSlice`
+  - `TestSpectralPropagationSlice` — runs `_gather_spectral_context` → `_apply_spectral_decision` end-to-end
+- **Required for every new high-risk orchestration boundary.** If you add a new pipeline path (a new dispatch decision, a new quality gate branch, a new spectral state transition), add a slice that exercises it with real code.
+
+### Shared test infrastructure inventory
+
+Always use these instead of inventing parallel scaffolding:
+
+**`tests/helpers.py`** — builders + helpers:
+- `make_request_row(**overrides)` — full album_requests row dict
+- `make_import_result(decision=..., new_min_bitrate=..., ...)` — `ImportResult` dataclass
+- `make_validation_result(**overrides)` — `ValidationResult` dataclass
+- `make_download_info(...)` — `DownloadInfo` dataclass
+- `make_download_file(...)` — real `DownloadFile` (not MagicMock)
+- `make_grab_list_entry(...)` — real `GrabListEntry`
+- `make_spectral_context(...)` — `SpectralContext`
+- `make_ctx_with_fake_db(fake_db)` — `SoularrContext` wired to a fake
+- `patch_dispatch_externals()` — context manager for the 5 dispatch external patches
+
+**`tests/fakes.py`** — stateful fakes:
+- `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper.
+- `FakeSlskdAPI` — stateful slskd client: `transfers` (enqueue, get_all_downloads, get_download, cancel_download, queued snapshots), `users` (directory with per-directory results and errors), call recording.
+
+**`tests/test_web_server.py`** — `_WebServerCase` harness with `_get`/`_post` helpers + `TestRouteContractAudit` guard.
 
 ### General test rules
-- **Fakes over mocks for stateful collaborators.** Use `MagicMock` for leaf seams. Use `FakePipelineDB` (or similar) when the test reasons about state transitions over time.
+- **Fakes over mocks for stateful collaborators.** Use `MagicMock` for leaf seams. Use `FakePipelineDB`/`FakeSlskdAPI` when the test reasons about state transitions over time.
 - **Equivalence proof for deleted tests.** When removing a test, document in the commit message: what behavior was covered, where it's covered now, what branch is still protected.
 - **Short docstrings.** One-line docstrings are fine. Long `NOTE:` paragraphs justifying a test's existence are a smell — extract a helper, move the explanation to the PR, or restructure the test.
-- **Builders for structured data.** Use `make_request_row()`, `make_import_result()`, `make_download_info()` from `tests/helpers.py`. Hand-rolled dicts with many fields drift silently when the schema evolves.
+- **Builders for structured data.** Hand-rolled dicts with many fields drift silently when the schema evolves.
+- **No new bespoke harnesses.** If the existing fakes/builders/helpers don't fit your test, extend them (and update this rule). Don't write a one-off.
 
 ## Pre-Commit Review Gate
 - For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
