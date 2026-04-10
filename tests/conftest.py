@@ -26,6 +26,11 @@ if not TEST_DSN and shutil.which("initdb") and shutil.which("pg_ctl"):
         TEST_DSN = _pg.dsn
         if TEST_DSN is not None:
             os.environ["TEST_DB_DSN"] = TEST_DSN
+            # Apply schema once at session start. Test helpers TRUNCATE
+            # between tests but don't re-migrate — the schema is created
+            # by the canonical migrator, exactly like prod.
+            from lib.migrator import apply_migrations
+            apply_migrations(TEST_DSN)
     except Exception as e:
         print(f"[WARN] Could not start ephemeral PostgreSQL: {e}", file=sys.stderr)
         _pg = None

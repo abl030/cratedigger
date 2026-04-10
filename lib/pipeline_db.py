@@ -26,128 +26,9 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS album_requests (
-    id SERIAL PRIMARY KEY,
-
-    -- Identity (at least one required)
-    mb_release_id TEXT UNIQUE,
-    mb_release_group_id TEXT,
-    mb_artist_id TEXT,
-    discogs_release_id TEXT,
-
-    -- Metadata
-    artist_name TEXT NOT NULL,
-    album_title TEXT NOT NULL,
-    year INTEGER,
-    country TEXT,
-    format TEXT,
-
-    -- Source
-    source TEXT NOT NULL CHECK(source IN ('redownload', 'request', 'manual')),
-    source_path TEXT,
-    reasoning TEXT,
-
-    -- Status lifecycle
-    status TEXT NOT NULL DEFAULT 'wanted'
-        CHECK(status IN ('wanted', 'downloading', 'imported', 'manual')),
-
-    -- Retry
-    search_attempts INTEGER NOT NULL DEFAULT 0,
-    download_attempts INTEGER NOT NULL DEFAULT 0,
-    validation_attempts INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at TIMESTAMPTZ,
-    next_retry_after TIMESTAMPTZ,
-
-    -- Import result
-    beets_distance REAL,
-    beets_scenario TEXT,
-    imported_path TEXT,
-
-    -- Quality upgrade
-    search_filetype_override TEXT,
-    target_format TEXT,
-    min_bitrate INTEGER,
-    prev_min_bitrate INTEGER,
-
-    -- Legacy Lidarr columns (unused, kept for schema compat)
-    lidarr_album_id INTEGER,
-    lidarr_artist_id INTEGER,
-
-    -- Timestamps
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS album_tracks (
-    id SERIAL PRIMARY KEY,
-    request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
-    disc_number INTEGER NOT NULL DEFAULT 1,
-    track_number INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    length_seconds REAL
-);
-
-CREATE TABLE IF NOT EXISTS download_log (
-    id SERIAL PRIMARY KEY,
-    request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
-    soulseek_username TEXT,
-    filetype TEXT,
-    download_path TEXT,
-    beets_distance REAL,
-    beets_scenario TEXT,
-    beets_detail TEXT,
-    valid BOOLEAN,
-    outcome TEXT CHECK(outcome IN ('success', 'rejected', 'failed', 'timeout', 'force_import')),
-    staged_path TEXT,
-    error_message TEXT,
-    bitrate INTEGER,
-    sample_rate INTEGER,
-    bit_depth INTEGER,
-    is_vbr BOOLEAN,
-    was_converted BOOLEAN DEFAULT FALSE,
-    original_filetype TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS search_log (
-    id SERIAL PRIMARY KEY,
-    request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
-    query TEXT,
-    result_count INTEGER,
-    elapsed_s REAL,
-    outcome TEXT NOT NULL CHECK(outcome IN (
-        'found', 'no_match', 'no_results', 'timeout', 'error', 'empty_query'
-    )),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS source_denylist (
-    id SERIAL PRIMARY KEY,
-    request_id INTEGER NOT NULL REFERENCES album_requests(id) ON DELETE CASCADE,
-    username TEXT NOT NULL,
-    reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(request_id, username)
-);
-
-CREATE TABLE IF NOT EXISTS user_cooldowns (
-    id SERIAL PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    cooldown_until TIMESTAMPTZ NOT NULL,
-    reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_requests_status ON album_requests(status);
-CREATE INDEX IF NOT EXISTS idx_requests_mb_release ON album_requests(mb_release_id);
-CREATE INDEX IF NOT EXISTS idx_requests_source ON album_requests(source);
-CREATE INDEX IF NOT EXISTS idx_tracks_request ON album_tracks(request_id);
-CREATE INDEX IF NOT EXISTS idx_download_log_request ON download_log(request_id);
-CREATE INDEX IF NOT EXISTS idx_search_log_request ON search_log(request_id);
-CREATE INDEX IF NOT EXISTS idx_denylist_request ON source_denylist(request_id);
-CREATE INDEX IF NOT EXISTS idx_cooldown_username ON user_cooldowns(username);
-"""
+# Schema is managed by lib/migrator.py via numbered files in migrations/.
+# PipelineDB itself never runs DDL — see scripts/migrate_db.py and the
+# soularr-db-migrate.service systemd unit (Nix module).
 
 
 @dataclass(frozen=True)
@@ -169,13 +50,18 @@ class RequestSpectralStateUpdate:
 
 
 class PipelineDB:
-    """PostgreSQL-backed pipeline database."""
+    """PostgreSQL-backed pipeline database.
 
-    def __init__(self, dsn=None, run_migrations=False):
+    Schema migrations are NOT this class's responsibility. They live in
+    ``migrations/*.sql`` and are applied by ``lib.migrator.apply_migrations``,
+    which the deploy systemd unit ``soularr-db-migrate.service`` runs on every
+    ``nixos-rebuild switch``. Construct this class against an already-migrated
+    database.
+    """
+
+    def __init__(self, dsn=None):
         self.dsn = dsn or DEFAULT_DSN
         self.conn = self._connect()
-        if run_migrations:
-            self.init_schema()
 
     def _connect(self):
         conn = psycopg2.connect(
@@ -193,167 +79,6 @@ class PipelineDB:
         """Reconnect if the connection is dead."""
         if self.conn.closed:
             self.conn = self._connect()
-
-    def init_schema(self):
-        """Run DDL on a separate short-lived connection to avoid blocking."""
-        mig_conn = psycopg2.connect(self.dsn, connect_timeout=10)
-        mig_conn.autocommit = True
-        with mig_conn.cursor() as cur:
-            cur.execute("SET lock_timeout TO '5s'")
-            # Safety net: kill any future idle-in-transaction after 60s
-            try:
-                cur.execute(
-                    "ALTER ROLE soularr SET idle_in_transaction_session_timeout = '60s'"
-                )
-            except psycopg2.errors.UndefinedObject:
-                pass  # Role doesn't exist (e.g. ephemeral test DB)
-            cur.execute(SCHEMA_SQL)
-            for col, coltype in [
-                ("bitrate", "INTEGER"),
-                ("sample_rate", "INTEGER"),
-                ("bit_depth", "INTEGER"),
-                ("is_vbr", "BOOLEAN"),
-                ("was_converted", "BOOLEAN DEFAULT FALSE"),
-                ("original_filetype", "TEXT"),
-                # Spectral quality verification columns
-                ("slskd_filetype", "TEXT"),
-                ("slskd_bitrate", "INTEGER"),
-                ("actual_filetype", "TEXT"),
-                ("actual_min_bitrate", "INTEGER"),
-                ("spectral_grade", "TEXT"),
-                ("spectral_bitrate", "INTEGER"),
-                ("existing_min_bitrate", "INTEGER"),
-                ("existing_spectral_bitrate", "INTEGER"),
-                # Full import_one.py result for audit trail
-                ("import_result", "JSONB"),
-                # Full validation result for audit trail
-                ("validation_result", "JSONB"),
-                # Final format on disk (e.g. "opus 128" when Opus conversion used)
-                ("final_format", "TEXT"),
-            ]:
-                cur.execute(f"""
-                    DO $$ BEGIN
-                        ALTER TABLE download_log ADD COLUMN {col} {coltype};
-                    EXCEPTION WHEN duplicate_column THEN NULL;
-                    END $$;
-                """)
-            for old_col, new_col in [
-                ("spectral_bitrate", "last_download_spectral_bitrate"),
-                ("spectral_grade", "last_download_spectral_grade"),
-                ("on_disk_spectral_grade", "current_spectral_grade"),
-                ("on_disk_spectral_bitrate", "current_spectral_bitrate"),
-            ]:
-                cur.execute(f"""
-                    DO $$ BEGIN
-                        IF EXISTS (
-                            SELECT 1 FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = 'album_requests'
-                              AND column_name = '{old_col}'
-                        ) AND NOT EXISTS (
-                            SELECT 1 FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = 'album_requests'
-                              AND column_name = '{new_col}'
-                        ) THEN
-                            ALTER TABLE album_requests RENAME COLUMN {old_col} TO {new_col};
-                        END IF;
-                    END $$;
-                """)
-            for col, coltype in [
-                ("search_filetype_override", "TEXT"),
-                ("min_bitrate", "INTEGER"),
-                ("prev_min_bitrate", "INTEGER"),
-                ("verified_lossless", "BOOLEAN DEFAULT FALSE"),
-                # Latest spectral analysis of the most recent download attempt
-                ("last_download_spectral_bitrate", "INTEGER"),
-                ("last_download_spectral_grade", "TEXT"),
-                # Spectral data for the files currently in beets, regardless
-                # of how they got there — updated on every spectral run
-                ("current_spectral_grade", "TEXT"),
-                ("current_spectral_bitrate", "INTEGER"),
-                # Async downloads: per-album download state
-                ("active_download_state", "JSONB"),
-                # Final format on disk (e.g. "opus 128" when Opus conversion used)
-                ("final_format", "TEXT"),
-            ]:
-                cur.execute(f"""
-                    DO $$ BEGIN
-                        ALTER TABLE album_requests ADD COLUMN {col} {coltype};
-                    EXCEPTION WHEN duplicate_column THEN NULL;
-                    END $$;
-                """)
-            # Migrate outcome CHECK constraint to include 'force_import'
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE download_log DROP CONSTRAINT IF EXISTS download_log_outcome_check;
-                    ALTER TABLE download_log ADD CONSTRAINT download_log_outcome_check
-                        CHECK (outcome IN ('success', 'rejected', 'failed', 'timeout', 'force_import', 'manual_import'));
-                END $$;
-            """)
-            # Migrate status CHECK to include 'downloading'
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE album_requests DROP CONSTRAINT IF EXISTS album_requests_status_check;
-                    ALTER TABLE album_requests ADD CONSTRAINT album_requests_status_check
-                        CHECK(status IN ('wanted', 'downloading', 'imported', 'manual'));
-                END $$;
-            """)
-            # Migrate symbolic intent names to concrete CSV values
-            cur.execute("""
-                UPDATE album_requests SET search_filetype_override = 'flac,mp3 v0,mp3 320'
-                WHERE search_filetype_override IN ('flac_preferred', 'upgrade');
-            """)
-            cur.execute("""
-                UPDATE album_requests SET search_filetype_override = NULL
-                WHERE search_filetype_override = 'best_effort';
-            """)
-            # Rename quality_override → search_filetype_override
-            cur.execute("""
-                DO $$ BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'album_requests'
-                          AND column_name = 'quality_override'
-                    ) AND NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'album_requests'
-                          AND column_name = 'search_filetype_override'
-                    ) THEN
-                        ALTER TABLE album_requests RENAME COLUMN quality_override TO search_filetype_override;
-                    END IF;
-                END $$;
-            """)
-            # Add target_format column
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE album_requests ADD COLUMN target_format TEXT;
-                EXCEPTION WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            # Rename legacy FLAC tiers to "lossless" (issue #35)
-            cur.execute("""
-                UPDATE album_requests
-                   SET search_filetype_override = regexp_replace(
-                       search_filetype_override,
-                       '(^|,\\s*)flac(\\s*,|$)',
-                       '\\1lossless\\2',
-                       'g'
-                   )
-                 WHERE search_filetype_override ~ '(^|,\\s*)flac(\\s*,|$)';
-            """)
-            cur.execute("""
-                UPDATE album_requests SET target_format = 'lossless'
-                WHERE target_format = 'flac';
-            """)
-            # Clean up nonsensical target_format values from old upgrade intent
-            cur.execute("""
-                UPDATE album_requests SET target_format = NULL
-                WHERE target_format LIKE '%,%';
-            """)
-        mig_conn.close()
 
     def close(self):
         self.conn.close()

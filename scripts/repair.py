@@ -140,7 +140,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    db = PipelineDB(args.dsn, run_migrations=False)
+    db = PipelineDB(args.dsn)
     try:
         if args.command == "scan":
             cmd_scan(db, args.slskd_host, args.slskd_key)

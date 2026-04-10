@@ -182,6 +182,19 @@ Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/help
 
 Deployed via NixOS. The NixOS module builds a Python environment with dependencies and runs Cratedigger as a systemd oneshot on a 5-minute timer.
 
+### Schema migrations
+
+Schema lives in `migrations/NNN_name.sql`, applied by a tiny custom migrator (`lib/migrator.py`) that tracks applied versions in a `schema_migrations` table. The deploy systemd unit `soularr-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE the app services start. `soularr.service` and `soularr-web.service` both `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
+
+To add a schema change:
+
+1. Drop a new file in `migrations/` named `NNN_describe_change.sql` (next number).
+2. Plain SQL — each file runs in its own transaction, exactly once per DB. No `IF NOT EXISTS` guards needed.
+3. Test it: `nix-shell --run "python3 -m unittest tests.test_migrator -v"`
+4. Commit, push, deploy. The migrator picks it up automatically.
+
+`PipelineDB` itself never runs DDL — it expects the schema to already be current. The migration unit is the only path.
+
 ## Credits
 
 This project grew out of [mrusse/soularr](https://github.com/mrusse/soularr) by [Michael Russell](https://github.com/mrusse) -- the original idea of bridging Soulseek into a music library workflow. If you appreciate that idea, [buy mrusse a coffee](https://ko-fi.com/mrusse).

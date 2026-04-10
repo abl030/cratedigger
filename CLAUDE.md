@@ -53,10 +53,15 @@ lib/
                            dispatch_action() flags for mark_done/failed/denylist/requeue.
                            Quality gate.
   import_service.py     — Force-import/manual-import service layer, ImportOutcome dataclass
-  pipeline_db.py        — PipelineDB class (PostgreSQL CRUD, queries, schema, get_download_log_entry)
+  pipeline_db.py        — PipelineDB class (PostgreSQL CRUD, queries, get_download_log_entry).
+                           Schema is NOT this class's responsibility — see lib/migrator.py.
                            Search logging: log_search(), get_search_history(), get_search_history_batch()
                            User cooldowns: add_cooldown(), get_cooled_down_users(), check_and_apply_cooldown()
                            RequestSpectralStateUpdate (typed spectral state writes)
+  migrator.py           — Versioned SQL migrator. discover_migrations() parses
+                           migrations/NNN_name.sql files; apply_migrations() runs unapplied
+                           ones in transactions and records each in schema_migrations.
+                           Idempotent. Driven by scripts/migrate_db.py from systemd.
   quality.py            — Pure decision functions + typed dataclasses:
                            Decision functions:
                            - spectral_import_decision(), import_quality_decision()
@@ -102,9 +107,15 @@ harness/
                            Single convert_lossless(path, spec) for all format conversions.
                            Flags: --force, --override-min-bitrate, --request-id, --target-format,
                            --verified-lossless-target, --dry-run
+migrations/
+  001_initial.sql       — Baseline schema (frozen). All future schema changes are new
+                           NNN_name.sql files in this directory; the migrator runs them in
+                           order and records each in the schema_migrations tracking table.
 scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, quality, query,
                            force-import, manual-import, set-intent, repair-spectral
+  migrate_db.py         — CLI entry point for the schema migrator. Runs by the
+                           soularr-db-migrate.service systemd unit on every nixos-rebuild.
   populate_tracks.py    — Populate tracks from MusicBrainz API
   run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
 tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash scripts/run_tests.sh"
@@ -487,7 +498,7 @@ git add <files> && git commit -m "description" && git push
 # 2. Update Nix flake input (MUST be on doc1 — it has git push access)
 ssh doc1 'cd ~/nixosconfig && nix flake update soularr-src && git add flake.lock && git commit -m "soularr: description" && git push'
 
-# 3. Deploy to doc2
+# 3. Deploy to doc2 — this also runs soularr-db-migrate.service automatically
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 
 # 4. Restart the web UI (soularr itself picks up changes on next timer cycle)
@@ -504,7 +515,36 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 ssh doc2 'sudo systemctl restart soularr-web'
 ```
 
-**IMPORTANT**: `restartIfChanged = false` on the service — deploys don't restart Soularr. The 5-min timer picks up new code on the next cycle, or manually start.
+**IMPORTANT**: `restartIfChanged = false` on `soularr.service` — deploys don't restart Soularr itself. The 5-min timer picks up new code on the next cycle, or manually start.
+
+## Database Migrations
+
+Schema changes go through versioned migration files. The deploy unit `soularr-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE `soularr.service` and `soularr-web.service` start. Both services `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
+
+**Layout:**
+- `migrations/NNN_name.sql` — versioned, append-only. Each file runs in its own transaction, exactly once per DB.
+- `lib/migrator.py` — discovers files, tracks applied versions in the `schema_migrations` table.
+- `scripts/migrate_db.py` — CLI entry point invoked by the systemd unit.
+
+**Adding a schema change:**
+1. Drop a new file in `migrations/` named `NNN_describe_change.sql` (next number).
+2. Plain SQL — no `IF NOT EXISTS` guards needed; versioned migrations only run once.
+3. Test it: `nix-shell --run "python3 -m unittest tests.test_migrator -v"`
+4. Commit, push, deploy. The migrator picks it up automatically on the next `nixos-rebuild switch`.
+
+**Verifying after deploy:**
+```bash
+ssh doc2 'sudo systemctl status soularr-db-migrate.service --no-pager | head -10'
+ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 5"'
+```
+
+**If a migration fails:** `ssh doc2 'sudo journalctl -u soularr-db-migrate.service -n 50'`. The unit must be in `active (exited)` state for soularr/soularr-web to start.
+
+**For destructive changes**, backup first: `ssh doc2 'pg_dump -h 192.168.100.11 -U soularr soularr' > /tmp/soularr_backup_$(date +%Y%m%d_%H%M%S).sql`
+
+**Never** edit a migration file that has already shipped. Frozen history. To fix a mistake, add a new migration that corrects it.
+
+**Never** add DDL inside `PipelineDB` methods. `PipelineDB.__init__` does NOT run migrations — it expects the schema to already be current. Migrations are exclusively `migrations/*.sql` applied by `lib/migrator.py`.
 
 ## NixOS Module
 
@@ -522,8 +562,15 @@ The module:
 1. Builds a Python environment with dependencies (requests, music-tag, slskd-api, psycopg2)
 2. Wraps `soularr.py` in a shell script with ffmpeg, sox, mp3val, flac in PATH
 3. Wraps `pipeline-cli` with the same tools in PATH (needed for `force-import` which calls `import_one.py`)
-4. Generates `config.ini` at runtime from sops secrets
-5. Pre-start: health-check slskd → integrity-check DB → start Soularr
+4. Wraps `pipeline-migrate` (`scripts/migrate_db.py`) for the schema migrator
+5. Generates `config.ini` at runtime from sops secrets
+6. Pre-start: health-check slskd → integrity-check DB → start Soularr
+
+Systemd units:
+- `soularr-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. Both `soularr.service` and `soularr-web.service` `requires` it, so the app cannot start against an un-migrated DB.
+- `soularr.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
+- `soularr.timer` — fires every 5 minutes.
+- `soularr-web.service` — long-running web UI for music.ablz.au.
 
 ## Running Tests
 

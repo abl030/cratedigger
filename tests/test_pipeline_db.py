@@ -28,10 +28,13 @@ def requires_postgres(cls):
 
 
 def make_db():
-    """Create a PipelineDB connected to the test database, with clean tables."""
+    """Create a PipelineDB connected to the test database, with clean tables.
+
+    Schema is migrated once in conftest.py at session start. This helper
+    just truncates all tables for an isolated test slate.
+    """
     import pipeline_db
-    db = pipeline_db.PipelineDB(TEST_DSN, run_migrations=True)
-    # Truncate all tables for a clean slate
+    db = pipeline_db.PipelineDB(TEST_DSN)
     for table in ["user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
@@ -41,6 +44,7 @@ def make_db():
 @requires_postgres
 class TestSchemaCreation(unittest.TestCase):
     def test_tables_exist(self):
+        """All expected tables exist after the migrator has run."""
         db = make_db()
         cur = db._execute("""
             SELECT table_name FROM information_schema.tables
@@ -53,33 +57,8 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("search_log", table_names)
         self.assertIn("source_denylist", table_names)
         self.assertIn("user_cooldowns", table_names)
-        db.close()
-
-    def test_idempotent_init(self):
-        db = make_db()
-        db.init_schema()  # second call should be safe
-        db.close()
-
-    def test_migrates_legacy_flac_tiers_to_lossless(self):
-        db = make_db()
-        req_id = db.add_request(
-            mb_release_id="migrate-lossless",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        db.update_request_fields(
-            req_id,
-            search_filetype_override="flac,mp3 v0,mp3 320",
-            target_format="flac",
-        )
-
-        db.init_schema()
-
-        req = db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["search_filetype_override"], "lossless,mp3 v0,mp3 320")
-        self.assertEqual(req["target_format"], "lossless")
+        # The migrator's own tracking table must also exist
+        self.assertIn("schema_migrations", table_names)
         db.close()
 
 

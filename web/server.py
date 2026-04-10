@@ -56,7 +56,7 @@ def _try_reconnect_db():
         except Exception:
             pass
     try:
-        db = PipelineDB(_db_dsn, run_migrations=False)
+        db = PipelineDB(_db_dsn)
         log.info("Reconnected to pipeline DB")
     except Exception:
         log.exception("Failed to reconnect to pipeline DB")
@@ -385,7 +385,7 @@ def main():
 
     global _db_dsn
     _db_dsn = args.dsn
-    db = PipelineDB(args.dsn, run_migrations=False)
+    db = PipelineDB(args.dsn)
     beets_db_path = args.beets_db
     if beets_db_path and os.path.exists(beets_db_path):
         _beets = BeetsDB(beets_db_path)

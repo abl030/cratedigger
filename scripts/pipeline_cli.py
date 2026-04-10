@@ -960,7 +960,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    db = PipelineDB(args.dsn, run_migrations=True)
+    db = PipelineDB(args.dsn)
 
     commands = {
         "list": cmd_list,
