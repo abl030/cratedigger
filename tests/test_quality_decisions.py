@@ -34,96 +34,40 @@ from lib.quality import (
 class TestSpectralImportDecision(unittest.TestCase):
     """Test pre-import spectral decision (MP3/CBR path)."""
 
-    # --- genuine / marginal always import ---
+    CASES = [
+        # desc, grade, bitrate, existing_spectral, existing_min, expected
+        ("genuine imports", "genuine", None, None, None, "import"),
+        ("genuine ignores bitrates", "genuine", 128, 256, None, "import"),
+        ("marginal imports", "marginal", 192, 256, None, "import"),
+        ("marginal no bitrates", "marginal", None, None, None, "import"),
+        ("suspect equal rejects", "suspect", 128, 128, None, "reject"),
+        ("suspect worse rejects", "suspect", 96, 128, None, "reject"),
+        ("likely transcode equal rejects", "likely_transcode", 160, 160, None, "reject"),
+        ("suspect better upgrades", "suspect", 192, 128, None, "import_upgrade"),
+        ("likely transcode better upgrades", "likely_transcode", 192, 96, None, "import_upgrade"),
+        ("suspect no existing zero", "suspect", 128, 0, None, "import_no_exist"),
+        ("suspect no existing none", "suspect", 128, None, None, "import_no_exist"),
+        ("likely transcode no existing", "likely_transcode", 96, None, None, "import_no_exist"),
+        ("suspect no new no existing", "suspect", None, None, None, "import_no_exist"),
+        ("suspect no new with existing", "suspect", None, 128, None, "import"),
+        ("fallback rejects", "likely_transcode", 96, None, 128, "reject"),
+        ("fallback upgrades", "suspect", 192, None, 128, "import_upgrade"),
+        ("spectral beats fallback", "suspect", 192, 128, 64, "import_upgrade"),
+        ("no spectral or container existing", "likely_transcode", 96, None, None, "import_no_exist"),
+    ]
 
-    def test_genuine_imports(self):
-        self.assertEqual(spectral_import_decision("genuine", None, None), "import")
-
-    def test_genuine_imports_regardless_of_bitrates(self):
-        self.assertEqual(spectral_import_decision("genuine", 128, 256), "import")
-
-    def test_marginal_imports(self):
-        self.assertEqual(spectral_import_decision("marginal", 192, 256), "import")
-
-    def test_marginal_imports_no_bitrates(self):
-        self.assertEqual(spectral_import_decision("marginal", None, None), "import")
-
-    # --- suspect: reject when not an upgrade ---
-
-    def test_suspect_rejects_when_not_upgrade(self):
-        self.assertEqual(
-            spectral_import_decision("suspect", 128, 128), "reject")
-
-    def test_suspect_rejects_when_worse(self):
-        self.assertEqual(
-            spectral_import_decision("suspect", 96, 128), "reject")
-
-    def test_likely_transcode_rejects_when_not_upgrade(self):
-        self.assertEqual(
-            spectral_import_decision("likely_transcode", 160, 160), "reject")
-
-    # --- suspect: upgrade when better ---
-
-    def test_suspect_upgrades_when_better(self):
-        self.assertEqual(
-            spectral_import_decision("suspect", 192, 128), "import_upgrade")
-
-    def test_likely_transcode_upgrades_when_better(self):
-        self.assertEqual(
-            spectral_import_decision("likely_transcode", 192, 96), "import_upgrade")
-
-    # --- suspect: no existing ---
-
-    def test_suspect_no_existing_zero(self):
-        self.assertEqual(
-            spectral_import_decision("suspect", 128, 0), "import_no_exist")
-
-    def test_suspect_no_existing_none(self):
-        self.assertEqual(
-            spectral_import_decision("suspect", 128, None), "import_no_exist")
-
-    def test_likely_transcode_no_existing(self):
-        self.assertEqual(
-            spectral_import_decision("likely_transcode", 96, None), "import_no_exist")
-
-    # --- suspect: no new bitrate ---
-
-    def test_suspect_no_new_bitrate_no_existing(self):
-        """No cliff detected → spectral_bitrate=None, nothing on disk."""
-        self.assertEqual(
-            spectral_import_decision("suspect", None, None), "import_no_exist")
-
-    def test_suspect_no_new_bitrate_with_existing(self):
-        """No cliff detected → spectral_bitrate=None, something on disk."""
-        self.assertEqual(
-            spectral_import_decision("suspect", None, 128), "import")
-
-    # --- fallback to existing_min_bitrate when spectral is None ---
-
-    def test_suspect_falls_back_to_existing_min_bitrate(self):
-        """Existing files are genuine (no spectral bitrate) but have container bitrate.
-        Should reject 96kbps transcode vs 128kbps genuine existing."""
-        self.assertEqual(
-            spectral_import_decision("likely_transcode", 96, None,
-                                     existing_min_bitrate=128), "reject")
-
-    def test_suspect_upgrade_vs_existing_min_bitrate(self):
-        """Suspect 192kbps vs genuine existing 128kbps container → upgrade."""
-        self.assertEqual(
-            spectral_import_decision("suspect", 192, None,
-                                     existing_min_bitrate=128), "import_upgrade")
-
-    def test_fallback_not_used_when_spectral_exists(self):
-        """When existing spectral bitrate is available, ignore fallback."""
-        self.assertEqual(
-            spectral_import_decision("suspect", 192, 128,
-                                     existing_min_bitrate=64), "import_upgrade")
-
-    def test_suspect_no_existing_at_all(self):
-        """Neither spectral nor container bitrate → truly no existing."""
-        self.assertEqual(
-            spectral_import_decision("likely_transcode", 96, None,
-                                     existing_min_bitrate=None), "import_no_exist")
+    def test_spectral_import_decisions(self):
+        for desc, grade, bitrate, existing_spectral, existing_min, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    spectral_import_decision(
+                        grade,
+                        bitrate,
+                        existing_spectral,
+                        existing_min_bitrate=existing_min,
+                    ),
+                    expected,
+                )
 
 
 # ============================================================================
@@ -138,93 +82,41 @@ class TestImportQualityDecision(unittest.TestCase):
     the resolved bitrate.
     """
 
-    # --- verified lossless always wins ---
+    CASES = [
+        # desc, new_kwargs, existing_kwargs, is_transcode, expected
+        ("verified lossless wins", dict(min_bitrate_kbps=240, verified_lossless=True), dict(min_bitrate_kbps=320), False, "import"),
+        ("verified lossless lower bitrate wins", dict(min_bitrate_kbps=207, verified_lossless=True), dict(min_bitrate_kbps=320), False, "import"),
+        ("verified lossless no existing", dict(min_bitrate_kbps=240, verified_lossless=True), None, False, "import"),
+        ("normal upgrade", dict(min_bitrate_kbps=256), dict(min_bitrate_kbps=192), False, "import"),
+        ("equal bitrate downgrade", dict(min_bitrate_kbps=320), dict(min_bitrate_kbps=320), False, "downgrade"),
+        ("lower bitrate downgrade", dict(min_bitrate_kbps=192), dict(min_bitrate_kbps=320), False, "downgrade"),
+        ("override already resolved as upgrade", dict(min_bitrate_kbps=240), dict(min_bitrate_kbps=128), False, "import"),
+        ("override already resolved as downgrade", dict(min_bitrate_kbps=100), dict(min_bitrate_kbps=128), False, "downgrade"),
+        ("transcode upgrade", dict(min_bitrate_kbps=192), dict(min_bitrate_kbps=128), True, "transcode_upgrade"),
+        ("transcode downgrade", dict(min_bitrate_kbps=128), dict(min_bitrate_kbps=192), True, "transcode_downgrade"),
+        ("transcode equal downgrade", dict(min_bitrate_kbps=128), dict(min_bitrate_kbps=128), True, "transcode_downgrade"),
+        ("transcode first import", dict(min_bitrate_kbps=150), None, True, "transcode_first"),
+        ("first import", dict(min_bitrate_kbps=240), None, False, "import"),
+        ("first import no bitrates", dict(), None, False, "import"),
+    ]
 
-    def test_verified_lossless_always_imports(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=240, verified_lossless=True)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
-        self.assertEqual(import_quality_decision(new, existing), "import")
-
-    def test_verified_lossless_even_lower_bitrate(self):
-        """V0 at 207kbps from genuine FLAC still imports over CBR 320."""
-        new = AudioQualityMeasurement(min_bitrate_kbps=207, verified_lossless=True)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
-        self.assertEqual(import_quality_decision(new, existing), "import")
-
-    def test_verified_lossless_no_existing(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=240, verified_lossless=True)
-        self.assertEqual(import_quality_decision(new, None), "import")
-
-    # --- normal upgrade ---
-
-    def test_upgrade_imports(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=256)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
-        self.assertEqual(import_quality_decision(new, existing), "import")
-
-    def test_equal_bitrate_is_downgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=320)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
-        self.assertEqual(import_quality_decision(new, existing), "downgrade")
-
-    def test_lower_bitrate_is_downgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=192)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
-        self.assertEqual(import_quality_decision(new, existing), "downgrade")
-
-    # --- override is now the caller's responsibility ---
-
-    def test_override_replaces_existing(self):
-        """Pipeline DB says existing is 128 (spectral), beets says 320.
-        Caller constructs existing with override bitrate already resolved."""
-        new = AudioQualityMeasurement(min_bitrate_kbps=240)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)  # override applied by caller
-        self.assertEqual(import_quality_decision(new, existing), "import")
-
-    def test_override_causes_downgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=100)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)  # override applied by caller
-        self.assertEqual(import_quality_decision(new, existing), "downgrade")
-
-    # --- transcode scenarios ---
-
-    def test_transcode_upgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=192)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)
-        self.assertEqual(
-            import_quality_decision(new, existing, is_transcode=True),
-            "transcode_upgrade")
-
-    def test_transcode_downgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=128)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
-        self.assertEqual(
-            import_quality_decision(new, existing, is_transcode=True),
-            "transcode_downgrade")
-
-    def test_transcode_equal_is_downgrade(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=128)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)
-        self.assertEqual(
-            import_quality_decision(new, existing, is_transcode=True),
-            "transcode_downgrade")
-
-    def test_transcode_first_import(self):
-        """No existing album — transcode is better than nothing."""
-        new = AudioQualityMeasurement(min_bitrate_kbps=150)
-        self.assertEqual(
-            import_quality_decision(new, None, is_transcode=True),
-            "transcode_first")
-
-    # --- first import (no existing) ---
-
-    def test_first_import_no_existing(self):
-        new = AudioQualityMeasurement(min_bitrate_kbps=240)
-        self.assertEqual(import_quality_decision(new, None), "import")
-
-    def test_first_import_no_bitrates(self):
-        new = AudioQualityMeasurement()
-        self.assertEqual(import_quality_decision(new, None), "import")
+    def test_import_quality_decisions(self):
+        for desc, new_kwargs, existing_kwargs, is_transcode, expected in self.CASES:
+            with self.subTest(desc=desc):
+                new = AudioQualityMeasurement(**new_kwargs)
+                existing = (
+                    AudioQualityMeasurement(**existing_kwargs)
+                    if existing_kwargs is not None
+                    else None
+                )
+                self.assertEqual(
+                    import_quality_decision(
+                        new,
+                        existing,
+                        is_transcode=is_transcode,
+                    ),
+                    expected,
+                )
 
 
 # ============================================================================
@@ -234,52 +126,35 @@ class TestImportQualityDecision(unittest.TestCase):
 class TestTranscodeDetection(unittest.TestCase):
     """Test post-conversion transcode detection."""
 
-    def test_no_conversion_not_transcode(self):
-        self.assertFalse(transcode_detection(0, 150))
+    CASES = [
+        # desc, converted_count, min_bitrate, spectral_grade, expected
+        ("no conversion", 0, 150, None, False),
+        ("none bitrate", 5, None, None, False),
+        ("above threshold", 10, 240, None, False),
+        ("at threshold", 10, TRANSCODE_MIN_BITRATE_KBPS, None, False),
+        ("below threshold", 10, 190, None, True),
+        ("way below threshold", 1, 96, None, True),
+        ("just below threshold", 5, TRANSCODE_MIN_BITRATE_KBPS - 1, None, True),
+        ("genuine overrides low bitrate", 12, 190, "genuine", False),
+        ("marginal overrides low bitrate", 12, 190, "marginal", False),
+        ("suspect overrides high bitrate", 12, 240, "suspect", True),
+        ("likely transcode overrides high bitrate", 12, 240, "likely_transcode", True),
+        ("no spectral low bitrate fallback", 12, 190, None, True),
+        ("no spectral high bitrate fallback", 12, 240, None, False),
+        ("no conversion beats spectral", 0, 190, "suspect", False),
+    ]
 
-    def test_none_bitrate_not_transcode(self):
-        self.assertFalse(transcode_detection(5, None))
-
-    def test_above_threshold_not_transcode(self):
-        self.assertFalse(transcode_detection(10, 240))
-
-    def test_at_threshold_not_transcode(self):
-        self.assertFalse(transcode_detection(10, TRANSCODE_MIN_BITRATE_KBPS))
-
-    def test_below_threshold_is_transcode(self):
-        self.assertTrue(transcode_detection(10, 190))
-
-    def test_way_below_threshold_is_transcode(self):
-        self.assertTrue(transcode_detection(1, 96))
-
-    def test_just_below_threshold_is_transcode(self):
-        self.assertTrue(transcode_detection(5, TRANSCODE_MIN_BITRATE_KBPS - 1))
-
-    # --- spectral grade override ---
-
-    def test_spectral_genuine_overrides_low_bitrate(self):
-        """Lo-fi lossless: genuine spectral + low V0 bitrate = NOT transcode."""
-        self.assertFalse(transcode_detection(12, 190, spectral_grade="genuine"))
-
-    def test_spectral_marginal_overrides_low_bitrate(self):
-        """Lo-fi lossless: marginal spectral (demos/live) = NOT transcode."""
-        self.assertFalse(transcode_detection(12, 190, spectral_grade="marginal"))
-
-    def test_spectral_suspect_is_transcode_even_above_threshold(self):
-        """Cliff detected: suspect grade = transcode even at high bitrate."""
-        self.assertTrue(transcode_detection(12, 240, spectral_grade="suspect"))
-
-    def test_spectral_likely_transcode_is_transcode(self):
-        self.assertTrue(transcode_detection(12, 240, spectral_grade="likely_transcode"))
-
-    def test_no_spectral_falls_back_to_threshold(self):
-        """No spectral data — use bitrate threshold (backward compat)."""
-        self.assertTrue(transcode_detection(12, 190, spectral_grade=None))
-        self.assertFalse(transcode_detection(12, 240, spectral_grade=None))
-
-    def test_spectral_no_conversion_still_false(self):
-        """Zero conversions = not transcode regardless of spectral."""
-        self.assertFalse(transcode_detection(0, 190, spectral_grade="suspect"))
+    def test_transcode_detection_cases(self):
+        for desc, converted_count, min_bitrate, spectral_grade, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    transcode_detection(
+                        converted_count,
+                        min_bitrate,
+                        spectral_grade=spectral_grade,
+                    ),
+                    expected,
+                )
 
 
 # ============================================================================
