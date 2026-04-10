@@ -991,16 +991,38 @@ def dispatch_action(decision: str) -> DispatchAction:
         return DispatchAction(record_rejection=True)
 
 
+SPECTRAL_TRANSCODE_GRADES: frozenset[str] = frozenset({"suspect", "likely_transcode"})
+"""Spectral grades that authorize the spectral bitrate as an override input.
+
+Only these grades mean "this is a transcode and the spectral cliff is a
+legitimate low-bound on original quality". Genuine/marginal/error/None/unknown
+grades must leave the container bitrate untouched — a genuine lo-fi file
+(e.g. Mountain Goats boombox) can produce a low spectral cliff estimate that
+is NOT a quality signal and would falsely drag the import comparison down.
+See issue #61 for the motivating incident.
+"""
+
+
 def compute_effective_override_bitrate(
     container_bitrate: int | None,
     spectral_bitrate: int | None,
+    spectral_grade: str | None,
 ) -> int | None:
-    """Compute the effective override bitrate from container and spectral data.
+    """Compute the grade-aware effective override bitrate.
 
-    Returns the lower of the two when both are available (more conservative).
-    Used by dispatch_import() to pass --override-min-bitrate to import_one.py,
-    and by _check_quality_gate() for spectral override.
+    Spectral bitrate only participates when ``spectral_grade`` is in
+    ``SPECTRAL_TRANSCODE_GRADES`` (``suspect`` / ``likely_transcode``). For any
+    other grade — ``genuine``, ``marginal``, ``error``, ``None``, or an unknown
+    future value — the spectral input is ignored and the container bitrate is
+    returned untouched.
+
+    When spectral is authorized, the function returns the lower of the two
+    available values (conservative). Used by ``dispatch_import()`` to derive
+    ``--override-min-bitrate`` for ``import_one.py`` and by the quality gate
+    to determine whether to apply a spectral override to the gate bitrate.
     """
+    if spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+        return container_bitrate
     if container_bitrate is None and spectral_bitrate is None:
         return None
     if container_bitrate is None:

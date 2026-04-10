@@ -539,26 +539,54 @@ class TestFullPipelineTargetFormat(unittest.TestCase):
 # ============================================================================
 
 class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
-    """Test the spectral/container override computation (pure)."""
+    """Grade-aware spectral/container override computation (pure).
 
-    def _compute(self, container, spectral):
+    Spectral bitrate only participates when grade is in SPECTRAL_TRANSCODE_GRADES
+    (suspect / likely_transcode). For genuine/marginal/error/None/unknown grades
+    the helper must return the container bitrate untouched — a genuine file with
+    a low spectral cliff estimate must not drag the comparison bitrate down.
+    """
+
+    # (description, container, spectral, grade, expected)
+    CASES = [
+        ("spectral ignored when grade None",             320, 128, None,               320),
+        ("spectral ignored when grade genuine",          320, 128, "genuine",          320),
+        ("spectral ignored when grade marginal",         320, 128, "marginal",         320),
+        ("spectral ignored when grade error",            320, 128, "error",            320),
+        ("unknown grade treated as non-transcode",       320, 128, "weird_new_grade",  320),
+        ("spectral lower wins when suspect",             320, 128, "suspect",          128),
+        ("spectral lower wins when likely_transcode",    320, 128, "likely_transcode", 128),
+        ("container lower wins when suspect",            192, 256, "suspect",          192),
+        ("container lower wins when likely_transcode",   192, 256, "likely_transcode", 192),
+        ("equal values when suspect",                    200, 200, "suspect",          200),
+        ("no spectral returns container (genuine)",      320, None, "genuine",         320),
+        ("no spectral returns container (suspect)",      320, None, "suspect",         320),
+        ("no container, suspect spectral",               None, 128, "suspect",         128),
+        ("no container, likely_transcode spectral",      None, 128, "likely_transcode", 128),
+        ("no container, genuine spectral ignored",       None, 128, "genuine",         None),
+        ("no container, grade None ignored",             None, 128, None,              None),
+        ("both None, genuine",                           None, None, "genuine",        None),
+        ("both None, suspect",                           None, None, "suspect",        None),
+        ("both None, grade None",                        None, None, None,             None),
+    ]
+
+    def test_grade_aware_table(self):
         from lib.quality import compute_effective_override_bitrate
-        return compute_effective_override_bitrate(container, spectral)
+        for desc, container, spectral, grade, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    compute_effective_override_bitrate(container, spectral, grade),
+                    expected,
+                    f"{desc}: compute_effective_override_bitrate"
+                    f"({container!r}, {spectral!r}, {grade!r}) "
+                    f"expected {expected!r}",
+                )
 
-    def test_spectral_lower_wins(self):
-        self.assertEqual(self._compute(320, 128), 128)
-
-    def test_container_lower_wins(self):
-        self.assertEqual(self._compute(192, 256), 192)
-
-    def test_no_spectral_returns_container(self):
-        self.assertEqual(self._compute(320, None), 320)
-
-    def test_no_container_no_spectral(self):
-        self.assertIsNone(self._compute(None, None))
-
-    def test_no_container_with_spectral(self):
-        self.assertEqual(self._compute(None, 128), 128)
+    def test_spectral_transcode_grades_constant(self):
+        """Locks the set of grades that authorize spectral override."""
+        from lib.quality import SPECTRAL_TRANSCODE_GRADES
+        self.assertEqual(SPECTRAL_TRANSCODE_GRADES,
+                         frozenset({"suspect", "likely_transcode"}))
 
 
 # ============================================================================

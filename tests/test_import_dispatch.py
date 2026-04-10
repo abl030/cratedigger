@@ -298,6 +298,10 @@ class TestOverrideMinBitrate(unittest.TestCase):
 
     Tests the dispatch_import() adapter's override computation. Will break
     if import_one becomes a library call (#48).
+
+    The override must be grade-aware: spectral bitrate only participates when
+    current_spectral_grade is in {suspect, likely_transcode}. Genuine/marginal/
+    None grades must leave the container bitrate untouched — see issue #61.
     """
 
     def _get_override_value(self, db_fields):
@@ -322,25 +326,35 @@ class TestOverrideMinBitrate(unittest.TestCase):
                 return int(cmd[i + 1])
         return None
 
-    def test_uses_spectral_when_lower(self):
-        val = self._get_override_value(
-            make_request_row(min_bitrate=320, current_spectral_bitrate=128))
-        self.assertEqual(val, 128)
+    # (description, min_bitrate, current_spectral_bitrate, current_spectral_grade, expected)
+    CASES = [
+        ("suspect spectral lower wins",             320, 128, "suspect",          128),
+        ("likely_transcode spectral lower wins",    320, 128, "likely_transcode", 128),
+        ("genuine spectral ignored even if lower",  320, 128, "genuine",          320),
+        ("marginal spectral ignored even if lower", 320, 128, "marginal",         320),
+        ("grade None ignores spectral",             320, 128, None,               320),
+        ("suspect grade but spectral higher",       192, 256, "suspect",          192),
+        ("no spectral, grade genuine",              320, None, "genuine",         320),
+        ("no spectral, grade None",                 320, None, None,              320),
+        ("no container no spectral",                None, None, None,             None),
+        ("no container, suspect spectral",          None, 128, "suspect",         128),
+        ("no container, genuine spectral ignored",  None, 128, "genuine",         None),
+    ]
 
-    def test_uses_container_when_no_spectral(self):
-        val = self._get_override_value(
-            make_request_row(min_bitrate=320, current_spectral_bitrate=None))
-        self.assertEqual(val, 320)
-
-    def test_uses_container_when_spectral_higher(self):
-        val = self._get_override_value(
-            make_request_row(min_bitrate=192, current_spectral_bitrate=256))
-        self.assertEqual(val, 192)
-
-    def test_no_override_when_no_bitrate(self):
-        val = self._get_override_value(
-            make_request_row(min_bitrate=None, current_spectral_bitrate=None))
-        self.assertIsNone(val)
+    def test_override_from_db_table(self):
+        for desc, min_br, spectral_br, grade, expected in self.CASES:
+            with self.subTest(desc=desc):
+                row = make_request_row(
+                    min_bitrate=min_br,
+                    current_spectral_bitrate=spectral_br,
+                    current_spectral_grade=grade,
+                )
+                self.assertEqual(
+                    self._get_override_value(row), expected,
+                    f"{desc}: override from min_bitrate={min_br!r} "
+                    f"spectral_bitrate={spectral_br!r} grade={grade!r} "
+                    f"expected {expected!r}",
+                )
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):
@@ -479,6 +493,66 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertIsNone(m.spectral_bitrate_kbps)
         self.assertEqual(quality_gate_decision(m), "accept")
         # Should stay imported (not requeued)
+        self.assertEqual(db.request(42)["status"], "imported")
+
+    def _capture_gate_measurement(self, *, current_spectral_grade,
+                                  current_spectral_bitrate,
+                                  beets_min_bitrate_kbps):
+        """Run _check_quality_gate_core and capture the AudioQualityMeasurement."""
+        from lib.import_dispatch import _check_quality_gate_core
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="imported",
+            current_spectral_grade=current_spectral_grade,
+            current_spectral_bitrate=current_spectral_bitrate,
+            verified_lossless=False,
+        ))
+        captured = {}
+
+        def capture(measurement):
+            captured["m"] = measurement
+            return "accept"
+
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
+             patch("lib.quality.quality_gate_decision", side_effect=capture):
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = MagicMock(
+                min_bitrate_kbps=beets_min_bitrate_kbps, is_cbr=False)
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42, files=[],
+                db=db)  # type: ignore[arg-type]
+        return db, captured["m"]
+
+    def test_quality_gate_uses_likely_transcode_spectral(self):
+        """likely_transcode album grade must feed into the gate, not just suspect.
+
+        Regression for issue #61: _check_quality_gate_core previously only
+        accepted "suspect", silently ignoring the album-level "likely_transcode"
+        grade produced by classify_album when >=60% of tracks are suspect.
+        """
+        _, m = self._capture_gate_measurement(
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=180,
+            beets_min_bitrate_kbps=226,
+        )
+        self.assertEqual(m.spectral_bitrate_kbps, 180)
+
+    def test_quality_gate_ignores_genuine_low_spectral(self):
+        """Genuine grade with low spectral estimate must NOT lower the gate bitrate.
+
+        Guards the original #31 fix: a lo-fi genuine V0 (e.g. ~160kbps cliff
+        estimate) must not trigger a requeue loop when beets reports 226kbps.
+        """
+        db, m = self._capture_gate_measurement(
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=160,
+            beets_min_bitrate_kbps=226,
+        )
+        self.assertIsNone(m.spectral_bitrate_kbps)
         self.assertEqual(db.request(42)["status"], "imported")
 
     def test_dispatch_requeue_uses_intent(self):

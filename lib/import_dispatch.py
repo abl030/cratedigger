@@ -276,18 +276,23 @@ def _check_quality_gate_core(
         is_cbr = info.is_cbr
 
         spectral_br: int | None = None
+        spectral_grade: str | None = None
         req = None
         try:
             req = db.get_request(request_id)
             spectral_grade = req.get("current_spectral_grade") if req else None
             raw_br = req.get("current_spectral_bitrate") if req else None
-            if spectral_grade == "suspect":
-                spectral_br = raw_br if isinstance(raw_br, int) else None
-            if spectral_br is not None:
-                effective = compute_effective_override_bitrate(min_br_kbps, spectral_br)
-                if effective is not None and effective < min_br_kbps:
-                    logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
-                                f"(lower than beets min_bitrate={min_br_kbps}kbps)")
+            raw_br_int = raw_br if isinstance(raw_br, int) else None
+            # Grade-aware: helper returns container_bitrate unchanged for
+            # non-transcode grades. spectral_br is set only when the helper
+            # actually lowered the effective bitrate (see issue #61).
+            effective = compute_effective_override_bitrate(
+                min_br_kbps, raw_br_int, spectral_grade)
+            if effective is not None and effective < min_br_kbps:
+                spectral_br = raw_br_int
+                logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
+                            f"(lower than beets min_bitrate={min_br_kbps}kbps, "
+                            f"grade={spectral_grade})")
         except Exception:
             logger.debug("QUALITY GATE: DB lookup failed for spectral override")
         verified_lossless = bool(req.get("verified_lossless")) if req else False
@@ -319,7 +324,8 @@ def _check_quality_gate_core(
                              search_filetype_override=upgrade_override,
                              min_bitrate=min_br_kbps)
             usernames = extract_usernames(files)
-            gate_br = compute_effective_override_bitrate(min_br_kbps, spectral_br) or min_br_kbps
+            gate_br = compute_effective_override_bitrate(
+                min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
             if spectral_br and spectral_br < min_br_kbps:
                 reason = (f"quality gate: spectral {spectral_br}kbps "
                           f"(beets {min_br_kbps}kbps) < {QUALITY_MIN_BITRATE_KBPS}kbps")
@@ -629,13 +635,16 @@ def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, de
     """
     db = ctx.pipeline_db_source._get_db()
 
-    # Compute override_min_bitrate from DB
+    # Compute override_min_bitrate from DB — grade-aware: current_spectral_bitrate
+    # only lowers the override when current_spectral_grade is suspect/likely_transcode.
     override_min_bitrate: int | None = None
     try:
         req = db.get_request(request_id)
         if req:
             override_min_bitrate = compute_effective_override_bitrate(
-                req.get("min_bitrate"), req.get("current_spectral_bitrate"))
+                req.get("min_bitrate"),
+                req.get("current_spectral_bitrate"),
+                req.get("current_spectral_grade"))
     except Exception:
         logger.debug("DB lookup failed for override-min-bitrate")
 
@@ -730,9 +739,12 @@ def dispatch_import_from_db(
             username=source_username, size=0,
         )]
 
-    # Compute override from DB state
+    # Compute override from DB state — grade-aware: current_spectral_bitrate only
+    # lowers the override when current_spectral_grade is suspect/likely_transcode.
     override_min_bitrate = compute_effective_override_bitrate(
-        req.get("min_bitrate"), req.get("current_spectral_bitrate"))
+        req.get("min_bitrate"),
+        req.get("current_spectral_bitrate"),
+        req.get("current_spectral_grade"))
 
     return dispatch_import_core(
         path=failed_path,
