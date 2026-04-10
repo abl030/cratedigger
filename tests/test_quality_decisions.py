@@ -287,96 +287,35 @@ class TestTranscodeDetection(unittest.TestCase):
 # ============================================================================
 
 class TestQualityGateDecision(unittest.TestCase):
-    """Test post-import quality gate.
+    """Test post-import quality gate via subTest table."""
 
-    Uses AudioQualityMeasurement to carry all params in one object.
-    """
+    CASES = [
+        # (description, measurement_kwargs, expected_decision)
+        # --- accept ---
+        ("VBR above threshold", dict(min_bitrate_kbps=240, is_cbr=False), "accept"),
+        ("VBR at threshold", dict(min_bitrate_kbps=QUALITY_MIN_BITRATE_KBPS, is_cbr=False), "accept"),
+        ("verified lossless low bitrate", dict(min_bitrate_kbps=180, verified_lossless=True), "accept"),
+        ("verified lossless CBR", dict(min_bitrate_kbps=320, is_cbr=True, verified_lossless=True), "accept"),
+        ("verified lossless overrides spectral", dict(min_bitrate_kbps=180, verified_lossless=True, spectral_bitrate_kbps=150), "accept"),
+        ("opus 128 verified lossless", dict(min_bitrate_kbps=128, verified_lossless=True), "accept"),
+        # --- requeue_upgrade ---
+        ("below threshold", dict(min_bitrate_kbps=190), "requeue_upgrade"),
+        ("way below threshold", dict(min_bitrate_kbps=96), "requeue_upgrade"),
+        ("spectral override CBR", dict(min_bitrate_kbps=320, is_cbr=True, spectral_bitrate_kbps=128), "requeue_upgrade"),
+        ("spectral higher ignored", dict(min_bitrate_kbps=192, spectral_bitrate_kbps=256), "requeue_upgrade"),
+        ("CBR below threshold", dict(min_bitrate_kbps=192, is_cbr=True), "requeue_upgrade"),
+        ("opus 128 not verified", dict(min_bitrate_kbps=128), "requeue_upgrade"),
+        ("none bitrate", dict(), "requeue_upgrade"),
+        # --- requeue_lossless ---
+        ("CBR above threshold", dict(min_bitrate_kbps=320, is_cbr=True), "requeue_lossless"),
+        ("CBR 256", dict(min_bitrate_kbps=256, is_cbr=True), "requeue_lossless"),
+    ]
 
-    # --- accept cases ---
-
-    def test_vbr_above_threshold_accepts(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=240, is_cbr=False)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    def test_vbr_at_threshold_accepts(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=QUALITY_MIN_BITRATE_KBPS, is_cbr=False)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    def test_verified_lossless_accepts_regardless(self):
-        """Verified lossless with low bitrate (quiet music) still accepts."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=180, verified_lossless=True)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    def test_verified_lossless_cbr_accepts(self):
-        """verified_lossless + CBR = accept (we verified it)."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True, verified_lossless=True)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    # --- requeue_upgrade cases ---
-
-    def test_below_threshold_requeues_upgrade(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=190)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    def test_way_below_threshold_requeues(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=96)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    def test_spectral_override_requeues(self):
-        """Beets says 320 but spectral says 128 → use spectral → requeue."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True,
-                                    spectral_bitrate_kbps=128)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    def test_spectral_higher_than_bitrate_ignored(self):
-        """Spectral says 256 but beets says 192 → use beets (lower) → requeue."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=192, spectral_bitrate_kbps=256)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    # --- requeue_lossless cases ---
-
-    def test_cbr_above_threshold_requeues_lossless(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=320, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_lossless")
-
-    def test_cbr_256_requeues_lossless(self):
-        m = AudioQualityMeasurement(min_bitrate_kbps=256, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_lossless")
-
-    # --- edge: CBR below threshold → requeue_upgrade (not flac) ---
-
-    def test_cbr_below_threshold_requeues_upgrade_not_flac(self):
-        """CBR 192 → below threshold takes priority over CBR path."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=192, is_cbr=True)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    # --- verified_lossless + spectral interaction ---
-
-    def test_verified_lossless_overrides_spectral(self):
-        """Verified lossless at 180kbps with spectral_bitrate=150 → still accept.
-        verified_lossless forces gate_br to threshold after spectral override."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=180, verified_lossless=True,
-                                    spectral_bitrate_kbps=150)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    # --- Opus path ---
-
-    def test_opus_128_verified_lossless_accepts(self):
-        """Opus 128kbps from verified lossless is the endgame — always accept."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=128, verified_lossless=True)
-        self.assertEqual(quality_gate_decision(m), "accept")
-
-    def test_opus_128_not_verified_requeues(self):
-        """Opus 128kbps without verified_lossless should requeue (below threshold)."""
-        m = AudioQualityMeasurement(min_bitrate_kbps=128)
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
-
-    # --- None min_bitrate ---
-
-    def test_none_bitrate_requeues(self):
-        """No measurable bitrate → requeue for upgrade."""
-        m = AudioQualityMeasurement()
-        self.assertEqual(quality_gate_decision(m), "requeue_upgrade")
+    def test_quality_gate_decisions(self):
+        for desc, kwargs, expected in self.CASES:
+            with self.subTest(desc=desc):
+                m = AudioQualityMeasurement(**kwargs)
+                self.assertEqual(quality_gate_decision(m), expected)
 
 
 # ============================================================================
@@ -772,71 +711,38 @@ class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
 # ============================================================================
 
 class TestDispatchAction(unittest.TestCase):
-    """Test dispatch_action: map decision string to action flags."""
+    """Test dispatch_action: map decision string to action flags via subTest table."""
 
-    def _action(self, decision):
+    # (decision, {flag: expected_value, ...})
+    CASES = [
+        ("import", dict(mark_done=True, mark_failed=False, denylist=False,
+                        requeue=False, cleanup=True, trigger_meelo=True,
+                        run_quality_gate=True)),
+        ("preflight_existing", dict(mark_done=True, trigger_meelo=True,
+                                    run_quality_gate=True)),
+        ("downgrade", dict(mark_done=False, mark_failed=True, denylist=True,
+                           requeue=False, cleanup=True)),
+        ("transcode_upgrade", dict(mark_done=True, denylist=True, requeue=True,
+                                   trigger_meelo=True)),
+        ("transcode_downgrade", dict(mark_done=False, mark_failed=True,
+                                     denylist=True, requeue=True)),
+        ("transcode_first", dict(mark_done=True, denylist=True, requeue=True,
+                                 trigger_meelo=True)),
+        ("conversion_failed", dict(mark_failed=True, denylist=False)),
+        ("import_failed", dict(mark_failed=True)),
+        ("target_conversion_failed", dict(mark_failed=True, denylist=False)),
+    ]
+
+    def test_dispatch_action_flags(self):
         from lib.quality import dispatch_action
-        return dispatch_action(decision)
-
-    def test_import_action(self):
-        a = self._action("import")
-        self.assertTrue(a.mark_done)
-        self.assertFalse(a.mark_failed)
-        self.assertFalse(a.denylist)
-        self.assertFalse(a.requeue)
-        self.assertTrue(a.cleanup)
-        self.assertTrue(a.trigger_meelo)
-        self.assertTrue(a.run_quality_gate)
-
-    def test_preflight_existing_action(self):
-        a = self._action("preflight_existing")
-        self.assertTrue(a.mark_done)
-        self.assertTrue(a.trigger_meelo)
-        self.assertTrue(a.run_quality_gate)
-
-    def test_downgrade_action(self):
-        a = self._action("downgrade")
-        self.assertFalse(a.mark_done)
-        self.assertTrue(a.mark_failed)
-        self.assertTrue(a.denylist)
-        self.assertFalse(a.requeue)
-        self.assertTrue(a.cleanup)
-
-    def test_transcode_upgrade_action(self):
-        a = self._action("transcode_upgrade")
-        self.assertTrue(a.mark_done)
-        self.assertTrue(a.denylist)
-        self.assertTrue(a.requeue)
-        self.assertTrue(a.trigger_meelo)
-
-    def test_transcode_downgrade_action(self):
-        a = self._action("transcode_downgrade")
-        self.assertFalse(a.mark_done)
-        self.assertTrue(a.mark_failed)
-        self.assertTrue(a.denylist)
-        self.assertTrue(a.requeue)
-
-    def test_transcode_first_action(self):
-        a = self._action("transcode_first")
-        self.assertTrue(a.mark_done)
-        self.assertTrue(a.denylist)
-        self.assertTrue(a.requeue)
-        self.assertTrue(a.trigger_meelo)
-
-    def test_unknown_decision_marks_failed(self):
-        a = self._action("conversion_failed")
-        self.assertTrue(a.mark_failed)
-        self.assertFalse(a.denylist)
-
-    def test_import_failed_action(self):
-        a = self._action("import_failed")
-        self.assertTrue(a.mark_failed)
-
-    def test_target_conversion_failed_marks_failed(self):
-        """Target conversion failure falls into catch-all → mark_failed."""
-        a = self._action("target_conversion_failed")
-        self.assertTrue(a.mark_failed)
-        self.assertFalse(a.denylist)
+        for decision, expected in self.CASES:
+            with self.subTest(decision=decision):
+                action = dispatch_action(decision)
+                for flag, value in expected.items():
+                    self.assertEqual(
+                        getattr(action, flag), value,
+                        f"dispatch_action({decision!r}).{flag}: "
+                        f"expected {value!r}, got {getattr(action, flag)!r}")
 
 
 # ============================================================================
