@@ -36,7 +36,7 @@ DEFAULT_MIGRATIONS_DIR = os.path.join(
     "migrations",
 )
 
-_FILENAME_RE = re.compile(r"^(\d+)_([A-Za-z0-9_]+)\.sql$")
+_FILENAME_RE = re.compile(r"^(\d{3,})_([A-Za-z0-9_]+)\.sql$")
 
 _TRACKING_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (

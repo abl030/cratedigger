@@ -71,12 +71,12 @@ class TestDiscoverMigrations(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         discover_migrations(d)
 
-    def test_short_prefix_is_allowed(self):
-        """\\d+ permits any number of leading digits — '1_x.sql' is fine."""
+    def test_rejects_short_prefix(self):
+        """Migration filenames must use the documented three-digit prefix."""
         with tempfile.TemporaryDirectory() as d:
             self._write(d, "1_short_prefix.sql")
-            migs = discover_migrations(d)
-            self.assertEqual(migs[0].version, 1)
+            with self.assertRaises(ValueError):
+                discover_migrations(d)
 
     def test_rejects_duplicate_version(self):
         with tempfile.TemporaryDirectory() as d:
