@@ -8,6 +8,7 @@ instead of MagicMock call shapes.
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -247,6 +248,9 @@ class FakePipelineDB:
         self.denylist: list[DenylistEntry] = []
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
+        self.status_history: list[tuple[int, str]] = []
+        self.update_download_state_calls: list[tuple[int, str]] = []
+        self.clear_download_state_calls: list[int] = []
         self._cooldown_result: bool | Callable[[str], bool] = False
 
     # --- Seeding ---
@@ -282,6 +286,7 @@ class FakePipelineDB:
         row["updated_at"] = _utcnow()
         for key, val in extra.items():
             row[key] = val
+        self.status_history.append((request_id, status))
 
     def reset_to_wanted(self, request_id: int, **fields: Any) -> None:
         row = self._requests.get(request_id)
@@ -303,6 +308,7 @@ class FakePipelineDB:
             if current_min_bitrate is not None:
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
+        self.status_history.append((request_id, "wanted"))
 
     def set_downloading(self, request_id: int, state_json: str) -> bool:
         row = self._requests.get(request_id)
@@ -313,12 +319,24 @@ class FakePipelineDB:
         row["active_download_state"] = state_json
         row["last_attempt_at"] = now
         row["updated_at"] = now
+        self.status_history.append((request_id, "downloading"))
         return True
 
     def clear_download_state(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row:
             row["active_download_state"] = None
+            row["updated_at"] = _utcnow()
+        self.clear_download_state_calls.append(request_id)
+
+    def update_download_state(self, request_id: int, state_json: str) -> None:
+        row = self._requests.get(request_id)
+        self.update_download_state_calls.append((request_id, state_json))
+        if row:
+            try:
+                row["active_download_state"] = json.loads(state_json)
+            except json.JSONDecodeError:
+                row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
 
     def log_download(self, request_id: int, **kwargs: Any) -> None:

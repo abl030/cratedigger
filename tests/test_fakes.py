@@ -44,6 +44,21 @@ class TestFakePipelineDB(unittest.TestCase):
             row["active_download_state"],
             '{"enqueued_at":"2026-01-01T00:00:00+00:00"}',
         )
+        self.assertEqual(db.status_history, [(42, "downloading")])
+
+    def test_update_download_state_rewrites_json_state(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        db.update_download_state(42, '{"filetype":"flac"}')
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "downloading")
+        self.assertEqual(row["active_download_state"], {"filetype": "flac"})
+        self.assertEqual(
+            db.update_download_state_calls,
+            [(42, '{"filetype":"flac"}')],
+        )
 
     def test_update_spectral_state(self):
         db = FakePipelineDB()
