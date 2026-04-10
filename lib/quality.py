@@ -1528,9 +1528,9 @@ def get_decision_tree() -> dict[str, Any]:
                 "when": "After successful beets import",
                 "inputs": ["current: AudioQualityMeasurement"],
                 "rules": [
-                    {"condition": "gate_br = min(current.min_bitrate_kbps, current.spectral_bitrate_kbps)",
+                    {"condition": "gate_br = min(container, spectral) only when spectral grade is suspect/likely_transcode",
                      "result": "(computed)", "color": "green",
-                     "effect": "spectral overrides container if lower"},
+                     "effect": "spectral overrides container if lower and grade is transcode-like"},
                     {"condition": f"current.verified_lossless AND gate_br < "
                                   f"{QUALITY_MIN_BITRATE_KBPS}",
                      "result": f"gate_br = {QUALITY_MIN_BITRATE_KBPS}",
@@ -1730,9 +1730,16 @@ def full_pipeline_decision(
         gate_cbr = is_cbr
 
     # --- Stage 3: Post-import quality gate ---
+    gate_spectral_bitrate = None
+    effective_gate_bitrate = compute_effective_override_bitrate(
+        gate_bitrate, spectral_bitrate, spectral_grade)
+    if (gate_bitrate is not None
+            and effective_gate_bitrate is not None
+            and effective_gate_bitrate < gate_bitrate):
+        gate_spectral_bitrate = spectral_bitrate
     gate_m = AudioQualityMeasurement(min_bitrate_kbps=gate_bitrate, is_cbr=gate_cbr,
                                      verified_lossless=verified_lossless,
-                                     spectral_bitrate_kbps=spectral_bitrate)
+                                     spectral_bitrate_kbps=gate_spectral_bitrate)
     result["stage3_quality_gate"] = quality_gate_decision(gate_m)
 
     if result["stage3_quality_gate"] == "accept":

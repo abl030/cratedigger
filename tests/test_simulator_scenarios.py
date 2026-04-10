@@ -17,6 +17,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    compute_effective_override_bitrate,
     full_pipeline_decision,
     rejection_backfill_override,
     search_tiers,
@@ -157,16 +158,19 @@ def simulate(album: AlbumState, download: DownloadScenario,
              verified_lossless_target: str | None = None) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
-    existing_min_bitrate = album.min_bitrate
     existing_spectral_bitrate = album.spectral_bitrate
+    effective_existing = compute_effective_override_bitrate(
+        album.min_bitrate,
+        album.spectral_bitrate,
+        album.spectral_grade,
+    )
     override = None
-    if (album.spectral_bitrate is not None and album.min_bitrate is not None
-            and album.spectral_bitrate < album.min_bitrate):
-        override = album.spectral_bitrate
-        existing_min_bitrate = override
+    if (effective_existing is not None and album.min_bitrate is not None
+            and effective_existing != album.min_bitrate):
+        override = effective_existing
 
     result = full_pipeline_decision(
-        existing_min_bitrate=existing_min_bitrate,
+        existing_min_bitrate=album.min_bitrate,
         existing_spectral_bitrate=existing_spectral_bitrate,
         override_min_bitrate=override,
         verified_lossless=album.verified_lossless,
@@ -365,11 +369,11 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertFalse(allow_catch_all)
 
     def test_springsteen_genuine_but_96kbps(self):
-        """CBR 320 genuine + spectral_bitrate=96 -> effective existing is 96kbps.
+        """CBR 320 genuine + spectral_bitrate=96 ignores the stale low estimate.
 
         Contradictory state: genuine spectral grade but 96kbps spectral bitrate.
-        The spectral truth (96kbps) is used as effective existing, so almost any
-        download is an upgrade.
+        Genuine grade means the spectral bitrate is not a transcode-quality
+        estimate, so comparisons use the 320kbps container bitrate.
         """
         album = ALBUM_MAP["cbr_320_genuine_spectral96"]
 
@@ -379,14 +383,15 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r1.final_status, "imported")
         self.assertFalse(r1.keep_searching)
 
-        # MP3 V0 240 imports (240 > 96 effective)
+        # MP3 V0 240 is still lower than the 320kbps container bitrate.
         r2 = simulate(album, DL_MAP["mp3_v0_240"])
-        self.assertTrue(r2.imported)
-        self.assertEqual(r2.stage2_import, "import")
+        self.assertFalse(r2.imported)
+        self.assertEqual(r2.stage2_import, "downgrade")
 
-        # Even low V0 205 imports (205 > 96 effective)
+        # Low V0 205 is also a downgrade; the stale 96kbps estimate is ignored.
         r3 = simulate(album, DL_MAP["mp3_v0_low_205"])
-        self.assertTrue(r3.imported)
+        self.assertFalse(r3.imported)
+        self.assertEqual(r3.stage2_import, "downgrade")
 
     def test_scientists_no_spectral_loop(self):
         """CBR 320 no spectral + CBR 320 genuine download -> propagation -> backfill.

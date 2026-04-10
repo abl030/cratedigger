@@ -382,6 +382,27 @@ class TestFullPipelineContract(unittest.TestCase):
             self.assertIn(r["stage3_quality_gate"], VALID_STAGE3,
                           f"Unexpected stage3 value: {r['stage3_quality_gate']} for {kwargs}")
 
+    def test_stage3_grade_aware_spectral_gate(self):
+        """Full simulator must match production's grade-aware quality gate."""
+        cases = [
+            ("genuine ignores low spectral", "genuine", 160, "accept", "imported"),
+            ("marginal ignores low spectral", "marginal", 160, "accept", "imported"),
+            ("likely_transcode uses low spectral", "likely_transcode", 160,
+             "requeue_upgrade", "wanted"),
+            ("suspect uses low spectral", "suspect", 160, "requeue_upgrade", "wanted"),
+        ]
+        for desc, grade, spectral_br, expected_gate, expected_status in cases:
+            with self.subTest(desc=desc):
+                r = full_pipeline_decision(
+                    is_flac=False,
+                    min_bitrate=226,
+                    is_cbr=False,
+                    spectral_grade=grade,
+                    spectral_bitrate=spectral_br,
+                )
+                self.assertEqual(r["stage3_quality_gate"], expected_gate)
+                self.assertEqual(r["final_status"], expected_status)
+
     def test_final_status_values_in_contract(self):
         """final_status must be from the known set."""
         r1 = full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=False)

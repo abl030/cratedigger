@@ -512,7 +512,7 @@ def cmd_quality(db, args):
     """Show quality state and simulate decisions for common download scenarios."""
     from quality import (full_pipeline_decision, quality_gate_decision,
                          AudioQualityMeasurement, rejection_backfill_override,
-                         search_tiers)
+                         search_tiers, compute_effective_override_bitrate)
 
     req = db.get_request(args.id)
     if not req:
@@ -543,10 +543,16 @@ def cmd_quality(db, args):
                     is_cbr = info.is_cbr
             except Exception:
                 pass
+        gate_spectral_br = None
+        effective_gate_br = compute_effective_override_bitrate(
+            min_br, current_br, spectral_grade)
+        if (min_br is not None and effective_gate_br is not None
+                and effective_gate_br < min_br):
+            gate_spectral_br = current_br
         current = AudioQualityMeasurement(
             min_bitrate_kbps=min_br, is_cbr=is_cbr,
             verified_lossless=verified,
-            spectral_bitrate_kbps=current_br)
+            spectral_bitrate_kbps=gate_spectral_br)
         gate = quality_gate_decision(current)
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
                       "requeue_lossless": "NEEDS LOSSLESS"}[gate]
@@ -574,9 +580,12 @@ def cmd_quality(db, args):
         print(f"  Backfill:      won't fire (conditions not met)")
 
     # --- Simulate common scenarios ---
-    effective_existing = min_br
-    if current_br and min_br and current_br < min_br:
-        effective_existing = current_br
+    effective_existing = compute_effective_override_bitrate(
+        min_br, current_br, spectral_grade)
+    override_min_bitrate = None
+    if (effective_existing is not None and min_br is not None
+            and effective_existing != min_br):
+        override_min_bitrate = effective_existing
 
     scenarios = [
         # --- FLAC downloads ---
@@ -635,9 +644,9 @@ def cmd_quality(db, args):
     print(f"\n  What would happen if we downloaded:")
     for name, params in scenarios:
         result = full_pipeline_decision(
-            existing_min_bitrate=effective_existing,
+            existing_min_bitrate=min_br,
             existing_spectral_bitrate=current_br,
-            override_min_bitrate=current_br if current_br and min_br and current_br < min_br else None,
+            override_min_bitrate=override_min_bitrate,
             verified_lossless=verified,
             **params)
 
