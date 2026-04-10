@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
+from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from tests.helpers import make_request_row
 
 _MOCK_PIPELINE_REQUEST = make_request_row(
@@ -63,6 +64,52 @@ _DEFAULT_WRONG_MATCH_ENTRY = {
         "scenario": "high_distance",
     },
 }
+
+
+def _assert_required_fields(
+    case: unittest.TestCase,
+    payload: dict,
+    required_fields: set[str],
+    label: str,
+) -> None:
+    missing = required_fields - set(payload.keys())
+    case.assertFalse(missing, f"{label} missing fields: {missing}")
+
+
+class _WebServerCase(unittest.TestCase):
+    """Shared HTTP test harness for endpoint contract tests."""
+
+    server: HTTPServer
+    port: int
+    base: str
+    mock_db: MagicMock
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.port, cls.mock_db = _make_server()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _get(self, path: str) -> tuple[int, dict]:
+        url = f"{self.base}{path}"
+        try:
+            resp = urlopen(url)
+            return resp.status, json.loads(resp.read())
+        except HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def _post(self, path: str, body: dict) -> tuple[int, dict]:
+        url = f"{self.base}{path}"
+        data = json.dumps(body).encode()
+        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            resp = urlopen(req)
+            return resp.status, json.loads(resp.read())
+        except HTTPError as e:
+            return e.code, json.loads(e.read())
 
 
 def _make_server():
@@ -493,6 +540,720 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(data["release_groups"]), 1)
         self.assertEqual(data["release_groups"][0]["title"], "Studio")
+
+
+class TestRouteContractAudit(unittest.TestCase):
+    """Every web/routes.py endpoint must be covered by a frontend contract decision."""
+
+    CLASSIFIED_ROUTES = {
+        "/api/search",
+        "/api/library/artist",
+        r"^/api/artist/([a-f0-9-]+)$",
+        r"^/api/artist/([a-f0-9-]+)/disambiguate$",
+        r"^/api/release-group/([a-f0-9-]+)$",
+        r"^/api/release/([a-f0-9-]+)$",
+        "/api/pipeline/log",
+        "/api/pipeline/status",
+        "/api/pipeline/recent",
+        "/api/pipeline/all",
+        "/api/pipeline/constants",
+        "/api/pipeline/simulate",
+        r"^/api/pipeline/(\d+)$",
+        "/api/pipeline/add",
+        "/api/pipeline/update",
+        "/api/pipeline/upgrade",
+        "/api/pipeline/set-quality",
+        "/api/pipeline/set-intent",
+        "/api/pipeline/ban-source",
+        "/api/pipeline/force-import",
+        "/api/pipeline/delete",
+        "/api/beets/search",
+        "/api/beets/recent",
+        r"^/api/beets/album/(\d+)$",
+        "/api/beets/delete",
+        "/api/manual-import/scan",
+        "/api/manual-import/import",
+        "/api/wrong-matches",
+        "/api/wrong-matches/delete",
+    }
+
+    def test_all_web_routes_are_classified_for_contract_coverage(self):
+        import web.server as srv
+
+        actual = set(srv.Handler._FUNC_GET_ROUTES)
+        actual.update(srv.Handler._FUNC_POST_ROUTES)
+        actual.update(pattern.pattern for pattern, _fn in srv.Handler._FUNC_GET_PATTERNS)
+
+        self.assertFalse(actual - self.CLASSIFIED_ROUTES,
+                         f"Unclassified web routes: {sorted(actual - self.CLASSIFIED_ROUTES)}")
+        self.assertFalse(self.CLASSIFIED_ROUTES - actual,
+                         f"Stale route classifications: {sorted(self.CLASSIFIED_ROUTES - actual)}")
+
+
+class TestPipelineRouteContracts(_WebServerCase):
+    """Contract tests for frontend-consumed pipeline GET routes."""
+
+    PIPELINE_ITEM_REQUIRED_FIELDS = {
+        "id", "artist_name", "album_title", "year", "format", "country",
+        "source", "created_at", "status", "search_attempts",
+        "download_attempts", "validation_attempts", "beets_distance",
+        "mb_release_id", "imported_path", "current_spectral_bitrate",
+        "last_download_spectral_bitrate", "current_spectral_grade",
+        "last_download_spectral_grade", "verified_lossless",
+    }
+    LOG_ENTRY_REQUIRED_FIELDS = {
+        "id", "request_id", "outcome", "album_title", "artist_name",
+        "created_at", "badge", "badge_class", "border_color", "summary",
+        "verdict", "in_beets",
+    }
+    HISTORY_REQUIRED_FIELDS = {
+        "id", "request_id", "outcome", "created_at", "soulseek_username",
+        "downloaded_label", "verdict", "beets_scenario", "beets_distance",
+        "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
+        "existing_spectral_bitrate",
+    }
+    STATUS_WANTED_REQUIRED_FIELDS = {
+        "id", "artist", "album", "mb_release_id", "source", "created_at",
+    }
+    RECENT_REQUIRED_FIELDS = (
+        PIPELINE_ITEM_REQUIRED_FIELDS | {"pipeline_tracks", "in_beets", "beets_tracks"}
+    )
+    CONSTANTS_REQUIRED_FIELDS = {"constants", "paths", "path_labels", "stages"}
+    STAGE_REQUIRED_FIELDS = {
+        "id", "title", "path", "function", "when", "inputs", "rules",
+    }
+    SIMULATE_REQUIRED_FIELDS = {
+        "stage1_spectral", "stage2_import", "stage3_quality_gate",
+        "final_status", "imported", "denylisted", "keep_searching",
+        "target_final_format",
+    }
+
+    def setUp(self) -> None:
+        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+        self.mock_db.get_tracks.return_value = [
+            {"disc_number": 1, "track_number": 1, "title": "Track", "length_seconds": 180},
+        ]
+        self.mock_db.get_wanted.return_value = [
+            make_request_row(id=101, status="wanted", source="request"),
+        ]
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 1, "downloading": 0, "imported": 1, "manual": 0,
+        }
+        self.mock_db.get_by_status.side_effect = None
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.get_recent.return_value = []
+        self.mock_db.get_track_counts.return_value = {}
+
+    def test_pipeline_log_contract(self):
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"log", "counts"}, "pipeline log response")
+        _assert_required_fields(self, data["log"][0], self.LOG_ENTRY_REQUIRED_FIELDS,
+                                "pipeline log entry")
+        _assert_required_fields(self, data["counts"], {"all", "imported", "rejected"},
+                                "pipeline log counts")
+
+    def test_pipeline_status_contract(self):
+        status, data = self._get("/api/pipeline/status")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"counts", "wanted"}, "pipeline status response")
+        _assert_required_fields(self, data["wanted"][0], self.STATUS_WANTED_REQUIRED_FIELDS,
+                                "pipeline status wanted item")
+
+    def test_pipeline_all_contract(self):
+        row = make_request_row(id=201, status="wanted", album_title="Wanted Album")
+        self.mock_db.get_by_status.side_effect = lambda s: [row] if s == "wanted" else []
+
+        status, data = self._get("/api/pipeline/all")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "manual"},
+                                "pipeline all response")
+        _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
+                                "pipeline all item")
+
+    def test_pipeline_detail_contract(self):
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"request", "history", "tracks"},
+                                "pipeline detail response")
+        _assert_required_fields(self, data["request"], self.PIPELINE_ITEM_REQUIRED_FIELDS,
+                                "pipeline detail request")
+        _assert_required_fields(self, data["history"][0], self.HISTORY_REQUIRED_FIELDS,
+                                "pipeline detail history item")
+
+    def test_pipeline_recent_contract(self):
+        row = make_request_row(id=202, status="imported", album_title="Recent Album")
+        history = copy.deepcopy(self.mock_db.get_download_history.return_value[0])
+        self.mock_db.get_recent.return_value = [row]
+        self.mock_db.get_track_counts.return_value = {202: 11}
+        self.mock_db.get_download_history_batch.return_value = {202: [history]}
+
+        status, data = self._get("/api/pipeline/recent")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"recent"}, "pipeline recent response")
+        _assert_required_fields(self, data["recent"][0], self.RECENT_REQUIRED_FIELDS,
+                                "pipeline recent item")
+
+    def test_pipeline_constants_contract(self):
+        status, data = self._get("/api/pipeline/constants")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.CONSTANTS_REQUIRED_FIELDS,
+                                "pipeline constants response")
+        _assert_required_fields(self, data["stages"][0], self.STAGE_REQUIRED_FIELDS,
+                                "pipeline constants stage")
+
+    def test_pipeline_simulate_contract(self):
+        status, data = self._get(
+            "/api/pipeline/simulate?is_flac=false&min_bitrate=320&is_cbr=true"
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
+                                "pipeline simulate response")
+
+
+class TestPipelineMutationRouteContracts(_WebServerCase):
+    """Contract tests for frontend-consumed pipeline mutation routes."""
+
+    ADD_REQUIRED_FIELDS = {"status", "id", "artist", "album", "tracks"}
+    EXISTS_REQUIRED_FIELDS = {"status", "id", "current_status"}
+    UPDATE_REQUIRED_FIELDS = {"status", "id", "new_status"}
+    UPGRADE_REQUIRED_FIELDS = {
+        "status", "id", "min_bitrate", "search_filetype_override",
+    }
+    SET_QUALITY_REQUIRED_FIELDS = {"status", "id", "new_status", "min_bitrate"}
+    SET_INTENT_REQUIRED_FIELDS = {
+        "status", "id", "intent", "target_format", "requeued",
+    }
+    BAN_SOURCE_REQUIRED_FIELDS = {"status", "username", "beets_removed"}
+    FORCE_IMPORT_REQUIRED_FIELDS = {
+        "status", "request_id", "artist", "album", "message",
+    }
+    DELETE_REQUIRED_FIELDS = {"status", "id"}
+
+    def setUp(self) -> None:
+        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+        self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.add_request.return_value = 501
+        self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
+
+    @patch("routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_contract(self, mock_get_release):
+        mock_get_release.return_value = {
+            "release_group_id": "rg-1",
+            "artist_id": "artist-1",
+            "artist_name": "Test Artist",
+            "title": "Test Album",
+            "year": 2024,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+
+        status, data = self._post("/api/pipeline/add", {"mb_release_id": "abc-123"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add response")
+
+    def test_pipeline_add_exists_contract(self):
+        self.mock_db.get_request_by_mb_release_id.return_value = {
+            "id": 502,
+            "status": "wanted",
+        }
+
+        status, data = self._post("/api/pipeline/add", {"mb_release_id": "abc-123"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
+                                "pipeline add exists response")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_pipeline_update_contract(self, _mock_transition):
+        status, data = self._post("/api/pipeline/update", {"id": 100, "status": "manual"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
+                                "pipeline update response")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_pipeline_upgrade_contract(self, _mock_transition):
+        self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
+
+        status, data = self._post("/api/pipeline/upgrade", {"mb_release_id": "abc-123"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
+                                "pipeline upgrade response")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_pipeline_set_quality_contract(self, _mock_transition):
+        self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
+
+        status, data = self._post(
+            "/api/pipeline/set-quality",
+            {"mb_release_id": "abc-123", "status": "manual", "min_bitrate": 245},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
+                                "pipeline set-quality response")
+
+    def test_pipeline_set_intent_contract(self):
+        self.mock_db.get_request.return_value = make_request_row(id=100, status="wanted")
+
+        status, data = self._post("/api/pipeline/set-intent",
+                                  {"id": 100, "intent": "lossless"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
+                                "pipeline set-intent response")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_pipeline_ban_source_contract(self, _mock_transition):
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 100, "username": "baduser", "mb_release_id": "abc-123"},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
+                                "pipeline ban-source response")
+
+    @patch("routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("lib.import_dispatch.dispatch_import_from_db")
+    def test_pipeline_force_import_contract(self, mock_dispatch, _mock_resolve):
+        mock_dispatch.return_value = MagicMock(success=True, message="Import successful")
+
+        status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
+                                "pipeline force-import response")
+
+    def test_pipeline_delete_contract(self):
+        status, data = self._post("/api/pipeline/delete", {"id": 100})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
+                                "pipeline delete response")
+
+
+class TestManualImportRouteContracts(_WebServerCase):
+    """Contract tests for manual import routes."""
+
+    FOLDER_REQUIRED_FIELDS = {"name", "path", "artist", "album", "file_count", "match"}
+    MATCH_REQUIRED_FIELDS = {"request_id", "artist", "album", "mb_release_id", "score"}
+    IMPORT_REQUIRED_FIELDS = {"status", "message", "request_id", "artist", "album"}
+
+    def setUp(self) -> None:
+        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+        self.mock_db.get_by_status.side_effect = None
+
+    @patch("routes.imports.match_folders_to_requests")
+    @patch("routes.imports.scan_complete_folder")
+    def test_manual_import_scan_contract(self, mock_scan, mock_match):
+        folder = FolderInfo(
+            name="Test Artist - Test Album",
+            path="/complete/Test Artist - Test Album",
+            artist="Test Artist",
+            album="Test Album",
+            file_count=10,
+        )
+        request = ImportRequest(
+            id=100,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            mb_release_id="abc-123",
+        )
+        mock_scan.return_value = [folder]
+        mock_match.return_value = [FolderMatch(folder=folder, request=request, score=0.91)]
+        self.mock_db.get_by_status.return_value = [
+            make_request_row(id=100, status="wanted", mb_release_id="abc-123"),
+        ]
+
+        status, data = self._get("/api/manual-import/scan")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"folders", "wanted_count"},
+                                "manual import scan response")
+        _assert_required_fields(self, data["folders"][0], self.FOLDER_REQUIRED_FIELDS,
+                                "manual import folder")
+        _assert_required_fields(self, data["folders"][0]["match"], self.MATCH_REQUIRED_FIELDS,
+                                "manual import match")
+
+    @patch("lib.import_dispatch.dispatch_import_from_db")
+    def test_manual_import_post_contract(self, mock_dispatch):
+        mock_dispatch.return_value = MagicMock(success=True, message="Imported")
+
+        status, data = self._post(
+            "/api/manual-import/import",
+            {"request_id": 100, "path": "/complete/Test Artist - Test Album"},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.IMPORT_REQUIRED_FIELDS,
+                                "manual import response")
+
+
+class TestBrowseRouteContracts(_WebServerCase):
+    """Contract tests for browse and MusicBrainz-backed routes."""
+
+    ARTIST_SEARCH_REQUIRED_FIELDS = {"id", "name", "disambiguation"}
+    RELEASE_SEARCH_REQUIRED_FIELDS = {
+        "id", "title", "artist_id", "artist_name", "primary_type",
+    }
+    ARTIST_RG_REQUIRED_FIELDS = {
+        "id", "title", "type", "secondary_types", "first_release_date",
+        "artist_credit", "primary_artist_id", "has_official",
+    }
+    LIBRARY_ALBUM_REQUIRED_FIELDS = {
+        "id", "album", "artist", "year", "mb_albumid", "track_count",
+        "mb_releasegroupid", "release_group_title", "added", "formats",
+        "min_bitrate", "type", "label", "country", "source",
+    }
+    RELEASE_GROUP_REQUIRED_FIELDS = {
+        "id", "title", "country", "date", "format", "track_count", "status",
+        "in_library", "pipeline_status", "pipeline_id",
+    }
+    RELEASE_DETAIL_REQUIRED_FIELDS = {
+        "id", "title", "tracks", "in_library", "pipeline_status", "pipeline_id",
+    }
+    RELEASE_TRACK_REQUIRED_FIELDS = {
+        "disc_number", "track_number", "title", "length_seconds",
+    }
+    DISAMBIGUATE_RESPONSE_REQUIRED_FIELDS = {
+        "artist_id", "artist_name", "release_groups",
+    }
+    DISAMBIGUATE_RG_REQUIRED_FIELDS = {
+        "release_group_id", "title", "primary_type", "first_date",
+        "release_ids", "pressings", "track_count", "unique_track_count",
+        "covered_by", "library_status", "pipeline_status", "pipeline_id",
+        "tracks",
+    }
+    DISAMBIGUATE_PRESSING_REQUIRED_FIELDS = {
+        "release_id", "title", "date", "format", "track_count", "country",
+        "recording_ids", "in_library", "beets_album_id", "pipeline_status",
+        "pipeline_id",
+    }
+    DISAMBIGUATE_TRACK_REQUIRED_FIELDS = {
+        "recording_id", "title", "unique", "also_on",
+    }
+
+    ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+    RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    RG_ID = "11111111-1111-1111-1111-111111111111"
+
+    def test_artist_search_contract(self):
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.search_artists.return_value = [
+                {"id": self.ARTIST_ID, "name": "Test Artist", "disambiguation": ""},
+            ]
+            status, data = self._get("/api/search?q=test")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"artists"}, "artist search response")
+        _assert_required_fields(self, data["artists"][0], self.ARTIST_SEARCH_REQUIRED_FIELDS,
+                                "artist search result")
+
+    def test_release_search_contract(self):
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.search_release_groups.return_value = [
+                {
+                    "id": self.RG_ID,
+                    "title": "Test Album",
+                    "artist_id": self.ARTIST_ID,
+                    "artist_name": "Test Artist",
+                    "primary_type": "Album",
+                },
+            ]
+            status, data = self._get("/api/search?q=test&type=release")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"release_groups"}, "release search response")
+        _assert_required_fields(self, data["release_groups"][0],
+                                self.RELEASE_SEARCH_REQUIRED_FIELDS,
+                                "release search result")
+
+    def test_library_artist_route_contract(self):
+        album = {
+            "id": 7,
+            "album": "Test Album",
+            "artist": "Test Artist",
+            "year": 2024,
+            "mb_albumid": self.RELEASE_ID,
+            "track_count": 10,
+            "mb_releasegroupid": self.RG_ID,
+            "release_group_title": "Test Album",
+            "added": 1773651901.0,
+            "formats": "MP3",
+            "min_bitrate": 320000,
+            "type": "album",
+            "label": "Test Label",
+            "country": "US",
+            "source": "musicbrainz",
+        }
+        with patch("web.server.get_library_artist", return_value=[album]):
+            status, data = self._get(
+                f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
+            )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"albums"}, "library artist response")
+        _assert_required_fields(self, data["albums"][0], self.LIBRARY_ALBUM_REQUIRED_FIELDS,
+                                "library artist album")
+
+    def test_artist_release_groups_contract(self):
+        release_group = {
+            "id": self.RG_ID,
+            "title": "Test Album",
+            "type": "Album",
+            "secondary_types": [],
+            "first_release_date": "2024-01-01",
+            "artist_credit": "Test Artist",
+            "primary_artist_id": self.ARTIST_ID,
+        }
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"release_groups"}, "artist response")
+        _assert_required_fields(self, data["release_groups"][0], self.ARTIST_RG_REQUIRED_FIELDS,
+                                "artist release group")
+
+    def test_release_group_contract(self):
+        release = {
+            "id": self.RELEASE_ID,
+            "title": "Test Album",
+            "country": "US",
+            "date": "2024-01-01",
+            "format": "CD",
+            "track_count": 10,
+            "status": "Official",
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
+                patch("web.server.check_pipeline",
+                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted"}}):
+            mock_mb.get_release_group_releases.return_value = {"releases": [release]}
+            status, data = self._get(f"/api/release-group/{self.RG_ID}")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"releases"}, "release group response")
+        _assert_required_fields(self, data["releases"][0], self.RELEASE_GROUP_REQUIRED_FIELDS,
+                                "release group release")
+
+    def test_release_detail_contract(self):
+        release = {
+            "id": self.RELEASE_ID,
+            "title": "Test Album",
+            "tracks": [
+                {
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Track",
+                    "length_seconds": 180,
+                },
+            ],
+        }
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=42, status="wanted", mb_release_id=self.RELEASE_ID,
+        )
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()):
+            mock_mb.get_release.return_value = release
+            status, data = self._get(f"/api/release/{self.RELEASE_ID}")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.RELEASE_DETAIL_REQUIRED_FIELDS,
+                                "release detail response")
+        _assert_required_fields(self, data["tracks"][0], self.RELEASE_TRACK_REQUIRED_FIELDS,
+                                "release detail track")
+
+    def test_artist_disambiguate_contract(self):
+        fake_releases = [
+            {
+                "id": self.RELEASE_ID,
+                "title": "Test Album",
+                "date": "2024-01-01",
+                "country": "US",
+                "status": "Official",
+                "release-group": {
+                    "id": self.RG_ID,
+                    "title": "Test Album",
+                    "primary-type": "Album",
+                    "secondary-types": [],
+                },
+                "media": [{
+                    "position": 1,
+                    "format": "CD",
+                    "track-count": 1,
+                    "tracks": [
+                        {"position": 1, "number": "1", "title": "Track",
+                         "recording": {"id": "rec-1", "title": "Track"}},
+                    ],
+                }],
+            },
+        ]
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}):
+            mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}/disambiguate")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DISAMBIGUATE_RESPONSE_REQUIRED_FIELDS,
+                                "disambiguate response")
+        rg = data["release_groups"][0]
+        _assert_required_fields(self, rg, self.DISAMBIGUATE_RG_REQUIRED_FIELDS,
+                                "disambiguate release group")
+        _assert_required_fields(self, rg["pressings"][0], self.DISAMBIGUATE_PRESSING_REQUIRED_FIELDS,
+                                "disambiguate pressing")
+        _assert_required_fields(self, rg["tracks"][0], self.DISAMBIGUATE_TRACK_REQUIRED_FIELDS,
+                                "disambiguate track")
+
+
+class TestBeetsRouteContracts(_WebServerCase):
+    """Contract tests for frontend-consumed beets library routes."""
+
+    ALBUM_REQUIRED_FIELDS = {
+        "id", "album", "artist", "year", "mb_albumid", "track_count",
+        "mb_releasegroupid", "release_group_title", "added", "formats",
+        "min_bitrate", "type", "label", "country", "source",
+    }
+    DETAIL_REQUIRED_FIELDS = (
+        ALBUM_REQUIRED_FIELDS | {
+            "path", "tracks", "pipeline_id", "pipeline_status",
+            "pipeline_source", "pipeline_min_bitrate",
+            "search_filetype_override", "target_format", "upgrade_queued",
+            "download_history",
+        }
+    )
+    TRACK_REQUIRED_FIELDS = {
+        "disc", "track", "title", "length", "format", "bitrate",
+        "samplerate", "bitdepth",
+    }
+    DELETE_REQUIRED_FIELDS = {"status", "id", "album", "artist", "deleted_files"}
+
+    RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    RG_ID = "11111111-1111-1111-1111-111111111111"
+
+    def setUp(self) -> None:
+        import web.server as srv
+
+        self._srv = srv
+        self._orig_beets = srv._beets
+        self._orig_beets_db_path = srv.beets_db_path
+        self.beets = MagicMock()
+        srv._beets = self.beets
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+        )
+
+    def tearDown(self) -> None:
+        self._srv._beets = self._orig_beets
+        self._srv.beets_db_path = self._orig_beets_db_path
+
+    def _album(self) -> dict:
+        return {
+            "id": 7,
+            "album": "Test Album",
+            "artist": "Test Artist",
+            "year": 2024,
+            "mb_albumid": self.RELEASE_ID,
+            "track_count": 10,
+            "mb_releasegroupid": self.RG_ID,
+            "release_group_title": "Test Album",
+            "added": 1773651901.0,
+            "formats": "MP3",
+            "min_bitrate": 320000,
+            "type": "album",
+            "label": "Test Label",
+            "country": "US",
+            "source": "musicbrainz",
+        }
+
+    def _track(self) -> dict:
+        return {
+            "disc": 1,
+            "track": 1,
+            "title": "Track",
+            "length": 180.0,
+            "format": "MP3",
+            "bitrate": 320000,
+            "samplerate": 44100,
+            "bitdepth": 16,
+        }
+
+    def test_beets_search_contract(self):
+        self.beets.search_albums.return_value = [self._album()]
+        with patch("web.server.check_pipeline", return_value={}):
+            status, data = self._get("/api/beets/search?q=test")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"albums"}, "beets search response")
+        _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
+                                "beets search album")
+
+    def test_beets_recent_contract(self):
+        self.beets.get_recent.return_value = [self._album()]
+        with patch("web.server.check_pipeline", return_value={}):
+            status, data = self._get("/api/beets/recent")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"albums"}, "beets recent response")
+        _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
+                                "beets recent album")
+
+    def test_beets_album_detail_contract(self):
+        detail = self._album()
+        detail["path"] = "/music/Test Artist/Test Album"
+        detail["tracks"] = [self._track()]
+        self.beets.get_album_detail.return_value = detail
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DETAIL_REQUIRED_FIELDS,
+                                "beets album detail")
+        _assert_required_fields(self, data["tracks"][0], self.TRACK_REQUIRED_FIELDS,
+                                "beets album track")
+
+    @patch("routes.library.os.path.isdir", return_value=False)
+    @patch("routes.library.os.path.isfile", return_value=False)
+    @patch("routes.library.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB.delete_album")
+    def test_beets_delete_contract(
+        self,
+        mock_delete,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        self._srv.beets_db_path = "/tmp/beets.db"
+        mock_delete.return_value = (
+            "Test Album",
+            "Test Artist",
+            ["/music/Test Artist/Test Album/01 Track.mp3"],
+        )
+
+        status, data = self._post("/api/beets/delete", {"id": 7, "confirm": "DELETE"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
+                                "beets delete response")
 
 
 class TestApplyPipelineBitrateOverride(unittest.TestCase):
