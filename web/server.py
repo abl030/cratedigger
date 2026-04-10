@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
-import cache
+import web.cache as cache
 import mb as mb_api
 from beets_db import BeetsDB
 from pipeline_db import PipelineDB

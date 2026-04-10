@@ -182,6 +182,7 @@ class HarnessImportSession(ImportSession):
         self._task_counter += 1
 
         # Build the task description
+        candidates = task.candidates or []
         msg = {
             "type": "choose_match",
             "task_id": task_id,
@@ -191,10 +192,10 @@ class HarnessImportSession(ImportSession):
             "item_count": len(task.items),
             "items": [_serialize_item(item) for item in task.items],
             "recommendation": task.rec.name if task.rec else "none",
-            "candidate_count": len(task.candidates),
+            "candidate_count": len(candidates),
             "candidates": [
                 _serialize_album_candidate(i, c)
-                for i, c in enumerate(task.candidates)
+                for i, c in enumerate(candidates)
             ],
         }
         _send(msg)
@@ -208,6 +209,7 @@ class HarnessImportSession(ImportSession):
         task_id = self._task_counter
         self._task_counter += 1
 
+        candidates = task.candidates or []
         msg = {
             "type": "choose_item",
             "task_id": task_id,
@@ -216,10 +218,10 @@ class HarnessImportSession(ImportSession):
             "cur_title": getattr(getattr(task, "item", None), "title", "") if hasattr(task, "item") else "",
             "item": _serialize_item(getattr(task, "item")) if hasattr(task, "item") else {},
             "recommendation": task.rec.name if task.rec else "none",
-            "candidate_count": len(task.candidates),
+            "candidate_count": len(candidates),
             "candidates": [
                 _serialize_track_candidate(i, c)
-                for i, c in enumerate(task.candidates)
+                for i, c in enumerate(candidates)
             ],
         }
         _send(msg)

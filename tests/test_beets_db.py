@@ -450,8 +450,10 @@ class TestGetAlbumDetail(unittest.TestCase):
         self.assertEqual(detail["album"], "Test Album")
         self.assertEqual(detail["artist"], "Artist A")
         self.assertIn("tracks", detail)
-        self.assertEqual(len(detail["tracks"]), 2)
-        self.assertEqual(detail["tracks"][0]["title"], "Track 1")
+        tracks = detail["tracks"]
+        assert isinstance(tracks, list)
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(tracks[0]["title"], "Track 1")
 
     def test_nonexistent_returns_none(self) -> None:
         with BeetsDB(self.db_path) as db:

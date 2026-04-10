@@ -126,6 +126,7 @@ class TestSlskdSearchShapes(unittest.TestCase):
         # Mock cfg to avoid global state issues
         from unittest.mock import MagicMock
         import soularr
+        from lib.quality import verify_filetype
         orig_cfg = soularr.cfg
         soularr.cfg = MagicMock()
         try:
@@ -133,7 +134,7 @@ class TestSlskdSearchShapes(unittest.TestCase):
                 for f in r.get("files", [])[:3]:
                     # Should not crash — this is the exact pattern that broke in prod
                     try:
-                        soularr.verify_filetype(f, "flac")
+                        verify_filetype(f, "flac")
                     except (KeyError, ValueError):
                         pass  # Wrong type is fine — crashing is not
         finally:
