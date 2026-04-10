@@ -143,6 +143,39 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertEqual(row["search_filetype_override"], QUALITY_LOSSLESS)
 
 
+    def test_transcode_upgrade_requeues_with_denylist(self):
+        """Transcode upgrade → mark_done + requeue to upgrade tiers + denylist."""
+        ir = make_import_result(decision="transcode_upgrade", new_min_bitrate=227)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=227,
+            is_cbr=False, album_path="/Beets/Test")
+
+        db = self._run_dispatch(ir, beets_info)
+
+        row = db.request(42)
+        # Transcode upgrade requeues directly (no quality gate)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        # Transcode source denylisted
+        self.assertTrue(len(db.denylist) >= 1)
+        db.assert_log(self, 0, outcome="success")
+
+    def test_downgrade_prevented(self):
+        """Downgrade → mark_failed + denylist, no quality gate."""
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=320)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=128,
+            is_cbr=False, album_path="/Beets/Test")
+
+        db = self._run_dispatch(ir, beets_info)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertTrue(len(db.denylist) >= 1)
+        db.assert_log(self, 0, outcome="rejected")
+
+
 class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
     """Integration slice: quality gate stays imported for verified_lossless
     even when bitrate < 210."""
@@ -159,13 +192,7 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=207,
             is_cbr=False, album_path="/Beets/Test")
 
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets_instance = MagicMock()
-            mock_beets_cls.return_value.__enter__ = MagicMock(
-                return_value=mock_beets_instance)
-            mock_beets_cls.return_value.__exit__ = MagicMock(return_value=False)
-            mock_beets_instance.get_album_info.return_value = beets_info
-
+        with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
             _check_quality_gate_core(
                 mb_id="mbid-123",
                 label="Lo-Fi Album",
@@ -177,7 +204,6 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "imported")
         self.assertEqual(row["min_bitrate"], 207)
-        # No denylist — accepted
         self.assertEqual(len(db.denylist), 0)
 
 
@@ -200,13 +226,7 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             is_cbr=False, album_path="/Beets/Test")
 
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets_instance = MagicMock()
-            mock_beets_cls.return_value.__enter__ = MagicMock(
-                return_value=mock_beets_instance)
-            mock_beets_cls.return_value.__exit__ = MagicMock(return_value=False)
-            mock_beets_instance.get_album_info.return_value = beets_info
-
+        with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
             _check_quality_gate_core(
                 mb_id="mbid-123",
                 label="Fake 320 Album",
@@ -218,9 +238,95 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
-        # Source denylisted for quality gate failure
         self.assertEqual(len(db.denylist), 1)
         self.assertIn("spectral", db.denylist[0].reason or "")
+
+
+class TestDispatchNoJsonResult(unittest.TestCase):
+    """Integration slice: sp.run returns no sentinel → mark_failed."""
+
+    def test_no_json_marks_failed_and_requeues(self):
+        """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                ext.run.return_value = MagicMock(
+                    returncode=1, stdout="some error\n", stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    cfg=cfg,
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(self, 0, outcome="failed")
+
+
+class TestForceImportSlice(unittest.TestCase):
+    """Integration slice: dispatch_import_from_db with force=True."""
+
+    def test_force_import_success(self):
+        """Force-import → imported, download_log outcome=force_import."""
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123",
+            min_bitrate=180, current_spectral_bitrate=128,
+        ))
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        stdout = _make_stdout(ir)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            is_cbr=False, album_path="/Beets/Test")
+
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.import_dispatch._read_runtime_config",
+                       return_value=cfg):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                result = dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="user1",
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertTrue(result.success)
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        db.assert_log(self, 0, outcome="force_import")
 
 
 if __name__ == "__main__":
