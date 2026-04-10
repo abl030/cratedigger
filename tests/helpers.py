@@ -237,7 +237,12 @@ def make_spectral_context(
 # Shared context wiring
 # ---------------------------------------------------------------------------
 
-def make_ctx_with_fake_db(fake_db: Any, *, cfg: Any = None) -> Any:
+def make_ctx_with_fake_db(
+    fake_db: Any,
+    *,
+    cfg: Any = None,
+    slskd: Any = None,
+) -> Any:
     """Build a SoularrContext wired to a FakePipelineDB.
 
     The fake is wired via pipeline_db_source._get_db() so production code
@@ -248,7 +253,7 @@ def make_ctx_with_fake_db(fake_db: Any, *, cfg: Any = None) -> Any:
     mock_source._get_db.return_value = fake_db
     return SoularrContext(
         cfg=cfg if cfg is not None else MagicMock(),
-        slskd=MagicMock(),
+        slskd=slskd if slskd is not None else MagicMock(),
         pipeline_db_source=mock_source,
     )
 

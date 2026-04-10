@@ -17,9 +17,10 @@ from tests.helpers import (
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
+    make_request_row,
     make_spectral_context,
 )
-from tests.fakes import FakeSlskdAPI
+from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
 
 def _utc_now_iso() -> str:
@@ -529,44 +530,61 @@ class TestGrabMostWanted(unittest.TestCase):
     def test_sets_downloading_status(self):
         """After enqueue, album_requests.status = 'downloading'."""
         from lib.download import grab_most_wanted
-        from lib.grab_list import GrabListEntry, DownloadFile
-        entry = GrabListEntry(
-            album_id=1, filetype="flac", title="T", artist="A", year="2020",
-            mb_release_id="mbid", db_request_id=42, db_source="request",
-            files=[
-                DownloadFile(filename="u\\M\\01.flac", id="tid-1",
-                             file_dir="u\\M", username="user1", size=30000000),
-            ],
+        entry = make_grab_list_entry(
+            album_id=1,
+            filetype="flac",
+            title="T",
+            artist="A",
+            year="2020",
+            mb_release_id="mbid",
+            db_request_id=42,
+            db_source="request",
+            files=[make_download_file(
+                filename="u\\M\\01.flac",
+                id="tid-1",
+                file_dir="u\\M",
+                username="user1",
+                size=30000000,
+            )],
         )
-        ctx = _make_ctx()
-        mock_db = MagicMock()
-        cast(Any, ctx.pipeline_db_source._get_db).return_value = mock_db
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="wanted"))
+        ctx = make_ctx_with_fake_db(fake_db)
         search_fn = MagicMock(return_value=({1: entry}, [], []))
         grab_most_wanted([], search_fn, ctx)
-        mock_db.set_downloading.assert_called_once()
-        call_args = mock_db.set_downloading.call_args
-        self.assertEqual(call_args[0][0], 42)  # request_id
+        row = fake_db.request(42)
+        self.assertEqual(row["status"], "downloading")
+        self.assertEqual(fake_db.status_history, [(42, "downloading")])
 
     def test_writes_active_download_state(self):
         """JSONB written with correct structure."""
         from lib.download import grab_most_wanted
-        from lib.grab_list import GrabListEntry, DownloadFile
         import json
-        entry = GrabListEntry(
-            album_id=1, filetype="mp3 v0", title="T", artist="A", year="2020",
-            mb_release_id="mbid", db_request_id=42, db_source="request",
-            files=[
-                DownloadFile(filename="u\\M\\01.mp3", id="tid-1",
-                             file_dir="u\\M", username="user1", size=5000000),
-            ],
+        entry = make_grab_list_entry(
+            album_id=1,
+            filetype="mp3 v0",
+            title="T",
+            artist="A",
+            year="2020",
+            mb_release_id="mbid",
+            db_request_id=42,
+            db_source="request",
+            files=[make_download_file(
+                filename="u\\M\\01.mp3",
+                id="tid-1",
+                file_dir="u\\M",
+                username="user1",
+                size=5000000,
+            )],
         )
-        ctx = _make_ctx()
-        mock_db = MagicMock()
-        cast(Any, ctx.pipeline_db_source._get_db).return_value = mock_db
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="wanted"))
+        ctx = make_ctx_with_fake_db(fake_db)
         search_fn = MagicMock(return_value=({1: entry}, [], []))
         grab_most_wanted([], search_fn, ctx)
-        state_json = mock_db.set_downloading.call_args[0][1]
-        state = json.loads(state_json)
+        state_raw = fake_db.request(42)["active_download_state"]
+        assert isinstance(state_raw, str)
+        state = json.loads(state_raw)
         self.assertEqual(state["filetype"], "mp3 v0")
         self.assertEqual(len(state["files"]), 1)
 
