@@ -912,23 +912,26 @@ class TestPollActiveDownloads(unittest.TestCase):
         }
 
     def _make_poll_ctx(self, downloading_rows=None, slskd_downloads=None):
-        """Build context with mocked DB + slskd for polling."""
-        ctx = _make_ctx()
+        """Build context with mocked DB + fake slskd for polling."""
+        if slskd_downloads is None:
+            # Default: return transfers that match the files
+            slskd_downloads = [{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [
+                    {
+                        "filename": "user1\\Music\\01.flac",
+                        "id": "tid-1",
+                        "state": "InProgress",
+                        "bytesTransferred": 1,
+                    },
+                ]}],
+            }]
+        ctx = _make_ctx(slskd=FakeSlskdAPI(downloads=slskd_downloads))
         mock_db = MagicMock()
         mock_db.get_downloading.return_value = downloading_rows or []
         mock_db.get_request.return_value = None  # default: album not found after processing
         cast(Any, ctx.pipeline_db_source._get_db).return_value = mock_db
 
-        if slskd_downloads is not None:
-            ctx.slskd.transfers.get_all_downloads.return_value = slskd_downloads
-        else:
-            # Default: return transfers that match the files
-            ctx.slskd.transfers.get_all_downloads.return_value = [{
-                "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [
-                    {"filename": "user1\\Music\\01.flac", "id": "tid-1"},
-                ]}],
-            }]
         return ctx, mock_db
 
     def test_poll_active_no_downloading(self):
@@ -943,18 +946,23 @@ class TestPollActiveDownloads(unittest.TestCase):
         """1 downloading album, all files complete → calls process_completed_album."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
 
-        # Mock slskd status: file is complete
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Completed, Succeeded"}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            mock_process.return_value = True
-            # After process_completed_album, DB shows status='imported'
-            mock_db.get_request.return_value = {"id": 1, "status": "imported"}
-            poll_active_downloads(ctx)
+        mock_process.return_value = True
+        # After process_completed_album, DB shows status='imported'
+        mock_db.get_request.return_value = {"id": 1, "status": "imported"}
+        poll_active_downloads(ctx)
 
         mock_db.update_download_state.assert_called_once()
         mock_process.assert_called_once()
@@ -964,17 +972,23 @@ class TestPollActiveDownloads(unittest.TestCase):
         """beets_validation_enabled=False → process returns True, poll sets imported."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Completed, Succeeded"}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            mock_process.return_value = True
-            # After process_completed_album, status still 'downloading' (no beets)
-            mock_db.get_request.return_value = {"id": 1, "status": "downloading"}
-            poll_active_downloads(ctx)
+        mock_process.return_value = True
+        # After process_completed_album, status still 'downloading' (no beets)
+        mock_db.get_request.return_value = {"id": 1, "status": "downloading"}
+        poll_active_downloads(ctx)
 
         mock_db.update_download_state.assert_called_once()
         mock_db.update_status.assert_called_once_with(1, "imported")
@@ -994,15 +1008,21 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "InProgress",
+                    "bytesTransferred": 12345,
+                }]}],
+            }],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "InProgress", "bytesTransferred": 12345}
-            return True
         with patch("lib.download.cancel_and_delete"):
-            with patch("lib.download.slskd_download_status", side_effect=mock_status):
-                poll_active_downloads(ctx)
+            poll_active_downloads(ctx)
 
         # Should have logged a timeout download and reset to wanted
         mock_db.log_download.assert_called_once()
@@ -1026,14 +1046,20 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "InProgress",
+                    "bytesTransferred": 22345,
+                }]}],
+            }],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "InProgress", "bytesTransferred": 22345}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            poll_active_downloads(ctx)
+        poll_active_downloads(ctx)
 
         mock_db.log_download.assert_not_called()
         mock_db.update_download_state.assert_called_once()
@@ -1095,14 +1121,20 @@ class TestPollActiveDownloads(unittest.TestCase):
         """Files still downloading with fresh state transition → persist progress snapshot."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "InProgress",
+                    "bytesTransferred": 2048,
+                }]}],
+            }],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "InProgress", "bytesTransferred": 2048}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            poll_active_downloads(ctx)
+        poll_active_downloads(ctx)
 
         # Should NOT process or timeout
         mock_db.update_download_state.assert_called_once()
@@ -1125,38 +1157,39 @@ class TestPollActiveDownloads(unittest.TestCase):
         row2["album_title"] = "Album 2"
         row2["artist_name"] = "Artist 2"
 
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row1, row2])
-
-        # slskd returns transfers for both users
-        def get_downloads_side_effect(includeRemoved=None):
-            return [{
-                "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [
-                    {"filename": "user1\\Music\\01.flac", "id": "tid-1"},
-                ]}]},
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row1, row2],
+            slskd_downloads=[
+                {
+                    "username": "user1",
+                    "directories": [{"directory": "user1\\Music", "files": [{
+                        "filename": "user1\\Music\\01.flac",
+                        "id": "tid-1",
+                        "state": "Completed, Succeeded",
+                        "bytesTransferred": 30000000,
+                    }]}],
+                },
                 {
                     "username": "user2",
-                    "directories": [{"directory": "user2\\Music", "files": [
-                    {"filename": "user2\\Music\\01.mp3", "id": "tid-2"},
-                ]}]},
-            ]
-        ctx.slskd.transfers.get_all_downloads.side_effect = get_downloads_side_effect
+                    "directories": [{"directory": "user2\\Music", "files": [{
+                        "filename": "user2\\Music\\01.mp3",
+                        "id": "tid-2",
+                        "state": "InProgress",
+                        "bytesTransferred": 2048,
+                    }]}],
+                },
+            ],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                if f.username == "user1":
-                    f.status = {"state": "Completed, Succeeded"}
-                else:
-                    f.status = {"state": "InProgress"}
-            return True
+        # slskd returns transfers for both users
+        self.assertEqual(cast(FakeSlskdAPI, ctx.slskd).transfers.get_all_downloads_calls, [])
 
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            mock_process.return_value = True
-            mock_db.get_request.side_effect = lambda request_id: {
-                "id": request_id,
-                "status": "imported" if request_id == 1 else "downloading",
-            }
-            poll_active_downloads(ctx)
+        mock_process.return_value = True
+        mock_db.get_request.side_effect = lambda request_id: {
+            "id": request_id,
+            "status": "imported" if request_id == 1 else "downloading",
+        }
+        poll_active_downloads(ctx)
 
         # Album 1 persists processing_started_at, album 2 persists progress.
         self.assertEqual(mock_db.update_download_state.call_count, 2)
@@ -1182,15 +1215,21 @@ class TestPollActiveDownloads(unittest.TestCase):
         """All files errored → timeout the album."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
-
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Completed, Errored"}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            with patch("lib.download.cancel_and_delete"):
-                poll_active_downloads(ctx)
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [
+                    {
+                        "filename": "user1\\Music\\01.flac",
+                        "id": "tid-1",
+                        "state": "Completed, Errored",
+                    },
+                ]}],
+            }],
+        )
+        with patch("lib.download.cancel_and_delete"):
+            poll_active_downloads(ctx)
 
         mock_process.assert_not_called()
         mock_db.log_download.assert_called_once()
@@ -1210,18 +1249,23 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Queued, Remotely",
+                }]}],
+            }],
+        )
         cfg = cast(Any, ctx.cfg)
         cfg.remote_queue_timeout = 120  # 2 minutes
         cfg.stalled_timeout = 600  # 10 minutes (not exceeded)
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Queued, Remotely"}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            with patch("lib.download.cancel_and_delete"):
-                poll_active_downloads(ctx)
+        with patch("lib.download.cancel_and_delete"):
+            poll_active_downloads(ctx)
 
         mock_db.log_download.assert_called_once()
         kwargs = mock_db.log_download.call_args.kwargs
@@ -1243,19 +1287,23 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Queued, Remotely",
+                }]}],
+            }],
+        )
         cfg = cast(Any, ctx.cfg)
         cfg.remote_queue_timeout = 3600
         cfg.stalled_timeout = 120
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Queued, Remotely"}
-            return True
-
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            with patch("lib.download.cancel_and_delete"):
-                poll_active_downloads(ctx)
+        with patch("lib.download.cancel_and_delete"):
+            poll_active_downloads(ctx)
 
         mock_db.log_download.assert_not_called()
 
@@ -1278,21 +1326,21 @@ class TestPollActiveDownloads(unittest.TestCase):
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
         # Only files 0-4 have transfers in slskd
-        slskd_files = [{"filename": f"user1\\Music\\{i:02d}.flac", "id": f"tid-{i}"}
-                       for i in range(5)]
-        ctx.slskd.transfers.get_all_downloads.return_value = [{
+        slskd_files = [
+            {
+                "filename": f"user1\\Music\\{i:02d}.flac",
+                "id": f"tid-{i}",
+                "state": "InProgress",
+            }
+            for i in range(5)
+        ]
+        cast(FakeSlskdAPI, ctx.slskd).set_downloads([{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": slskd_files}],
-        }]
+        }])
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                if f.id:  # Only files with IDs get polled
-                    f.status = {"state": "InProgress"}
-            return True
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            with patch("lib.download.slskd_do_enqueue", return_value=None):
-                poll_active_downloads(ctx)
+        with patch("lib.download.slskd_do_enqueue", return_value=None):
+            poll_active_downloads(ctx)
 
         # Should NOT process — 7 files vanished (errored), album not complete
         mock_process.assert_not_called()
@@ -1320,28 +1368,37 @@ class TestPollActiveDownloads(unittest.TestCase):
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
 
         # All 3 files have transfers in slskd
-        ctx.slskd.transfers.get_all_downloads.return_value = [{
+        cast(FakeSlskdAPI, ctx.slskd).set_downloads([{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": [
-                {"filename": "user1\\Music\\01.flac", "id": "tid-1"},
-                {"filename": "user1\\Music\\02.flac", "id": "tid-2"},
-                {"filename": "user1\\Music\\03.flac", "id": "tid-3"},
+                {
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                },
+                {
+                    "filename": "user1\\Music\\02.flac",
+                    "id": "tid-2",
+                    "state": "Completed, Succeeded",
+                },
+                {
+                    "filename": "user1\\Music\\03.flac",
+                    "id": "tid-3",
+                    "state": "Completed, Errored",
+                },
             ]}],
-        }]
+        }])
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                if f.filename.endswith("03.flac"):
-                    f.status = {"state": "Completed, Errored"}
-                else:
-                    f.status = {"state": "Completed, Succeeded"}
-            return True
-
-        mock_requeue_file = MagicMock()
-        mock_requeue_file.id = "new-tid-3"
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            with patch("lib.download.slskd_do_enqueue", return_value=[mock_requeue_file]) as mock_enqueue:
-                poll_active_downloads(ctx)
+        requeue_file = make_download_file(
+            filename="user1\\Music\\03.flac",
+            id="new-tid-3",
+            file_dir="user1\\Music",
+            username="user1",
+            size=20000000,
+        )
+        with patch("lib.download.slskd_do_enqueue",
+                   return_value=[requeue_file]) as mock_enqueue:
+            poll_active_downloads(ctx)
 
         # Should NOT process (not all done) and NOT timeout
         mock_process.assert_not_called()
@@ -1359,8 +1416,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
-        ctx.slskd.transfers.get_all_downloads.side_effect = RuntimeError(
-            "temporary slskd failure"
+        cast(FakeSlskdAPI, ctx.slskd).transfers.get_all_downloads_error = (
+            RuntimeError("temporary slskd failure")
         )
 
         with patch("lib.download.cancel_and_delete") as mock_cancel:
@@ -1378,16 +1435,21 @@ class TestPollActiveDownloads(unittest.TestCase):
         """Exceptions after completion should leave persisted state for the next cycle to resume."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
 
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Completed, Succeeded"}
-            return True
-
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            mock_process.side_effect = RuntimeError("boom")
-            poll_active_downloads(ctx)
+        mock_process.side_effect = RuntimeError("boom")
+        poll_active_downloads(ctx)
 
         mock_db.log_download.assert_not_called()
         mock_db.update_status.assert_not_called()
@@ -1400,12 +1462,18 @@ class TestPollActiveDownloads(unittest.TestCase):
         """Album stays 'downloading' during process_completed_album — no redownload window."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
-
-        def mock_status(downloads, ctx_arg, **kwargs):
-            for f in downloads:
-                f.status = {"state": "Completed, Succeeded"}
-            return True
+        ctx, mock_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
 
         # After process_completed_album, mark_done set status to 'imported'
         mock_db.get_request.return_value = {"id": 1, "status": "imported"}
@@ -1418,9 +1486,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             status_updates.append(args)
         mock_db.update_status.side_effect = track_update
 
-        with patch("lib.download.slskd_download_status", side_effect=mock_status):
-            mock_process.return_value = True
-            poll_active_downloads(ctx)
+        mock_process.return_value = True
+        poll_active_downloads(ctx)
 
         # process_completed_album ran
         mock_process.assert_called_once()

@@ -125,6 +125,24 @@ class TestFakeSlskdAPI(unittest.TestCase):
         self.assertEqual(slskd.transfers.enqueue_calls[0].files, files)
         self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "tid-1")
 
+    def test_user_directories_record_results_and_errors(self):
+        slskd = FakeSlskdAPI()
+        directory = [{"directory": "Music\\Album", "files": []}]
+        slskd.users.set_directory("user1", "Music\\Album", directory)
+        slskd.users.set_directory_error(
+            "user1",
+            "Music\\Broken",
+            Exception("Peer offline"),
+        )
+
+        self.assertEqual(slskd.users.directory("user1", "Music\\Album"), directory)
+        with self.assertRaises(Exception):
+            slskd.users.directory("user1", "Music\\Broken")
+        self.assertEqual(slskd.users.directory_calls, [
+            ("user1", "Music\\Album"),
+            ("user1", "Music\\Broken"),
+        ])
+
 
 class TestBuilders(unittest.TestCase):
     def test_make_download_file_defaults(self):

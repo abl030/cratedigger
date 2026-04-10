@@ -114,20 +114,32 @@ class FakeSlskdUsers:
     def __init__(self) -> None:
         self.directory_calls: list[tuple[str, str]] = []
         self.directory_error: Exception | None = None
-        self._directories: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._directories: dict[tuple[str, str], list[Any]] = {}
+        self._directory_errors: dict[tuple[str, str], Exception] = {}
 
     def set_directory(
         self,
         username: str,
         directory: str,
-        result: list[dict[str, Any]],
+        result: list[Any],
     ) -> None:
         self._directories[(username, directory)] = copy.deepcopy(result)
 
-    def directory(self, username: str, directory: str) -> list[dict[str, Any]]:
+    def set_directory_error(
+        self,
+        username: str,
+        directory: str,
+        error: Exception,
+    ) -> None:
+        self._directory_errors[(username, directory)] = error
+
+    def directory(self, username: str, directory: str) -> list[Any]:
         self.directory_calls.append((username, directory))
         if self.directory_error is not None:
             raise self.directory_error
+        directory_error = self._directory_errors.get((username, directory))
+        if directory_error is not None:
+            raise directory_error
         return copy.deepcopy(self._directories.get((username, directory), []))
 
 

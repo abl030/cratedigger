@@ -1,6 +1,6 @@
 """Integration tests — exercise the full search→enqueue→download→process flow.
 
-Uses realistic slskd API fixtures with mocked API calls. Catches type
+Uses realistic slskd API fixtures with lightweight API fakes. Catches type
 mismatches at the boundary between raw slskd dicts and DownloadFile instances.
 """
 
@@ -32,6 +32,7 @@ from lib.download import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.import_dispatch import _build_download_info
 from lib.context import SoularrContext
+from tests.fakes import FakeSlskdAPI
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
@@ -415,12 +416,9 @@ class TestSlskdDoEnqueue(unittest.TestCase):
 
     def test_returns_download_files(self):
         """slskd_do_enqueue should return list of DownloadFile, not dicts."""
-        ctx = _make_ctx()
         file_dir = "Music\\Artist\\Album"
         files = [{"filename": file_dir + "\\01 - Track.flac", "size": 52428800}]
-
-        ctx.slskd.transfers.enqueue.return_value = True
-        ctx.slskd.transfers.get_all_downloads.return_value = [{
+        slskd = FakeSlskdAPI(downloads=[{
             "username": "testuser",
             "directories": make_download_list([
                 make_directory(file_dir, [
@@ -428,9 +426,11 @@ class TestSlskdDoEnqueue(unittest.TestCase):
                      "id": "xfer-1", "size": 52428800},
                 ])
             ])["directories"],
-        }]
+        }])
+        ctx = _make_ctx(slskd=slskd)
 
-        result = slskd_do_enqueue("testuser", files, file_dir, ctx)
+        with patch("time.sleep"):
+            result = slskd_do_enqueue("testuser", files, file_dir, ctx)
 
         self.assertIsNotNone(result)
         assert result is not None
@@ -442,20 +442,21 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         self.assertEqual(result[0].size, 52428800)
 
     def test_enqueue_failure_returns_none(self):
-        ctx = _make_ctx()
-        ctx.slskd.transfers.enqueue.side_effect = Exception("connection error")
-        result = slskd_do_enqueue("user", [{"filename": "f", "size": 1}], "dir", ctx)
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = Exception("connection error")
+        ctx = _make_ctx(slskd=slskd)
+        with patch("time.sleep"):
+            result = slskd_do_enqueue(
+                "user", [{"filename": "f", "size": 1}], "dir", ctx)
         self.assertIsNone(result)
 
     def test_multiple_files(self):
-        ctx = _make_ctx()
         file_dir = "Music\\Album"
         files = [
             {"filename": file_dir + "\\01 - A.flac", "size": 100},
             {"filename": file_dir + "\\02 - B.flac", "size": 200},
         ]
-        ctx.slskd.transfers.enqueue.return_value = True
-        ctx.slskd.transfers.get_all_downloads.return_value = [{
+        slskd = FakeSlskdAPI(downloads=[{
             "username": "user",
             "directories": make_download_list([
                 make_directory(file_dir, [
@@ -463,9 +464,11 @@ class TestSlskdDoEnqueue(unittest.TestCase):
                     {"filename": file_dir + "\\02 - B.flac", "id": "id2", "size": 200},
                 ])
             ])["directories"],
-        }]
+        }])
+        ctx = _make_ctx(slskd=slskd)
 
-        result = slskd_do_enqueue("user", files, file_dir, ctx)
+        with patch("time.sleep"):
+            result = slskd_do_enqueue("user", files, file_dir, ctx)
         assert result is not None
         self.assertEqual(len(result), 2)
         self.assertIsInstance(result[0], DownloadFile)
@@ -477,10 +480,17 @@ class TestDownloadStatusFlow(unittest.TestCase):
 
     def test_status_set_on_download_file(self):
         """slskd_download_status sets .status on DownloadFile instances."""
-        ctx = _make_ctx()
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="user",
+            directory="dir",
+            filename="track.flac",
+            id="xfer-1",
+            state="Completed, Succeeded",
+        )
+        ctx = _make_ctx(slskd=slskd)
         f = DownloadFile(filename="track.flac", id="xfer-1",
                          file_dir="dir", username="user", size=100)
-        ctx.slskd.transfers.get_download.return_value = DOWNLOAD_STATUS_DONE
 
         ok = slskd_download_status([f], ctx)
 
@@ -578,15 +588,18 @@ class TestCancelAndDelete(unittest.TestCase):
     """Verify cancel_and_delete works with DownloadFile instances."""
 
     def test_cancels_download_files(self):
-        ctx = _make_ctx(cfg=_make_matching_cfg(slskd_download_dir=tempfile.mkdtemp()))
+        slskd = FakeSlskdAPI()
+        ctx = _make_ctx(
+            cfg=_make_matching_cfg(slskd_download_dir=tempfile.mkdtemp()),
+            slskd=slskd,
+        )
         files = [
             DownloadFile(filename="track.flac", id="xfer-1",
                          file_dir="Music\\Album", username="user1", size=100),
         ]
         cancel_and_delete(files, ctx)
-        ctx.slskd.transfers.cancel_download.assert_called_once_with(
-            username="user1", id="xfer-1"
-        )
+        self.assertEqual(slskd.transfers.cancel_download_calls[0].username, "user1")
+        self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "xfer-1")
 
 
 class TestAlbumRecordAttrAccess(unittest.TestCase):
@@ -630,19 +643,19 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         mock_cfg = _make_matching_cfg()
         soularr.cfg = mock_cfg
 
-        mock_slskd = MagicMock()
-        mock_slskd.users.directory.return_value = [
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory("user1", "Music\\Disc1", [
             make_directory("Music\\Disc1", [
                 {"filename": "01 - Track.flac", "size": 100},
             ])
-        ]
-        soularr.slskd = mock_slskd
+        ])
+        soularr.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
-        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
@@ -750,14 +763,14 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         )
         soularr.cfg = mock_cfg
 
-        mock_slskd = MagicMock()
-        soularr.slskd = mock_slskd
+        slskd = FakeSlskdAPI()
+        soularr.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
-        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
@@ -1004,14 +1017,14 @@ class TestNegativeMatchCache(unittest.TestCase):
         mock_cfg = _make_matching_cfg()
         soularr.cfg = mock_cfg
 
-        mock_slskd = MagicMock()
-        soularr.slskd = mock_slskd
+        slskd = FakeSlskdAPI()
+        soularr.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
-        self.ctx = _make_ctx(cfg=mock_cfg, slskd=mock_slskd, pipeline_db_source=mock_pdb)
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
@@ -1095,14 +1108,14 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         mock_cfg = _make_matching_cfg()
         soularr.cfg = mock_cfg
 
-        self.mock_slskd = MagicMock()
-        soularr.slskd = self.mock_slskd
+        self.slskd = FakeSlskdAPI()
+        soularr.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
-        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.mock_slskd, pipeline_db_source=mock_pdb)
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
@@ -1121,7 +1134,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should NOT have called slskd.users.directory — skipped before browse
-        self.mock_slskd.users.directory.assert_not_called()
+        self.assertEqual(self.slskd.users.directory_calls, [])
 
     def test_dir_with_close_count_not_skipped(self):
         """Directory with 13 audio files should NOT be skipped for 12 tracks (tolerance +-2)."""
@@ -1129,32 +1142,38 @@ class TestSearchResultPreFiltering(unittest.TestCase):
             "user1": {"Music\\Album": 13}
         }
         # Set up directory return for when it does browse
-        self.mock_slskd.users.directory.return_value = [
+        self.slskd.users.set_directory("user1", "Music\\Album", [
             make_directory("Music\\Album", [
                 {"filename": f"0{i} - Track.flac", "size": 100} for i in range(13)
             ])
-        ]
+        ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # SHOULD have browsed — count is close enough
-        self.mock_slskd.users.directory.assert_called_once()
+        self.assertEqual(
+            self.slskd.users.directory_calls,
+            [("user1", "Music\\Album")],
+        )
 
     def test_dir_without_metadata_not_skipped(self):
         """Directory with no search metadata should still be browsed."""
         # ctx.search_dir_audio_count is empty by default
-        self.mock_slskd.users.directory.return_value = [
+        self.slskd.users.set_directory("user1", "Music\\Album", [
             make_directory("Music\\Album", [{"filename": "01.flac", "size": 100}])
-        ]
+        ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
         soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should browse — no metadata to pre-filter
-        self.mock_slskd.users.directory.assert_called_once()
+        self.assertEqual(
+            self.slskd.users.directory_calls,
+            [("user1", "Music\\Album")],
+        )
 
 
 class TestRankCandidateDirs(unittest.TestCase):
@@ -1226,14 +1245,14 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         mock_cfg = _make_matching_cfg()
         soularr.cfg = mock_cfg
 
-        self.mock_slskd = MagicMock()
-        soularr.slskd = self.mock_slskd
+        self.slskd = FakeSlskdAPI()
+        soularr.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
         soularr.pipeline_db_source = mock_pdb
 
-        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.mock_slskd, pipeline_db_source=mock_pdb)
+        self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
         soularr.cfg = self._orig_cfg
@@ -1242,40 +1261,45 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
 
     def test_parallel_browse_populates_cache(self):
         """_browse_directories should populate folder_cache for all dirs."""
-        def mock_directory(username, directory):
-            return [make_directory(directory, [
-                {"filename": "01 - Track.flac", "size": 100}
-            ])]
-
-        self.mock_slskd.users.directory.side_effect = mock_directory
-
         dirs_to_browse = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
+        for directory in dirs_to_browse:
+            self.slskd.users.set_directory("user1", directory, [
+                make_directory(directory, [
+                    {"filename": "01 - Track.flac", "size": 100}
+                ])
+            ])
+
         results = soularr._browse_directories(
-            dirs_to_browse, "user1", self.mock_slskd, max_workers=2
+            dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
         self.assertEqual(len(results), 3)
         self.assertIn("Music\\Dir1", results)
         self.assertIn("Music\\Dir2", results)
         self.assertIn("Music\\Dir3", results)
+        self.assertCountEqual(self.slskd.users.directory_calls, [
+            ("user1", "Music\\Dir1"),
+            ("user1", "Music\\Dir2"),
+            ("user1", "Music\\Dir3"),
+        ])
 
     def test_parallel_browse_handles_failures(self):
         """Failed browses should be collected, not crash."""
-        call_count = [0]
-
-        def mock_directory(username, directory):
-            call_count[0] += 1
-            if "Dir2" in directory:
-                raise Exception("Peer offline")
-            return [make_directory(directory, [
-                {"filename": "01 - Track.flac", "size": 100}
-            ])]
-
-        self.mock_slskd.users.directory.side_effect = mock_directory
-
         dirs_to_browse = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
+        for directory in ["Music\\Dir1", "Music\\Dir3"]:
+            self.slskd.users.set_directory("user1", directory, [
+                make_directory(directory, [
+                    {"filename": "01 - Track.flac", "size": 100}
+                ])
+            ])
+        self.slskd.users.set_directory_error(
+            "user1",
+            "Music\\Dir2",
+            Exception("Peer offline"),
+        )
+
         results = soularr._browse_directories(
-            dirs_to_browse, "user1", self.mock_slskd, max_workers=2
+            dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
         # Dir1 and Dir3 should succeed, Dir2 should fail
@@ -1283,10 +1307,15 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.assertIn("Music\\Dir1", results)
         self.assertNotIn("Music\\Dir2", results)
         self.assertIn("Music\\Dir3", results)
+        self.assertCountEqual(self.slskd.users.directory_calls, [
+            ("user1", "Music\\Dir1"),
+            ("user1", "Music\\Dir2"),
+            ("user1", "Music\\Dir3"),
+        ])
 
     def test_browse_all_fail_marks_broken(self):
         """If all browses for a user fail, they should be marked broken."""
-        self.mock_slskd.users.directory.side_effect = Exception("Peer gone")
+        self.slskd.users.directory_error = Exception("Peer gone")
 
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = make_tracks((1, "Track One", 1))
