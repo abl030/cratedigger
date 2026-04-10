@@ -591,19 +591,27 @@ class TestGrabMostWanted(unittest.TestCase):
     def test_no_blocking_monitor(self):
         """grab_most_wanted returns immediately without blocking."""
         from lib.download import grab_most_wanted
-        from lib.grab_list import GrabListEntry, DownloadFile
         import time as _time
-        entry = GrabListEntry(
-            album_id=1, filetype="flac", title="T", artist="A", year="2020",
-            mb_release_id="mbid", db_request_id=42, db_source="request",
-            files=[
-                DownloadFile(filename="u\\M\\01.flac", id="tid-1",
-                             file_dir="u\\M", username="user1", size=30000000),
-            ],
+        entry = make_grab_list_entry(
+            album_id=1,
+            filetype="flac",
+            title="T",
+            artist="A",
+            year="2020",
+            mb_release_id="mbid",
+            db_request_id=42,
+            db_source="request",
+            files=[make_download_file(
+                filename="u\\M\\01.flac",
+                id="tid-1",
+                file_dir="u\\M",
+                username="user1",
+                size=30000000,
+            )],
         )
-        ctx = _make_ctx()
-        mock_db = MagicMock()
-        cast(Any, ctx.pipeline_db_source._get_db).return_value = mock_db
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="wanted"))
+        ctx = make_ctx_with_fake_db(fake_db)
         search_fn = MagicMock(return_value=({1: entry}, [], []))
         start = _time.time()
         grab_most_wanted([], search_fn, ctx)
@@ -930,7 +938,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         }
 
     def _make_poll_ctx(self, downloading_rows=None, slskd_downloads=None):
-        """Build context with mocked DB + fake slskd for polling."""
+        """Build context with fake DB + fake slskd for polling."""
         if slskd_downloads is None:
             # Default: return transfers that match the files
             slskd_downloads = [{
@@ -944,27 +952,35 @@ class TestPollActiveDownloads(unittest.TestCase):
                     },
                 ]}],
             }]
-        ctx = _make_ctx(slskd=FakeSlskdAPI(downloads=slskd_downloads))
-        mock_db = MagicMock()
-        mock_db.get_downloading.return_value = downloading_rows or []
-        mock_db.get_request.return_value = None  # default: album not found after processing
-        cast(Any, ctx.pipeline_db_source._get_db).return_value = mock_db
+        fake_db = FakePipelineDB()
+        for row in downloading_rows or []:
+            fake_db.seed_request(row)
+        cfg = _make_ctx().cfg
+        ctx = make_ctx_with_fake_db(
+            fake_db,
+            cfg=cfg,
+            slskd=FakeSlskdAPI(downloads=slskd_downloads),
+        )
+        return ctx, fake_db
 
-        return ctx, mock_db
+    def _download_state(self, fake_db: FakePipelineDB, request_id: int = 1):
+        state = fake_db.request(request_id)["active_download_state"]
+        assert isinstance(state, dict)
+        return state
 
     def test_poll_active_no_downloading(self):
         """No downloading albums → no-op."""
         from lib.download import poll_active_downloads
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[])
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[])
         poll_active_downloads(ctx)
-        mock_db.clear_download_state.assert_not_called()
+        self.assertEqual(fake_db.clear_download_state_calls, [])
 
     @patch("lib.download.process_completed_album")
     def test_poll_active_all_complete(self, mock_process):
         """1 downloading album, all files complete → calls process_completed_album."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -977,12 +993,15 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        mock_process.return_value = True
-        # After process_completed_album, DB shows status='imported'
-        mock_db.get_request.return_value = {"id": 1, "status": "imported"}
+        def mark_imported(*args):
+            fake_db.update_status(1, "imported")
+            return True
+
+        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
-        mock_db.update_download_state.assert_called_once()
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertEqual(fake_db.request(1)["status"], "imported")
         mock_process.assert_called_once()
 
     @patch("lib.download.process_completed_album")
@@ -990,7 +1009,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         """beets_validation_enabled=False → process returns True, poll sets imported."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1004,12 +1023,11 @@ class TestPollActiveDownloads(unittest.TestCase):
         )
 
         mock_process.return_value = True
-        # After process_completed_album, status still 'downloading' (no beets)
-        mock_db.get_request.return_value = {"id": 1, "status": "downloading"}
         poll_active_downloads(ctx)
 
-        mock_db.update_download_state.assert_called_once()
-        mock_db.update_status.assert_called_once_with(1, "imported")
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertEqual(fake_db.request(1)["status"], "imported")
+        self.assertIsNone(fake_db.request(1)["active_download_state"])
 
     def test_poll_active_timeout(self):
         """No byte/state progress for stalled_timeout → cancel, log, reset to wanted."""
@@ -1026,7 +1044,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1042,12 +1060,9 @@ class TestPollActiveDownloads(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"):
             poll_active_downloads(ctx)
 
-        # Should have logged a timeout download and reset to wanted
-        mock_db.log_download.assert_called_once()
-        kwargs = mock_db.log_download.call_args.kwargs
-        self.assertEqual(kwargs["outcome"], "timeout")
-        # Check apply_transition called reset_to_wanted
-        mock_db.reset_to_wanted.assert_called_once()
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
+        self.assertEqual(fake_db.recorded_attempts, [(1, "download")])
 
     def test_poll_active_old_album_with_progress_does_not_timeout(self):
         """Fresh byte progress should refresh stall timer even for an old album."""
@@ -1064,7 +1079,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1079,17 +1094,17 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        mock_db.log_download.assert_not_called()
-        mock_db.update_download_state.assert_called_once()
-        persisted_json = mock_db.update_download_state.call_args[0][1]
-        self.assertIn('"bytes_transferred": 22345', persisted_json)
-        self.assertIn('"last_progress_at"', persisted_json)
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        persisted = self._download_state(fake_db)
+        self.assertEqual(persisted["files"][0]["bytes_transferred"], 22345)
+        self.assertIsNotNone(persisted["last_progress_at"])
 
     def test_poll_active_transfer_vanished_all(self):
         """slskd returns no matching transfers → treat as timeout."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1099,17 +1114,15 @@ class TestPollActiveDownloads(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"):
             poll_active_downloads(ctx)
 
-        mock_db.log_download.assert_called_once()
-        # Check outcome is timeout
-        kwargs = mock_db.log_download.call_args.kwargs
-        self.assertEqual(kwargs["outcome"], "timeout")
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
 
     @patch("lib.download.process_completed_album")
     def test_poll_active_completed_removed_transfer_uses_snapshot_status(self, mock_process):
         """Completed transfers from includeRemoved=true should import, not timeout."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1125,21 +1138,25 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        mock_process.return_value = True
-        mock_db.get_request.return_value = {"id": 1, "status": "imported"}
+        def mark_imported(*args):
+            fake_db.update_status(1, "imported")
+            return True
+
+        mock_process.side_effect = mark_imported
 
         with patch("lib.download.slskd_download_status") as mock_status:
             poll_active_downloads(ctx)
 
         mock_status.assert_not_called()
         mock_process.assert_called_once()
-        mock_db.log_download.assert_not_called()
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.request(1)["status"], "imported")
 
     def test_poll_active_in_progress(self):
         """Files still downloading with fresh state transition → persist progress snapshot."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1155,8 +1172,9 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
 
         # Should NOT process or timeout
-        mock_db.update_download_state.assert_called_once()
-        mock_db.log_download.assert_not_called()
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
 
     @patch("lib.download.process_completed_album")
     def test_poll_active_multiple_albums(self, mock_process):
@@ -1175,7 +1193,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         row2["album_title"] = "Album 2"
         row2["artist_name"] = "Artist 2"
 
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row1, row2],
             slskd_downloads=[
                 {
@@ -1202,18 +1220,21 @@ class TestPollActiveDownloads(unittest.TestCase):
         # slskd returns transfers for both users
         self.assertEqual(cast(FakeSlskdAPI, ctx.slskd).transfers.get_all_downloads_calls, [])
 
-        mock_process.return_value = True
-        mock_db.get_request.side_effect = lambda request_id: {
-            "id": request_id,
-            "status": "imported" if request_id == 1 else "downloading",
-        }
+        def mark_imported(*args):
+            fake_db.update_status(1, "imported")
+            return True
+
+        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
         # Album 1 persists processing_started_at, album 2 persists progress.
-        self.assertEqual(mock_db.update_download_state.call_count, 2)
-        update_request_ids = [call.args[0] for call in mock_db.update_download_state.call_args_list]
+        self.assertEqual(len(fake_db.update_download_state_calls), 2)
+        update_request_ids = [
+            request_id for request_id, _ in fake_db.update_download_state_calls
+        ]
         self.assertEqual(update_request_ids, [1, 2])
-        self.assertIn('"processing_started_at"', mock_db.update_download_state.call_args_list[0].args[1])
+        self.assertIsNone(fake_db.request(1)["active_download_state"])
+        self.assertIsNotNone(self._download_state(fake_db, 2)["last_progress_at"])
         mock_process.assert_called_once()
 
     def test_poll_crash_recovery_no_state(self):
@@ -1221,19 +1242,20 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         row["active_download_state"] = None  # Simulates crash
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
 
         poll_active_downloads(ctx)
 
         # apply_transition calls reset_to_wanted for downloading→wanted
-        mock_db.reset_to_wanted.assert_called_once()
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
+        self.assertEqual(fake_db.status_history, [(1, "wanted")])
 
     @patch("lib.download.process_completed_album")
     def test_poll_active_all_errors(self, mock_process):
         """All files errored → timeout the album."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1250,7 +1272,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         mock_process.assert_not_called()
-        mock_db.log_download.assert_called_once()
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
 
     def test_poll_active_remote_queue_timeout(self):
         """All files queued remotely past timeout → timeout."""
@@ -1267,7 +1290,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1285,9 +1308,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"):
             poll_active_downloads(ctx)
 
-        mock_db.log_download.assert_called_once()
-        kwargs = mock_db.log_download.call_args.kwargs
-        self.assertEqual(kwargs["outcome"], "timeout")
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
 
     def test_poll_active_remote_queue_does_not_use_stalled_timeout(self):
         """Fully remote-queued albums should not hit stalled_timeout first."""
@@ -1305,7 +1327,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1323,7 +1345,9 @@ class TestPollActiveDownloads(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"):
             poll_active_downloads(ctx)
 
-        mock_db.log_download.assert_not_called()
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
 
     @patch("lib.download.process_completed_album")
     def test_poll_transfer_vanished_partial(self, mock_process):
@@ -1341,7 +1365,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             "files": files,
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
 
         # Only files 0-4 have transfers in slskd
         slskd_files = [
@@ -1362,7 +1386,9 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         # Should NOT process — 7 files vanished (errored), album not complete
         mock_process.assert_not_called()
-        mock_db.clear_download_state.assert_not_called()
+        self.assertEqual(fake_db.clear_download_state_calls, [])
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
 
 
     @patch("lib.download.process_completed_album")
@@ -1383,7 +1409,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ],
         }
         row = self._make_downloading_row(state_dict=state_dict)
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
 
         # All 3 files have transfers in slskd
         cast(FakeSlskdAPI, ctx.slskd).set_downloads([{
@@ -1420,20 +1446,20 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         # Should NOT process (not all done) and NOT timeout
         mock_process.assert_not_called()
-        mock_db.log_download.assert_not_called()
+        self.assertEqual(fake_db.download_logs, [])
         # Should re-enqueue the errored file
         mock_enqueue.assert_called_once()
         call_args = mock_enqueue.call_args
         self.assertEqual(call_args[0][0], "user1")  # username
         self.assertEqual(call_args[0][1][0]["filename"], "user1\\Music\\03.flac")
-        persisted_json = mock_db.update_download_state.call_args[0][1]
-        self.assertIn('"retry_count": 1', persisted_json)
+        persisted = self._download_state(fake_db)
+        self.assertEqual(persisted["files"][2]["retry_count"], 1)
 
     def test_poll_active_get_all_downloads_api_error_waits_for_next_cycle(self):
         """Transient bulk-download API failures must not be treated as vanished transfers."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(downloading_rows=[row])
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
         cast(FakeSlskdAPI, ctx.slskd).transfers.get_all_downloads_error = (
             RuntimeError("temporary slskd failure")
         )
@@ -1442,18 +1468,17 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         mock_cancel.assert_not_called()
-        mock_db.log_download.assert_not_called()
-        mock_db.update_download_state.assert_not_called()
-        reset_calls = [c for c in mock_db._execute.call_args_list
-                       if "wanted" in str(c)]
-        self.assertEqual(reset_calls, [])
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(fake_db.status_history, [])
 
     @patch("lib.download.process_completed_album")
     def test_poll_active_completion_exception_persists_processing_state(self, mock_process):
         """Exceptions after completion should leave persisted state for the next cycle to resume."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1469,18 +1494,18 @@ class TestPollActiveDownloads(unittest.TestCase):
         mock_process.side_effect = RuntimeError("boom")
         poll_active_downloads(ctx)
 
-        mock_db.log_download.assert_not_called()
-        mock_db.update_status.assert_not_called()
-        mock_db.update_download_state.assert_called_once()
-        persisted_json = mock_db.update_download_state.call_args[0][1]
-        self.assertIn('"processing_started_at"', persisted_json)
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        persisted = self._download_state(fake_db)
+        self.assertIsNotNone(persisted["processing_started_at"])
 
     @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):
         """Album stays 'downloading' during process_completed_album — no redownload window."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
-        ctx, mock_db = self._make_poll_ctx(
+        ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
@@ -1493,33 +1518,18 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        # After process_completed_album, mark_done set status to 'imported'
-        mock_db.get_request.return_value = {"id": 1, "status": "imported"}
+        def mark_imported(*args):
+            fake_db.update_status(1, "imported")
+            return True
 
-        # Track all update_status and _reset_to_wanted calls to verify
-        # album was never set to 'wanted' during processing
-        status_updates = []
-        original_update = mock_db.update_status.side_effect
-        def track_update(*args, **kwargs):
-            status_updates.append(args)
-        mock_db.update_status.side_effect = track_update
-
-        mock_process.return_value = True
+        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
         # process_completed_album ran
         mock_process.assert_called_once()
-        mock_db.update_download_state.assert_called_once()
-        # The album was NEVER set to 'wanted' before processing
-        for args in status_updates:
-            if len(args) >= 2:
-                self.assertNotEqual(args[1], "wanted",
-                                  "Album should never be set to 'wanted' during processing")
-        # _reset_to_wanted uses _execute, not update_status — check no 'wanted' SQL
-        for call in mock_db._execute.call_args_list:
-            sql = str(call[0][0]) if call[0] else ""
-            if "wanted" in sql:
-                self.fail("Album was reset to 'wanted' during processing — redownload window!")
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertNotIn((1, "wanted"), fake_db.status_history)
+        self.assertEqual(fake_db.request(1)["status"], "imported")
 
 
 class TestBuildActiveDownloadState(unittest.TestCase):
