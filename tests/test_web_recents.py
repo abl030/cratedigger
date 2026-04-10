@@ -35,7 +35,7 @@ _DEFAULTS = LogEntry(
     existing_min_bitrate=None,
     existing_spectral_bitrate=None,
     request_min_bitrate=320,
-    quality_override=None,
+    search_filetype_override=None,
     request_status="imported",
     bitrate=320000,
     filetype="mp3",
@@ -244,10 +244,10 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Failed")
         self.assertEqual(result.badge_class, "badge-failed")
 
-    def test_quality_override_upgrade(self):
-        """quality_override set — replacing garbage CBR with genuine V0."""
+    def test_search_filetype_override_upgrade(self):
+        """search_filetype_override set - replacing garbage CBR with genuine V0."""
         result = classify_log_entry(_entry(
-            outcome="success", quality_override="flac",
+            outcome="success", search_filetype_override="flac",
             existing_min_bitrate=320, actual_min_bitrate=243))
         self.assertEqual(result.badge, "Upgraded")
         self.assertEqual(result.badge_class, "badge-upgraded")
@@ -600,29 +600,29 @@ class TestDownloadedLabel(unittest.TestCase):
 
 
 # ============================================================================
-# quality_override — should only trigger with existing files on disk
+# search_filetype_override - should only trigger with existing files on disk
 # ============================================================================
 
-class TestQualityOverride(unittest.TestCase):
+class TestSearchFiletypeOverride(unittest.TestCase):
 
-    def test_quality_override_without_existing_is_new_import(self):
-        """quality_override set but nothing on disk = new import, not upgrade."""
+    def test_search_filetype_override_without_existing_is_new_import(self):
+        """search_filetype_override set but nothing on disk = new import, not upgrade."""
         result = classify_log_entry(_entry(
-            outcome="success", quality_override="flac",
+            outcome="success", search_filetype_override="flac",
             existing_min_bitrate=None, actual_min_bitrate=243))
         self.assertEqual(result.badge, "Imported")
 
-    def test_quality_override_with_existing_is_upgrade(self):
-        """quality_override set AND existing on disk = upgrade."""
+    def test_search_filetype_override_with_existing_is_upgrade(self):
+        """search_filetype_override set AND existing on disk = upgrade."""
         result = classify_log_entry(_entry(
-            outcome="success", quality_override="flac",
+            outcome="success", search_filetype_override="flac",
             existing_min_bitrate=320, actual_min_bitrate=243))
         self.assertEqual(result.badge, "Upgraded")
 
-    def test_quality_override_opus_shows_opus(self):
+    def test_search_filetype_override_opus_shows_opus(self):
         """Opus upgrade should show OPUS in verdict, not MP3."""
         result = classify_log_entry(_entry(
-            outcome="success", quality_override="flac",
+            outcome="success", search_filetype_override="flac",
             existing_min_bitrate=320, actual_filetype="opus",
             was_converted=True, original_filetype="flac"))
         self.assertEqual(result.badge, "Upgraded")

@@ -117,8 +117,8 @@ class AlbumRecord:
         year = row.get("year") or "0000"
         mb_artist_id = row.get("mb_artist_id") or ""
         assert isinstance(mb_artist_id, str)
-        quality_override = row.get("search_filetype_override")
-        assert isinstance(quality_override, (str, type(None)))
+        search_filetype_override = row.get("search_filetype_override")
+        assert isinstance(search_filetype_override, (str, type(None)))
         target_format = row.get("target_format")
         assert isinstance(target_format, (str, type(None)))
 
@@ -133,7 +133,7 @@ class AlbumRecord:
             db_request_id=row_id,
             db_source=source,
             db_mb_release_id=mb_release_id or "",
-            db_search_filetype_override=quality_override,
+            db_search_filetype_override=search_filetype_override,
             db_target_format=target_format,
         )
 
@@ -282,10 +282,10 @@ class DatabaseSource:
             final_format=dl.final_format,
         )
 
-    def mark_failed(self, album_record, bv_result, usernames=None,
-                    download_info=None, search_filetype_override=None,
-                    cooled_down_users: set[str] | None = None):
-        """Log the failure, preserve intent, and keep the album wanted for retry."""
+    def reject_and_requeue(self, album_record, bv_result, usernames=None,
+                           download_info=None, search_filetype_override=None,
+                           cooled_down_users: set[str] | None = None):
+        """Record a rejected validation and keep the album wanted for retry."""
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:

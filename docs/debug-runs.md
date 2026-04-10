@@ -138,9 +138,9 @@ None — all fixes confirmed working.
 
 ### Fixed:
 1. **Removed album-level Scenario from detail panel** — was showing old import's "strong_match" for a "high_distance" rejection, causing confusion
-2. **quality_override downloads show "Upgraded" not "Quality mismatch"** — when replacing garbage CBR 320 with genuine V0, the nominal bitrate goes down (320→224) but it's still an upgrade. Now checks if `quality_override` is set.
+2. **search_filetype_override downloads show "Upgraded" not "Quality mismatch"** — when replacing garbage CBR 320 with genuine V0, the nominal bitrate goes down (320→224) but it's still an upgrade. Now checks if `search_filetype_override` is set.
 3. **Reverted Bug 10 fix** — album `estimated_bitrate` now set from any outlier track again. A single bad track at 192kbps means the album should be upgraded.
 
 ### Remaining display issues (cosmetic, not blocking):
-- Nine Black Poppies shows "Quality mismatch - accepted" (no quality_override, was manually accepted pre-spectral era)
+- Nine Black Poppies shows "Quality mismatch - accepted" (no search_filetype_override, was manually accepted pre-spectral era)
 - Heretic Pride 11:23 shows ↓MP3 V2→MP3 160k (genuine downgrade from ShadowoftheHunter that happened pre-spectral)

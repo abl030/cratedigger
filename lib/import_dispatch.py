@@ -117,7 +117,7 @@ def _do_mark_done(
     )
 
 
-def _do_mark_failed(
+def _record_rejection_and_maybe_requeue(
     db: "PipelineDB",
     request_id: int,
     dl_info: DownloadInfo,
@@ -132,7 +132,7 @@ def _do_mark_failed(
     validation_result: str | None = None,
     staged_path: str | None = None,
 ) -> None:
-    """Log failure and optionally requeue — standalone version of DatabaseSource.mark_failed.
+    """Record a rejected import and optionally requeue the request.
 
     When requeue=True (auto-import): transitions to "wanted", records attempt.
     When requeue=False (force/manual import): only logs to download_log.
@@ -429,7 +429,7 @@ def dispatch_import_core(
                 f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
             for line in (result.stdout or "").strip().split("\n"):
                 logger.error(f"  {line}")
-            _do_mark_failed(
+            _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 distance=distance,
                 scenario="no_json_result",
@@ -475,7 +475,7 @@ def dispatch_import_core(
                             logger.exception("Failed to update upgrade delta")
                 outcome_success = True
                 outcome_message = "Import successful"
-            elif action.mark_failed:
+            elif action.record_rejection:
                 if decision == "downgrade":
                     fail_scenario = "quality_downgrade"
                     fail_detail: str | None = (f"new {new_br}kbps "
@@ -523,7 +523,7 @@ def dispatch_import_core(
                         logger.debug(
                             "Failed to inspect search_filetype_override before downgrade reset")
 
-                _do_mark_failed(
+                _record_rejection_and_maybe_requeue(
                     db, request_id, dl_info,
                     distance=distance,
                     scenario=fail_scenario,
@@ -561,7 +561,7 @@ def dispatch_import_core(
                             cooled_down_users.add(username)
                 logger.info(f"  Denylisted {usernames} for request {request_id}")
 
-            if action.requeue and (requeue_on_failure or not action.mark_failed):
+            if action.requeue and (requeue_on_failure or not action.record_rejection):
                 requeue_fields: dict[str, object] = {
                     "search_filetype_override": QUALITY_UPGRADE_TIERS,
                 }
@@ -588,7 +588,7 @@ def dispatch_import_core(
                     trigger_meelo_clean(cfg)
     except sp.TimeoutExpired:
         logger.error(f"{mode} TIMEOUT: {label}")
-        _do_mark_failed(
+        _record_rejection_and_maybe_requeue(
             db, request_id, dl_info,
             distance=distance, scenario="timeout",
             detail="import_one.py timed out", error="timeout",
@@ -603,7 +603,7 @@ def dispatch_import_core(
         outcome_message = "Import timed out"
     except Exception:
         logger.exception(f"{mode} ERROR: {label}")
-        _do_mark_failed(
+        _record_rejection_and_maybe_requeue(
             db, request_id, dl_info,
             distance=distance, scenario="exception",
             detail="unhandled exception in auto-import", error="exception",

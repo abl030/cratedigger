@@ -292,7 +292,7 @@ class PipelineDB:
                    ar.album_title, ar.artist_name, ar.mb_release_id,
                    ar.year, ar.country, ar.status AS request_status,
                    ar.min_bitrate AS request_min_bitrate,
-                   ar.prev_min_bitrate, ar.search_filetype_override AS quality_override, ar.source
+                   ar.prev_min_bitrate, ar.search_filetype_override, ar.source
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
         """

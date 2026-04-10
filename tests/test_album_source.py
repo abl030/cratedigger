@@ -171,7 +171,7 @@ class TestDatabaseSource(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "imported")
 
-    def test_mark_failed_updates_status_and_denylists(self):
+    def test_reject_and_requeue_updates_status_and_denylists(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="fail-uuid",
@@ -182,7 +182,7 @@ class TestDatabaseSource(unittest.TestCase):
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
-        source.mark_failed(record, bv_result, usernames={"bad_user1", "bad_user2"})
+        source.reject_and_requeue(record, bv_result, usernames={"bad_user1", "bad_user2"})
 
         req = db.get_request(req_id)
         assert req is not None
@@ -193,7 +193,7 @@ class TestDatabaseSource(unittest.TestCase):
         usernames = {d["username"] for d in denied}
         self.assertEqual(usernames, {"bad_user1", "bad_user2"})
 
-    def test_mark_failed_preserves_existing_search_filetype_override(self):
+    def test_reject_and_requeue_preserves_existing_search_filetype_override(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="fail-preserve-uuid",
@@ -205,13 +205,13 @@ class TestDatabaseSource(unittest.TestCase):
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
-        source.mark_failed(record, bv_result)
+        source.reject_and_requeue(record, bv_result)
 
         req = db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["search_filetype_override"], "flac,mp3 v0,mp3 320")
 
-    def test_mark_failed_uses_explicit_narrowed_override(self):
+    def test_reject_and_requeue_uses_explicit_narrowed_override(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="fail-narrow-uuid",
@@ -223,7 +223,8 @@ class TestDatabaseSource(unittest.TestCase):
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="quality_downgrade")
 
-        source.mark_failed(record, bv_result, search_filetype_override="flac,mp3 v0")
+        source.reject_and_requeue(record, bv_result,
+                                  search_filetype_override="flac,mp3 v0")
 
         req = db.get_request(req_id)
         assert req is not None

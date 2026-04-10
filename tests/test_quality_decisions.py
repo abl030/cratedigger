@@ -570,22 +570,22 @@ class TestDispatchAction(unittest.TestCase):
 
     # (decision, {flag: expected_value, ...})
     CASES = [
-        ("import", dict(mark_done=True, mark_failed=False, denylist=False,
+        ("import", dict(mark_done=True, record_rejection=False, denylist=False,
                         requeue=False, cleanup=True, trigger_meelo=True,
                         run_quality_gate=True)),
         ("preflight_existing", dict(mark_done=True, trigger_meelo=True,
                                     run_quality_gate=True)),
-        ("downgrade", dict(mark_done=False, mark_failed=True, denylist=True,
+        ("downgrade", dict(mark_done=False, record_rejection=True, denylist=True,
                            requeue=False, cleanup=True)),
         ("transcode_upgrade", dict(mark_done=True, denylist=True, requeue=True,
                                    trigger_meelo=True)),
-        ("transcode_downgrade", dict(mark_done=False, mark_failed=True,
+        ("transcode_downgrade", dict(mark_done=False, record_rejection=True,
                                      denylist=True, requeue=True)),
         ("transcode_first", dict(mark_done=True, denylist=True, requeue=True,
                                  trigger_meelo=True)),
-        ("conversion_failed", dict(mark_failed=True, denylist=False)),
-        ("import_failed", dict(mark_failed=True)),
-        ("target_conversion_failed", dict(mark_failed=True, denylist=False)),
+        ("conversion_failed", dict(record_rejection=True, denylist=False)),
+        ("import_failed", dict(record_rejection=True)),
+        ("target_conversion_failed", dict(record_rejection=True, denylist=False)),
     ]
 
     def test_dispatch_action_flags(self):
@@ -651,8 +651,9 @@ class TestDispatchActionContract(unittest.TestCase):
         import_stage = [s for s in tree["stages"] if s["id"] == "import_decision"][0]
         for outcome in import_stage["outcomes"]:
             a = dispatch_action(outcome)
-            self.assertTrue(a.mark_done or a.mark_failed,
-                            f"dispatch_action('{outcome}') must set mark_done or mark_failed")
+            self.assertTrue(a.mark_done or a.record_rejection,
+                            f"dispatch_action('{outcome}') must set mark_done or "
+                            "record_rejection")
 
 
 # ============================================================================
@@ -660,7 +661,7 @@ class TestDispatchActionContract(unittest.TestCase):
 # ============================================================================
 
 class TestRejectedDownloadTier(unittest.TestCase):
-    """Test mapping from DownloadInfo to quality_override tier string."""
+    """Test mapping from DownloadInfo to search_filetype_override tier string."""
 
     def test_cbr_320_bps(self):
         """CBR 320 (bitrate in bps after import_one) → 'mp3 320'."""
@@ -700,7 +701,7 @@ class TestRejectedDownloadTier(unittest.TestCase):
 
 
 class TestNarrowOverrideOnDowngrade(unittest.TestCase):
-    """Test narrowing quality_override after downgrade rejection."""
+    """Test narrowing search_filetype_override after downgrade rejection."""
 
     def test_removes_320_from_upgrade_tiers(self):
         """Standard case: 'lossless,mp3 v0,mp3 320' + 320 → 'lossless,mp3 v0'."""

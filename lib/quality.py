@@ -963,7 +963,7 @@ def quality_gate_decision(current: AudioQualityMeasurement) -> str:
 class DispatchAction:
     """What actions to take after import_one.py returns a decision."""
     mark_done: bool = False
-    mark_failed: bool = False
+    record_rejection: bool = False
     denylist: bool = False
     requeue: bool = False
     cleanup: bool = True
@@ -980,15 +980,15 @@ def dispatch_action(decision: str) -> DispatchAction:
         return DispatchAction(mark_done=True, trigger_meelo=True,
                               run_quality_gate=True, cleanup=True)
     elif decision == "downgrade":
-        return DispatchAction(mark_failed=True, denylist=True, cleanup=True)
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision in ("transcode_upgrade", "transcode_first"):
         return DispatchAction(mark_done=True, denylist=True, requeue=True,
                               trigger_meelo=True, cleanup=True)
     elif decision == "transcode_downgrade":
-        return DispatchAction(mark_failed=True, denylist=True, requeue=True,
+        return DispatchAction(record_rejection=True, denylist=True, requeue=True,
                               cleanup=True)
     else:  # import_failed, conversion_failed, mbid_missing, crash, etc.
-        return DispatchAction(mark_failed=True)
+        return DispatchAction(record_rejection=True)
 
 
 def compute_effective_override_bitrate(
@@ -1538,16 +1538,16 @@ def get_decision_tree() -> dict[str, Any]:
                      "result": "mark_done + quality_gate", "color": "green",
                      "effect": "imported, run quality gate"},
                     {"condition": "downgrade",
-                     "result": "mark_failed + denylist", "color": "red",
+                     "result": "record_rejection + denylist", "color": "red",
                      "effect": "not an upgrade, denylist source"},
                     {"condition": "transcode_upgrade / transcode_first",
                      "result": "mark_done + denylist + requeue", "color": "amber",
                      "effect": "imported but transcode, keep searching"},
                     {"condition": "transcode_downgrade",
-                     "result": "mark_failed + denylist + requeue", "color": "red",
+                     "result": "record_rejection + denylist + requeue", "color": "red",
                      "effect": "transcode not an upgrade, keep searching"},
                     {"condition": "other (error/crash/timeout)",
-                     "result": "mark_failed", "color": "red",
+                     "result": "record_rejection", "color": "red",
                      "effect": "import failed"},
                 ],
                 "outcomes": ["import", "preflight_existing", "downgrade",

@@ -29,7 +29,7 @@ Created 2026-04-03. Tracks the AudioFileSpec refactoring and planned extensions.
   in import_one.py (`will_be_verified_lossless = converted > 0 and not is_transcode`).
 
 ### Catch-all fallback
-- `find_download()` retries with `"*"` when normal filetypes fail and no quality_override
+- `find_download()` retries with `"*"` when normal filetypes fail and no search_filetype_override
 - `try_enqueue()` / `try_multi_enqueue()` merge all cached dirs for catch-all
 - `album_track_num()` counts all audio files without same-extension constraint
 

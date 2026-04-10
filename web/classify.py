@@ -58,7 +58,7 @@ class LogEntry:
     mb_release_id: Optional[str] = None
     request_status: Optional[str] = None
     request_min_bitrate: Optional[int] = None  # kbps
-    quality_override: Optional[str] = None
+    search_filetype_override: Optional[str] = None
     source: Optional[str] = None
 
     @classmethod
@@ -186,8 +186,8 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
                         and entry.existing_min_bitrate > 0)
 
         if had_existing:
-            if entry.quality_override:
-                return _classify_quality_override(entry, is_verified_lossless)
+            if entry.search_filetype_override:
+                return _classify_search_filetype_override(entry, is_verified_lossless)
             verdict = _upgrade_verdict(
                 entry.existing_min_bitrate,
                 entry.actual_min_bitrate or entry.request_min_bitrate,
@@ -264,9 +264,11 @@ def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
     return ("Transcode", "badge-transcode", "#a93", verdict)
 
 
-def _classify_quality_override(entry: LogEntry,
-                               is_verified_lossless: bool) -> tuple[str, str, str, str]:
-    """Classify a quality_override upgrade (replacing unverified CBR)."""
+def _classify_search_filetype_override(
+    entry: LogEntry,
+    is_verified_lossless: bool,
+) -> tuple[str, str, str, str]:
+    """Classify a search_filetype_override upgrade (replacing unverified CBR)."""
     fmt = entry.actual_filetype or entry.filetype or "mp3"
     cur_label = quality_label(fmt, entry.actual_min_bitrate
                               or entry.request_min_bitrate or 0)

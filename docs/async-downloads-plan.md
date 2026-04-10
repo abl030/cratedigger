@@ -221,7 +221,7 @@ class ActiveDownloadState:
 **Tests first** (RED): `tests/test_download.py`
 - `test_reconstruct_grab_list_entry_basic`: album_requests row + ActiveDownloadState → correct GrabListEntry
 - `test_reconstruct_grab_list_entry_multi_disc`: disk_no/disk_count preserved
-- `test_reconstruct_grab_list_entry_quality_override`: db_quality_override set correctly
+- `test_reconstruct_grab_list_entry_search_filetype_override`: db_search_filetype_override set correctly
 - `test_reconstruct_grab_list_entry_missing_year`: year defaults to empty string
 
 **Implementation** (GREEN):
@@ -262,7 +262,7 @@ def reconstruct_grab_list_entry(
         mb_release_id=request.get("mb_release_id") or "",
         db_request_id=request["id"],
         db_source=request.get("source"),
-        db_quality_override=request.get("quality_override"),
+        db_search_filetype_override=request.get("search_filetype_override"),
     )
 ```
 
@@ -339,7 +339,7 @@ def rederive_transfer_ids(
 **Files**: `lib/download.py`
 
 **Tests first** (RED): `tests/test_download.py`
-- `test_poll_active_all_complete`: 1 downloading album, all files "Completed, Succeeded" → calls `process_completed_album`, final status set by mark_done/mark_failed
+- `test_poll_active_all_complete`: 1 downloading album, all files "Completed, Succeeded" → calls `process_completed_album`, final status set by mark_done/reject_and_requeue
 - `test_poll_active_all_complete_no_beets`: beets_validation_enabled=False → process_completed_album returns without calling mark_done → poll catches this and sets status='imported'
 - `test_poll_active_timeout`: enqueued_at is old, timeout exceeded → cancel, log download with outcome='timeout', set status='wanted'
 - `test_poll_active_transfer_vanished_all`: slskd returns no matching transfers → treat as timeout
@@ -425,7 +425,7 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
 
     STATUS ORDERING: Album stays 'downloading' during process_completed_album.
     - If process_completed_album calls mark_done() → status='imported' (done)
-    - If process_completed_album calls mark_failed() → status='wanted' (retry)
+    - If process_completed_album calls reject_and_requeue() → status='wanted' (retry)
     - If process_completed_album returns without setting status (beets
       validation disabled, or no mb_release_id) → we catch this and set
       status='imported' ourselves
@@ -509,7 +509,7 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
         if album_done and problems is None:
             logger.info(f"Download complete: {entry.artist} - {entry.title}")
             # Clear active_download_state but keep status='downloading'.
-            # process_completed_album will set final status via mark_done/mark_failed.
+            # process_completed_album will set final status via mark_done/reject_and_requeue.
             # If it crashes, next poll sees downloading+no state → resets to wanted.
             db.clear_download_state(request_id)
             success = process_completed_album(entry, [], ctx)
@@ -647,7 +647,7 @@ if refreshed and refreshed["status"] == "downloading":
 **Files**: `lib/pipeline_db.py`
 
 **Why**: `reset_to_wanted()` and `update_status()` are called from many places (quality gate,
-mark_done, mark_failed, dispatch_import). If any of these runs on an album that still has
+mark_done, reject_and_requeue, dispatch_import). If any of these runs on an album that still has
 `active_download_state` set (e.g., due to a bug or race), the stale JSONB persists. Clearing
 it in these methods is defensive — it should already be NULL by the time they run, but this
 prevents stale state from accumulating.

@@ -36,7 +36,7 @@ class AlbumState:
     spectral_grade: str | None    # current_spectral_grade
     spectral_bitrate: int | None  # current_spectral_bitrate
     verified_lossless: bool
-    quality_override: str | None  # search_filetype_override (transient search filter)
+    search_filetype_override: str | None  # search_filetype_override (transient search filter)
     target_format: str | None = None  # persistent user intent
 
 
@@ -76,7 +76,7 @@ class SimResult:
     stage2_import: str | None
     stage3_quality_gate: str | None
     backfill_override: str | None
-    quality_override_after: str | None  # what search_filetype_override becomes after cycle
+    search_filetype_override_after: str | None  # what search_filetype_override becomes after cycle
     target_format_after: str | None = None  # target_format is always preserved
 
 
@@ -178,7 +178,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     # Simulate spectral propagation + backfill for rejections
     backfill = None
     if not result["imported"] and result["keep_searching"]:
-        if not album.quality_override:
+        if not album.search_filetype_override:
             dl_spectral = download.spectral_grade
             propagated_grade = dl_spectral if dl_spectral else album.spectral_grade
             backfill = rejection_backfill_override(
@@ -198,7 +198,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     gate = result["stage3_quality_gate"]
     if not result["imported"]:
         # Rejection: override stays (or backfill sets it)
-        override_after = backfill if backfill else album.quality_override
+        override_after = backfill if backfill else album.search_filetype_override
     elif gate == "accept":
         override_after = None  # production clears search_filetype_override on accept
     elif gate == "requeue_upgrade":
@@ -206,7 +206,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     elif gate == "requeue_lossless":
         override_after = "lossless"
     else:
-        override_after = album.quality_override
+        override_after = album.search_filetype_override
 
     return SimResult(
         imported=result["imported"],
@@ -217,7 +217,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
         stage2_import=result["stage2_import"],
         stage3_quality_gate=result["stage3_quality_gate"],
         backfill_override=backfill,
-        quality_override_after=override_after,
+        search_filetype_override_after=override_after,
         target_format_after=album.target_format,  # always preserved
     )
 
@@ -310,10 +310,10 @@ class TestSimulatorInvariants(unittest.TestCase):
                     if r.imported:
                         self.assertIsNone(r.backfill_override)
 
-    def test_quality_override_suppresses_backfill(self):
-        """Albums with existing quality_override skip backfill entirely."""
+    def test_search_filetype_override_suppresses_backfill(self):
+        """Albums with existing search_filetype_override skip backfill entirely."""
         for album in ALBUM_STATES:
-            if album.quality_override is None:
+            if album.search_filetype_override is None:
                 continue
             for dl in DOWNLOAD_SCENARIOS:
                 with self.subTest(album=album.name, dl=dl.name):
@@ -347,7 +347,7 @@ class TestNamedRegressions(unittest.TestCase):
         """CBR 320 genuine on disk + MP3 downgrade -> backfill fires -> flac only.
 
         Bug: CBR 320 genuine albums kept downloading MP3s rejected as
-        downgrades. Without backfill, quality_override stays NULL and the
+        downgrades. Without backfill, search_filetype_override stays NULL and the
         pipeline re-searches all tiers forever.
         """
         album = ALBUM_MAP["cbr_320_genuine"]
@@ -457,7 +457,7 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r.stage3_quality_gate, "accept")
 
         # search_filetype_override is correctly cleared on accept (transient)
-        self.assertIsNone(r.quality_override_after,
+        self.assertIsNone(r.search_filetype_override_after,
             "search_filetype_override should be cleared on accept")
         # target_format survives — user intent is preserved
         self.assertEqual(r.target_format_after, "flac",
@@ -814,7 +814,7 @@ class TestBackfillPropagation(unittest.TestCase):
                                       "192 < 210 -> backfill should not fire")
 
     def test_existing_override_suppresses_backfill(self):
-        """Albums with quality_override already set skip backfill entirely."""
+        """Albums with search_filetype_override already set skip backfill entirely."""
         album = ALBUM_MAP["cbr_320_genuine_flac_override"]
         for dl in DOWNLOAD_SCENARIOS:
             with self.subTest(dl=dl.name):

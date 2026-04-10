@@ -226,7 +226,7 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
 
 
 class TestCooldownTriggerOnRejection(unittest.TestCase):
-    """mark_failed() should call check_and_apply_cooldown after logging."""
+    """reject_and_requeue() should call check_and_apply_cooldown after logging."""
 
     def test_rejection_triggers_cooldown_check(self):
         from album_source import DatabaseSource
@@ -251,9 +251,9 @@ class TestCooldownTriggerOnRejection(unittest.TestCase):
         dl = DownloadInfo(username="baduser")
         cooled_down_users: set[str] = set()
 
-        source.mark_failed(album_record, bv_result,
-                           usernames=["baduser"], download_info=dl,
-                           cooled_down_users=cooled_down_users)
+        source.reject_and_requeue(album_record, bv_result,
+                                  usernames=["baduser"], download_info=dl,
+                                  cooled_down_users=cooled_down_users)
 
         # Domain state assertions
         self.assertEqual(fake_db.request(42)["status"], "wanted")

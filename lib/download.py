@@ -472,7 +472,7 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
     # Backfill search_filetype_override for pre-quality-gate albums stuck in loops
     backfill_override = _compute_rejection_backfill(album_data, ctx)
 
-    ctx.pipeline_db_source.mark_failed(
+    ctx.pipeline_db_source.reject_and_requeue(
         album_data,
         bv_result,
         usernames=usernames,

@@ -170,7 +170,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         db.assert_log(self, 0, outcome="success")
 
     def test_downgrade_prevented(self):
-        """Downgrade → mark_failed + denylist, no quality gate."""
+        """Downgrade -> record rejection + denylist, no quality gate."""
         ir = make_import_result(decision="downgrade",
                                 new_min_bitrate=128, prev_min_bitrate=320)
         beets_info = AlbumInfo(
@@ -320,7 +320,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
 
 class TestDispatchNoJsonResult(unittest.TestCase):
-    """Integration slice: sp.run returns no sentinel → mark_failed."""
+    """Integration slice: sp.run returns no sentinel -> record rejection."""
 
     def test_no_json_marks_failed_and_requeues(self):
         """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""

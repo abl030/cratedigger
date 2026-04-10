@@ -1,4 +1,4 @@
-"""Tests for _do_mark_done and _do_mark_failed — standalone DB operations.
+"""Tests for _do_mark_done and rejection recording — standalone DB operations.
 
 Orchestration tests using FakePipelineDB. Assert domain state (request
 status/fields, download log rows, recorded attempts) rather than mock
@@ -70,18 +70,18 @@ class TestDoMarkDone(unittest.TestCase):
         self.assertAlmostEqual(log.beets_distance, 0.05)
 
 
-class TestDoMarkFailed(unittest.TestCase):
-    """_do_mark_failed must log failure, optionally requeue, handle cooldowns."""
+class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
+    """Rejection recording must log failure and optionally requeue."""
 
     def _call(self, requeue=True, outcome_label="rejected",
               search_filetype_override=None, dl_info=None,
               validation_result=None, staged_path=None):
-        from lib.import_dispatch import _do_mark_failed
+        from lib.import_dispatch import _record_rejection_and_maybe_requeue
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         if dl_info is None:
             dl_info = DownloadInfo(username="baduser")
-        _do_mark_failed(
+        _record_rejection_and_maybe_requeue(
             db=db,  # type: ignore[arg-type]
             request_id=42,
             dl_info=dl_info,

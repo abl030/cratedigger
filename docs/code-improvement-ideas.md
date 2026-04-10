@@ -44,7 +44,7 @@ JS could import a shared `STATUSES` array from a single module. When a new statu
 
 ## 3. `process_completed_album` status contract
 
-**Problem**: `poll_active_downloads` has a "safety net" that checks whether `process_completed_album` set the DB status or not. This exists because `process_completed_album` sometimes sets status (via `mark_done`/`mark_failed` in the beets validation path) and sometimes doesn't (when beets validation is disabled). The caller has to guess.
+**Problem**: `poll_active_downloads` has a "safety net" that checks whether `process_completed_album` set the DB status or not. This exists because `process_completed_album` sometimes sets status (via `mark_done`/`reject_and_requeue` in the beets validation path) and sometimes doesn't (when beets validation is disabled). The caller has to guess.
 
 **Fix**: Return a typed result instead of a bool:
 
