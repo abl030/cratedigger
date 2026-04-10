@@ -232,9 +232,12 @@ class TestCooldownTriggerOnRejection(unittest.TestCase):
         from album_source import DatabaseSource
         from lib.quality import DownloadInfo
 
-        mock_db = MagicMock()
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="downloading"))
+        fake_db.set_cooldown_result(True)
+
         source = DatabaseSource.__new__(DatabaseSource)
-        source._db = mock_db
+        source._db = fake_db  # type: ignore[assignment]
 
         album_record = MagicMock()
         album_record.db_request_id = 42
@@ -247,17 +250,19 @@ class TestCooldownTriggerOnRejection(unittest.TestCase):
 
         dl = DownloadInfo(username="baduser")
         cooled_down_users: set[str] = set()
-        mock_db.check_and_apply_cooldown.return_value = True
 
-        with patch("lib.transitions.apply_transition"):
-            source.mark_failed(album_record, bv_result,
-                               usernames=["baduser"], download_info=dl,
-                               cooled_down_users=cooled_down_users)
+        source.mark_failed(album_record, bv_result,
+                           usernames=["baduser"], download_info=dl,
+                           cooled_down_users=cooled_down_users)
 
-        mock_db.log_download.assert_called_once()
-        self.assertEqual(mock_db.log_download.call_args.kwargs["outcome"], "rejected")
-        mock_db.check_and_apply_cooldown.assert_called_once_with("baduser")
+        # Domain state assertions
+        self.assertEqual(fake_db.request(42)["status"], "wanted")
+        self.assertEqual(len(fake_db.download_logs), 1)
+        fake_db.assert_log(self, 0, outcome="rejected")
+        self.assertIn("baduser", fake_db.cooldowns_applied)
         self.assertEqual(cooled_down_users, {"baduser"})
+        self.assertEqual(len(fake_db.denylist), 1)
+        self.assertEqual(fake_db.denylist[0].username, "baduser")
 
 
 if __name__ == "__main__":
