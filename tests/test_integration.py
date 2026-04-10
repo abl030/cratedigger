@@ -27,12 +27,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import soularr
 from lib import enqueue as enqueue_module
-from lib.grab_list import GrabListEntry, DownloadFile
+from lib.grab_list import DownloadFile
 from lib.download import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.import_dispatch import _build_download_info
 from lib.context import SoularrContext
 from tests.fakes import FakeSlskdAPI
+from tests.helpers import make_download_file, make_grab_list_entry
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
@@ -489,8 +490,13 @@ class TestDownloadStatusFlow(unittest.TestCase):
             state="Completed, Succeeded",
         )
         ctx = _make_ctx(slskd=slskd)
-        f = DownloadFile(filename="track.flac", id="xfer-1",
-                         file_dir="dir", username="user", size=100)
+        f = make_download_file(
+            filename="track.flac",
+            id="xfer-1",
+            file_dir="dir",
+            username="user",
+            size=100,
+        )
 
         ok = slskd_download_status([f], ctx)
 
@@ -501,8 +507,10 @@ class TestDownloadStatusFlow(unittest.TestCase):
 
     def test_downloads_all_done(self):
         """downloads_all_done reads .status on DownloadFile instances."""
-        f1 = DownloadFile(filename="a.flac", id="1", file_dir="d", username="u", size=1)
-        f2 = DownloadFile(filename="b.flac", id="2", file_dir="d", username="u", size=1)
+        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
+                                username="u", size=1)
+        f2 = make_download_file(filename="b.flac", id="2", file_dir="d",
+                                username="u", size=1)
         f1.status = DOWNLOAD_STATUS_DONE
         f2.status = DOWNLOAD_STATUS_DONE
 
@@ -513,8 +521,10 @@ class TestDownloadStatusFlow(unittest.TestCase):
         self.assertEqual(queued, 0)
 
     def test_downloads_partial_queued(self):
-        f1 = DownloadFile(filename="a.flac", id="1", file_dir="d", username="u", size=1)
-        f2 = DownloadFile(filename="b.flac", id="2", file_dir="d", username="u", size=1)
+        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
+                                username="u", size=1)
+        f2 = make_download_file(filename="b.flac", id="2", file_dir="d",
+                                username="u", size=1)
         f1.status = DOWNLOAD_STATUS_DONE
         f2.status = DOWNLOAD_STATUS_QUEUED
 
@@ -524,7 +534,8 @@ class TestDownloadStatusFlow(unittest.TestCase):
         self.assertEqual(queued, 1)
 
     def test_downloads_with_errors(self):
-        f1 = DownloadFile(filename="a.flac", id="1", file_dir="d", username="u", size=1)
+        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
+                                username="u", size=1)
         f1.status = DOWNLOAD_STATUS_FAILED
 
         done, problems, queued = downloads_all_done([f1])
@@ -539,18 +550,24 @@ class TestBuildDownloadInfo(unittest.TestCase):
     """Verify _build_download_info reads from DownloadFile instances."""
 
     def test_extracts_metadata(self):
-        entry = GrabListEntry(
+        entry = make_grab_list_entry(
             album_id=-1,
-            files=[
-                DownloadFile(
-                    filename="Music\\01 - Track.flac", id="1",
-                    file_dir="Music", username="user1", size=100,
-                    bitRate=1411000, sampleRate=44100, bitDepth=16,
-                    isVariableBitRate=False,
-                ),
-            ],
-            filetype="flac", title="T", artist="A",
-            year="2024", mb_release_id="x",
+            files=[make_download_file(
+                filename="Music\\01 - Track.flac",
+                id="1",
+                file_dir="Music",
+                username="user1",
+                size=100,
+                bitRate=1411000,
+                sampleRate=44100,
+                bitDepth=16,
+                isVariableBitRate=False,
+            )],
+            filetype="flac",
+            title="T",
+            artist="A",
+            year="2024",
+            mb_release_id="x",
         )
 
         info = _build_download_info(entry)
@@ -565,16 +582,22 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_handles_missing_metadata(self):
         """Audio metadata is optional — shouldn't crash when absent."""
-        entry = GrabListEntry(
+        entry = make_grab_list_entry(
             album_id=-1,
-            files=[
-                DownloadFile(
-                    filename="Music\\01 - Track.mp3", id="1",
-                    file_dir="Music", username="user1", size=100,
-                ),
-            ],
-            filetype="mp3", title="T", artist="A",
-            year="2024", mb_release_id="x",
+            files=[make_download_file(
+                filename="Music\\01 - Track.mp3",
+                id="1",
+                file_dir="Music",
+                username="user1",
+                size=100,
+                bitRate=None,
+                sampleRate=None,
+            )],
+            filetype="mp3",
+            title="T",
+            artist="A",
+            year="2024",
+            mb_release_id="x",
         )
 
         info = _build_download_info(entry)
@@ -593,10 +616,13 @@ class TestCancelAndDelete(unittest.TestCase):
             cfg=_make_matching_cfg(slskd_download_dir=tempfile.mkdtemp()),
             slskd=slskd,
         )
-        files = [
-            DownloadFile(filename="track.flac", id="xfer-1",
-                         file_dir="Music\\Album", username="user1", size=100),
-        ]
+        files = [make_download_file(
+            filename="track.flac",
+            id="xfer-1",
+            file_dir="Music\\Album",
+            username="user1",
+            size=100,
+        )]
         cancel_and_delete(files, ctx)
         self.assertEqual(slskd.transfers.cancel_download_calls[0].username, "user1")
         self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "xfer-1")
@@ -621,9 +647,15 @@ class TestAlbumRecordAttrAccess(unittest.TestCase):
 
     def test_get_tracks_with_grab_list_entry(self):
         """get_tracks also works with GrabListEntry via getattr."""
-        entry = GrabListEntry(
-            album_id=-1, files=[], filetype="mp3", title="T", artist="A",
-            year="2024", mb_release_id="x", db_request_id=None,
+        entry = make_grab_list_entry(
+            album_id=-1,
+            files=[],
+            filetype="mp3",
+            title="T",
+            artist="A",
+            year="2024",
+            mb_release_id="x",
+            db_request_id=None,
         )
         from album_source import DatabaseSource
         source = DatabaseSource.__new__(DatabaseSource)
