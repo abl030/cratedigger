@@ -10,6 +10,7 @@ and _check_quality_gate_core run for real, not patched.
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from lib.beets_db import AlbumInfo
@@ -22,7 +23,15 @@ from lib.quality import (
     ImportResult,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_download_file,
+    make_grab_list_entry,
+    make_import_result,
+    make_request_row,
+    make_validation_result,
+    patch_dispatch_externals,
+)
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -240,6 +249,74 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
         self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
         self.assertEqual(len(db.denylist), 1)
         self.assertIn("spectral", db.denylist[0].reason or "")
+
+
+class TestSpectralPropagationSlice(unittest.TestCase):
+    """Integration slice: gather spectral context then apply real decision."""
+
+    def test_suspect_download_updates_current_spectral_and_denylists(self):
+        from lib.download import _apply_spectral_decision, _gather_spectral_context
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ctx = make_ctx_with_fake_db(db)
+        album = make_grab_list_entry(
+            db_request_id=42,
+            mb_release_id="mbid-123",
+            files=[make_download_file(
+                filename="user1\\Music\\01 - Track.mp3",
+                file_dir="user1\\Music",
+                username="user1",
+                bitRate=320,
+                isVariableBitRate=False,
+            )],
+            filetype="mp3",
+        )
+        bv_result = make_validation_result()
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=320,
+            is_cbr=True,
+            album_path="/Beets/Test",
+        )
+
+        with patch(
+            "lib.download.spectral_analyze",
+            side_effect=[
+                SimpleNamespace(
+                    grade="suspect",
+                    estimated_bitrate_kbps=128,
+                    suspect_pct=90.0,
+                ),
+                SimpleNamespace(
+                    grade="genuine",
+                    estimated_bitrate_kbps=320,
+                    suspect_pct=0.0,
+                ),
+            ],
+        ), patch("lib.download.BeetsDB", _mock_beets_db(beets_info)), \
+             patch("os.path.isdir", return_value=True):
+            spec_ctx = _gather_spectral_context(album, "/tmp/download", ctx)
+            with self.assertLogs("soularr", level="WARNING") as logs:
+                _apply_spectral_decision(
+                    album,
+                    bv_result,
+                    spec_ctx,
+                    "/tmp/download",
+                    ctx,
+                )
+
+        row = db.request(42)
+        self.assertIn("SPECTRAL REJECT", "\n".join(logs.output))
+        self.assertEqual(row["current_spectral_grade"], "genuine")
+        self.assertEqual(row["current_spectral_bitrate"], 320)
+        self.assertFalse(bv_result.valid)
+        self.assertEqual(bv_result.scenario, "spectral_reject")
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].username, "user1")
+        self.assertIn("spectral: 128kbps <= existing 320kbps",
+                      db.denylist[0].reason or "")
 
 
 class TestDispatchNoJsonResult(unittest.TestCase):
