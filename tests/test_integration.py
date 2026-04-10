@@ -681,6 +681,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 {"filename": "01 - Track.flac", "size": 100},
             ])
         ])
+        self.slskd = slskd
         soularr.slskd = slskd
 
         mock_pdb = MagicMock()
@@ -715,6 +716,24 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         dir1 = make_directory("Music\\Disc1", [{"filename": "01 - Track.flac", "size": 100}])
         dir2 = make_directory("Music\\Disc2", [{"filename": "01 - Track.flac", "size": 100}])
+        self.slskd.queue_download_snapshots(
+            [{
+                "username": "user1",
+                "directories": [{"directory": "Music\\Disc1", "files": [{
+                    "filename": "Music\\Disc1\\01 - Track.flac",
+                    "id": "disc1-track",
+                    "size": 100,
+                }]}],
+            }],
+            [{
+                "username": "user1",
+                "directories": [{"directory": "Music\\Disc2", "files": [{
+                    "filename": "Music\\Disc2\\01 - Track.flac",
+                    "id": "disc2-track",
+                    "size": 100,
+                }]}],
+            }],
+        )
 
         with patch.object(
             enqueue_module,
@@ -723,11 +742,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 (True, dir1, "Music\\Disc1"),
                 (True, dir2, "Music\\Disc2"),
             ],
-        ), patch.object(
-            enqueue_module,
-            "slskd_do_enqueue",
-            side_effect=[[MagicMock()], [MagicMock()]],
-        ):
+        ), patch("time.sleep"):
             soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
 
         self.assertEqual(results, original_results)
@@ -747,8 +762,24 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
 
         dir1 = make_directory("Music\\Disc1", [{"filename": "01 - Track.flac", "size": 100}])
         dir2 = make_directory("Music\\Disc2", [{"filename": "01 - Track.flac", "size": 100}])
-        download1 = MagicMock()
-        download2 = MagicMock()
+        self.slskd.queue_download_snapshots(
+            [{
+                "username": "user1",
+                "directories": [{"directory": "Music\\Disc1", "files": [{
+                    "filename": "Music\\Disc1\\01 - Track.flac",
+                    "id": "disc1-track",
+                    "size": 100,
+                }]}],
+            }],
+            [{
+                "username": "user1",
+                "directories": [{"directory": "Music\\Disc2", "files": [{
+                    "filename": "Music\\Disc2\\01 - Track.flac",
+                    "id": "disc2-track",
+                    "size": 100,
+                }]}],
+            }],
+        )
 
         with patch.object(
             enqueue_module,
@@ -757,25 +788,24 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 (True, dir1, "Music\\Disc1"),
                 (True, dir2, "Music\\Disc2"),
             ],
-        ), patch.object(
-            enqueue_module,
-            "slskd_do_enqueue",
-            side_effect=[[download1], [download2]],
-        ) as enqueue_mock:
+        ), patch("time.sleep"):
             attempt = soularr.try_multi_enqueue(
                 release, tracks, results, "flac", self.ctx
             )
 
         self.assertTrue(attempt.matched)
-        self.assertEqual(attempt.downloads, [download1, download2])
+        self.assertIsNotNone(attempt.downloads)
+        assert attempt.downloads is not None
+        self.assertEqual([download.id for download in attempt.downloads],
+                         ["disc1-track", "disc2-track"])
         self.assertEqual(dir1["files"][0]["filename"], "01 - Track.flac")
         self.assertEqual(dir2["files"][0]["filename"], "01 - Track.flac")
         self.assertEqual(
-            enqueue_mock.call_args_list[0].kwargs["files"][0]["filename"],
+            self.slskd.transfers.enqueue_calls[0].files[0]["filename"],
             "Music\\Disc1\\01 - Track.flac",
         )
         self.assertEqual(
-            enqueue_mock.call_args_list[1].kwargs["files"][0]["filename"],
+            self.slskd.transfers.enqueue_calls[1].files[0]["filename"],
             "Music\\Disc2\\01 - Track.flac",
         )
 
@@ -906,7 +936,12 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
         db = MagicMock()
         db.get_denylisted_users.return_value = []
         source._get_db.return_value = db
-        self.ctx = _make_ctx(cfg=soularr.cfg, pipeline_db_source=source)
+        self.slskd = FakeSlskdAPI()
+        self.ctx = _make_ctx(
+            cfg=soularr.cfg,
+            slskd=self.slskd,
+            pipeline_db_source=source,
+        )
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         self.ctx.user_upload_speed["user1"] = 10
 
@@ -918,17 +953,20 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
             {"filename": "01 - Track.flac", "size": 100},
         ])
         results = {"user1": {"flac": ["Music\\Album"]}}
-        downloads = [MagicMock()]
+        self.slskd.queue_download_snapshots([{
+            "username": "user1",
+            "directories": [{"directory": "Music\\Album", "files": [{
+                "filename": "Music\\Album\\01 - Track.flac",
+                "id": "album-track",
+                "size": 100,
+            }]}],
+        }])
 
         with patch.object(
             enqueue_module,
             "check_for_match",
             return_value=(True, directory, "Music\\Album"),
-        ), patch.object(
-            enqueue_module,
-            "slskd_do_enqueue",
-            return_value=downloads,
-        ) as enqueue_mock:
+        ), patch("time.sleep"):
             attempt = soularr.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
@@ -937,10 +975,12 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
             )
 
         self.assertTrue(attempt.matched)
-        self.assertEqual(attempt.downloads, downloads)
+        self.assertIsNotNone(attempt.downloads)
+        assert attempt.downloads is not None
+        self.assertEqual(attempt.downloads[0].id, "album-track")
         self.assertEqual(directory["files"][0]["filename"], "01 - Track.flac")
         self.assertEqual(
-            enqueue_mock.call_args.kwargs["files"][0]["filename"],
+            self.slskd.transfers.enqueue_calls[0].files[0]["filename"],
             "Music\\Album\\01 - Track.flac",
         )
 
@@ -1008,7 +1048,9 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         db = MagicMock()
         db.get_denylisted_users.return_value = []
         source._get_db.return_value = db
-        ctx = _make_ctx(cfg=soularr.cfg, pipeline_db_source=source)
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_result = False
+        ctx = _make_ctx(cfg=soularr.cfg, slskd=slskd, pipeline_db_source=source)
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         ctx.user_upload_speed["user1"] = 10
 
@@ -1021,10 +1063,6 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             enqueue_module,
             "check_for_match",
             return_value=(True, directory, "Music\\Album"),
-        ), patch.object(
-            enqueue_module,
-            "slskd_do_enqueue",
-            return_value=None,
         ):
             attempt = soularr.try_enqueue(
                 make_tracks((1, "Track One", 1)),
@@ -1036,6 +1074,10 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
         self.assertIsNone(attempt.downloads)
+        self.assertEqual(
+            slskd.transfers.enqueue_calls[0].files,
+            [{"filename": "Music\\Album\\01 - Track.flac", "size": 100}],
+        )
 
 
 class TestNegativeMatchCache(unittest.TestCase):
