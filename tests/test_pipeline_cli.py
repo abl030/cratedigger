@@ -3,6 +3,7 @@
 import io
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch, MagicMock
@@ -437,6 +438,77 @@ class TestCmdSetIntent(unittest.TestCase):
         args = MagicMock(id=99, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
         db.update_request_fields.assert_not_called()
+
+
+class TestCmdRepairSpectral(unittest.TestCase):
+    """Regression tests for the rank-model repair flow."""
+
+    def test_repair_spectral_uses_beets_format_and_runtime_rank_config(self):
+        """A GOOD-rank VBR album should repair to imported under a GOOD gate."""
+        from lib.beets_db import AlbumInfo
+
+        cfg_fd, cfg_path = tempfile.mkstemp(prefix="quality-ranks-", suffix=".ini")
+        os.close(cfg_fd)
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("[Quality Ranks]\n")
+                f.write("gate_min_rank = good\n")
+
+            candidate_cur = MagicMock()
+            candidate_cur.fetchall.return_value = [make_request_row(
+                id=42,
+                status="wanted",
+                mb_release_id="mbid-123",
+                artist_name="Artist",
+                album_title="Album",
+                min_bitrate=180,
+                current_spectral_grade="genuine",
+                current_spectral_bitrate=96,
+                verified_lossless=False,
+            )]
+            clear_cur = MagicMock()
+            delete_cur = MagicMock()
+            delete_cur.fetchall.return_value = []
+            import_cur = MagicMock()
+
+            db = MagicMock()
+            db._execute.side_effect = [
+                candidate_cur,
+                clear_cur,
+                delete_cur,
+                import_cur,
+            ]
+
+            beets_info = AlbumInfo(
+                album_id=1,
+                track_count=10,
+                min_bitrate_kbps=180,
+                avg_bitrate_kbps=180,
+                format="MP3",
+                is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            )
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = beets_info
+
+            args = MagicMock(dry_run=False)
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": cfg_path}), \
+                 patch("beets_db.BeetsDB", return_value=mock_beets), \
+                 redirect_stdout(stdout):
+                pipeline_cli.cmd_repair_spectral(db, args)
+
+            output = stdout.getvalue()
+            self.assertIn("quality_gate_decision → accept", output)
+            self.assertIn("→ transitioned to imported", output)
+            self.assertEqual(db._execute.call_count, 4)
+            imported_sql, imported_params = db._execute.call_args_list[3][0]
+            self.assertIn("SET status = 'imported'", imported_sql)
+            self.assertEqual(imported_params, (180, 42))
+        finally:
+            os.unlink(cfg_path)
 
 
 if __name__ == "__main__":

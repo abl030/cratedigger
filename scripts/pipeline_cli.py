@@ -42,6 +42,38 @@ from util import resolve_failed_path as _shared_resolve_failed_path
 MB_API = "http://192.168.1.35:5200/ws/2"
 
 
+def _load_runtime_rank_config():
+    """Load the runtime QualityRankConfig from the active config.ini."""
+    from quality import QualityRankConfig
+
+    import configparser
+
+    rank_cfg = QualityRankConfig.defaults()
+    cfg_path = (os.environ.get("SOULARR_RUNTIME_CONFIG")
+                or "/var/lib/soularr/config.ini")
+    if os.path.exists(cfg_path):
+        try:
+            parser = configparser.RawConfigParser()
+            parser.read(cfg_path)
+            rank_cfg = QualityRankConfig.from_ini(parser)
+        except Exception:
+            pass
+    return rank_cfg
+
+
+def _load_beets_album_info(mb_release_id, rank_cfg):
+    """Best-effort Beets album lookup for current quality metadata."""
+    from beets_db import BeetsDB
+
+    if not mb_release_id:
+        return None
+    try:
+        with BeetsDB() as beets:
+            return beets.get_album_info(mb_release_id, rank_cfg)
+    except Exception:
+        return None
+
+
 def fetch_mb_release(mb_release_id):
     """Fetch release metadata + tracks from MusicBrainz API."""
     url = f"{MB_API}/release/{mb_release_id}?inc=recordings+artist-credits&fmt=json"
@@ -514,23 +546,8 @@ def cmd_quality(db, args):
                          AudioQualityMeasurement, measurement_rank,
                          rejection_backfill_override,
                          search_tiers, compute_effective_override_bitrate)
-    from quality import QualityRankConfig
 
-    # Load the runtime SoularrConfig (same [Quality Ranks] section that
-    # production dispatch reads), so the simulator output matches what
-    # actually happens in _check_quality_gate_core().
-    import configparser
-    import os as _os
-    rank_cfg = QualityRankConfig.defaults()
-    cfg_path = (_os.environ.get("SOULARR_RUNTIME_CONFIG")
-                or "/var/lib/soularr/config.ini")
-    if _os.path.exists(cfg_path):
-        try:
-            _parser = configparser.RawConfigParser()
-            _parser.read(cfg_path)
-            rank_cfg = QualityRankConfig.from_ini(_parser)
-        except Exception:
-            pass  # Fall through to defaults
+    rank_cfg = _load_runtime_rank_config()
 
     req = db.get_request(args.id)
     if not req:
@@ -556,19 +573,13 @@ def cmd_quality(db, args):
     avg_br = None
     existing_format_hint = final_format
     if min_br is not None:
-        from beets_db import BeetsDB
         mbid = req.get("mb_release_id")
-        if mbid:
-            try:
-                with BeetsDB() as beets:
-                    info = beets.get_album_info(mbid, rank_cfg)
-                if info:
-                    is_cbr = info.is_cbr
-                    avg_br = info.avg_bitrate_kbps
-                    if not existing_format_hint:
-                        existing_format_hint = info.format
-            except Exception:
-                pass
+        info = _load_beets_album_info(mbid, rank_cfg)
+        if info:
+            is_cbr = info.is_cbr
+            avg_br = info.avg_bitrate_kbps
+            if not existing_format_hint:
+                existing_format_hint = info.format
         gate_spectral_br = None
         effective_gate_br = compute_effective_override_bitrate(
             min_br, current_br, spectral_grade)
@@ -847,6 +858,8 @@ def cmd_repair_spectral(db, args):
     """
     from quality import AudioQualityMeasurement, quality_gate_decision
 
+    rank_cfg = _load_runtime_rank_config()
+
     # Find candidates: genuine on disk but spectral bitrate < min_bitrate
     # (genuine files should have no spectral cliff → bitrate should be NULL)
     cur = db._execute("""
@@ -871,19 +884,30 @@ def cmd_repair_spectral(db, args):
     for req in candidates:
         rid = req["id"]
         label = f"{req['artist_name']} - {req['album_title']}"
+        beets_info = _load_beets_album_info(req.get("mb_release_id"), rank_cfg)
         min_br = req["min_bitrate"]
+        effective_min_br = (
+            min_br if min_br is not None
+            else (beets_info.min_bitrate_kbps if beets_info else None)
+        )
         stale_br = req["current_spectral_bitrate"]
         print(f"  [{rid:>4}] {label}")
-        print(f"         min_bitrate={min_br}kbps, stale current_spectral={stale_br}kbps")
+        print(f"         min_bitrate={effective_min_br}kbps, "
+              f"stale current_spectral={stale_br}kbps")
 
         # Check what quality gate would decide after clearing stale data
+        existing_format = req.get("final_format")
+        if not existing_format and beets_info:
+            existing_format = beets_info.format
         measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=min_br or 0,
-            is_cbr=False,  # if they're genuine, they're VBR V0
+            min_bitrate_kbps=effective_min_br,
+            avg_bitrate_kbps=(beets_info.avg_bitrate_kbps if beets_info else None),
+            format=existing_format or "MP3",
+            is_cbr=(beets_info.is_cbr if beets_info else False),
             verified_lossless=bool(req.get("verified_lossless")),
             spectral_bitrate_kbps=None,  # cleared
         )
-        decision = quality_gate_decision(measurement)
+        decision = quality_gate_decision(measurement, cfg=rank_cfg)
         print(f"         after repair: quality_gate_decision → {decision}")
 
         if args.dry_run:
@@ -912,14 +936,14 @@ def cmd_repair_spectral(db, args):
             print(f"         un-denylisted: {entry['username']} ({entry['reason']})")
 
         # If quality gate would accept, transition to imported
-        if decision == "accept" and min_br:
+        if decision == "accept" and effective_min_br is not None:
             db._execute("""
                 UPDATE album_requests
                 SET status = 'imported',
                     min_bitrate = %s,
                     updated_at = NOW()
                 WHERE id = %s
-            """, (min_br, rid))
+            """, (effective_min_br, rid))
             print(f"         → transitioned to imported")
         else:
             print(f"         → remains wanted (gate says {decision})")
