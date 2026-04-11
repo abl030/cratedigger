@@ -160,7 +160,7 @@ Supported formats:
 | `aac 128` | AAC VBR 128kbps | `.m4a` | Apple ecosystem |
 | *(empty)* | *(none)* | `.mp3` | Keep V0 — the default |
 
-The V0 verification step always runs first regardless of target format. The V0 bitrate proves the FLAC was genuine lossless (>210kbps = genuine, <210kbps = transcode). Only after verification does the target conversion run from the original FLAC. If the FLAC is a transcode, the target conversion is skipped and V0 is kept.
+The V0 verification step always runs first regardless of target format. Genuineness is judged by `transcode_detection()`: spectral cliff analysis is authoritative when available (suspect grade → transcode, genuine/marginal → not), and the post-conversion V0 bitrate is a fallback only when spectral is unavailable. The fallback threshold defaults to `cfg.mp3_vbr.excellent` (210 kbps) and tracks retuning of `[Quality Ranks]` automatically. Only after verification does the target conversion run from the original FLAC. If the FLAC is a transcode, the target conversion is skipped and V0 is kept.
 
 ## Running tests
 

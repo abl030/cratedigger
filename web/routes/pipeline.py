@@ -174,8 +174,16 @@ def _runtime_rank_config():
 
 
 def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
-    """Return decision tree structure + thresholds for the diagram."""
-    tree = get_decision_tree()
+    """Return decision tree structure + thresholds for the diagram.
+
+    The runtime rank config is threaded into ``get_decision_tree`` so the
+    transcode-detection threshold displayed in the UI tracks the live
+    ``cfg.mp3_vbr.excellent`` (issue #66 follow-up). Without this, an
+    operator who retuned the gate would see a stale Decisions tab while
+    the actual pipeline ran at the new threshold.
+    """
+    rank_cfg = _runtime_rank_config()
+    tree = get_decision_tree(cfg=rank_cfg)
     tree["constants"]["HF_DEFICIT_SUSPECT"] = HF_DEFICIT_SUSPECT
     tree["constants"]["HF_DEFICIT_MARGINAL"] = HF_DEFICIT_MARGINAL
     tree["constants"]["ALBUM_SUSPECT_PCT"] = ALBUM_SUSPECT_PCT
@@ -183,7 +191,6 @@ def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
     tree["constants"]["CLIFF_THRESHOLD_DB_PER_KHZ"] = CLIFF_THRESHOLD_DB_PER_KHZ
     # Expose the runtime rank config to the UI so the Decisions tab shows
     # the configured gate_min_rank and bitrate_metric.
-    rank_cfg = _runtime_rank_config()
     tree["constants"]["rank_gate_min_rank"] = rank_cfg.gate_min_rank.name
     tree["constants"]["rank_bitrate_metric"] = rank_cfg.bitrate_metric.value
     h._json(tree)

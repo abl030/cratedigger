@@ -20,7 +20,7 @@ After FLAC-to-V0 conversion, the resulting bitrate reveals source quality:
 - **Transcode from ~192kbps**: ~190-210kbps
 - **Transcode from ~128kbps**: ~160-180kbps
 
-Threshold: `TRANSCODE_MIN_BITRATE_KBPS = 210` in `import_one.py`
+Threshold: `cfg.mp3_vbr.excellent` (default 210 kbps), read by `transcode_detection()` in `lib/quality.py`. The legacy `TRANSCODE_MIN_BITRATE_KBPS = 210` module constant is still exported as the default and used when no cfg is passed; operators who retune `[Quality Ranks] mp3_vbr.excellent` in `config.ini` automatically move both the gate threshold and this fallback (#66).
 
 Limitation: Only works when we download FLAC and convert. Doesn't catch bad MP3 downloads (e.g. 320kbps that was upsampled from 128kbps).
 
@@ -149,7 +149,7 @@ The wide-band energy ratio approach (v1) produces too many false positives on lo
 
 1. **FLAC downloads**: Run spectral check pre-conversion. If cliff detected → transcode in container. Still convert to V0 — if bitrate > existing on disk, import as upgrade.
 2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
-3. **Already converted V0 with good bitrate (>210kbps)**: Skip spectral check — the V0 conversion already proved source quality.
+3. **Already converted V0 with good bitrate (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)**: Skip spectral check — the V0 conversion already proved source quality.
 
 ### Tuning results (Mountain Goats library, 65 albums)
 
@@ -161,7 +161,7 @@ At `HF_DEFICIT_SUSPECT=60dB + cliff detection`:
 - **0 false positives** on albums with verified good sources
 - Successfully catches: cliffs at 16kHz (128kbps transcodes), cliffs at 18kHz (192kbps), upsampled CBR 320, terrible pre-pipeline rips
 
-Albums that were downloaded as FLAC, converted to V0 at >210kbps, and have no cliff: always pass — confirming the V0 conversion is the primary quality proof.
+Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vbr.excellent` threshold (default 210 kbps), and have no cliff: always pass — confirming the V0 conversion is the primary quality proof.
 
 ### What the spectral check catches that V0 conversion doesn't
 
@@ -187,6 +187,6 @@ Albums that were downloaded as FLAC, converted to V0 at >210kbps, and have no cl
 - [ ] Add spectral quality score to pipeline DB (new column) and web UI display
 - [ ] Run spectral check on CBR 320 MP3 downloads post-download
 - [ ] Run spectral check on FLACs pre-conversion to catch transcodes early
-- [ ] Skip spectral check for albums that already passed V0 conversion (>210kbps)
+- [ ] Skip spectral check for albums that already passed V0 conversion (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)
 - [ ] Test `spectro` pip package as second-opinion validation
 - [ ] Performance: 16 sox calls per track x 30s trim ≈ 8s/track, ~100s per 12-track album

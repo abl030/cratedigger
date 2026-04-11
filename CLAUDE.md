@@ -365,7 +365,7 @@ Lo-fi V0 at 207kbps now passes the gate via the `"mp3 v0"` label contract (`cfg.
 **FLAC downloads** (in `import_one.py`):
 1. Spectral check on raw FLAC → grade stored on album_requests
 2. Convert FLAC → V0 via `convert_lossless(path, V0_SPEC)` for verification
-3. Transcode detection: spectral grade is authoritative (genuine/marginal = not transcode, suspect = transcode). Bitrate < 210kbps threshold is fallback only when spectral unavailable.
+3. Transcode detection: spectral grade is authoritative (genuine/marginal = not transcode, suspect = transcode). Bitrate fallback threshold (`cfg.mp3_vbr.excellent`, default 210 kbps) is used only when spectral is unavailable — tracks retuning automatically (#66).
 4. Compare new V0 bitrate against existing on disk (override = `min(pipeline DB min_bitrate, current_spectral_bitrate)` — catches fake 320s)
 5. If verified lossless AND `verified_lossless_target` configured (e.g. "opus 128"): convert original FLAC → target format, discard V0 (ephemeral verification artifact)
 6. If upgrade → import to beets. `verified_lossless` set by import_one.py's verdict (not re-derived). When verified lossless, `current_spectral_bitrate` = actual min bitrate (not spectral cliff estimate).

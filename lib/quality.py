@@ -2068,17 +2068,33 @@ def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
 # Decision tree metadata — consumed by the web UI diagram
 # ---------------------------------------------------------------------------
 
-def get_decision_tree() -> dict[str, Any]:
+def get_decision_tree(
+    cfg: "QualityRankConfig | None" = None,
+) -> dict[str, Any]:
     """Return the full pipeline decision structure as data.
 
     The web UI renders this as a diagram. Contract tests verify this matches
     the actual decision functions. When a function changes, update this too —
     the tests will catch divergence.
+
+    ``cfg`` drives the thresholds that depend on the runtime rank model.
+    When omitted, ``QualityRankConfig.defaults()`` is used so the legacy
+    "show the hardcoded defaults" behavior still works. The web route at
+    ``web/routes/pipeline.py:get_pipeline_constants`` passes the live
+    runtime cfg so operators who retune ``mp3_vbr.excellent`` see the
+    Decisions tab update in lockstep with ``transcode_detection()``
+    (issue #66 follow-up).
     """
+    effective_cfg = cfg if cfg is not None else QualityRankConfig.defaults()
+    # The spectral-fallback threshold for transcode_detection() is derived
+    # from cfg.mp3_vbr.excellent (see #66). Expose it as the "live" constant
+    # so the web UI's Decisions tab reflects the runtime rank model instead
+    # of a stale module-level default.
+    transcode_threshold = effective_cfg.mp3_vbr.excellent
     return {
         "constants": {
             "QUALITY_MIN_BITRATE_KBPS": QUALITY_MIN_BITRATE_KBPS,
-            "TRANSCODE_MIN_BITRATE_KBPS": TRANSCODE_MIN_BITRATE_KBPS,
+            "TRANSCODE_MIN_BITRATE_KBPS": transcode_threshold,
             "QUALITY_UPGRADE_TIERS": QUALITY_UPGRADE_TIERS,
         },
         "paths": ["flac", "mp3"],
@@ -2131,12 +2147,13 @@ def get_decision_tree() -> dict[str, Any]:
                     {"condition": "spectral = genuine/marginal",
                      "result": "is_transcode = false", "color": "green",
                      "effect": "no cliff = not transcode (lo-fi OK)"},
-                    {"condition": f"no spectral: post_conv_br < {TRANSCODE_MIN_BITRATE_KBPS}kbps",
+                    {"condition": f"no spectral: post_conv_br < {transcode_threshold}kbps",
                      "result": "is_transcode = true", "color": "red",
                      "effect": "fallback when spectral unavailable"},
                 ],
                 "note": f"Spectral grade is authoritative when available. "
-                        f"Bitrate threshold ({TRANSCODE_MIN_BITRATE_KBPS}kbps) is fallback only",
+                        f"Bitrate threshold ({transcode_threshold}kbps, "
+                        f"derived from cfg.mp3_vbr.excellent) is fallback only",
             },
             {
                 "id": "verified_lossless",

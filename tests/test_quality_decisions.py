@@ -697,13 +697,67 @@ class TestFullPipelineContract(unittest.TestCase):
                         f"Tree gate outcomes {gate_outcomes} not in {VALID_STAGE3}")
 
     def test_decision_tree_constants_match_code(self):
-        """Tree constants must match the actual module constants."""
+        """Tree constants must match the actual module constants under default cfg.
+
+        With no cfg passed, get_decision_tree falls back to
+        QualityRankConfig.defaults(), whose mp3_vbr.excellent equals the
+        legacy TRANSCODE_MIN_BITRATE_KBPS constant (pinned by
+        test_default_constant_matches_default_cfg_mp3_vbr_excellent).
+        """
         tree = get_decision_tree()
         consts = tree["constants"]
         self.assertEqual(consts["QUALITY_MIN_BITRATE_KBPS"],
                          QUALITY_MIN_BITRATE_KBPS)
         self.assertEqual(consts["TRANSCODE_MIN_BITRATE_KBPS"],
                          TRANSCODE_MIN_BITRATE_KBPS)
+
+    def test_decision_tree_custom_cfg_drives_transcode_threshold(self):
+        """get_decision_tree(cfg=...) must surface cfg.mp3_vbr.excellent in
+        the transcode stage so the web Decisions tab tracks runtime retuning.
+
+        Issue #66 made transcode_detection() read cfg.mp3_vbr.excellent at
+        call time, but the decision tree previously hardcoded the legacy
+        constant. An operator who set mp3_vbr.excellent=170 would see a
+        stale "< 210kbps" threshold in the UI while the actual gate ran
+        at 170. This test pins the fix: the threshold surfaced to the UI
+        must come from the same cfg the gate uses.
+        """
+        from lib.quality import CodecRankBands, QualityRankConfig
+
+        custom_cfg = QualityRankConfig(
+            mp3_vbr=CodecRankBands(
+                transparent=245, excellent=170, good=140, acceptable=100))
+        tree = get_decision_tree(cfg=custom_cfg)
+        self.assertEqual(tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"], 170)
+
+        # The transcode stage's rule text and note must also reference the
+        # custom threshold — the UI reads these strings directly.
+        transcode_stage = next(
+            s for s in tree["stages"] if s["id"] == "transcode")
+        fallback_rule = next(
+            r for r in transcode_stage["rules"]
+            if "no spectral" in r["condition"])
+        self.assertIn("170kbps", fallback_rule["condition"])
+        self.assertIn("170kbps", transcode_stage["note"])
+        self.assertNotIn(f"{TRANSCODE_MIN_BITRATE_KBPS}kbps",
+                         fallback_rule["condition"])
+
+    def test_decision_tree_default_cfg_matches_legacy_constant(self):
+        """Explicit None cfg must reproduce the legacy hardcoded threshold.
+
+        Back-compat guard: any existing caller passing no cfg (or None)
+        should see the same payload they saw before #66's follow-up. Pins
+        the default surface against TRANSCODE_MIN_BITRATE_KBPS.
+        """
+        default_tree = get_decision_tree(cfg=None)
+        self.assertEqual(
+            default_tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"],
+            TRANSCODE_MIN_BITRATE_KBPS)
+        transcode_stage = next(
+            s for s in default_tree["stages"] if s["id"] == "transcode")
+        self.assertIn(
+            f"{TRANSCODE_MIN_BITRATE_KBPS}kbps",
+            transcode_stage["note"])
 
     def test_decision_tree_every_stage_has_rules(self):
         """Every stage must have at least one rule."""
