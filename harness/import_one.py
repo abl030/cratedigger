@@ -49,7 +49,6 @@ from lib.beets_db import AlbumInfo, BeetsDB
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, ImportResult,
                          PostflightInfo, QualityRankConfig,
-                         TRANSCODE_MIN_BITRATE_KBPS,
                          comparison_format_hint,
                          determine_verified_lossless,
                          import_quality_decision, transcode_detection)
@@ -865,12 +864,16 @@ def main():
         v0_ext_filter = {".mp3"} if has_target and converted > 0 else None
         post_conv_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter) if converted > 0 else None
         r.conversion.post_conversion_min_bitrate = post_conv_br
-        is_transcode = transcode_detection(converted, post_conv_br,
-                                           spectral_grade=spectral_grade)
+        is_transcode = transcode_detection(
+            converted, post_conv_br,
+            spectral_grade=spectral_grade, cfg=_rank_cfg)
         r.conversion.is_transcode = is_transcode
         if is_transcode:
+            # Threshold tracks the runtime cfg (issue #66) — log the value
+            # the decision actually used so retuned deployments stay
+            # auditable.
             _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
-                 f"< {TRANSCODE_MIN_BITRATE_KBPS}kbps — source was not lossless")
+                 f"< {_rank_cfg.mp3_vbr.excellent}kbps — source was not lossless")
         if post_conv_br is not None:
             _log(f"  post_conversion_min_bitrate={post_conv_br}")
     else:

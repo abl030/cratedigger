@@ -1526,7 +1526,8 @@ def import_quality_decision(
 
 
 def transcode_detection(converted_count, post_conversion_min_bitrate,
-                        spectral_grade=None):
+                        spectral_grade=None,
+                        cfg: "QualityRankConfig | None" = None):
     """Detect whether a FLAC→V0 conversion produced a transcode.
 
     Called in import_one.py after convert_flac_to_v0().
@@ -1535,9 +1536,16 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
     (MP3 wrapped in FLAC container).
 
     Inputs:
-        converted_count:            number of FLAC files converted
+        converted_count:             number of FLAC files converted
         post_conversion_min_bitrate: min bitrate after conversion (kbps), or None
-        spectral_grade:             album spectral grade, or None if unavailable
+        spectral_grade:              album spectral grade, or None if unavailable
+        cfg:                         QualityRankConfig — the spectral-fallback
+                                     threshold is taken from
+                                     ``cfg.mp3_vbr.excellent``. When omitted,
+                                     falls back to the legacy
+                                     ``TRANSCODE_MIN_BITRATE_KBPS`` constant
+                                     (210) so existing callers stay
+                                     bit-for-bit compatible. Issue #66.
     """
     if converted_count == 0:
         return False
@@ -1550,8 +1558,13 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
             return True
         # No cliff = not a transcode (lo-fi lossless produces low V0 bitrates)
         return False
-    # No spectral data — fall back to bitrate threshold
-    return post_conversion_min_bitrate < TRANSCODE_MIN_BITRATE_KBPS
+    # No spectral data — fall back to bitrate threshold. Derived from cfg
+    # so the threshold tracks gate retuning automatically: an operator who
+    # lowers mp3_vbr.excellent to accept lower-quality V0 also implicitly
+    # lowers what counts as "credible V0" for the spectral fallback.
+    threshold = (cfg.mp3_vbr.excellent if cfg is not None
+                 else TRANSCODE_MIN_BITRATE_KBPS)
+    return post_conversion_min_bitrate < threshold
 
 
 # ---------------------------------------------------------------------------
@@ -2412,8 +2425,9 @@ def full_pipeline_decision(
         gate_format = stage2_new_format  # "flac"
     elif is_flac:
         # FLAC path: convert first, then decide
-        is_transcode = transcode_detection(converted_count, post_conversion_min_bitrate,
-                                           spectral_grade=spectral_grade)
+        is_transcode = transcode_detection(
+            converted_count, post_conversion_min_bitrate,
+            spectral_grade=spectral_grade, cfg=cfg)
         import_br = post_conversion_min_bitrate if post_conversion_min_bitrate else min_bitrate
 
         will_be_verified = (converted_count > 0 and not is_transcode)

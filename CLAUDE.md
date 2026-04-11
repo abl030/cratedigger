@@ -274,7 +274,7 @@ All quality decisions are pure functions in `lib/quality.py` — no I/O, no data
 
 1. **`spectral_import_decision()`** — Pre-import: should we import this MP3/CBR download? (genuine/suspect/reject)
 2. **`import_quality_decision()`** — Import-time: is this an upgrade or downgrade? (import/downgrade/transcode)
-3. **`transcode_detection(spectral_grade)`** — Post-conversion: was this FLAC actually a transcode? Spectral grade is authoritative when available (suspect/likely_transcode = transcode, genuine/marginal = not transcode). Bitrate < 210kbps threshold is fallback only when spectral is unavailable.
+3. **`transcode_detection(spectral_grade, cfg)`** — Post-conversion: was this FLAC actually a transcode? Spectral grade is authoritative when available (suspect/likely_transcode = transcode, genuine/marginal = not transcode). Bitrate fallback uses `cfg.mp3_vbr.excellent` (default 210 kbps) only when spectral is unavailable — tracks retuning automatically (#66).
 4. **`quality_gate_decision()`** — Post-import: accept, or re-queue for better quality?
 5. **`determine_verified_lossless()`** — Single source of truth for verified lossless status. `is_verified_lossless()` is the legacy fallback for old download_log rows.
 6. **`dispatch_action()`** — Post-import_one.py: map decision string to action flags (mark_done/failed, denylist, requeue, trigger_meelo, quality_gate). Used by `dispatch_import()`.
