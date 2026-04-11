@@ -6,14 +6,12 @@ import { esc } from './util.js';
  * Load decision pipeline constants and render the simulator.
  */
 export async function loadDecisions() {
-  if (state.dsLoaded) return;
   const el = document.getElementById('decisions-content');
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
     const r = await fetch(`${API}/api/pipeline/constants`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state.dsConstants = await r.json();
-    state.dsLoaded = true;
     renderSimulatorForm();
   } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
 }

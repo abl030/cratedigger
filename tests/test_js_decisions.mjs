@@ -11,7 +11,8 @@
  * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
  */
 
-import { renderPolicyBadges } from '../web/js/decisions.js';
+import { loadDecisions, renderPolicyBadges } from '../web/js/decisions.js';
+import { state } from '../web/js/state.js';
 
 let passed = 0;
 let failed = 0;
@@ -104,6 +105,53 @@ const xssHtml = renderPolicyBadges({
 assertNotContains(xssHtml, '<script>alert(1)</script>', 'raw script tag must be escaped');
 assertContains(xssHtml, '&lt;script&gt;', 'script tag becomes &lt;script&gt;');
 assertContains(xssHtml, 'a &amp; b', 'ampersand escaped');
+
+// Revisit behavior — opening the Decisions tab twice must refetch constants
+// so runtime config changes show up without a full page reload (issue #68).
+console.log('\nloadDecisions()');
+const decisionsEl = { innerHTML: '' };
+global.document = {
+  getElementById(id) {
+    return id === 'decisions-content' ? decisionsEl : null;
+  },
+};
+const payloads = [
+  {
+    constants: {
+      rank_gate_min_rank: 'EXCELLENT',
+      rank_bitrate_metric: 'avg',
+      rank_within_tolerance_kbps: 5,
+    },
+    stages: [],
+    paths: [],
+    path_labels: {},
+  },
+  {
+    constants: {
+      rank_gate_min_rank: 'GOOD',
+      rank_bitrate_metric: 'median',
+      rank_within_tolerance_kbps: 10,
+    },
+    stages: [],
+    paths: [],
+    path_labels: {},
+  },
+];
+let fetchCalls = 0;
+global.fetch = async () => {
+  const payload = payloads[fetchCalls];
+  fetchCalls++;
+  return {
+    ok: true,
+    async json() { return payload; },
+  };
+};
+state.dsConstants = null;
+await loadDecisions();
+await loadDecisions();
+assert(fetchCalls === 2, `expected loadDecisions() to fetch twice, got ${fetchCalls}`);
+assertContains(decisionsEl.innerHTML, 'GOOD', 'second tab open renders fresh gate rank');
+assertContains(decisionsEl.innerHTML, '10 kbps', 'second tab open renders fresh tolerance');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
