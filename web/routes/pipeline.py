@@ -165,6 +165,24 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     h._json(all_data)
 
 
+def _runtime_rank_config():
+    """Load the runtime QualityRankConfig from the same config.ini the main
+    soularr process reads, so web simulator matches production dispatch."""
+    import configparser
+    import os
+    from quality import QualityRankConfig  # type: ignore[import-not-found]
+    cfg = QualityRankConfig.defaults()
+    path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
+    if os.path.exists(path):
+        try:
+            parser = configparser.RawConfigParser()
+            parser.read(path)
+            cfg = QualityRankConfig.from_ini(parser)
+        except Exception:
+            pass
+    return cfg
+
+
 def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
     """Return decision tree structure + thresholds for the diagram."""
     tree = get_decision_tree()
@@ -173,6 +191,11 @@ def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
     tree["constants"]["ALBUM_SUSPECT_PCT"] = ALBUM_SUSPECT_PCT
     tree["constants"]["MIN_CLIFF_SLICES"] = MIN_CLIFF_SLICES
     tree["constants"]["CLIFF_THRESHOLD_DB_PER_KHZ"] = CLIFF_THRESHOLD_DB_PER_KHZ
+    # Expose the runtime rank config to the UI so the Decisions tab shows
+    # the configured gate_min_rank and bitrate_metric.
+    rank_cfg = _runtime_rank_config()
+    tree["constants"]["rank_gate_min_rank"] = rank_cfg.gate_min_rank.name
+    tree["constants"]["rank_bitrate_metric"] = rank_cfg.bitrate_metric.value
     h._json(tree)
 
 
@@ -200,10 +223,14 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
         existing_min_bitrate=_int("existing_min_bitrate"),
         existing_spectral_bitrate=_int("existing_spectral_bitrate"),
         override_min_bitrate=_int("override_min_bitrate"),
+        existing_format=_str("existing_format"),
+        existing_is_cbr=_bool("existing_is_cbr"),
+        new_format=_str("new_format"),
         post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
         converted_count=_int("converted_count") or 0,
         verified_lossless=_bool("verified_lossless"),
         verified_lossless_target=_str("verified_lossless_target"),
+        cfg=_runtime_rank_config(),
     )
     h._json(result)
 

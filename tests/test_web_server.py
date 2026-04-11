@@ -708,6 +708,9 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline constants response")
         _assert_required_fields(self, data["stages"][0], self.STAGE_REQUIRED_FIELDS,
                                 "pipeline constants stage")
+        # Issue #60: rank config surfaced to UI for the Decisions tab
+        self.assertIn("rank_gate_min_rank", data["constants"])
+        self.assertIn("rank_bitrate_metric", data["constants"])
 
     def test_pipeline_simulate_contract(self):
         status, data = self._get(

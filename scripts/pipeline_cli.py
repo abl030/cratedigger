@@ -511,8 +511,26 @@ def cmd_show(db, args):
 def cmd_quality(db, args):
     """Show quality state and simulate decisions for common download scenarios."""
     from quality import (full_pipeline_decision, quality_gate_decision,
-                         AudioQualityMeasurement, rejection_backfill_override,
+                         AudioQualityMeasurement, measurement_rank,
+                         rejection_backfill_override,
                          search_tiers, compute_effective_override_bitrate)
+    from quality import QualityRankConfig
+
+    # Load the runtime SoularrConfig (same [Quality Ranks] section that
+    # production dispatch reads), so the simulator output matches what
+    # actually happens in _check_quality_gate_core().
+    import configparser
+    import os as _os
+    rank_cfg = QualityRankConfig.defaults()
+    cfg_path = (_os.environ.get("SOULARR_RUNTIME_CONFIG")
+                or "/var/lib/soularr/config.ini")
+    if _os.path.exists(cfg_path):
+        try:
+            _parser = configparser.RawConfigParser()
+            _parser.read(cfg_path)
+            rank_cfg = QualityRankConfig.from_ini(_parser)
+        except Exception:
+            pass  # Fall through to defaults
 
     req = db.get_request(args.id)
     if not req:
@@ -525,24 +543,30 @@ def cmd_quality(db, args):
     current_br = req.get("current_spectral_bitrate")
     q_override = req.get("search_filetype_override")
     spectral_grade = req.get("current_spectral_grade")
+    final_format = req.get("final_format")
 
     print(f"  {label}")
     print(f"  Status: {req['status']}")
+    print(f"  Rank config: metric={rank_cfg.bitrate_metric.value}, "
+          f"gate_min_rank={rank_cfg.gate_min_rank.name}")
     print()
 
     # --- Current quality gate ---
     is_cbr = False
+    avg_br = None
+    existing_format_hint = final_format
     if min_br is not None:
         from beets_db import BeetsDB
-        from quality import QualityRankConfig
         mbid = req.get("mb_release_id")
         if mbid:
             try:
                 with BeetsDB() as beets:
-                    info = beets.get_album_info(
-                        mbid, QualityRankConfig.defaults())
+                    info = beets.get_album_info(mbid, rank_cfg)
                 if info:
                     is_cbr = info.is_cbr
+                    avg_br = info.avg_bitrate_kbps
+                    if not existing_format_hint:
+                        existing_format_hint = info.format
             except Exception:
                 pass
         gate_spectral_br = None
@@ -552,15 +576,21 @@ def cmd_quality(db, args):
                 and effective_gate_br < min_br):
             gate_spectral_br = current_br
         current = AudioQualityMeasurement(
-            min_bitrate_kbps=min_br, is_cbr=is_cbr,
+            min_bitrate_kbps=min_br,
+            avg_bitrate_kbps=avg_br,
+            format=existing_format_hint or "MP3",
+            is_cbr=is_cbr,
             verified_lossless=verified,
             spectral_bitrate_kbps=gate_spectral_br)
-        gate = quality_gate_decision(current)
+        current_rank = measurement_rank(current, rank_cfg)
+        gate = quality_gate_decision(current, cfg=rank_cfg)
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
                       "requeue_lossless": "NEEDS LOSSLESS"}[gate]
-        print(f"  Quality gate:  {gate_label}")
-        print(f"    min_bitrate={_fmt_br(min_br)}, verified_lossless={verified}, "
-              f"is_cbr={is_cbr}")
+        print(f"  Quality gate:  {gate_label}  (rank={current_rank.name})")
+        print(f"    min_bitrate={_fmt_br(min_br)}, "
+              f"avg_bitrate={_fmt_br(avg_br) if avg_br else 'n/a'}, "
+              f"format={existing_format_hint or '(unknown)'}, "
+              f"verified_lossless={verified}, is_cbr={is_cbr}")
         if current_br:
             print(f"    current_spectral_bitrate={current_br}kbps")
         if spectral_grade:
@@ -649,7 +679,10 @@ def cmd_quality(db, args):
             existing_min_bitrate=min_br,
             existing_spectral_bitrate=current_br,
             override_min_bitrate=override_min_bitrate,
+            existing_format=existing_format_hint,
+            existing_is_cbr=is_cbr,
             verified_lossless=verified,
+            cfg=rank_cfg,
             **params)
 
         imported = "IMPORT" if result["imported"] else "REJECT"

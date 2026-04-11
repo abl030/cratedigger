@@ -552,6 +552,99 @@ class TestNamedRegressions(unittest.TestCase):
                 self.assertEqual(r.backfill_override, "lossless",
                                  f"{dl_name} must propagate genuine spectral -> backfill")
 
+    # ------------------------------------------------------------------
+    # Issue #60 — codec-aware cross-codec regressions
+    # ------------------------------------------------------------------
+
+    def test_opus_128_equivalent_to_mp3_v0(self):
+        """Opus 128 reads as equivalent to MP3 V0 under the rank model.
+
+        Simulates an existing MP3 V0 (245kbps) album, then dispatches a
+        FLAC→Opus 128 verified lossless conversion. Under the old raw-
+        bitrate model, Opus 128 (~120kbps) would lose to MP3 V0 (245) as a
+        downgrade. Under the rank model, both classify TRANSPARENT and
+        compare as equivalent, so the verified_lossless preference imports.
+        """
+        from lib.quality import (
+            AudioQualityMeasurement, compare_quality, QualityRankConfig)
+        cfg = QualityRankConfig.defaults()
+        opus_128 = AudioQualityMeasurement(
+            format="opus 128", avg_bitrate_kbps=130, verified_lossless=True)
+        mp3_v0 = AudioQualityMeasurement(
+            format="mp3 v0", avg_bitrate_kbps=245)
+        # compare_quality uses label-based rank → both TRANSPARENT
+        self.assertEqual(compare_quality(opus_128, mp3_v0, cfg), "equivalent")
+        # import_quality_decision honors the verified_lossless preference
+        from lib.quality import import_quality_decision
+        self.assertEqual(
+            import_quality_decision(opus_128, mp3_v0, cfg=cfg), "import")
+
+    def test_opus_64_cannot_replace_mp3_v0(self):
+        """Too-low verified_lossless target Opus 64 is blocked by rank floor.
+
+        Issue #60 guardrail. Opus 64 from a verified FLAC lands at GOOD rank
+        (below EXCELLENT), while existing MP3 V0 is TRANSPARENT. Verdict is
+        "worse", and the verified_lossless bypass is tier-gated so the
+        import is rejected.
+        """
+        from lib.quality import (
+            AudioQualityMeasurement, import_quality_decision,
+            QualityRankConfig)
+        cfg = QualityRankConfig.defaults()
+        opus_64 = AudioQualityMeasurement(
+            format="opus 64", avg_bitrate_kbps=64, verified_lossless=True)
+        mp3_v0 = AudioQualityMeasurement(
+            format="mp3 v0", avg_bitrate_kbps=245)
+        self.assertEqual(
+            import_quality_decision(opus_64, mp3_v0, cfg=cfg), "downgrade")
+
+    def test_flac_to_opus_128_replaces_cbr_320(self):
+        """Verified Opus 128 replaces unverified CBR 320 (codec parity)."""
+        from lib.quality import (
+            AudioQualityMeasurement, import_quality_decision,
+            QualityRankConfig)
+        cfg = QualityRankConfig.defaults()
+        opus_128 = AudioQualityMeasurement(
+            format="opus 128", avg_bitrate_kbps=130, verified_lossless=True)
+        cbr_320 = AudioQualityMeasurement(
+            format="mp3 320", avg_bitrate_kbps=320, is_cbr=True)
+        self.assertEqual(
+            import_quality_decision(opus_128, cbr_320, cfg=cfg), "import")
+
+    def test_lofi_v0_still_imports(self):
+        """Lo-fi V0 (207kbps) imports under the rank model via the label.
+
+        Issue #60: ``verified_lossless=True`` used to be a blanket bypass
+        that let lo-fi V0 through the gate. Under the rank model the same
+        case works because "mp3 v0" classifies as TRANSPARENT via
+        cfg.mp3_vbr_levels[0] regardless of bitrate.
+        """
+        from lib.quality import (
+            AudioQualityMeasurement, quality_gate_decision, QualityRankConfig)
+        cfg = QualityRankConfig.defaults()
+        current = AudioQualityMeasurement(
+            format="mp3 v0", min_bitrate_kbps=207, avg_bitrate_kbps=207,
+            verified_lossless=True)
+        self.assertEqual(quality_gate_decision(current, cfg=cfg), "accept")
+
+    def test_gate_min_rank_good_accepts_lower_cfg(self):
+        """Custom cfg.gate_min_rank=GOOD lets 180kbps VBR pass the gate.
+
+        Locks the runtime-config threading through the gate. Under default
+        EXCELLENT the same measurement requeues; under GOOD it accepts.
+        """
+        from lib.quality import (
+            AudioQualityMeasurement, quality_gate_decision,
+            QualityRank, QualityRankConfig)
+        default_cfg = QualityRankConfig.defaults()
+        lenient_cfg = QualityRankConfig(gate_min_rank=QualityRank.GOOD)
+        current = AudioQualityMeasurement(
+            format="MP3", min_bitrate_kbps=180, avg_bitrate_kbps=180)
+        self.assertEqual(
+            quality_gate_decision(current, cfg=default_cfg), "requeue_upgrade")
+        self.assertEqual(
+            quality_gate_decision(current, cfg=lenient_cfg), "accept")
+
 
 # ============================================================================
 # Fresh request matrix — exact outcomes for all 16 scenarios
