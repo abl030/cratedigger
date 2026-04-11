@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 # Bootstrap ephemeral PostgreSQL if available
@@ -523,6 +524,92 @@ class TestCmdRepairSpectral(unittest.TestCase):
             self.assertEqual(imported_params, (207, 42))
         finally:
             os.unlink(cfg_path)
+
+
+class TestCmdQuality(unittest.TestCase):
+    """Regression tests for pipeline-cli quality simulator parity."""
+
+    def _run_quality(self, request_row, *, runtime_target: str | None):
+        from lib.quality import QualityRankConfig
+
+        db = MagicMock()
+        db.get_request.return_value = request_row
+
+        beets_info = SimpleNamespace(
+            is_cbr=False,
+            avg_bitrate_kbps=245,
+            format="MP3",
+        )
+        captured_kwargs: list[dict[str, object]] = []
+
+        def fake_full_pipeline_decision(**kwargs):
+            captured_kwargs.append(kwargs)
+            return {
+                "stage1_spectral": None,
+                "stage2_import": "import",
+                "stage3_quality_gate": "accept",
+                "final_status": "imported",
+                "imported": True,
+                "denylisted": False,
+                "keep_searching": False,
+                "target_final_format": kwargs.get("target_format")
+                or kwargs.get("verified_lossless_target"),
+            }
+
+        stdout = io.StringIO()
+        with patch("pipeline_cli._load_runtime_rank_config",
+                   return_value=QualityRankConfig.defaults()), \
+             patch("pipeline_cli._load_runtime_verified_lossless_target",
+                   return_value=runtime_target or ""), \
+             patch("pipeline_cli._load_beets_album_info",
+                   return_value=beets_info), \
+             patch("quality.full_pipeline_decision",
+                   side_effect=fake_full_pipeline_decision), \
+             redirect_stdout(stdout):
+            pipeline_cli.cmd_quality(db, MagicMock(id=request_row["id"]))
+
+        return stdout.getvalue(), captured_kwargs
+
+    def test_quality_threads_runtime_verified_lossless_target(self):
+        request_row = make_request_row(
+            id=7,
+            status="imported",
+            mb_release_id="mbid-123",
+            artist_name="Artist",
+            album_title="Album",
+            min_bitrate=245,
+            verified_lossless=True,
+            final_format="mp3 v0",
+            target_format=None,
+        )
+
+        output, calls = self._run_quality(request_row, runtime_target="opus 128")
+
+        self.assertTrue(calls)
+        self.assertTrue(all(
+            call["verified_lossless_target"] == "opus 128" for call in calls))
+        self.assertIn("Verified-lossless output: opus 128", output)
+        self.assertIn("Genuine FLAC → opus 128 (high bitrate):", output)
+
+    def test_quality_threads_request_target_format(self):
+        request_row = make_request_row(
+            id=8,
+            status="imported",
+            mb_release_id="mbid-123",
+            artist_name="Artist",
+            album_title="Album",
+            min_bitrate=245,
+            verified_lossless=True,
+            final_format="mp3 v0",
+            target_format="flac",
+        )
+
+        output, calls = self._run_quality(request_row, runtime_target="opus 128")
+
+        self.assertTrue(calls)
+        self.assertTrue(all(call["target_format"] == "flac" for call in calls))
+        self.assertIn("Verified-lossless output: flac", output)
+        self.assertIn("Genuine FLAC → flac (high bitrate):", output)
 
 
 if __name__ == "__main__":

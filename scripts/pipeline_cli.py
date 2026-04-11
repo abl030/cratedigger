@@ -61,6 +61,25 @@ def _load_runtime_rank_config():
     return rank_cfg
 
 
+def _load_runtime_verified_lossless_target() -> str:
+    """Load the runtime verified_lossless_target from the active config.ini."""
+    from config import read_verified_lossless_target
+
+    return read_verified_lossless_target()
+
+
+def _quality_preview_target_label(
+    target_format: str | None,
+    verified_lossless_target: str | None,
+) -> str:
+    """Human label for the on-disk destination used in quality previews."""
+    if target_format in ("flac", "lossless"):
+        return "flac"
+    if verified_lossless_target:
+        return verified_lossless_target
+    return "V0"
+
+
 def _load_beets_album_info(mb_release_id, rank_cfg):
     """Best-effort Beets album lookup for current quality metadata."""
     from beets_db import BeetsDB
@@ -561,11 +580,15 @@ def cmd_quality(db, args):
     q_override = req.get("search_filetype_override")
     spectral_grade = req.get("current_spectral_grade")
     final_format = req.get("final_format")
+    target_format = req.get("target_format")
+    verified_lossless_target = _load_runtime_verified_lossless_target() or None
 
     print(f"  {label}")
     print(f"  Status: {req['status']}")
     print(f"  Rank config: metric={rank_cfg.bitrate_metric.value}, "
           f"gate_min_rank={rank_cfg.gate_min_rank.name}")
+    print(f"  Verified-lossless output: "
+          f"{_quality_preview_target_label(target_format, verified_lossless_target)}")
     print()
 
     # --- Current quality gate ---
@@ -630,17 +653,19 @@ def cmd_quality(db, args):
             and effective_existing != min_br):
         override_min_bitrate = effective_existing
 
+    lossless_target_label = _quality_preview_target_label(
+        target_format, verified_lossless_target)
     scenarios = [
         # --- FLAC downloads ---
-        ("Genuine FLAC → V0 (high bitrate)", dict(
+        (f"Genuine FLAC → {lossless_target_label} (high bitrate)", dict(
             is_flac=True, min_bitrate=245, is_cbr=False,
             spectral_grade="genuine", converted_count=12,
             post_conversion_min_bitrate=245)),
-        ("Genuine FLAC → V0 (lo-fi, 207kbps)", dict(
+        (f"Genuine FLAC → {lossless_target_label} (lo-fi, 207kbps)", dict(
             is_flac=True, min_bitrate=207, is_cbr=False,
             spectral_grade="genuine", converted_count=12,
             post_conversion_min_bitrate=207)),
-        ("Marginal FLAC → V0", dict(
+        (f"Marginal FLAC → {lossless_target_label}", dict(
             is_flac=True, min_bitrate=240, is_cbr=False,
             spectral_grade="marginal", converted_count=12,
             post_conversion_min_bitrate=240)),
@@ -693,6 +718,8 @@ def cmd_quality(db, args):
             existing_format=existing_format_hint,
             existing_is_cbr=is_cbr,
             verified_lossless=verified,
+            target_format=target_format,
+            verified_lossless_target=verified_lossless_target,
             cfg=rank_cfg,
             **params)
 

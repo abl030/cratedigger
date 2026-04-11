@@ -721,6 +721,27 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
                                 "pipeline simulate response")
 
+    @patch("routes.pipeline.full_pipeline_decision")
+    def test_pipeline_simulate_threads_target_format(self, mock_simulate):
+        mock_simulate.return_value = {
+            "stage1_spectral": None,
+            "stage2_import": "import",
+            "stage3_quality_gate": "accept",
+            "final_status": "imported",
+            "imported": True,
+            "denylisted": False,
+            "keep_searching": False,
+            "target_final_format": "flac",
+        }
+
+        status, _data = self._get(
+            "/api/pipeline/simulate?is_flac=true&min_bitrate=900&target_format=flac"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            mock_simulate.call_args.kwargs["target_format"], "flac")
+
 
 class TestPipelineMutationRouteContracts(_WebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""

@@ -229,6 +229,7 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
         post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
         converted_count=_int("converted_count") or 0,
         verified_lossless=_bool("verified_lossless"),
+        target_format=_str("target_format"),
         verified_lossless_target=_str("verified_lossless_target"),
         cfg=_runtime_rank_config(),
     )
