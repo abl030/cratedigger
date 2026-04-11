@@ -876,20 +876,37 @@ class QualityRankConfig:
 
     @classmethod
     def from_json(cls, raw: str) -> "QualityRankConfig":
-        """Inverse of to_json(). Missing keys raise KeyError."""
-        payload = json.loads(raw)
-        return cls(
-            bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
-            gate_min_rank=QualityRank(int(payload["gate_min_rank"])),
-            within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
-            opus=CodecRankBands(**payload["opus"]),
-            mp3_vbr=CodecRankBands(**payload["mp3_vbr"]),
-            mp3_cbr=CodecRankBands(**payload["mp3_cbr"]),
-            aac=CodecRankBands(**payload["aac"]),
-            mp3_vbr_levels=tuple(QualityRank(int(r)) for r in payload["mp3_vbr_levels"]),
-            lossless_codecs=frozenset(payload["lossless_codecs"]),
-            mixed_format_precedence=tuple(payload["mixed_format_precedence"]),
-        )
+        """Inverse of to_json().
+
+        Missing keys / invalid enum values raise ValueError with a
+        QualityRankConfig-qualified diagnostic so the harness operator can
+        identify which field corrupted the argv round-trip. Used by
+        harness/import_one.py to deserialize the --quality-rank-config argv
+        blob emitted by dispatch_import_core().
+        """
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"QualityRankConfig.from_json: invalid JSON: {exc}") from exc
+        try:
+            return cls(
+                bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
+                gate_min_rank=QualityRank(int(payload["gate_min_rank"])),
+                within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
+                opus=CodecRankBands(**payload["opus"]),
+                mp3_vbr=CodecRankBands(**payload["mp3_vbr"]),
+                mp3_cbr=CodecRankBands(**payload["mp3_cbr"]),
+                aac=CodecRankBands(**payload["aac"]),
+                mp3_vbr_levels=tuple(
+                    QualityRank(int(r)) for r in payload["mp3_vbr_levels"]),
+                lossless_codecs=frozenset(payload["lossless_codecs"]),
+                mixed_format_precedence=tuple(payload["mixed_format_precedence"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"QualityRankConfig.from_json: failed to reconstruct config: "
+                f"{type(exc).__name__}: {exc}") from exc
 
 
 # Known codec family names produced by _codec_family_of().

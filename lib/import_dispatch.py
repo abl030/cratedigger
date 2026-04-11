@@ -434,6 +434,11 @@ def dispatch_import_core(
             cmd.extend(["--target-format", target_format])
         if override_min_bitrate is not None:
             cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
+        # Serialize the runtime QualityRankConfig so the harness classifies
+        # with the same policy as the caller. Missing cfg (e.g. legacy test
+        # path) → harness falls back to QualityRankConfig.defaults().
+        if cfg is not None:
+            cmd.extend(["--quality-rank-config", cfg.quality_ranks.to_json()])
         import_env = {**os.environ, "HOME": "/home/abl030"}
         result = sp.run(cmd, capture_output=True, text=True,
                         timeout=1800, env=import_env)

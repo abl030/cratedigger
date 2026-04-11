@@ -59,11 +59,11 @@ IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
 _current_result: ImportResult | None = None
 
-# Rank config used for BeetsDB.get_album_info() reduction of mixed-format
-# albums. Commit 4 will overwrite this with the deserialized runtime config
-# from the --quality-rank-config argv blob. For commit 3 it's the defaults
-# so behavior is unchanged — get_album_info() now takes cfg but mixed-format
-# reduction uses the default precedence tuple.
+# Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
+# quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
+# this with the deserialized --quality-rank-config argv blob passed by
+# lib.import_dispatch.dispatch_import_core. Missing or malformed argv falls
+# back to the hardcoded defaults.
 _rank_cfg: QualityRankConfig = QualityRankConfig.defaults()
 
 
@@ -291,16 +291,21 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
 # ---------------------------------------------------------------------------
 
 
-def _get_folder_min_bitrate(folder_path, ext_filter: set[str] | None = None):
-    """Get min bitrate (kbps) of audio files in a folder via ffprobe.
+def _get_folder_bitrates(folder_path,
+                         ext_filter: set[str] | None = None) -> list[int]:
+    """Probe per-track bitrates (kbps) for audio files in a folder via ffprobe.
 
     Uses audio stream bitrate (excludes cover art overhead). Falls back
     to format bitrate for VBR MP3s where stream bitrate is N/A.
 
     ext_filter: if provided, only measure files with these extensions
     (e.g. {".mp3"} to measure only V0 files when FLAC coexists).
+
+    Returns a list of strictly-positive bitrates (kbps) in filesystem-listed
+    order. Use _get_folder_min_bitrate() / _get_folder_avg_bitrate() for the
+    aggregate helpers.
     """
-    min_br = None
+    bitrates: list[int] = []
     for fname in os.listdir(folder_path):
         ext = os.path.splitext(fname)[1].lower()
         if ext not in AUDIO_EXTENSIONS:
@@ -329,11 +334,32 @@ def _get_folder_min_bitrate(folder_path, ext_filter: set[str] | None = None):
                 br_str = result.stdout.strip().rstrip(",")
             if br_str and br_str.isdigit():
                 br_kbps = int(br_str) // 1000
-                if br_kbps > 0 and (min_br is None or br_kbps < min_br):
-                    min_br = br_kbps
+                if br_kbps > 0:
+                    bitrates.append(br_kbps)
         except Exception:
             continue
-    return min_br
+    return bitrates
+
+
+def _get_folder_min_bitrate(folder_path,
+                            ext_filter: set[str] | None = None) -> int | None:
+    """Legacy alias: minimum per-file bitrate (kbps), or None if none probed."""
+    bitrates = _get_folder_bitrates(folder_path, ext_filter=ext_filter)
+    return min(bitrates) if bitrates else None
+
+
+def _get_folder_avg_bitrate(folder_path,
+                            ext_filter: set[str] | None = None) -> int | None:
+    """Mean per-file bitrate (kbps), or None if no probable files.
+
+    Truncated to int. Used by the codec-aware rank model as the preferred
+    metric for VBR codecs (issue #60) — album-mean is more robust to
+    legitimate per-track VBR variance than the min.
+    """
+    bitrates = _get_folder_bitrates(folder_path, ext_filter=ext_filter)
+    if not bitrates:
+        return None
+    return int(sum(bitrates) / len(bitrates))
 
 
 # ---------------------------------------------------------------------------
@@ -647,11 +673,31 @@ def main():
                         help="Target format after verified lossless (e.g. 'opus 128', 'mp3 v2')")
     parser.add_argument("--target-format", default=None,
                         help="Desired format on disk (e.g. 'flac' to skip conversion)")
+    parser.add_argument("--quality-rank-config", default=None,
+                        help="Serialized QualityRankConfig (JSON). Provided by "
+                             "lib.import_dispatch.dispatch_import_core so the "
+                             "harness's rank classification matches the caller's "
+                             "runtime config. Missing/empty falls back to defaults.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     mbid = args.mb_release_id
     request_id = args.request_id
+
+    # Parse --quality-rank-config and replace the module-level _rank_cfg default.
+    # Used by BeetsDB.get_album_info() mixed-format reduction + (commit 5)
+    # quality_rank()/compare_quality()/quality_gate_decision().
+    global _rank_cfg  # noqa: PLW0603
+    if args.quality_rank_config:
+        try:
+            _rank_cfg = QualityRankConfig.from_json(args.quality_rank_config)
+            _log(f"[CONFIG] quality_rank_config: "
+                 f"metric={_rank_cfg.bitrate_metric.value}, "
+                 f"gate_min_rank={_rank_cfg.gate_min_rank.name}")
+        except (ValueError, KeyError) as exc:
+            _log(f"[WARN] --quality-rank-config parse failed ({exc}); "
+                 f"falling back to defaults")
+            _rank_cfg = QualityRankConfig.defaults()
 
     # --force: raise distance threshold so high-distance candidates are accepted
     global MAX_DISTANCE
@@ -812,7 +858,12 @@ def main():
 
     # --- Quality comparison ---
     new_min_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter)
-    existing_min_br = beets.get_min_bitrate(mbid)
+    new_avg_br = _get_folder_avg_bitrate(args.path, ext_filter=v0_ext_filter)
+    existing_info = beets.get_album_info(mbid, _rank_cfg)
+    existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
+    existing_avg_br = existing_info.avg_bitrate_kbps if existing_info else None
+    existing_format = existing_info.format if existing_info else None
+    existing_is_cbr = existing_info.is_cbr if existing_info else False
     if args.override_min_bitrate is not None and existing_min_br is not None:
         if args.override_min_bitrate != existing_min_br:
             _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
@@ -822,14 +873,40 @@ def main():
         _log(f"  prev_min_bitrate={effective_existing}")
     if new_min_br is not None:
         _log(f"  new_min_bitrate={new_min_br}")
+    if new_avg_br is not None:
+        _log(f"  new_avg_bitrate={new_avg_br}")
 
     # Verified lossless: single source of truth in quality.py
     will_be_verified_lossless = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode)
 
+    # Final format label for the NEW measurement. Compute conv_target early
+    # (originally it was computed after the quality decision — hoisted for
+    # issue #60 so the rank model sees the correct target label).
+    new_conv_target = conversion_target(
+        args.target_format, will_be_verified_lossless,
+        args.verified_lossless_target)
+    if args.target_format in ("flac", "lossless"):
+        new_format_label: str | None = "flac"
+    elif new_conv_target:
+        # Post-commit-4 the measurement still reflects the V0 verification
+        # state at decision time; commit 5 will use this label for rank-based
+        # comparison, and the target-conversion block below updates it once
+        # the target conversion actually runs.
+        new_format_label = V0_SPEC.label if converted > 0 else None
+    elif converted > 0:
+        new_format_label = V0_SPEC.label
+    else:
+        # Native MP3 download — we don't know the exact VBR level / CBR
+        # without extra probing. Leave as None so the rank model falls back
+        # to bare-codec classification against the measured bitrate.
+        new_format_label = None
+
     # --- Build measurements ---
     new_m = AudioQualityMeasurement(
         min_bitrate_kbps=new_min_br,
+        avg_bitrate_kbps=new_avg_br,
+        format=new_format_label,
         spectral_grade=spectral_grade,
         spectral_bitrate_kbps=spectral_bitrate,
         verified_lossless=will_be_verified_lossless,
@@ -837,6 +914,9 @@ def main():
     )
     existing_m = (AudioQualityMeasurement(
         min_bitrate_kbps=effective_existing,
+        avg_bitrate_kbps=existing_avg_br,
+        format=existing_format,
+        is_cbr=existing_is_cbr,
         spectral_grade=existing_spectral_grade,
         spectral_bitrate_kbps=existing_spectral_bitrate,
     ) if existing_min_br is not None else None)
@@ -869,8 +949,10 @@ def main():
         _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
     # --- Target format conversion (after V0 verdict, before import) ---
-    conv_target = conversion_target(args.target_format, will_be_verified_lossless,
-                                    args.verified_lossless_target)
+    # conv_target was hoisted above for issue #60 (so new_m.format is
+    # available at the quality decision). Re-use it here instead of
+    # re-computing.
+    conv_target = new_conv_target
     target_achieved = False
     if should_run_target_conversion(conv_target):
         assert conv_target is not None
@@ -896,10 +978,17 @@ def main():
             _remove_files_by_ext(args.path, "." + V0_SPEC.extension)
         # Remove original lossless files (consumed by target conversion)
         _remove_lossless_files(args.path)
-        # Update measurements for target format
+        # Update measurements for the target format — include both the
+        # measured min/avg bitrate and the declared format label so the
+        # rank model classifies against the contract (e.g. "opus 128")
+        # rather than the measured VBR number (which lands 95-150 kbps
+        # depending on material).
         target_min_br = _get_folder_min_bitrate(args.path)
+        target_avg_br = _get_folder_avg_bitrate(args.path)
         r.new_measurement = AudioQualityMeasurement(
             min_bitrate_kbps=target_min_br,
+            avg_bitrate_kbps=target_avg_br,
+            format=target_spec.label,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
             verified_lossless=True,
@@ -908,7 +997,7 @@ def main():
         r.conversion.target_filetype = target_spec.extension
         r.final_format = target_spec.label
         _log(f"  {target_spec.label} conversion complete: {target_converted} files, "
-             f"min_bitrate={target_min_br}kbps")
+             f"min_bitrate={target_min_br}kbps, avg_bitrate={target_avg_br}kbps")
         _log(f"  V0 verification bitrate: {post_conv_br}kbps")
 
     # --- Clean up kept source files if target was skipped (transcode path) ---

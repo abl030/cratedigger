@@ -1385,6 +1385,46 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         for r in payload["mp3_vbr_levels"]:
             self.assertIsInstance(r, int)
 
+    def test_custom_collections_round_trip(self):
+        """Non-default mp3_vbr_levels / lossless_codecs / mixed_format_precedence
+        survive JSON round-trip unchanged."""
+        original = QualityRankConfig(
+            mp3_vbr_levels=(
+                QualityRank.EXCELLENT, QualityRank.GOOD, QualityRank.GOOD,
+                QualityRank.ACCEPTABLE, QualityRank.ACCEPTABLE, QualityRank.POOR,
+                QualityRank.POOR, QualityRank.POOR, QualityRank.POOR,
+                QualityRank.POOR,
+            ),
+            lossless_codecs=frozenset({"flac", "ape", "dsf", "wavpack"}),
+            mixed_format_precedence=("opus", "mp3", "flac"),
+        )
+        restored = QualityRankConfig.from_json(original.to_json())
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.mp3_vbr_levels[0], QualityRank.EXCELLENT)
+        self.assertIn("ape", restored.lossless_codecs)
+        self.assertEqual(restored.mixed_format_precedence, ("opus", "mp3", "flac"))
+
+    def test_from_json_invalid_json_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            QualityRankConfig.from_json("not valid json {")
+        self.assertIn("invalid JSON", str(ctx.exception))
+
+    def test_from_json_missing_key_raises_value_error(self):
+        """Missing keys produce a value error, not a bare KeyError."""
+        raw = '{"bitrate_metric": "avg"}'
+        with self.assertRaises(ValueError) as ctx:
+            QualityRankConfig.from_json(raw)
+        self.assertIn("failed to reconstruct", str(ctx.exception))
+
+    def test_from_json_invalid_rank_int_raises_value_error(self):
+        """Out-of-range QualityRank ints raise ValueError, not blow up."""
+        import json as _json
+        payload = _json.loads(QualityRankConfig.defaults().to_json())
+        payload["gate_min_rank"] = 9999  # invalid enum value
+        with self.assertRaises(ValueError) as ctx:
+            QualityRankConfig.from_json(_json.dumps(payload))
+        self.assertIn("failed to reconstruct", str(ctx.exception))
+
 
 class TestQualityRankConfigDefaults(unittest.TestCase):
     """Lock the default policy values so changes are explicit."""

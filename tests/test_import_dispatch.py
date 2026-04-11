@@ -357,6 +357,85 @@ class TestOverrideMinBitrate(unittest.TestCase):
                 )
 
 
+class TestDispatchRankConfigArgv(unittest.TestCase):
+    """Seam test — harness argv must carry --quality-rank-config JSON.
+
+    Verifies the QualityRankConfig round-trips through the subprocess
+    boundary unchanged, so the harness's rank classification matches the
+    caller's runtime config. Will break if import_one becomes a library
+    call (#48) or if QualityRankConfig.to_json() changes shape.
+    """
+
+    def _run_dispatch_capture_cmd(self, cfg_obj):
+        """Call dispatch_import_core with cfg_obj, return captured argv."""
+        from lib.import_dispatch import dispatch_import_core
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ir = make_import_result(decision="import")
+
+        with patch_dispatch_externals() as ext, \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+            dispatch_import_core(
+                path="/tmp/dest", mb_release_id="mbid-1",
+                request_id=42, label="Test Artist - Test Album",
+                beets_harness_path=_HARNESS,
+                cfg=cfg_obj,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                files=[MagicMock(username="user1", filename="01.mp3")],
+            )
+            return ext.run.call_args[0][0]
+
+    def _extract_rank_config_json(self, cmd):
+        for i, arg in enumerate(cmd):
+            if arg == "--quality-rank-config" and i + 1 < len(cmd):
+                return cmd[i + 1]
+        return None
+
+    def test_default_cfg_serializes_to_argv(self):
+        """Default QualityRankConfig → argv contains the round-trip JSON."""
+        from lib.config import SoularrConfig
+        from lib.quality import QualityRankConfig
+        cfg = SoularrConfig(beets_harness_path=_HARNESS)
+        cmd = self._run_dispatch_capture_cmd(cfg)
+        raw = self._extract_rank_config_json(cmd)
+        self.assertIsNotNone(raw)
+        assert raw is not None  # for pyright
+        # Round-trip must produce an equal QualityRankConfig
+        restored = QualityRankConfig.from_json(raw)
+        self.assertEqual(restored, cfg.quality_ranks)
+
+    def test_custom_cfg_serializes_to_argv(self):
+        """Custom gate_min_rank + metric survive the argv round-trip."""
+        from lib.config import SoularrConfig
+        from lib.quality import (QualityRank, QualityRankConfig,
+                                 RankBitrateMetric)
+        custom_ranks = QualityRankConfig(
+            bitrate_metric=RankBitrateMetric.MIN,
+            gate_min_rank=QualityRank.GOOD,
+            within_rank_tolerance_kbps=15,
+        )
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, quality_ranks=custom_ranks)
+        cmd = self._run_dispatch_capture_cmd(cfg)
+        raw = self._extract_rank_config_json(cmd)
+        self.assertIsNotNone(raw)
+        assert raw is not None  # for pyright
+        restored = QualityRankConfig.from_json(raw)
+        self.assertEqual(restored.bitrate_metric, RankBitrateMetric.MIN)
+        self.assertEqual(restored.gate_min_rank, QualityRank.GOOD)
+        self.assertEqual(restored.within_rank_tolerance_kbps, 15)
+
+    def test_missing_cfg_omits_argv(self):
+        """When cfg=None, the --quality-rank-config argv is not emitted.
+
+        Harness falls back to QualityRankConfig.defaults() in that case.
+        """
+        cmd = self._run_dispatch_capture_cmd(None)
+        self.assertNotIn("--quality-rank-config", cmd)
+
+
 class TestQualityGateUsesIntent(unittest.TestCase):
     """Orchestration tests for _check_quality_gate_core via FakePipelineDB."""
 
