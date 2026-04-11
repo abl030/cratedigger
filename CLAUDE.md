@@ -432,7 +432,7 @@ Uses `sox` bandpass filtering to detect transcodes. Measures RMS energy in 16 x 
 
 - **Recents tab** ("validation pipeline log"): Shows every download with full quality flow (slskd reported → actual on disk → spectral → existing). Badges: Upgraded, New import, Wrong match, Transcode, Quality mismatch. "On disk (before)" shows pre-import state.
 - **Library tab**: Quality label per album (MP3 V0, MP3 320, etc.). Upgrade button. Accept button (sets avg bitrate for lo-fi edge cases). Intent toggle: Default / Lossless (keeps lossless on disk for specific albums).
-- **Decisions tab**: Pipeline decision diagram generated from `get_decision_tree()` — shows FLAC/MP3 branching paths, all stages and rules with live thresholds from the code. Top of the tab renders a rank policy badge row (gate min rank / bitrate metric / within-rank tolerance) pulled from the same runtime cfg the backend uses, so operators see what `[Quality Ranks]` in the deployed `config.ini` is actually running (#68). Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
+- **Decisions tab**: Pipeline decision diagram generated from `get_decision_tree()` — shows FLAC/MP3 branching paths, all stages and rules with live thresholds from the code. A rank policy badge row at the top of the tab (gate min rank / bitrate metric / within-rank tolerance, issue #68) mirrors the same runtime cfg the backend uses, so operators see at a glance what `[Quality Ranks]` in the deployed `config.ini` is actually running. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
 - **Ban source**: Denylists user + removes from beets + requeues.
 
 ### Edge Cases

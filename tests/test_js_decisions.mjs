@@ -1,10 +1,14 @@
 /**
- * Unit tests for web/js/decisions.js — pure HTML-rendering functions.
+ * Unit tests for web/js/decisions.js — specifically renderPolicyBadges.
  * Run with: node tests/test_js_decisions.mjs
  *
- * These cover the pure functions exported from decisions.js. DOM-touching
- * entry points (loadDecisions, renderSimulatorForm) are exercised via live
- * deploy, not unit tests — the pure helpers they call are covered here.
+ * Scope: covers renderPolicyBadges (issue #68) only. The other pure
+ * exports in decisions.js — renderDiagram and renderStage — are exercised
+ * end-to-end via the test_pipeline_constants_contract route test plus
+ * live deploy verification of the Decisions tab. Future PRs that change
+ * the stage/diagram layout should consider adding dedicated unit tests
+ * here alongside renderPolicyBadges. DOM-touching entry points
+ * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
  */
 
 import { renderPolicyBadges } from '../web/js/decisions.js';
