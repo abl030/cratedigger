@@ -708,9 +708,16 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline constants response")
         _assert_required_fields(self, data["stages"][0], self.STAGE_REQUIRED_FIELDS,
                                 "pipeline constants stage")
-        # Issue #60: rank config surfaced to UI for the Decisions tab
+        # Issue #60: rank config surfaced to UI for the Decisions tab.
+        # Issue #68: within_rank_tolerance_kbps joins gate_min_rank and
+        # bitrate_metric as the third rank policy field the UI renders as
+        # a labeled badge at the top of the Decisions tab.
         self.assertIn("rank_gate_min_rank", data["constants"])
         self.assertIn("rank_bitrate_metric", data["constants"])
+        self.assertIn("rank_within_tolerance_kbps", data["constants"])
+        # Pin the type so the frontend can display it without conversion.
+        self.assertIsInstance(
+            data["constants"]["rank_within_tolerance_kbps"], int)
 
     def test_pipeline_simulate_contract(self):
         status, data = self._get(

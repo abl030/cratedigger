@@ -101,15 +101,60 @@ export function renderDiagram(tree) {
 }
 
 /**
+ * Render the live rank policy as labeled badges.
+ *
+ * Reads gate_min_rank / bitrate_metric / within_rank_tolerance_kbps from
+ * the constants payload so operators see at-a-glance what cfg the
+ * deployed `config.ini` is running — the same snapshot the transcode
+ * threshold, gate decision, and compare_quality tiebreaker all use
+ * (issue #68, following on from #75 which made the API surface
+ * coherent). Missing fields render as "?" so the function stays safe
+ * against partial payloads during boot or cache invalidation.
+ * @param {Object} constants - The `constants` sub-object from
+ *   `/api/pipeline/constants`.
+ * @returns {string} HTML string — a `.dp-policy` container with three
+ *   `.dp-policy-badge` pills.
+ */
+export function renderPolicyBadges(constants) {
+  const c = constants || {};
+  const gate = c.rank_gate_min_rank != null ? String(c.rank_gate_min_rank) : '?';
+  const metric = c.rank_bitrate_metric != null ? String(c.rank_bitrate_metric) : '?';
+  const tol = c.rank_within_tolerance_kbps != null
+    ? `${c.rank_within_tolerance_kbps} kbps`
+    : '?';
+  // Pure HTML: esc() every dynamic value even though the backend types are
+  // pinned — defense in depth if the constants payload ever grows richer
+  // fields (e.g. custom labels). The title attribute is a hardcoded static
+  // string; if you ever interpolate into it, route the value through esc()
+  // or a dedicated attribute encoder.
+  return `<div class="dp-policy" title="Live rank policy from config.ini">
+    <span class="dp-policy-badge">
+      <span class="dp-policy-badge-label">Gate min rank</span>
+      <span class="dp-policy-badge-value">${esc(gate)}</span>
+    </span>
+    <span class="dp-policy-badge">
+      <span class="dp-policy-badge-label">Bitrate metric</span>
+      <span class="dp-policy-badge-value">${esc(metric)}</span>
+    </span>
+    <span class="dp-policy-badge">
+      <span class="dp-policy-badge-label">Within-rank tolerance</span>
+      <span class="dp-policy-badge-value">${esc(tol)}</span>
+    </span>
+  </div>`;
+}
+
+/**
  * Render the simulator form with diagram and input fields.
  */
 export function renderSimulatorForm() {
   const el = document.getElementById('decisions-content');
   const c = state.dsConstants.constants;
   const diagram = renderDiagram(state.dsConstants);
+  const policy = renderPolicyBadges(c);
 
   el.innerHTML = `<div class="ds">
     <div class="ds-title">Decision Pipeline</div>
+    ${policy}
     ${diagram}
     <div class="dp-section-title" style="margin-top:24px;">Simulator</div>
     <div style="color:#666;font-size:0.85em;margin-bottom:12px;">

@@ -190,9 +190,13 @@ def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
     tree["constants"]["MIN_CLIFF_SLICES"] = MIN_CLIFF_SLICES
     tree["constants"]["CLIFF_THRESHOLD_DB_PER_KHZ"] = CLIFF_THRESHOLD_DB_PER_KHZ
     # Expose the runtime rank config to the UI so the Decisions tab shows
-    # the configured gate_min_rank and bitrate_metric.
+    # the configured gate_min_rank, bitrate_metric, and the same-rank
+    # tolerance. The frontend renders these three as labeled badges at
+    # the top of the tab (issue #68).
     tree["constants"]["rank_gate_min_rank"] = rank_cfg.gate_min_rank.name
     tree["constants"]["rank_bitrate_metric"] = rank_cfg.bitrate_metric.value
+    tree["constants"]["rank_within_tolerance_kbps"] = (
+        rank_cfg.within_rank_tolerance_kbps)
     h._json(tree)
 
 
