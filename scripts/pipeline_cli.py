@@ -550,7 +550,7 @@ def cmd_show(db, args):
 def cmd_quality(db, args):
     """Show quality state and simulate decisions for common download scenarios."""
     from quality import (full_pipeline_decision, quality_gate_decision,
-                         AudioQualityMeasurement, measurement_rank,
+                         AudioQualityMeasurement, gate_rank,
                          rejection_backfill_override,
                          search_tiers, compute_effective_override_bitrate)
 
@@ -604,7 +604,10 @@ def cmd_quality(db, args):
             is_cbr=is_cbr,
             verified_lossless=verified,
             spectral_bitrate_kbps=gate_spectral_br)
-        current_rank = measurement_rank(current, rank_cfg)
+        # gate_rank centralizes the spectral clamp the gate applies, so the
+        # displayed label always matches the verdict (no more EXCELLENT next
+        # to NEEDS UPGRADE on a fake CBR 320).
+        current_rank = gate_rank(current, rank_cfg)
         gate = quality_gate_decision(current, cfg=rank_cfg)
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
                       "requeue_lossless": "NEEDS LOSSLESS"}[gate]
@@ -625,7 +628,8 @@ def cmd_quality(db, args):
     # --- Rejection backfill status ---
     backfill = rejection_backfill_override(
         is_cbr=is_cbr, min_bitrate_kbps=min_br,
-        spectral_grade=spectral_grade, verified_lossless=verified)
+        spectral_grade=spectral_grade, verified_lossless=verified,
+        cfg=rank_cfg)
     if backfill and not q_override:
         print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
     elif q_override:
@@ -742,6 +746,7 @@ def cmd_quality(db, args):
                     min_bitrate_kbps=min_br,
                     spectral_grade=dl_spectral if dl_spectral else spectral_grade,
                     verified_lossless=verified,
+                    cfg=rank_cfg,
                 )
                 if propagated:
                     tiers, _ = search_tiers(propagated, [])

@@ -33,6 +33,7 @@ from lib.quality import (
     QualityRankConfig,
     quality_rank,
     measurement_rank,
+    gate_rank,
     compare_quality,
 )
 
@@ -305,6 +306,86 @@ class TestQualityGateDecision(unittest.TestCase):
                 self.assertEqual(
                     quality_gate_decision(m), expected,
                     f"{desc}: {kwargs} expected {expected!r}")
+
+
+# ============================================================================
+# gate_rank — single source of truth for the gate's classified rank
+# ============================================================================
+#
+# gate_rank() centralizes the spectral clamp that quality_gate_decision()
+# previously inlined. The simulator and the gate must always agree on the
+# displayed/decision rank — these tests pin that contract.
+
+class TestGateRank(unittest.TestCase):
+    """gate_rank: measurement_rank with the spectral clamp applied."""
+
+    def test_no_spectral_matches_measurement_rank(self):
+        """Without spectral, gate_rank must equal measurement_rank."""
+        m = AudioQualityMeasurement(format="mp3 v0", avg_bitrate_kbps=245)
+        cfg = QualityRankConfig.defaults()
+        self.assertEqual(gate_rank(m, cfg), measurement_rank(m, cfg))
+
+    def test_clamp_pulls_fake_cbr_down(self):
+        """Fake CBR 320 with spectral=128 must clamp from TRANSPARENT to POOR."""
+        m = AudioQualityMeasurement(
+            format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
+            spectral_bitrate_kbps=128)
+        cfg = QualityRankConfig.defaults()
+        # Without clamp, label "mp3 320" → TRANSPARENT
+        self.assertEqual(measurement_rank(m, cfg), QualityRank.TRANSPARENT)
+        # With clamp, spectral 128 against mp3_vbr.acceptable=130 → POOR
+        self.assertEqual(gate_rank(m, cfg), QualityRank.POOR)
+
+    def test_clamp_does_nothing_when_higher(self):
+        """Spectral above measurement rank: no clamp."""
+        m = AudioQualityMeasurement(
+            format="mp3", avg_bitrate_kbps=140, is_cbr=False,
+            spectral_bitrate_kbps=240)
+        cfg = QualityRankConfig.defaults()
+        # measurement: 140 → ACCEPTABLE; spectral 240 → EXCELLENT (higher); no clamp
+        self.assertEqual(gate_rank(m, cfg), QualityRank.ACCEPTABLE)
+
+    def test_afx_analord_regression(self):
+        """AFX Analord 09 live scenario: VBR 245kbps + spectral=160 likely_transcode.
+
+        Reproduces the exact case from the post-deploy reflection. The bare
+        MP3 label at 245 kbps is TRANSPARENT, but the spectral clamp must
+        pull it down to ACCEPTABLE so the gate's NEEDS UPGRADE verdict and
+        the displayed rank label agree.
+        """
+        m = AudioQualityMeasurement(
+            min_bitrate_kbps=213, avg_bitrate_kbps=245,
+            format="MP3", is_cbr=False,
+            spectral_bitrate_kbps=160)
+        cfg = QualityRankConfig.defaults()
+        rank = gate_rank(m, cfg)
+        # Spectral 160 → mp3_vbr.acceptable=130, between acceptable/good → ACCEPTABLE
+        self.assertEqual(rank, QualityRank.ACCEPTABLE)
+        # And quality_gate_decision agrees
+        self.assertEqual(quality_gate_decision(m, cfg), "requeue_upgrade")
+
+    def test_gate_decision_uses_gate_rank(self):
+        """quality_gate_decision must consult gate_rank, not raw measurement_rank.
+
+        Cross-check: every CASE in TestQualityGateDecision must produce the
+        same verdict whether we compute the rank via gate_rank() and apply
+        the gate threshold by hand, or call quality_gate_decision() directly.
+        """
+        cfg = QualityRankConfig.defaults()
+        for desc, kwargs, expected in TestQualityGateDecision.CASES:
+            with self.subTest(desc=desc):
+                m = AudioQualityMeasurement(**kwargs)
+                rank = gate_rank(m, cfg)
+                expected_via_rank = (
+                    "requeue_upgrade"
+                    if rank == QualityRank.UNKNOWN or rank < cfg.gate_min_rank
+                    else "requeue_lossless"
+                    if (not m.verified_lossless and m.is_cbr
+                        and rank < QualityRank.LOSSLESS)
+                    else "accept"
+                )
+                self.assertEqual(expected_via_rank, expected,
+                                 f"{desc}: gate_rank-derived verdict diverges from CASE expectation")
 
 
 # ============================================================================
@@ -1065,6 +1146,56 @@ class TestRejectionBackfillOverride(unittest.TestCase):
             is_cbr=True, min_bitrate_kbps=320,
             spectral_grade="suspect", verified_lossless=False)
         self.assertIsNone(result)
+
+    # --- Rank-aware: cfg threading (post-deploy follow-up) ---
+    #
+    # Before this fix, rejection_backfill_override hardcoded
+    # `min_bitrate_kbps >= QUALITY_MIN_BITRATE_KBPS` (210). Custom
+    # gate_min_rank settings did not propagate to the backfill decision
+    # — a cfg.gate_min_rank=GOOD operator would still see backfill fire
+    # only above 210kbps. Decision functions must thread cfg.
+
+    def test_custom_good_gate_lets_lower_vbr_backfill(self):
+        """gate_min_rank=GOOD lowers the bar: 180kbps VBR genuine → backfill fires."""
+        from lib.quality import rejection_backfill_override, QUALITY_LOSSLESS
+        lenient = QualityRankConfig(gate_min_rank=QualityRank.GOOD)
+        result = rejection_backfill_override(
+            is_cbr=False, min_bitrate_kbps=180,
+            spectral_grade="genuine", verified_lossless=False,
+            cfg=lenient)
+        # 180 against mp3_vbr (good=170) → GOOD, GOOD >= GOOD → backfill
+        self.assertEqual(result, QUALITY_LOSSLESS)
+
+    def test_custom_good_gate_default_blocks_lower_vbr(self):
+        """Default gate_min_rank=EXCELLENT blocks the same 180kbps VBR."""
+        from lib.quality import rejection_backfill_override
+        result = rejection_backfill_override(
+            is_cbr=False, min_bitrate_kbps=180,
+            spectral_grade="genuine", verified_lossless=False)
+        # 180 → GOOD, GOOD < EXCELLENT → no backfill
+        self.assertIsNone(result)
+
+    def test_custom_transparent_gate_blocks_excellent_cbr(self):
+        """gate_min_rank=TRANSPARENT raises the bar: CBR 256 (EXCELLENT) no longer backfills."""
+        from lib.quality import rejection_backfill_override
+        strict = QualityRankConfig(gate_min_rank=QualityRank.TRANSPARENT)
+        result = rejection_backfill_override(
+            is_cbr=True, min_bitrate_kbps=256,
+            spectral_grade="genuine", verified_lossless=False,
+            cfg=strict)
+        # 256 against mp3_cbr (transparent=320, excellent=256) → EXCELLENT,
+        # EXCELLENT < TRANSPARENT → no backfill
+        self.assertIsNone(result)
+
+    def test_custom_transparent_gate_still_backfills_cbr_320(self):
+        """gate_min_rank=TRANSPARENT still backfills CBR 320 (TRANSPARENT rank)."""
+        from lib.quality import rejection_backfill_override, QUALITY_LOSSLESS
+        strict = QualityRankConfig(gate_min_rank=QualityRank.TRANSPARENT)
+        result = rejection_backfill_override(
+            is_cbr=True, min_bitrate_kbps=320,
+            spectral_grade="genuine", verified_lossless=False,
+            cfg=strict)
+        self.assertEqual(result, QUALITY_LOSSLESS)
 
 
 # ============================================================================

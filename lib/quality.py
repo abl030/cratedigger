@@ -1529,16 +1529,41 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
 # Post-import quality gate (runs after successful import in soularr.py)
 # ---------------------------------------------------------------------------
 
+def gate_rank(
+    current: AudioQualityMeasurement,
+    cfg: "QualityRankConfig",
+) -> QualityRank:
+    """Rank used by ``quality_gate_decision()`` — measurement rank with the
+    spectral clamp applied.
+
+    This is the single source of truth for "what rank does the gate see".
+    Both ``quality_gate_decision()`` and the simulator (``pipeline-cli quality``)
+    call this so the displayed rank label and the actual gate verdict can
+    never disagree.
+
+    Spectral clamp: when the current measurement carries a spectral estimate
+    (set upstream only when the grade is suspect/likely_transcode — see
+    ``_check_quality_gate_core()``), classify that estimate against the MP3
+    VBR band table and take the lower rank. This catches fake 320s and
+    legacy low-spectral transcodes.
+    """
+    rank = measurement_rank(current, cfg)
+    if current.spectral_bitrate_kbps is not None:
+        spectral_rank = quality_rank(
+            "mp3", current.spectral_bitrate_kbps, is_cbr=False, cfg=cfg)
+        if spectral_rank < rank:
+            rank = spectral_rank
+    return rank
+
+
 def quality_gate_decision(
     current: AudioQualityMeasurement,
     cfg: "QualityRankConfig | None" = None,
 ) -> str:
     """Codec-aware post-import quality gate (issue #60).
 
-    Classifies ``current`` into a QualityRank via measurement_rank() and
-    compares against ``cfg.gate_min_rank``. Spectral bitrate can clamp the
-    rank down (catches fake 320s) by classifying the spectral estimate with
-    the MP3 VBR band table.
+    Classifies ``current`` via ``gate_rank()`` (which applies the spectral
+    clamp) and compares against ``cfg.gate_min_rank``.
 
     Returns one of: "accept", "requeue_upgrade", "requeue_lossless".
 
@@ -1549,18 +1574,7 @@ def quality_gate_decision(
     if cfg is None:
         cfg = QualityRankConfig.defaults()
 
-    rank = measurement_rank(current, cfg)
-
-    # Spectral clamp: when the current measurement carries a spectral
-    # estimate (set upstream only when the grade is suspect/likely_transcode
-    # — see _check_quality_gate_core()), classify that estimate against the
-    # MP3 VBR band table and take the lower rank. This catches fake 320s
-    # and legacy low-spectral transcodes.
-    if current.spectral_bitrate_kbps is not None:
-        spectral_rank = quality_rank(
-            "mp3", current.spectral_bitrate_kbps, is_cbr=False, cfg=cfg)
-        if spectral_rank < rank:
-            rank = spectral_rank
+    rank = gate_rank(current, cfg)
 
     if rank == QualityRank.UNKNOWN or rank < cfg.gate_min_rank:
         return "requeue_upgrade"
@@ -1703,6 +1717,7 @@ def rejection_backfill_override(
     min_bitrate_kbps: int | None,
     spectral_grade: str | None,
     verified_lossless: bool,
+    cfg: "QualityRankConfig | None" = None,
 ) -> str | None:
     """Backfill search_filetype_override for pre-quality-gate albums stuck in download loops.
 
@@ -1710,16 +1725,24 @@ def rejection_backfill_override(
     albums with decent quality on disk keep downloading the same tier forever
     because the quality gate only fires after successful imports.
 
-    Returns QUALITY_LOSSLESS when the on-disk state is good enough that only
-    a verified lossless source would be an upgrade. Returns None otherwise.
+    Returns QUALITY_LOSSLESS when the on-disk rank is at or above
+    ``cfg.gate_min_rank`` (the same threshold the post-import quality gate
+    uses) — the only upgrade left is a verified lossless source.
+
+    ``cfg`` defaults to ``QualityRankConfig.defaults()``. Threading the live
+    runtime cfg keeps backfill in lockstep with the gate when an operator
+    tunes ``gate_min_rank``.
     """
+    if cfg is None:
+        cfg = QualityRankConfig.defaults()
     if verified_lossless:
         return None
     if spectral_grade != "genuine":
         return None
     if min_bitrate_kbps is None:
         return None
-    if min_bitrate_kbps >= QUALITY_MIN_BITRATE_KBPS:
+    rank = quality_rank("mp3", min_bitrate_kbps, is_cbr=is_cbr, cfg=cfg)
+    if rank >= cfg.gate_min_rank:
         return QUALITY_LOSSLESS
     return None
 

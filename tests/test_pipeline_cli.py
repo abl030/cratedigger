@@ -611,6 +611,73 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("Verified-lossless output: flac", output)
         self.assertIn("Genuine FLAC → flac (high bitrate):", output)
 
+    def test_quality_label_matches_gate_after_spectral_clamp(self):
+        """AFX Analord 09 regression: displayed rank label must match the gate verdict.
+
+        Reproduces the exact post-deploy scenario: VBR ~245kbps + spectral=160
+        likely_transcode. Without the spectral clamp, the displayed label
+        showed `rank=EXCELLENT` next to `NEEDS UPGRADE` — self-contradictory.
+        After the fix, the displayed rank is the post-clamp rank that the
+        gate actually used.
+        """
+        from lib.quality import QualityRankConfig
+
+        request_row = make_request_row(
+            id=9,
+            status="imported",
+            mb_release_id="mbid-afx",
+            artist_name="AFX",
+            album_title="Analord 09",
+            min_bitrate=213,
+            current_spectral_bitrate=160,
+            current_spectral_grade="likely_transcode",
+            verified_lossless=False,
+            final_format=None,
+        )
+
+        beets_info = SimpleNamespace(
+            is_cbr=False,
+            avg_bitrate_kbps=245,
+            format="MP3",
+        )
+
+        def fake_full_pipeline_decision(**kwargs):
+            return {
+                "stage1_spectral": None,
+                "stage2_import": "import",
+                "stage3_quality_gate": "accept",
+                "final_status": "imported",
+                "imported": True,
+                "denylisted": False,
+                "keep_searching": False,
+                "target_final_format": kwargs.get("target_format")
+                or kwargs.get("verified_lossless_target"),
+            }
+
+        db = MagicMock()
+        db.get_request.return_value = request_row
+        stdout = io.StringIO()
+        with patch("pipeline_cli._load_runtime_rank_config",
+                   return_value=QualityRankConfig.defaults()), \
+             patch("pipeline_cli._load_runtime_verified_lossless_target",
+                   return_value=""), \
+             patch("pipeline_cli._load_beets_album_info",
+                   return_value=beets_info), \
+             patch("quality.full_pipeline_decision",
+                   side_effect=fake_full_pipeline_decision), \
+             redirect_stdout(stdout):
+            pipeline_cli.cmd_quality(db, MagicMock(id=9))
+
+        output = stdout.getvalue()
+        # The gate must say NEEDS UPGRADE (not DONE)
+        self.assertIn("NEEDS UPGRADE", output)
+        # And the displayed rank must agree — post-clamp 160kbps lands ACCEPTABLE.
+        # Use parenthesized form to disambiguate from `gate_min_rank=EXCELLENT`
+        # in the cfg display line.
+        self.assertIn("(rank=ACCEPTABLE)", output)
+        self.assertNotIn("(rank=TRANSPARENT)", output)
+        self.assertNotIn("(rank=EXCELLENT)", output)
+
 
 if __name__ == "__main__":
     unittest.main()
