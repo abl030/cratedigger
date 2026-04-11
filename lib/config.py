@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
+from lib.quality import QualityRankConfig
+
 if TYPE_CHECKING:
     from lib.quality import AudioFileSpec
 
@@ -65,6 +67,9 @@ class SoularrConfig:
     audio_check_mode: str = "normal"
     beets_tracking_file: str = ""
     verified_lossless_target: str = ""  # Target format after verified lossless (e.g. "opus 128", "mp3 v2")
+
+    # --- Quality Ranks (codec-aware comparison model, issue #60) ---
+    quality_ranks: QualityRankConfig = field(default_factory=QualityRankConfig.defaults)
 
     # --- Pipeline DB ---
     pipeline_db_enabled: bool = False
@@ -184,6 +189,9 @@ class SoularrConfig:
             audio_check_mode=get("Beets Validation", "audio_check", "normal"),
             beets_tracking_file=get("Beets Validation", "tracking_file", ""),
             verified_lossless_target=get("Beets Validation", "verified_lossless_target", ""),
+            # Quality Ranks — codec-aware comparison policy. Missing section
+            # yields the default QualityRankConfig (see lib/quality.py).
+            quality_ranks=QualityRankConfig.from_ini(config),
             # Pipeline DB
             pipeline_db_enabled=getbool("Pipeline DB", "enabled", False),
             pipeline_db_dsn=get("Pipeline DB", "dsn", "postgresql://soularr@localhost/soularr"),

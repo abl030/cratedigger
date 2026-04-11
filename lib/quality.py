@@ -4,6 +4,7 @@ Pure functions — no database, no filesystem, no external dependencies.
 Used by soularr.py and import_one.py, tested directly against real audio fixtures.
 """
 
+import configparser
 import enum
 import json
 from dataclasses import dataclass, field, asdict
@@ -750,6 +751,145 @@ class QualityRankConfig:
     @classmethod
     def defaults(cls) -> "QualityRankConfig":
         return cls()
+
+    # ------------------------------------------------------------------
+    # [Quality Ranks] config.ini parsing
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_ini(
+        cls,
+        parser: configparser.RawConfigParser,
+        section: str = "Quality Ranks",
+    ) -> "QualityRankConfig":
+        """Parse a [Quality Ranks] section into a QualityRankConfig.
+
+        Every key is optional — missing keys fall back to the field's default
+        value, so users can customize one codec or one band without writing
+        out the entire section.
+
+        Key names (all lowercase, codec-prefixed for bands):
+
+            bitrate_metric            = min | avg
+            gate_min_rank             = unknown|poor|acceptable|good|excellent|transparent|lossless
+            within_rank_tolerance_kbps = <int>
+            <codec>.<band>            = <int>
+              codecs: opus, mp3_vbr, mp3_cbr, aac
+              bands:  transparent, excellent, good, acceptable
+
+        Invalid values raise ValueError at parse time with a diagnostic that
+        names the offending key. Missing section silently returns defaults.
+        """
+        base = cls.defaults()
+        if not parser.has_section(section):
+            return base
+
+        def _get_str(key: str, default: str) -> str:
+            raw = parser.get(section, key, fallback=None)
+            if raw is None or raw.strip() == "":
+                return default
+            return raw.strip()
+
+        def _get_int(key: str, default: int) -> int:
+            raw = parser.get(section, key, fallback=None)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                return int(raw.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"[{section}] {key}: expected integer, got {raw!r}") from exc
+
+        # --- Policy ---
+        metric_str = _get_str("bitrate_metric", base.bitrate_metric.value).lower()
+        try:
+            metric = RankBitrateMetric(metric_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"[{section}] bitrate_metric: expected one of "
+                f"{[m.value for m in RankBitrateMetric]}, got {metric_str!r}"
+            ) from exc
+
+        rank_str = _get_str("gate_min_rank", base.gate_min_rank.name.lower()).lower()
+        if rank_str not in _RANK_NAME_TO_VALUE:
+            raise ValueError(
+                f"[{section}] gate_min_rank: expected one of "
+                f"{sorted(_RANK_NAME_TO_VALUE.keys())}, got {rank_str!r}")
+        gate_min_rank = _RANK_NAME_TO_VALUE[rank_str]
+
+        tolerance = _get_int("within_rank_tolerance_kbps", base.within_rank_tolerance_kbps)
+        if tolerance < 0:
+            raise ValueError(
+                f"[{section}] within_rank_tolerance_kbps: must be >= 0, got {tolerance}")
+
+        # --- Codec bands ---
+        def _get_bands(codec: str, default: CodecRankBands) -> CodecRankBands:
+            return CodecRankBands(
+                transparent=_get_int(f"{codec}.transparent", default.transparent),
+                excellent=_get_int(f"{codec}.excellent", default.excellent),
+                good=_get_int(f"{codec}.good", default.good),
+                acceptable=_get_int(f"{codec}.acceptable", default.acceptable),
+            )
+
+        try:
+            opus = _get_bands("opus", base.opus)
+            mp3_vbr = _get_bands("mp3_vbr", base.mp3_vbr)
+            mp3_cbr = _get_bands("mp3_cbr", base.mp3_cbr)
+            aac = _get_bands("aac", base.aac)
+        except ValueError as exc:
+            # CodecRankBands.__post_init__ raises on non-monotonic; re-wrap
+            # with section context.
+            raise ValueError(f"[{section}] invalid codec bands: {exc}") from exc
+
+        return cls(
+            bitrate_metric=metric,
+            gate_min_rank=gate_min_rank,
+            within_rank_tolerance_kbps=tolerance,
+            opus=opus,
+            mp3_vbr=mp3_vbr,
+            mp3_cbr=mp3_cbr,
+            aac=aac,
+            mp3_vbr_levels=base.mp3_vbr_levels,
+            lossless_codecs=base.lossless_codecs,
+            mixed_format_precedence=base.mixed_format_precedence,
+        )
+
+    # ------------------------------------------------------------------
+    # JSON round-trip (used by the import_one.py argv protocol)
+    # ------------------------------------------------------------------
+
+    def to_json(self) -> str:
+        """Serialize to JSON for the --quality-rank-config harness argv."""
+        payload: dict[str, Any] = {
+            "bitrate_metric": self.bitrate_metric.value,
+            "gate_min_rank": int(self.gate_min_rank),
+            "within_rank_tolerance_kbps": self.within_rank_tolerance_kbps,
+            "opus": asdict(self.opus),
+            "mp3_vbr": asdict(self.mp3_vbr),
+            "mp3_cbr": asdict(self.mp3_cbr),
+            "aac": asdict(self.aac),
+            "mp3_vbr_levels": [int(r) for r in self.mp3_vbr_levels],
+            "lossless_codecs": sorted(self.lossless_codecs),
+            "mixed_format_precedence": list(self.mixed_format_precedence),
+        }
+        return json.dumps(payload, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "QualityRankConfig":
+        """Inverse of to_json(). Missing keys raise KeyError."""
+        payload = json.loads(raw)
+        return cls(
+            bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
+            gate_min_rank=QualityRank(int(payload["gate_min_rank"])),
+            within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
+            opus=CodecRankBands(**payload["opus"]),
+            mp3_vbr=CodecRankBands(**payload["mp3_vbr"]),
+            mp3_cbr=CodecRankBands(**payload["mp3_cbr"]),
+            aac=CodecRankBands(**payload["aac"]),
+            mp3_vbr_levels=tuple(QualityRank(int(r)) for r in payload["mp3_vbr_levels"]),
+            lossless_codecs=frozenset(payload["lossless_codecs"]),
+            mixed_format_precedence=tuple(payload["mixed_format_precedence"]),
+        )
 
 
 # Known codec family names produced by _codec_family_of().

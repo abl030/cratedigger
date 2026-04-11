@@ -5,6 +5,7 @@ These test every branch of the four decision functions directly,
 independent of real audio fixtures or the full_pipeline_decision integrator.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -1225,6 +1226,164 @@ class TestCompareQuality(unittest.TestCase):
         self.assertEqual(compare_quality(new, existing, cfg_min), "better")
         # Under AVG: new=250, existing=260 → worse
         self.assertEqual(compare_quality(new, existing, CFG), "worse")
+
+
+class TestQualityRankConfigFromIni(unittest.TestCase):
+    """Parse [Quality Ranks] section from config.ini — exhaustive edge cases."""
+
+    def _parse(self, ini_body: str) -> QualityRankConfig:
+        import configparser
+        parser = configparser.RawConfigParser()
+        parser.read_string(ini_body)
+        return QualityRankConfig.from_ini(parser)
+
+    def test_missing_section_returns_defaults(self):
+        cfg = self._parse("[Other Section]\nkey = value\n")
+        self.assertEqual(cfg, QualityRankConfig.defaults())
+
+    def test_empty_section_returns_defaults(self):
+        cfg = self._parse("[Quality Ranks]\n")
+        self.assertEqual(cfg, QualityRankConfig.defaults())
+
+    def test_partial_override_one_band(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "opus.transparent = 120\n"
+        )
+        self.assertEqual(cfg.opus.transparent, 120)
+        # All other opus values stay at default
+        self.assertEqual(cfg.opus.excellent, 88)
+        self.assertEqual(cfg.opus.good, 64)
+        self.assertEqual(cfg.opus.acceptable, 48)
+        # And other codecs untouched
+        self.assertEqual(cfg.mp3_vbr, QualityRankConfig.defaults().mp3_vbr)
+
+    def test_full_override(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "bitrate_metric = min\n"
+            "gate_min_rank = good\n"
+            "within_rank_tolerance_kbps = 10\n"
+            "opus.transparent = 120\n"
+            "opus.excellent = 100\n"
+            "opus.good = 80\n"
+            "opus.acceptable = 60\n"
+            "mp3_vbr.transparent = 220\n"
+            "mp3_vbr.excellent = 180\n"
+            "mp3_vbr.good = 140\n"
+            "mp3_vbr.acceptable = 100\n"
+            "mp3_cbr.transparent = 320\n"
+            "mp3_cbr.excellent = 250\n"
+            "mp3_cbr.good = 200\n"
+            "mp3_cbr.acceptable = 130\n"
+            "aac.transparent = 200\n"
+            "aac.excellent = 150\n"
+            "aac.good = 120\n"
+            "aac.acceptable = 90\n"
+        )
+        self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MIN)
+        self.assertEqual(cfg.gate_min_rank, QualityRank.GOOD)
+        self.assertEqual(cfg.within_rank_tolerance_kbps, 10)
+        self.assertEqual(cfg.opus.transparent, 120)
+        self.assertEqual(cfg.mp3_vbr.transparent, 220)
+        self.assertEqual(cfg.mp3_cbr.excellent, 250)
+        self.assertEqual(cfg.aac.acceptable, 90)
+
+    def test_invalid_metric_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse("[Quality Ranks]\nbitrate_metric = median\n")
+        self.assertIn("bitrate_metric", str(ctx.exception))
+
+    def test_invalid_rank_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse("[Quality Ranks]\ngate_min_rank = perfect\n")
+        self.assertIn("gate_min_rank", str(ctx.exception))
+
+    def test_non_integer_band_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse("[Quality Ranks]\nopus.transparent = not_a_number\n")
+        self.assertIn("opus.transparent", str(ctx.exception))
+
+    def test_non_monotonic_bands_raise(self):
+        with self.assertRaises(ValueError):
+            self._parse(
+                "[Quality Ranks]\n"
+                "opus.transparent = 50\n"
+                "opus.excellent = 100\n"
+            )
+
+    def test_negative_tolerance_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse("[Quality Ranks]\nwithin_rank_tolerance_kbps = -3\n")
+        self.assertIn("within_rank_tolerance_kbps", str(ctx.exception))
+
+    def test_case_insensitive_metric_and_rank(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "bitrate_metric = AVG\n"
+            "gate_min_rank = TRANSPARENT\n"
+        )
+        self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.AVG)
+        self.assertEqual(cfg.gate_min_rank, QualityRank.TRANSPARENT)
+
+    def test_empty_value_falls_through_to_default(self):
+        """Empty `key =` should yield the default, matching _get_int behavior."""
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "bitrate_metric = \n"
+            "gate_min_rank =    \n"
+        )
+        self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.AVG)
+        self.assertEqual(cfg.gate_min_rank, QualityRank.EXCELLENT)
+
+    def test_repo_config_ini_parses_cleanly(self):
+        """The in-repo config.ini template must parse to a valid QualityRankConfig."""
+        import configparser
+        import os
+        parser = configparser.RawConfigParser()
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        parser.read(os.path.join(repo_root, "config.ini"))
+        cfg = QualityRankConfig.from_ini(parser)
+        # Repo template uses the defaults — assert round-trip equality.
+        self.assertEqual(cfg, QualityRankConfig.defaults())
+
+
+class TestQualityRankConfigRoundTrip(unittest.TestCase):
+    """to_json / from_json must round-trip identically."""
+
+    def test_defaults_round_trip(self):
+        original = QualityRankConfig.defaults()
+        restored = QualityRankConfig.from_json(original.to_json())
+        self.assertEqual(restored, original)
+
+    def test_custom_round_trip(self):
+        original = QualityRankConfig(
+            bitrate_metric=RankBitrateMetric.MIN,
+            gate_min_rank=QualityRank.TRANSPARENT,
+            within_rank_tolerance_kbps=8,
+            opus=CodecRankBands(transparent=120, excellent=100, good=80, acceptable=60),
+        )
+        payload = original.to_json()
+        restored = QualityRankConfig.from_json(payload)
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.opus.transparent, 120)
+
+    def test_json_shape_stable(self):
+        """to_json() must emit the expected top-level keys."""
+        import json
+        payload = json.loads(QualityRankConfig.defaults().to_json())
+        expected_keys = {
+            "bitrate_metric", "gate_min_rank", "within_rank_tolerance_kbps",
+            "opus", "mp3_vbr", "mp3_cbr", "aac",
+            "mp3_vbr_levels", "lossless_codecs", "mixed_format_precedence",
+        }
+        self.assertEqual(set(payload.keys()), expected_keys)
+
+    def test_json_rank_is_int(self):
+        payload = json.loads(QualityRankConfig.defaults().to_json())
+        self.assertIsInstance(payload["gate_min_rank"], int)
+        for r in payload["mp3_vbr_levels"]:
+            self.assertIsInstance(r, int)
 
 
 class TestQualityRankConfigDefaults(unittest.TestCase):
