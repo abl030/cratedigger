@@ -178,6 +178,7 @@ class TestGetAlbumInfo(unittest.TestCase):
         self.assertEqual(info.track_count, 2)
         self.assertEqual(info.min_bitrate_kbps, 320)
         self.assertEqual(info.avg_bitrate_kbps, 320)
+        self.assertEqual(info.median_bitrate_kbps, 320)
         self.assertTrue(info.is_cbr)
         self.assertEqual(info.album_path, "/music/Artist/Album")
         self.assertEqual(info.format, "MP3")
@@ -193,9 +194,50 @@ class TestGetAlbumInfo(unittest.TestCase):
         assert info is not None
         self.assertEqual(info.min_bitrate_kbps, 238)
         self.assertEqual(info.avg_bitrate_kbps, 244)  # (245+238+251)/3 = 244.66 → 244
+        # Median of {238, 245, 251} = 245
+        self.assertEqual(info.median_bitrate_kbps, 245)
         self.assertFalse(info.is_cbr)
         self.assertEqual(info.track_count, 3)
         self.assertEqual(info.format, "MP3")
+
+    def test_median_resists_outliers(self) -> None:
+        """Median ignores a single very-low track that would tank min/avg.
+
+        Issue #64: a V0 album with one quiet 60kbps interlude should still
+        classify as TRANSPARENT under the MEDIAN rank metric. The pure
+        rank classification is unit-tested in test_quality_decisions; here
+        we just verify BeetsDB computes the median field correctly.
+        """
+        _insert_album(self.db_path, 8, "median-1", [
+            ( 60000, "/m/M/00.mp3"),  # silent intro
+            (245000, "/m/M/01.mp3"),
+            (250000, "/m/M/02.mp3"),
+            (255000, "/m/M/03.mp3"),
+            (260000, "/m/M/04.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("median-1", self.cfg)
+        assert info is not None
+        self.assertEqual(info.min_bitrate_kbps, 60)
+        # avg = (60+245+250+255+260)/5 = 214 → int(214) = 214
+        self.assertEqual(info.avg_bitrate_kbps, 214)
+        # median of 5 sorted values {60, 245, 250, 255, 260} = 250
+        self.assertEqual(info.median_bitrate_kbps, 250)
+        self.assertFalse(info.is_cbr)
+
+    def test_median_even_track_count(self) -> None:
+        """statistics.median() averages the two middle values for even counts."""
+        _insert_album(self.db_path, 9, "median-2", [
+            (200000, "/m/E/01.mp3"),
+            (220000, "/m/E/02.mp3"),
+            (240000, "/m/E/03.mp3"),
+            (260000, "/m/E/04.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("median-2", self.cfg)
+        assert info is not None
+        # median of {200, 220, 240, 260} = (220+240)/2 = 230
+        self.assertEqual(info.median_bitrate_kbps, 230)
 
     def test_not_found(self) -> None:
         with BeetsDB(self.db_path) as db:

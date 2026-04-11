@@ -1358,6 +1358,51 @@ class TestMeasurementRank(unittest.TestCase):
         m = AudioQualityMeasurement(format="MP3")
         self.assertEqual(measurement_rank(m, CFG), QualityRank.UNKNOWN)
 
+    # ---- MEDIAN metric (issue #64) ---------------------------------------
+    # The median is robust against per-track outliers like a 60kbps interlude
+    # or a 320kbps hidden track on an otherwise V0 album. The subtest table
+    # below pins the dispatch behavior for every interesting combination.
+    MEDIAN_CASES = [
+        # (description, min, avg, median, format, expected_rank)
+        ("median wins over outlier-low min — Opus 130 album",
+         60, 128, 130, "Opus", QualityRank.TRANSPARENT),
+        ("median wins over outlier-high avg — MP3 V0 album with one 320 hidden track",
+         200, 230, 215, "MP3", QualityRank.EXCELLENT),
+        ("median falls back to min when None",
+         260, 260, None, "MP3", QualityRank.TRANSPARENT),
+        ("median below acceptable → POOR",
+         128, 128, 100, "MP3", QualityRank.POOR),
+        ("median classifies bare Opus into GOOD band",
+         60, 130, 70, "Opus", QualityRank.GOOD),
+    ]
+
+    def test_median_metric_table(self):
+        cfg_median = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
+        for desc, mn, av, med, fmt, expected in self.MEDIAN_CASES:
+            with self.subTest(desc=desc):
+                m = AudioQualityMeasurement(
+                    min_bitrate_kbps=mn,
+                    avg_bitrate_kbps=av,
+                    median_bitrate_kbps=med,
+                    format=fmt,
+                )
+                self.assertEqual(measurement_rank(m, cfg_median), expected)
+
+    def test_median_metric_does_not_affect_avg_default(self):
+        """Setting median_bitrate_kbps must not change AVG-policy classification."""
+        m = AudioQualityMeasurement(
+            min_bitrate_kbps=80, avg_bitrate_kbps=130,
+            median_bitrate_kbps=70, format="Opus")
+        # Default AVG metric → still uses 130 → TRANSPARENT, ignoring median.
+        self.assertEqual(measurement_rank(m, CFG), QualityRank.TRANSPARENT)
+
+    def test_median_metric_falls_back_to_min_when_only_min_set(self):
+        """Legacy measurements with only min populated still classify under MEDIAN."""
+        cfg_median = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
+        m = AudioQualityMeasurement(min_bitrate_kbps=260, format="MP3")
+        # 260 ≥ default mp3_vbr.transparent=245 → TRANSPARENT
+        self.assertEqual(measurement_rank(m, cfg_median), QualityRank.TRANSPARENT)
+
 
 class TestCompareQuality(unittest.TestCase):
     """compare_quality() covers all four outcome branches explicitly."""
@@ -1477,6 +1522,27 @@ class TestCompareQuality(unittest.TestCase):
         # Under AVG: new=250, existing=260 → worse
         self.assertEqual(compare_quality(new, existing, CFG), "worse")
 
+    def test_median_metric_honored_in_comparison(self):
+        """When cfg uses MEDIAN, compare_quality must use median not avg/min.
+
+        Issue #64: outlier-resistant comparisons. The new album has one
+        very quiet interlude (min=60) but every other track sits above the
+        existing album's median. Under MIN it would lose; under MEDIAN it
+        wins because the typical track is better.
+        """
+        cfg_med = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
+        new = self._m(format="MP3",
+                      min_bitrate_kbps=60, avg_bitrate_kbps=240,
+                      median_bitrate_kbps=255)
+        existing = self._m(format="MP3",
+                           min_bitrate_kbps=210, avg_bitrate_kbps=215,
+                           median_bitrate_kbps=215)
+        # Under MEDIAN: new=255 (TRANSPARENT) vs existing=215 (EXCELLENT) → better
+        self.assertEqual(compare_quality(new, existing, cfg_med), "better")
+        # Under MIN: new=60 (POOR) vs existing=210 (EXCELLENT) → worse
+        cfg_min = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
+        self.assertEqual(compare_quality(new, existing, cfg_min), "worse")
+
 
 class TestQualityRankConfigFromIni(unittest.TestCase):
     """Parse [Quality Ranks] section from config.ini — exhaustive edge cases."""
@@ -1541,8 +1607,13 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
 
     def test_invalid_metric_raises(self):
         with self.assertRaises(ValueError) as ctx:
-            self._parse("[Quality Ranks]\nbitrate_metric = median\n")
+            self._parse("[Quality Ranks]\nbitrate_metric = harmonic_mean\n")
         self.assertIn("bitrate_metric", str(ctx.exception))
+
+    def test_median_metric_parses(self):
+        """`bitrate_metric = median` is a valid policy (issue #64)."""
+        cfg = self._parse("[Quality Ranks]\nbitrate_metric = median\n")
+        self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MEDIAN)
 
     def test_invalid_rank_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -1617,6 +1688,12 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         restored = QualityRankConfig.from_json(payload)
         self.assertEqual(restored, original)
         self.assertEqual(restored.opus.transparent, 120)
+
+    def test_median_metric_round_trip(self):
+        """RankBitrateMetric.MEDIAN survives the harness argv round-trip."""
+        original = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
+        restored = QualityRankConfig.from_json(original.to_json())
+        self.assertEqual(restored.bitrate_metric, RankBitrateMetric.MEDIAN)
 
     def test_json_shape_stable(self):
         """to_json() must emit the expected top-level keys."""

@@ -12,6 +12,7 @@ Usage:
 
 import os
 import sqlite3
+import statistics
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -58,12 +59,13 @@ class AlbumInfo:
         so tests constructing AlbumInfo directly (e.g. integration slices)
         don't have to pass every field. Production always sets it via
         get_album_info() → _reduce_album_format().
-    min_bitrate_kbps / avg_bitrate_kbps:
-        Minimum and mean per-track bitrate (kbps). The rank model's
+    min_bitrate_kbps / avg_bitrate_kbps / median_bitrate_kbps:
+        Minimum, mean, and median per-track bitrate (kbps). The rank model's
         measurement_rank() picks between these based on
-        QualityRankConfig.bitrate_metric. ``avg_bitrate_kbps`` defaults to
-        None for the same test-ergonomics reason; measurement_rank() falls
-        back to min when avg is None.
+        QualityRankConfig.bitrate_metric. ``avg_bitrate_kbps`` and
+        ``median_bitrate_kbps`` default to None for test-ergonomics —
+        measurement_rank() falls back to min when the configured metric's
+        field is None.
     """
     album_id: int
     track_count: int
@@ -71,6 +73,7 @@ class AlbumInfo:
     is_cbr: bool
     album_path: str
     avg_bitrate_kbps: Optional[int] = None
+    median_bitrate_kbps: Optional[int] = None
     format: str = ""
 
 
@@ -138,6 +141,11 @@ class BeetsDB:
         bitrates = [r[0] for r in rows]
         min_br = min(bitrates)
         avg_br = sum(bitrates) / len(bitrates)
+        # statistics.median() returns the middle value (or the mean of the two
+        # middle values for even counts) — robust to per-track outliers like
+        # short interludes or hidden tracks at the album boundary. Computed in
+        # Python because the beets DB is SQLite, which has no native median.
+        median_br = statistics.median(bitrates)
         is_cbr = len(set(bitrates)) == 1
         track_count = len(rows)
 
@@ -154,6 +162,7 @@ class BeetsDB:
             track_count=track_count,
             min_bitrate_kbps=int(min_br / 1000),
             avg_bitrate_kbps=int(avg_br / 1000),
+            median_bitrate_kbps=int(median_br / 1000),
             is_cbr=is_cbr,
             album_path=album_path,
             format=album_format,

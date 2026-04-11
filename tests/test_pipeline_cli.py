@@ -499,6 +499,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 track_count=10,
                 min_bitrate_kbps=207,
                 avg_bitrate_kbps=207,
+                median_bitrate_kbps=207,
                 format="MP3",
                 is_cbr=False,
                 album_path="/Beets/Artist/Album",
@@ -538,6 +539,7 @@ class TestCmdQuality(unittest.TestCase):
         beets_info = SimpleNamespace(
             is_cbr=False,
             avg_bitrate_kbps=245,
+            median_bitrate_kbps=245,
             format="MP3",
         )
         captured_kwargs: list[dict[str, object]] = []
@@ -638,6 +640,7 @@ class TestCmdQuality(unittest.TestCase):
         beets_info = SimpleNamespace(
             is_cbr=False,
             avg_bitrate_kbps=245,
+            median_bitrate_kbps=245,
             format="MP3",
         )
 

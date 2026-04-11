@@ -26,6 +26,7 @@ import os
 import select
 import signal
 import shutil
+import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -139,9 +140,10 @@ def build_existing_measurement(
     """Build the existing on-disk measurement for pre-import comparison.
 
     ``override_min_bitrate`` is already the pipeline's corrected view of the
-    existing album after spectral downgrade logic. Under the default AVG rank
-    metric we must apply that override to both min and avg so the harness
-    compares against the same effective quality the caller intended.
+    existing album after spectral downgrade logic. Under any non-MIN rank
+    metric (AVG / MEDIAN) we must apply that override to every bitrate field
+    so the harness compares against the same effective quality the caller
+    intended — otherwise the median/avg would silently outvote the override.
     """
     if existing_info is None:
         return None
@@ -155,9 +157,15 @@ def build_existing_measurement(
         if override_min_bitrate is not None
         else existing_info.avg_bitrate_kbps
     )
+    effective_median = (
+        override_min_bitrate
+        if override_min_bitrate is not None
+        else existing_info.median_bitrate_kbps
+    )
     return AudioQualityMeasurement(
         min_bitrate_kbps=effective_existing,
         avg_bitrate_kbps=effective_avg,
+        median_bitrate_kbps=effective_median,
         format=existing_info.format,
         is_cbr=existing_info.is_cbr,
         spectral_grade=existing_spectral_grade,
@@ -901,6 +909,9 @@ def main():
     new_bitrates = _get_folder_bitrates(args.path, ext_filter=v0_ext_filter)
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
+    new_median_br = (
+        int(statistics.median(new_bitrates)) if new_bitrates else None
+    )
     new_is_cbr = len(set(new_bitrates)) == 1 if new_bitrates else False
     existing_info = beets.get_album_info(mbid, _rank_cfg)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
@@ -938,6 +949,7 @@ def main():
     new_m = AudioQualityMeasurement(
         min_bitrate_kbps=new_min_br,
         avg_bitrate_kbps=new_avg_br,
+        median_bitrate_kbps=new_median_br,
         format=new_format_label,
         is_cbr=new_is_cbr,
         spectral_grade=spectral_grade,
@@ -1031,10 +1043,14 @@ def main():
             int(sum(target_bitrates) / len(target_bitrates))
             if target_bitrates else None
         )
+        target_median_br = (
+            int(statistics.median(target_bitrates)) if target_bitrates else None
+        )
         target_is_cbr = len(set(target_bitrates)) == 1 if target_bitrates else False
         r.new_measurement = AudioQualityMeasurement(
             min_bitrate_kbps=target_min_br,
             avg_bitrate_kbps=target_avg_br,
+            median_bitrate_kbps=target_median_br,
             format=target_spec.label,
             is_cbr=target_is_cbr,
             spectral_grade=spectral_grade,
