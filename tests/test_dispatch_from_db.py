@@ -43,7 +43,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.import_dispatch._read_runtime_config",
+                 patch("lib.config.read_runtime_config",
                        return_value=SoularrConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
@@ -158,39 +158,41 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         self.assertTrue(hasattr(r["result"], "success"))
         self.assertTrue(hasattr(r["result"], "message"))
 
+class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
+    def test_dispatch_import_from_db_uses_shared_runtime_config_reader(self):
+        from lib.import_dispatch import dispatch_import_from_db
 
-class TestReadRuntimeConfig(unittest.TestCase):
-    def test_missing_config_returns_default(self):
-        from lib.import_dispatch import _read_runtime_config
-        with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": "/nonexistent/config.ini"}):
-            cfg = _read_runtime_config()
-        self.assertEqual(cfg.beets_harness_path, "")
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Artist",
+            album_title="Album",
+        ))
 
-    def test_reads_full_config(self):
-        from lib.import_dispatch import _read_runtime_config
-        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
-            tmp.write(
-                "[Beets Validation]\n"
-                "harness_path = /nix/store/test/run_beets_harness.sh\n"
-                "verified_lossless_target = opus 128\n"
-                "[Meelo]\n"
-                "url = http://meelo.test\n"
-                "[Plex]\n"
-                "url = http://plex.test\n"
-                "token = test-token\n"
-            )
-            config_path = tmp.name
+        cfg = SoularrConfig(
+            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+            pipeline_db_enabled=True,
+        )
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        tmpdir = tempfile.mkdtemp()
         try:
-            with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": config_path}):
-                cfg = _read_runtime_config()
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.config.read_runtime_config", return_value=cfg) as mock_read:
+                dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,
+                    force=True,
+                )
         finally:
-            os.unlink(config_path)
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-        self.assertEqual(cfg.beets_harness_path, "/nix/store/test/run_beets_harness.sh")
-        self.assertEqual(cfg.verified_lossless_target, "opus 128")
-        self.assertEqual(cfg.meelo_url, "http://meelo.test")
-        self.assertEqual(cfg.plex_url, "http://plex.test")
-        self.assertEqual(cfg.plex_token, "test-token")
+        mock_read.assert_called_once_with()
 
 
 if __name__ == "__main__":

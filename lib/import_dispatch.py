@@ -6,7 +6,6 @@ that runs import_one.py and dispatches on the ImportResult decision.
 
 from __future__ import annotations
 
-import configparser
 import logging
 import os
 import shutil
@@ -117,8 +116,8 @@ def _do_mark_done(
     request_id: int,
     dl_info: DownloadInfo,
     distance: float,
-    scenario: str,
-    dest_path: str,
+    scenario: str | None,
+    dest_path: str | None,
     outcome_label: str = "success",
     detail: str | None = None,
 ) -> None:
@@ -745,25 +744,6 @@ class DispatchOutcome:
     success: bool
     message: str
 
-
-def _read_runtime_config() -> "SoularrConfig":
-    """Read the full runtime config for force/manual import.
-
-    Same config.ini that the main soularr process uses, so force-import
-    behaves identically (Plex, Meelo, quality settings, etc.).
-    """
-    from lib.config import SoularrConfig
-    path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
-    if not os.path.exists(path):
-        return SoularrConfig()
-    parser = configparser.ConfigParser(interpolation=configparser.BasicInterpolation())
-    try:
-        parser.read(path)
-    except (configparser.Error, OSError):
-        return SoularrConfig()
-    return SoularrConfig.from_ini(parser, var_dir=os.path.dirname(path))
-
-
 def dispatch_import_from_db(
     db: "PipelineDB",
     request_id: int,
@@ -800,7 +780,9 @@ def dispatch_import_from_db(
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
 
-    cfg = _read_runtime_config()
+    from lib.config import read_runtime_config
+
+    cfg = read_runtime_config()
 
     files: list[DownloadFile] = []
     if source_username:

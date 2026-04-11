@@ -306,7 +306,7 @@ def patch_dispatch_externals():
     trigger_plex_scan, cleanup_disambiguation_orphans.
 
     Does NOT patch parse_import_result, _check_quality_gate_core,
-    BeetsDB, or _read_runtime_config — callers nest those as needed.
+    BeetsDB, or read_runtime_config — callers nest those as needed.
 
     Yields a SimpleNamespace with attributes: run, cleanup, meelo, plex, orphans.
     run is pre-configured with returncode=0, stdout="", stderr="".

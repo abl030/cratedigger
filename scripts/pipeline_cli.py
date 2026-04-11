@@ -44,21 +44,9 @@ MB_API = "http://192.168.1.35:5200/ws/2"
 
 def _load_runtime_rank_config():
     """Load the runtime QualityRankConfig from the active config.ini."""
-    from quality import QualityRankConfig
+    from config import read_runtime_rank_config
 
-    import configparser
-
-    rank_cfg = QualityRankConfig.defaults()
-    cfg_path = (os.environ.get("SOULARR_RUNTIME_CONFIG")
-                or "/var/lib/soularr/config.ini")
-    if os.path.exists(cfg_path):
-        try:
-            parser = configparser.RawConfigParser()
-            parser.read(cfg_path)
-            rank_cfg = QualityRankConfig.from_ini(parser)
-        except Exception:
-            pass
-    return rank_cfg
+    return read_runtime_rank_config()
 
 
 def _load_runtime_verified_lossless_target() -> str:

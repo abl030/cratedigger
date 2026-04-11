@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-
 
 from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.quality import ValidationResult
+from lib.quality import DownloadInfo, ValidationResult
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -170,6 +170,37 @@ class TestDatabaseSource(unittest.TestCase):
         req = db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["status"], "imported")
+
+    @patch("lib.import_dispatch._do_mark_done")
+    def test_mark_done_delegates_to_shared_helper(self, mock_mark_done):
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="delegate-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = ValidationResult(
+            valid=True, distance=0.05, scenario="strong_match", detail="ok")
+        dl = DownloadInfo(username="user1", filetype="mp3")
+
+        source.mark_done(
+            record,
+            bv_result,
+            dest_path="/Incoming/A/B",
+            download_info=dl,
+        )
+
+        mock_mark_done.assert_called_once_with(
+            db=db,
+            request_id=req_id,
+            dl_info=dl,
+            distance=0.05,
+            scenario="strong_match",
+            dest_path="/Incoming/A/B",
+            detail="ok",
+        )
 
     def test_reject_and_requeue_updates_status_and_denylists(self):
         source, db = self._make_source()

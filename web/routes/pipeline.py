@@ -168,19 +168,9 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
 def _runtime_rank_config():
     """Load the runtime QualityRankConfig from the same config.ini the main
     soularr process reads, so web simulator matches production dispatch."""
-    import configparser
-    import os
-    from quality import QualityRankConfig  # type: ignore[import-not-found]
-    cfg = QualityRankConfig.defaults()
-    path = os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
-    if os.path.exists(path):
-        try:
-            parser = configparser.RawConfigParser()
-            parser.read(path)
-            cfg = QualityRankConfig.from_ini(parser)
-        except Exception:
-            pass
-    return cfg
+    from lib.config import read_runtime_rank_config  # type: ignore[import-not-found]
+
+    return read_runtime_rank_config()
 
 
 def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:

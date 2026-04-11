@@ -488,7 +488,7 @@ class TestForceImportSlice(unittest.TestCase):
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 patch("lib.import_dispatch._read_runtime_config",
+                 patch("lib.config.read_runtime_config",
                        return_value=cfg):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")

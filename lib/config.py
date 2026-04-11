@@ -211,6 +211,44 @@ class SoularrConfig:
         )
 
 
+DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/soularr/config.ini"
+
+
+def _runtime_config_path(config_path: str | None = None) -> str:
+    """Resolve the active runtime config.ini path."""
+    return config_path or os.environ.get("SOULARR_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
+
+
+def read_runtime_config(config_path: str | None = None) -> SoularrConfig:
+    """Read the active runtime config.ini into a full SoularrConfig.
+
+    Manual-import, force-import, the CLI, and web simulator all need the same
+    runtime config the main soularr process reads. Missing or unreadable config
+    returns a default SoularrConfig so callers degrade safely.
+    """
+    path = _runtime_config_path(config_path)
+    if not path or not os.path.exists(path):
+        return SoularrConfig()
+
+    parser = configparser.RawConfigParser()
+    try:
+        parser.read(path)
+    except (configparser.Error, OSError):
+        return SoularrConfig()
+
+    runtime_dir = os.path.dirname(path)
+    return SoularrConfig.from_ini(
+        parser,
+        config_dir=runtime_dir,
+        var_dir=runtime_dir,
+    )
+
+
+def read_runtime_rank_config(config_path: str | None = None) -> QualityRankConfig:
+    """Read the active runtime QualityRankConfig."""
+    return read_runtime_config(config_path).quality_ranks
+
+
 def read_verified_lossless_target(config_path: str | None = None) -> str:
     """Read verified_lossless_target from the runtime config file.
 
@@ -218,15 +256,4 @@ def read_verified_lossless_target(config_path: str | None = None) -> str:
     need a small helper to discover the same runtime setting. Callers may pass an
     explicit path, otherwise the standard doc2 runtime config is used.
     """
-    path = config_path or os.environ.get("SOULARR_RUNTIME_CONFIG") or "/var/lib/soularr/config.ini"
-    if not path or not os.path.exists(path):
-        return ""
-
-    parser = configparser.ConfigParser(
-        interpolation=configparser.BasicInterpolation()
-    )
-    try:
-        parser.read(path)
-    except (configparser.Error, OSError):
-        return ""
-    return parser.get("Beets Validation", "verified_lossless_target", fallback="").strip()
+    return read_runtime_config(config_path).verified_lossless_target

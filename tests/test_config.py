@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.config import SoularrConfig, read_verified_lossless_target
+from lib.config import (
+    SoularrConfig,
+    read_runtime_config,
+    read_runtime_rank_config,
+    read_verified_lossless_target,
+)
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 TEST_CONFIG = os.path.join(FIXTURES_DIR, "test_config.ini")
@@ -256,6 +261,60 @@ class TestReadVerifiedLosslessTarget(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 f.write("[Beets Validation]\nverified_lossless_target = aac 128\n")
             self.assertEqual(read_verified_lossless_target(path), "aac 128")
+
+
+class TestReadRuntimeConfig(unittest.TestCase):
+    def test_missing_config_returns_default(self):
+        cfg = read_runtime_config("/nonexistent/config.ini")
+        self.assertEqual(cfg.beets_harness_path, "")
+
+    def test_reads_full_runtime_config(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
+            tmp.write(
+                "[Beets Validation]\n"
+                "harness_path = /nix/store/test/run_beets_harness.sh\n"
+                "verified_lossless_target = opus 128\n"
+                "[Meelo]\n"
+                "url = http://meelo.test\n"
+                "[Plex]\n"
+                "url = http://plex.test\n"
+                "token = test-token\n"
+            )
+            config_path = tmp.name
+        try:
+            cfg = read_runtime_config(config_path)
+        finally:
+            os.unlink(config_path)
+
+        self.assertEqual(cfg.beets_harness_path, "/nix/store/test/run_beets_harness.sh")
+        self.assertEqual(cfg.verified_lossless_target, "opus 128")
+        self.assertEqual(cfg.meelo_url, "http://meelo.test")
+        self.assertEqual(cfg.plex_url, "http://plex.test")
+        self.assertEqual(cfg.plex_token, "test-token")
+
+
+class TestReadRuntimeRankConfig(unittest.TestCase):
+    def test_missing_config_returns_defaults(self):
+        cfg = read_runtime_rank_config("/nonexistent/config.ini")
+        self.assertEqual(cfg.gate_min_rank.name, "EXCELLENT")
+
+    def test_reads_quality_ranks_from_runtime_config(self):
+        from lib.quality import QualityRank
+
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
+            tmp.write(
+                "[Quality Ranks]\n"
+                "gate_min_rank = good\n"
+                "bitrate_metric = min\n"
+            )
+            config_path = tmp.name
+        try:
+            cfg = read_runtime_rank_config(config_path)
+        finally:
+            os.unlink(config_path)
+
+        self.assertEqual(cfg.gate_min_rank, QualityRank.GOOD)
+        self.assertEqual(cfg.bitrate_metric.value, "min")
 
 
 class TestRawConfigParserRegression(unittest.TestCase):

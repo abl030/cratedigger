@@ -205,82 +205,22 @@ class DatabaseSource:
     def mark_done(self, album_record, bv_result, dest_path=None,
                   download_info=None):
         """Mark album as imported."""
-        from lib.quality import DownloadInfo, SpectralMeasurement, is_verified_lossless
-        from lib.pipeline_db import RequestSpectralStateUpdate
+        from lib.import_dispatch import _do_mark_done
+        from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
 
         db = self._get_db()
-        distance = bv_result.distance
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-
-        update_fields = dict(
-            beets_distance=distance,
-            beets_scenario=bv_result.scenario,
-            imported_path=dest_path,
-        )
-        verified_lossless = (
-            bool(dl.verified_lossless_override)
-            if dl.verified_lossless_override is not None
-            else is_verified_lossless(
-                dl.was_converted,
-                dl.original_filetype,
-                dl.download_spectral.grade if dl.download_spectral else None,
-            )
-        )
-        # Persist the full current quality state, not only truthy upgrades.
-        # Otherwise old verified/final-format labels leak into later imports.
-        update_fields["verified_lossless"] = verified_lossless
-        if dl.download_spectral is not None:
-            current_spectral = dl.download_spectral
-            if update_fields.get("verified_lossless") and dl.bitrate:
-                # Verified lossless: V0 bitrate is the real quality fingerprint,
-                # not the spectral cliff estimate (which can miscalibrate)
-                current_spectral = SpectralMeasurement(
-                    grade=dl.download_spectral.grade,
-                    bitrate_kbps=dl.bitrate // 1000,
-                )
-            update_fields.update(
-                RequestSpectralStateUpdate(
-                    last_download=dl.download_spectral,
-                    current=current_spectral,
-                ).as_update_fields()
-            )
-        update_fields["final_format"] = dl.final_format
-        from lib.transitions import apply_transition
-        apply_transition(db, request_id, "imported", **update_fields)
-
-        db.log_download(
+        _do_mark_done(
+            db=db,
             request_id=request_id,
-            soulseek_username=dl.username,
-            filetype=dl.filetype,
-            beets_distance=distance,
-            beets_scenario=bv_result.scenario,
-            beets_detail=bv_result.detail,
-            outcome="success",
-            staged_path=dest_path,
-            bitrate=dl.bitrate,
-            sample_rate=dl.sample_rate,
-            bit_depth=dl.bit_depth,
-            is_vbr=dl.is_vbr,
-            was_converted=dl.was_converted,
-            original_filetype=dl.original_filetype,
-            slskd_filetype=dl.slskd_filetype,
-            slskd_bitrate=dl.slskd_bitrate,
-            actual_filetype=dl.actual_filetype,
-            actual_min_bitrate=dl.actual_min_bitrate,
-            spectral_grade=dl.download_spectral.grade if dl.download_spectral else None,
-            spectral_bitrate=(
-                dl.download_spectral.bitrate_kbps if dl.download_spectral else None
-            ),
-            existing_min_bitrate=dl.existing_min_bitrate,
-            existing_spectral_bitrate=(
-                dl.current_spectral.bitrate_kbps if dl.current_spectral else None
-            ),
-            import_result=dl.import_result,
-            validation_result=dl.validation_result,
-            final_format=dl.final_format,
+            dl_info=dl,
+            distance=bv_result.distance,
+            scenario=bv_result.scenario,
+            dest_path=dest_path,
+            detail=bv_result.detail,
         )
 
     def reject_and_requeue(self, album_record, bv_result, usernames=None,
