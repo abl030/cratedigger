@@ -93,7 +93,11 @@ Three metrics are supported:
 
 Spectral cliff detection and `transcode_detection()` continue to use `min`
 regardless of this setting — those care about the worst track, not the
-typical one.
+typical one. The transcode-detection spectral-fallback threshold is now
+derived from `cfg.mp3_vbr.excellent` (issue #66) so it tracks any retuning
+of the gate threshold automatically — operators who lower the gate to
+accept lower-quality V0 also implicitly lower what counts as "credible
+V0" for the spectral fallback.
 
 `measurement_rank()` is the single dispatch point. Each metric reads its
 matching field on `AudioQualityMeasurement` (`avg_bitrate_kbps`,

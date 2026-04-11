@@ -237,6 +237,68 @@ class TestTranscodeDetection(unittest.TestCase):
                     expected,
                 )
 
+    # ---- Issue #66: configurable spectral-fallback threshold -------------
+
+    def test_default_constant_matches_default_cfg_mp3_vbr_excellent(self):
+        """Legacy module constant must equal the default cfg's mp3_vbr.excellent.
+
+        These are two different surfaces for the same number — if a future
+        change tunes mp3_vbr.excellent without updating the legacy constant,
+        the contract tests in test_decision_tree_constants_match_code break
+        and the displayed transcode threshold drifts from the runtime
+        threshold. Pin the equality so the divergence is loud.
+        """
+        defaults_excellent = QualityRankConfig.defaults().mp3_vbr.excellent
+        self.assertEqual(TRANSCODE_MIN_BITRATE_KBPS, defaults_excellent)
+
+    def test_transcode_detection_uses_cfg_mp3_vbr_excellent(self):
+        """Custom cfg must shift the spectral-fallback threshold."""
+        # Default cfg → threshold 210 → 200 is a transcode.
+        default_cfg = QualityRankConfig.defaults()
+        self.assertTrue(transcode_detection(
+            10, 200, spectral_grade=None, cfg=default_cfg))
+
+        # Lower the threshold to 180 → 200 is no longer a transcode.
+        loose_cfg = QualityRankConfig(
+            mp3_vbr=CodecRankBands(
+                transparent=245, excellent=180, good=140, acceptable=100))
+        self.assertFalse(transcode_detection(
+            10, 200, spectral_grade=None, cfg=loose_cfg))
+
+        # Raise the threshold to 240 → 230 becomes a transcode.
+        strict_cfg = QualityRankConfig(
+            mp3_vbr=CodecRankBands(
+                transparent=300, excellent=240, good=180, acceptable=140))
+        self.assertTrue(transcode_detection(
+            10, 230, spectral_grade=None, cfg=strict_cfg))
+        # And just above the strict threshold passes.
+        self.assertFalse(transcode_detection(
+            10, 240, spectral_grade=None, cfg=strict_cfg))
+
+    def test_transcode_detection_cfg_does_not_override_spectral(self):
+        """Spectral grade is still authoritative even with a custom cfg."""
+        loose_cfg = QualityRankConfig(
+            mp3_vbr=CodecRankBands(
+                transparent=245, excellent=180, good=140, acceptable=100))
+        # Spectral=suspect → transcode regardless of bitrate (240 > threshold).
+        self.assertTrue(transcode_detection(
+            10, 240, spectral_grade="suspect", cfg=loose_cfg))
+        # Spectral=genuine → not transcode even when bitrate < threshold.
+        self.assertFalse(transcode_detection(
+            10, 100, spectral_grade="genuine", cfg=loose_cfg))
+
+    def test_transcode_detection_default_cfg_when_omitted(self):
+        """Omitting cfg must reproduce the legacy hardcoded behavior.
+
+        Critical for backward compatibility — every existing caller that
+        doesn't pass cfg keeps using the 210 kbps threshold.
+        """
+        # Same as the legacy "below threshold" case (210 - 20 = 190).
+        self.assertTrue(transcode_detection(10, 190, spectral_grade=None))
+        # Same as the legacy "at threshold" case.
+        self.assertFalse(transcode_detection(
+            10, TRANSCODE_MIN_BITRATE_KBPS, spectral_grade=None))
+
 
 # ============================================================================
 # quality_gate_decision
