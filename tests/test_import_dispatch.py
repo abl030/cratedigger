@@ -436,6 +436,57 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         self.assertNotIn("--quality-rank-config", cmd)
 
 
+class TestLoadQualityGateState(unittest.TestCase):
+    """Direct tests for the shared quality-gate state adapter."""
+
+    def test_uses_full_request_row_to_apply_final_format(self):
+        """The shared adapter must honor persisted final_format labels."""
+        from lib.beets_db import AlbumInfo
+        from lib.import_dispatch import load_quality_gate_state
+        from lib.quality import QualityRankConfig
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="mbid-123",
+            verified_lossless=True,
+            final_format="mp3 v0",
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=96,
+        ))
+
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = AlbumInfo(
+                album_id=1,
+                track_count=10,
+                min_bitrate_kbps=207,
+                avg_bitrate_kbps=207,
+                format="MP3",
+                is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            )
+            mock_beets_cls.return_value = mock_beets
+
+            state = load_quality_gate_state(
+                request_id=42,
+                db=db,  # type: ignore[arg-type]
+                quality_ranks=QualityRankConfig.defaults(),
+            )
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.min_bitrate_kbps, 207)
+        self.assertEqual(state.measurement.format, "mp3 v0")
+        self.assertEqual(state.measurement.avg_bitrate_kbps, 207)
+        self.assertFalse(state.measurement.is_cbr)
+        self.assertTrue(state.measurement.verified_lossless)
+        self.assertIsNone(state.spectral_bitrate_kbps)
+
+
 class TestQualityGateUsesIntent(unittest.TestCase):
     """Orchestration tests for _check_quality_gate_core via FakePipelineDB."""
 

@@ -31,9 +31,85 @@ if TYPE_CHECKING:
     from lib.context import SoularrContext
     from lib.grab_list import GrabListEntry
     from lib.pipeline_db import PipelineDB
-    from lib.quality import QualityRankConfig
+    from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("soularr")
+
+
+@dataclass(frozen=True)
+class QualityGateState:
+    """Resolved on-disk state for a quality-gate evaluation."""
+    measurement: AudioQualityMeasurement
+    min_bitrate_kbps: int
+    spectral_bitrate_kbps: int | None
+    spectral_grade: str | None
+
+
+def load_quality_gate_state(
+    *,
+    request_id: int,
+    db: "PipelineDB",
+    mb_id: str | None = None,
+    quality_ranks: "QualityRankConfig | None" = None,
+) -> QualityGateState | None:
+    """Load the current on-disk measurement for quality-gate evaluation.
+
+    Shared adapter for all post-import quality-gate callers. This is the
+    single place that combines:
+    - Beets on-disk metadata (min/avg/format/is_cbr)
+    - request-row overrides (`final_format`, `verified_lossless`)
+    - grade-aware spectral override logic
+    """
+    from lib.beets_db import BeetsDB
+    from lib.quality import AudioQualityMeasurement, QualityRankConfig
+
+    if quality_ranks is None:
+        quality_ranks = QualityRankConfig.defaults()
+
+    req = None
+    try:
+        req = db.get_request(request_id)
+    except Exception:
+        logger.debug("QUALITY GATE: DB lookup failed for request row")
+
+    resolved_mb_id = mb_id or (str(req["mb_release_id"]) if req and req.get("mb_release_id") else None)
+    if not resolved_mb_id:
+        return None
+
+    with BeetsDB() as beets:
+        info = beets.get_album_info(resolved_mb_id, quality_ranks)
+    if not info:
+        return None
+
+    min_br_kbps = info.min_bitrate_kbps
+    spectral_grade = req.get("current_spectral_grade") if req else None
+    raw_br = req.get("current_spectral_bitrate") if req else None
+    raw_br_int = raw_br if isinstance(raw_br, int) else None
+    spectral_br: int | None = None
+    effective = compute_effective_override_bitrate(
+        min_br_kbps, raw_br_int, spectral_grade)
+    if effective is not None and effective < min_br_kbps:
+        spectral_br = raw_br_int
+
+    album_format = info.format
+    verified_lossless = bool(req.get("verified_lossless")) if req else False
+    if req and req.get("final_format"):
+        album_format = str(req["final_format"])
+
+    current = AudioQualityMeasurement(
+        min_bitrate_kbps=min_br_kbps,
+        avg_bitrate_kbps=info.avg_bitrate_kbps,
+        format=album_format,
+        is_cbr=info.is_cbr,
+        verified_lossless=verified_lossless,
+        spectral_bitrate_kbps=spectral_br,
+    )
+    return QualityGateState(
+        measurement=current,
+        min_bitrate_kbps=min_br_kbps,
+        spectral_bitrate_kbps=spectral_br,
+        spectral_grade=spectral_grade,
+    )
 
 
 def _do_mark_done(
@@ -270,9 +346,7 @@ def _check_quality_gate_core(
     don't care about mixed-format reduction still work. Commit 5 will thread
     the real runtime config through from dispatch_import_core().
     """
-    from lib.quality import (
-        quality_gate_decision, AudioQualityMeasurement, QualityRankConfig)
-    from lib.beets_db import BeetsDB
+    from lib.quality import quality_gate_decision, QualityRankConfig
 
     if quality_ranks is None:
         quality_ranks = QualityRankConfig.defaults()
@@ -280,46 +354,22 @@ def _check_quality_gate_core(
     if not mb_id:
         return
     try:
-        with BeetsDB() as beets:
-            info = beets.get_album_info(mb_id, quality_ranks)
-        if not info:
+        state = load_quality_gate_state(
+            request_id=request_id,
+            db=db,
+            mb_id=mb_id,
+            quality_ranks=quality_ranks,
+        )
+        if not state:
             return
-        min_br_kbps = info.min_bitrate_kbps
-        avg_br_kbps = info.avg_bitrate_kbps
-        is_cbr = info.is_cbr
-        album_format = info.format
-
-        spectral_br: int | None = None
-        spectral_grade: str | None = None
-        req = None
-        try:
-            req = db.get_request(request_id)
-            spectral_grade = req.get("current_spectral_grade") if req else None
-            raw_br = req.get("current_spectral_bitrate") if req else None
-            raw_br_int = raw_br if isinstance(raw_br, int) else None
-            # Grade-aware: helper returns container_bitrate unchanged for
-            # non-transcode grades. spectral_br is set only when the helper
-            # actually lowered the effective bitrate (see issue #61).
-            effective = compute_effective_override_bitrate(
-                min_br_kbps, raw_br_int, spectral_grade)
-            if effective is not None and effective < min_br_kbps:
-                spectral_br = raw_br_int
-                logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
-                            f"(lower than beets min_bitrate={min_br_kbps}kbps, "
-                            f"grade={spectral_grade})")
-        except Exception:
-            logger.debug("QUALITY GATE: DB lookup failed for spectral override")
-        verified_lossless = bool(req.get("verified_lossless")) if req else False
-        if req and req.get("final_format"):
-            album_format = str(req["final_format"])
-
-        current = AudioQualityMeasurement(
-            min_bitrate_kbps=min_br_kbps,
-            avg_bitrate_kbps=avg_br_kbps,
-            format=album_format,
-            is_cbr=is_cbr,
-            verified_lossless=verified_lossless,
-            spectral_bitrate_kbps=spectral_br)
+        current = state.measurement
+        min_br_kbps = state.min_bitrate_kbps
+        spectral_br = state.spectral_bitrate_kbps
+        spectral_grade = state.spectral_grade
+        if spectral_br is not None:
+            logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
+                        f"(lower than beets min_bitrate={min_br_kbps}kbps, "
+                        f"grade={spectral_grade})")
         decision = quality_gate_decision(current, cfg=quality_ranks)
 
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
@@ -364,7 +414,7 @@ def _check_quality_gate_core(
                 min_bitrate=min_br_kbps,
                 search_filetype_override=None,  # done searching
             )
-            if verified_lossless:
+            if current.verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
             else:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps VBR — quality OK")
