@@ -329,14 +329,31 @@ The pipeline automatically upgrades album quality toward VBR V0 from verified lo
 
 The target quality for every album is: **FLAC downloaded from Soulseek → spectral analysis confirms genuine lossless → convert to VBR V0**. The VBR bitrate acts as a permanent quality fingerprint (genuine CD rips → ~240-260kbps, transcodes → ~190kbps). CBR 320 is never a final state — it's unverifiable.
 
-### Quality Gate (`_check_quality_gate()` in import_dispatch.py)
+### Codec-Aware Quality Ranks (issue #60, shipped 2026-04-11)
 
-After every import, the quality gate decides what to do next. It checks these conditions in order:
+Quality comparison is now **rank-based**, not raw-bitrate-based. Every measurement classifies into a `QualityRank` band (UNKNOWN / POOR / ACCEPTABLE / GOOD / EXCELLENT / TRANSPARENT / LOSSLESS) via `lib.quality.quality_rank()`, and `compare_quality()` uses the rank as the primary comparison key. The quality gate compares against `cfg.quality_ranks.gate_min_rank` (default EXCELLENT). Cross-codec cases now work correctly:
 
-1. **`verified_lossless=TRUE` + any bitrate** → **DONE**. We verified this from genuine FLAC. Low V0 bitrate (e.g. 207kbps) on lo-fi music is fine — the source is proven lossless.
-2. **`min_bitrate < 210kbps`** → **RE-QUEUE** for upgrade. Bad quality, search for better.
-3. **CBR on disk** (all tracks same bitrate) **+ not verified_lossless** → **RE-QUEUE for lossless** (`search_filetype_override="lossless"`). CBR is unverifiable — spectral analysis can detect obvious upsamples but cannot prove a CBR file came from lossless source. The `"lossless"` tier matches FLAC, ALAC, and WAV sources.
-4. **VBR above 210kbps** → **DONE**. VBR bitrate is trustworthy.
+- **Opus 128 ≡ MP3 V0** (both TRANSPARENT) → "equivalent"
+- **FLAC > any lossy** (LOSSLESS > TRANSPARENT)
+- **Unverifiable CBR 320** → TRANSPARENT but still `requeue_lossless` via the `is_cbr && !verified_lossless` branch
+
+Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be retuned in the `[Quality Ranks]` section of `config.ini`. The default `mp3_vbr.excellent=210` preserves the legacy 210kbps gate threshold for bare-codec measurements. Full rationale and tuning guide in `docs/quality-ranks.md`.
+
+**Key rule**: the `verified_lossless=True` bypass is now **tier-gated**. It imports on verdict `"better"` or `"equivalent"` but blocks on `"worse"`. This prevents a deliberately-too-low `verified_lossless_target` (Opus 64) from replacing a good existing album.
+
+**Bitrate metric**: `cfg.quality_ranks.bitrate_metric` picks between `min` (legacy) and `avg` (default, recommended for VBR codecs). Spectral cliff detection always uses min.
+
+### Quality Gate (`_check_quality_gate_core()` in import_dispatch.py)
+
+After every import, the quality gate runs `quality_gate_decision(current, cfg=cfg.quality_ranks)` which delegates to `measurement_rank()`:
+
+1. Classify the current measurement into a `QualityRank` via format label or bare-codec band table.
+2. If a spectral estimate is set, clamp the rank to the minimum of (rank, spectral_rank) — catches fake 320s.
+3. **Rank < `cfg.gate_min_rank`** → `requeue_upgrade`.
+4. **CBR on disk + not verified_lossless + below LOSSLESS** → `requeue_lossless` (search for a FLAC source).
+5. Otherwise → `accept`.
+
+Lo-fi V0 at 207kbps now passes the gate via the `"mp3 v0"` label contract (`cfg.mp3_vbr_levels[0] = TRANSPARENT`) without needing the old `verified_lossless` blanket bypass.
 
 ### Two Key Concepts (don't confuse them)
 

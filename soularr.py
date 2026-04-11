@@ -595,6 +595,32 @@ def main():
             logger.info(f"Beets validation ENABLED: harness={cfg.beets_harness_path}, "
                         f"threshold={cfg.beets_distance_threshold}, staging={cfg.beets_staging_dir}")
 
+        # --- Soft warning for sub-gate verified_lossless_target (issue #60) ---
+        # When the configured verified_lossless_target has a declared rank
+        # below gate_min_rank, the resulting imports will fail the quality
+        # gate and be re-queued for upgrade — meaning they'll never stabilize
+        # as "imported". Log loudly at startup so operators see this before
+        # it surprises them downstream.
+        if cfg.verified_lossless_target:
+            try:
+                from lib.quality import quality_rank, QualityRank
+                target_rank = quality_rank(
+                    cfg.verified_lossless_target,
+                    bitrate_kbps=None, is_cbr=False, cfg=cfg.quality_ranks)
+                if (target_rank != QualityRank.UNKNOWN
+                        and target_rank < cfg.quality_ranks.gate_min_rank):
+                    logger.warning(
+                        f"verified_lossless_target={cfg.verified_lossless_target!r} "
+                        f"has rank {target_rank.name}, below configured "
+                        f"gate_min_rank={cfg.quality_ranks.gate_min_rank.name}. "
+                        f"Files converted to this target will fail the quality "
+                        f"gate and be re-queued for upgrade. Either raise the "
+                        f"target format or lower gate_min_rank in config.ini "
+                        f"[Quality Ranks]."
+                    )
+            except Exception as exc:
+                logger.debug(f"verified_lossless_target rank check failed: {exc}")
+
         from album_source import DatabaseSource
         pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
         logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")
