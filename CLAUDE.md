@@ -341,7 +341,7 @@ Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be 
 
 **Key rule**: the `verified_lossless=True` bypass is now **tier-gated**. It imports on verdict `"better"` or `"equivalent"` but blocks on `"worse"`. This prevents a deliberately-too-low `verified_lossless_target` (Opus 64) from replacing a good existing album.
 
-**Bitrate metric**: `cfg.quality_ranks.bitrate_metric` picks between `min` (legacy) and `avg` (default, recommended for VBR codecs). Spectral cliff detection always uses min.
+**Bitrate metric**: `cfg.quality_ranks.bitrate_metric` picks between `min` (legacy), `avg` (default, recommended for VBR codecs), and `median` (outlier-resistant — picks the middle track, ignoring quiet intros/outros, hidden tracks, and skits that would drag MIN down or skew AVG). Spectral cliff detection always uses min. See `docs/quality-ranks.md` for *when to prefer median*.
 
 ### Quality Gate (`_check_quality_gate_core()` in import_dispatch.py)
 

@@ -70,29 +70,63 @@ Primary key is the rank. Within the same rank:
 - **Same codec family, either side carries an explicit label** → equivalent.
   A V0 label and a "mp3 320" label at the same rank are both contracts.
 - **Same codec family, both bare codec names** → compare the configured
-  metric (`avg_bitrate_kbps` or `min_bitrate_kbps`) with
-  `cfg.within_rank_tolerance_kbps` tolerance.
+  metric (`avg_bitrate_kbps`, `median_bitrate_kbps`, or `min_bitrate_kbps`)
+  with `cfg.within_rank_tolerance_kbps` tolerance.
 
-## Bitrate metric — `min` vs `avg`
+## Bitrate metric — `min` vs `avg` vs `median`
 
 VBR codecs have legitimate per-track variance. Opus 128 unconstrained VBR
 regularly lands individual tracks between 95-150 kbps depending on material;
 MP3 V0 can range 160-270. Using the minimum across an album penalizes
 legitimately encoded VBR with quiet passages.
 
-Two metrics are supported:
+Three metrics are supported:
 
 - **`avg`** (default) — album-mean per-track bitrate. Robust to VBR variance.
+- **`median`** — middle per-track bitrate. Outlier-resistant. Recommended
+  when albums commonly contain a single very-quiet intro/outro, hidden
+  tracks, or short interludes that drag MIN down or skew AVG away from the
+  typical track quality. The median ignores them entirely. See *When to
+  prefer median* below.
 - **`min`** — minimum per-track bitrate. Legacy behavior; conservative but
   prone to false negatives on lo-fi VBR.
 
 Spectral cliff detection and `transcode_detection()` continue to use `min`
 regardless of this setting — those care about the worst track, not the
-average.
+typical one.
 
-Adding future metrics like `median` is a one-line change in
-`measurement_rank()` (the single dispatch point) plus one new field on
-`AudioQualityMeasurement` and `AlbumInfo`.
+`measurement_rank()` is the single dispatch point. Each metric reads its
+matching field on `AudioQualityMeasurement` (`avg_bitrate_kbps`,
+`median_bitrate_kbps`, `min_bitrate_kbps`); if the configured metric's
+field is `None`, classification falls back to `min_bitrate_kbps` so legacy
+measurements still classify correctly.
+
+### When to prefer `median`
+
+Pick `median` over `avg` when your library has a meaningful number of
+albums where a small minority of tracks pulls the average around. The
+canonical cases:
+
+- **Lo-fi V0 with one clean closer.** A bedroom-pop V0 sitting at ~190 kbps
+  with a single "studio" track at 270 kbps. AVG drifts to ~200; MEDIAN
+  stays at ~190 — a faithful representation of the album's actual quality
+  contract.
+- **Hidden tracks / silence outros.** A 90-second silent track at 60 kbps
+  on an otherwise V0 album. MIN tanks to 60 (POOR), AVG dips by ~15-20
+  kbps; MEDIAN ignores the outlier entirely.
+- **Skits and interludes.** Hip-hop and concept albums frequently have
+  10-20 second skits encoded at much lower bitrates. MEDIAN stays anchored
+  to the typical full-length track.
+
+Pick `avg` when your library is mostly even-bitrate VBR encodes — AVG and
+MEDIAN converge on those, and AVG is the cheaper, more familiar metric.
+The defaults stay on `avg`; switch to `median` only when one of the cases
+above is biting you.
+
+Computation: AVG is `sum/count`. MEDIAN is `statistics.median()` — the
+middle value, or the mean of the two middle values for even track counts.
+Both are computed in Python in `BeetsDB.get_album_info()` because the
+beets library is SQLite (no native percentile aggregator).
 
 ## Default band values
 

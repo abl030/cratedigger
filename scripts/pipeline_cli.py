@@ -582,6 +582,7 @@ def cmd_quality(db, args):
     # --- Current quality gate ---
     is_cbr = False
     avg_br = None
+    median_br = None
     existing_format_hint = final_format
     if min_br is not None:
         mbid = req.get("mb_release_id")
@@ -589,6 +590,7 @@ def cmd_quality(db, args):
         if info:
             is_cbr = info.is_cbr
             avg_br = info.avg_bitrate_kbps
+            median_br = info.median_bitrate_kbps
             if not existing_format_hint:
                 existing_format_hint = info.format
         gate_spectral_br = None
@@ -600,6 +602,7 @@ def cmd_quality(db, args):
         current = AudioQualityMeasurement(
             min_bitrate_kbps=min_br,
             avg_bitrate_kbps=avg_br,
+            median_bitrate_kbps=median_br,
             format=existing_format_hint or "MP3",
             is_cbr=is_cbr,
             verified_lossless=verified,
@@ -614,6 +617,7 @@ def cmd_quality(db, args):
         print(f"  Quality gate:  {gate_label}  (rank={current_rank.name})")
         print(f"    min_bitrate={_fmt_br(min_br)}, "
               f"avg_bitrate={_fmt_br(avg_br) if avg_br else 'n/a'}, "
+              f"median_bitrate={_fmt_br(median_br) if median_br else 'n/a'}, "
               f"format={existing_format_hint or '(unknown)'}, "
               f"verified_lossless={verified}, is_cbr={is_cbr}")
         if current_br:

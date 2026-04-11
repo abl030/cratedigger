@@ -99,12 +99,17 @@ def make_import_result(
         error=error,
         new_measurement=AudioQualityMeasurement(
             min_bitrate_kbps=new_min_bitrate,
+            avg_bitrate_kbps=new_min_bitrate,
+            median_bitrate_kbps=new_min_bitrate,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
             verified_lossless=verified_lossless,
             was_converted_from=original_filetype if was_converted else None,
         ),
-        existing_measurement=(AudioQualityMeasurement(min_bitrate_kbps=prev_min_bitrate)
+        existing_measurement=(AudioQualityMeasurement(
+                                  min_bitrate_kbps=prev_min_bitrate,
+                                  avg_bitrate_kbps=prev_min_bitrate,
+                                  median_bitrate_kbps=prev_min_bitrate)
                               if prev_min_bitrate is not None else None),
         conversion=ConversionInfo(
             was_converted=was_converted,

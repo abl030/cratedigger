@@ -572,6 +572,14 @@ class AudioQualityMeasurement:
                                RankBitrateMetric and measurement_rank(). Additive;
                                legacy callers that only populate min_bitrate_kbps
                                still work (measurement_rank() falls back to min).
+        median_bitrate_kbps:   median per-track bitrate (kbps), None if
+                               unmeasured. Used when
+                               RankBitrateMetric.MEDIAN is configured —
+                               robust against per-track outliers (intro/outro
+                               silence, hidden tracks, very short interludes)
+                               that can pull MIN or AVG away from the typical
+                               track quality. measurement_rank() falls back
+                               to min when this is None.
         format:                codec label or bare codec name that drives the
                                quality_rank() classifier. Accepts either an
                                explicit label from ImportResult.final_format
@@ -586,6 +594,7 @@ class AudioQualityMeasurement:
     """
     min_bitrate_kbps: Optional[int] = None
     avg_bitrate_kbps: Optional[int] = None
+    median_bitrate_kbps: Optional[int] = None
     format: Optional[str] = None
     is_cbr: bool = False
     spectral_grade: Optional[str] = None
@@ -616,16 +625,22 @@ class AudioQualityMeasurement:
 class RankBitrateMetric(StrEnum):
     """Which per-album bitrate statistic feeds into quality_rank() classification.
 
-    MIN  — minimum per-track bitrate. Legacy behavior. Conservative and prone to
-           VBR false negatives on albums with genuinely quiet tracks.
-    AVG  — album-mean per-track bitrate. Recommended for VBR codecs. Default.
+    MIN    — minimum per-track bitrate. Legacy behavior. Conservative and prone
+             to VBR false negatives on albums with genuinely quiet tracks.
+    AVG    — album-mean per-track bitrate. Recommended for VBR codecs. Default.
+    MEDIAN — middle per-track bitrate. Robust against per-track outliers
+             (intro/outro silence, hidden tracks, very short interludes) where
+             a single low track would drag MIN down and a few skewed tracks
+             could pull AVG away from the typical track quality.
 
-    measurement_rank() is the only function that dispatches on this enum — adding
-    MEDIAN later means one new enum value, one elif branch in measurement_rank(),
-    and one new field on AudioQualityMeasurement / AlbumInfo.
+    measurement_rank() is the only function that dispatches on this enum.
+    Each metric has a matching field on AudioQualityMeasurement / AlbumInfo;
+    when the configured metric's field is None, measurement_rank() falls back
+    to min_bitrate_kbps so legacy callers still classify correctly.
     """
     MIN = "min"
     AVG = "avg"
+    MEDIAN = "median"
 
 
 class QualityRank(IntEnum):
@@ -1040,20 +1055,15 @@ def measurement_rank(
 ) -> QualityRank:
     """Pick the configured bitrate metric from m and classify it.
 
-    This is the ONLY function that dispatches on cfg.bitrate_metric.
-    Adding MEDIAN later is a one-line change here + one new field on
-    AudioQualityMeasurement / AlbumInfo.
+    This is the ONLY function that dispatches on cfg.bitrate_metric. Each
+    metric has a matching field on AudioQualityMeasurement: AVG → avg,
+    MEDIAN → median, MIN → min.
 
-    Falls back to min_bitrate_kbps when the configured metric's value is
+    Falls back to min_bitrate_kbps when the configured metric's field is
     None — so legacy measurements (which only populate min) continue to
-    classify correctly under the default AVG policy.
+    classify correctly regardless of the configured policy.
     """
-    chosen: Optional[int]
-    if cfg.bitrate_metric is RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
-        chosen = m.avg_bitrate_kbps
-    else:
-        chosen = m.min_bitrate_kbps
-    return quality_rank(m.format, chosen, m.is_cbr, cfg)
+    return quality_rank(m.format, _selected_bitrate(m, cfg), m.is_cbr, cfg)
 
 
 def _selected_bitrate(m: AudioQualityMeasurement,
@@ -1062,10 +1072,13 @@ def _selected_bitrate(m: AudioQualityMeasurement,
 
     Used by compare_quality() for the same-rank, same-codec tiebreaker.
     Keeps the metric dispatch in one place — compare_quality does not
-    peek into m.avg / m.min directly.
+    peek into m.avg / m.median / m.min directly.
     """
     if cfg.bitrate_metric is RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
         return m.avg_bitrate_kbps
+    if (cfg.bitrate_metric is RankBitrateMetric.MEDIAN
+            and m.median_bitrate_kbps is not None):
+        return m.median_bitrate_kbps
     return m.min_bitrate_kbps
 
 
@@ -2307,6 +2320,9 @@ def full_pipeline_decision(
                       avg_bitrate_kbps=override_min_bitrate
                       if override_min_bitrate is not None
                       else existing_min_bitrate,
+                      median_bitrate_kbps=override_min_bitrate
+                      if override_min_bitrate is not None
+                      else existing_min_bitrate,
                       format=effective_existing_format,
                       is_cbr=existing_is_cbr)
                   if existing_min_bitrate is not None else None)
@@ -2317,6 +2333,7 @@ def full_pipeline_decision(
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
             avg_bitrate_kbps=min_bitrate,
+            median_bitrate_kbps=min_bitrate,
             format=stage2_new_format)
         result["stage2_import"] = import_quality_decision(
             new_m, existing_m, cfg=cfg)
@@ -2351,6 +2368,7 @@ def full_pipeline_decision(
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=import_br,
             avg_bitrate_kbps=import_br,
+            median_bitrate_kbps=import_br,
             format=stage2_new_format,
             verified_lossless=will_be_verified)
         result["stage2_import"] = import_quality_decision(
@@ -2401,6 +2419,7 @@ def full_pipeline_decision(
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
             avg_bitrate_kbps=min_bitrate,
+            median_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
             is_cbr=is_cbr)
         result["stage2_import"] = import_quality_decision(
@@ -2427,6 +2446,7 @@ def full_pipeline_decision(
     gate_m = AudioQualityMeasurement(
         min_bitrate_kbps=gate_bitrate,
         avg_bitrate_kbps=gate_bitrate,
+        median_bitrate_kbps=gate_bitrate,
         format=gate_format,
         is_cbr=gate_cbr,
         verified_lossless=verified_lossless,

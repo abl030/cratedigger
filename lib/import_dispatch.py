@@ -97,6 +97,7 @@ def load_quality_gate_state(
     current = AudioQualityMeasurement(
         min_bitrate_kbps=min_br_kbps,
         avg_bitrate_kbps=info.avg_bitrate_kbps,
+        median_bitrate_kbps=info.median_bitrate_kbps,
         format=album_format,
         is_cbr=info.is_cbr,
         verified_lossless=verified_lossless,
