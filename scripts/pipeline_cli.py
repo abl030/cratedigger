@@ -856,7 +856,8 @@ def cmd_repair_spectral(db, args):
     current_spectral_bitrate still holds a stale transcode estimate,
     causing the quality gate to requeue indefinitely (issue #18).
     """
-    from quality import AudioQualityMeasurement, quality_gate_decision
+    from lib.import_dispatch import load_quality_gate_state
+    from quality import quality_gate_decision
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -884,30 +885,27 @@ def cmd_repair_spectral(db, args):
     for req in candidates:
         rid = req["id"]
         label = f"{req['artist_name']} - {req['album_title']}"
-        beets_info = _load_beets_album_info(req.get("mb_release_id"), rank_cfg)
-        min_br = req["min_bitrate"]
-        effective_min_br = (
-            min_br if min_br is not None
-            else (beets_info.min_bitrate_kbps if beets_info else None)
-        )
         stale_br = req["current_spectral_bitrate"]
+        state = load_quality_gate_state(
+            request_id=rid,
+            db=db,
+            quality_ranks=rank_cfg,
+        )
+        effective_min_br = (
+            state.min_bitrate_kbps
+            if state is not None
+            else req["min_bitrate"]
+        )
         print(f"  [{rid:>4}] {label}")
         print(f"         min_bitrate={effective_min_br}kbps, "
               f"stale current_spectral={stale_br}kbps")
 
         # Check what quality gate would decide after clearing stale data
-        existing_format = req.get("final_format")
-        if not existing_format and beets_info:
-            existing_format = beets_info.format
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=effective_min_br,
-            avg_bitrate_kbps=(beets_info.avg_bitrate_kbps if beets_info else None),
-            format=existing_format or "MP3",
-            is_cbr=(beets_info.is_cbr if beets_info else False),
-            verified_lossless=bool(req.get("verified_lossless")),
-            spectral_bitrate_kbps=None,  # cleared
+        decision = (
+            quality_gate_decision(state.measurement, cfg=rank_cfg)
+            if state is not None
+            else "requeue_upgrade"
         )
-        decision = quality_gate_decision(measurement, cfg=rank_cfg)
         print(f"         after repair: quality_gate_decision → {decision}")
 
         if args.dry_run:

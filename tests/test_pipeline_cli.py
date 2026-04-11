@@ -443,8 +443,8 @@ class TestCmdSetIntent(unittest.TestCase):
 class TestCmdRepairSpectral(unittest.TestCase):
     """Regression tests for the rank-model repair flow."""
 
-    def test_repair_spectral_uses_beets_format_and_runtime_rank_config(self):
-        """A GOOD-rank VBR album should repair to imported under a GOOD gate."""
+    def test_repair_spectral_reloads_full_request_metadata(self):
+        """Lo-fi V0 repair must reload full request metadata, not trust the partial row."""
         from lib.beets_db import AlbumInfo
 
         cfg_fd, cfg_path = tempfile.mkstemp(prefix="quality-ranks-", suffix=".ini")
@@ -452,26 +452,40 @@ class TestCmdRepairSpectral(unittest.TestCase):
         try:
             with open(cfg_path, "w", encoding="utf-8") as f:
                 f.write("[Quality Ranks]\n")
-                f.write("gate_min_rank = good\n")
 
+            # Mirror the real repair query shape: it does NOT include
+            # mb_release_id/final_format, so the command must re-load the
+            # full request row instead of depending on the partial result.
             candidate_cur = MagicMock()
-            candidate_cur.fetchall.return_value = [make_request_row(
-                id=42,
-                status="wanted",
-                mb_release_id="mbid-123",
-                artist_name="Artist",
-                album_title="Album",
-                min_bitrate=180,
-                current_spectral_grade="genuine",
-                current_spectral_bitrate=96,
-                verified_lossless=False,
-            )]
+            candidate_cur.fetchall.return_value = [{
+                "id": 42,
+                "artist_name": "Artist",
+                "album_title": "Album",
+                "min_bitrate": 207,
+                "current_spectral_grade": "genuine",
+                "current_spectral_bitrate": 96,
+                "last_download_spectral_bitrate": None,
+                "last_download_spectral_grade": None,
+                "verified_lossless": True,
+            }]
             clear_cur = MagicMock()
             delete_cur = MagicMock()
             delete_cur.fetchall.return_value = []
             import_cur = MagicMock()
 
             db = MagicMock()
+            db.get_request.return_value = make_request_row(
+                id=42,
+                status="wanted",
+                mb_release_id="mbid-123",
+                artist_name="Artist",
+                album_title="Album",
+                min_bitrate=207,
+                current_spectral_grade="genuine",
+                current_spectral_bitrate=96,
+                verified_lossless=True,
+                final_format="mp3 v0",
+            )
             db._execute.side_effect = [
                 candidate_cur,
                 clear_cur,
@@ -482,8 +496,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
             beets_info = AlbumInfo(
                 album_id=1,
                 track_count=10,
-                min_bitrate_kbps=180,
-                avg_bitrate_kbps=180,
+                min_bitrate_kbps=207,
+                avg_bitrate_kbps=207,
                 format="MP3",
                 is_cbr=False,
                 album_path="/Beets/Artist/Album",
@@ -496,7 +510,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             args = MagicMock(dry_run=False)
             stdout = io.StringIO()
             with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": cfg_path}), \
-                 patch("beets_db.BeetsDB", return_value=mock_beets), \
+                 patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(db, args)
 
@@ -506,7 +520,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             self.assertEqual(db._execute.call_count, 4)
             imported_sql, imported_params = db._execute.call_args_list[3][0]
             self.assertIn("SET status = 'imported'", imported_sql)
-            self.assertEqual(imported_params, (180, 42))
+            self.assertEqual(imported_params, (207, 42))
         finally:
             os.unlink(cfg_path)
 
