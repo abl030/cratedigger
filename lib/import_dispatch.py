@@ -17,7 +17,6 @@ from typing import Sequence, TYPE_CHECKING
 from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          SpectralMeasurement,
                          ValidationResult,
-                         QUALITY_MIN_BITRATE_KBPS,
                          QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, narrow_override_on_downgrade,
@@ -376,6 +375,7 @@ def _check_quality_gate_core(
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
         if decision == "requeue_upgrade":
+            from lib.quality import gate_rank
             upgrade_override = QUALITY_UPGRADE_TIERS
             apply_transition(db, request_id, "wanted",
                              from_status="imported",
@@ -384,16 +384,19 @@ def _check_quality_gate_core(
             usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(
                 min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
-            if spectral_br and spectral_br < min_br_kbps:
-                reason = (f"quality gate: spectral {spectral_br}kbps "
-                          f"(beets {min_br_kbps}kbps) < {QUALITY_MIN_BITRATE_KBPS}kbps")
-            else:
-                reason = f"quality gate: {min_br_kbps}kbps < {QUALITY_MIN_BITRATE_KBPS}kbps"
+            actual_rank = gate_rank(current, quality_ranks)
+            gate_min = quality_ranks.gate_min_rank
+            br_note = (f"spectral {spectral_br}kbps (beets {min_br_kbps}kbps)"
+                       if spectral_br and spectral_br < min_br_kbps
+                       else f"{min_br_kbps}kbps")
+            reason = (f"quality gate: rank {actual_rank.name} < {gate_min.name} "
+                      f"({br_note})")
             for username in usernames:
                 db.add_denylist(request_id, username, reason)
             logger.info(
                 f"QUALITY GATE: {label} "
-                f"gate_bitrate={gate_br}kbps{spectral_note} < {QUALITY_MIN_BITRATE_KBPS}kbps, "
+                f"rank={actual_rank.name} < {gate_min.name} "
+                f"(gate_bitrate={gate_br}kbps{spectral_note}), "
                 f"queued for upgrade, denylisted {usernames} "
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
@@ -586,6 +589,7 @@ def dispatch_import_core(
                                         "current_spectral_grade"),
                                     verified_lossless=bool(
                                         req_row.get("verified_lossless")),
+                                    cfg=_gate_cfg,
                                 )
                                 if narrowed_override:
                                     logger.info(

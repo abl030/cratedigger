@@ -548,6 +548,99 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(len(db.denylist), 1)
         self.assertIn("quality gate", db.denylist[0].reason or "")
 
+    def test_requeue_upgrade_denylist_reason_is_rank_aware(self):
+        """Denylist reason text must reflect the actual rank/threshold, not the
+        legacy hardcoded 210kbps constant.
+
+        The reason is persisted to the DB and surfaces in operator-facing
+        history. Before this fix, every requeue_upgrade row was tagged with
+        '< 210kbps' regardless of cfg.gate_min_rank. After the fix the reason
+        carries the rank name + the configured gate threshold.
+        """
+        from lib.import_dispatch import _check_quality_gate_core
+        from lib.quality import QualityRankConfig
+        from lib.beets_db import AlbumInfo
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="imported", verified_lossless=False,
+            current_spectral_bitrate=None, current_spectral_grade=None,
+            mb_release_id="mbid-low",
+        ))
+
+        # Bare MP3 at 150kbps avg → ACCEPTABLE rank, below default EXCELLENT gate.
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=150, avg_bitrate_kbps=150,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            )
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate_core(
+                mb_id="mbid-low", label="Artist - Album",
+                request_id=42,
+                files=[MagicMock(username="loweruser", filename="01.mp3")],
+                db=db,  # type: ignore[arg-type]
+                quality_ranks=QualityRankConfig.defaults(),
+            )
+
+        self.assertEqual(len(db.denylist), 1)
+        reason = db.denylist[0].reason or ""
+        # New format: includes the actual rank name and gate threshold
+        self.assertIn("ACCEPTABLE", reason,
+                      f"reason should name the actual rank, got: {reason}")
+        self.assertIn("EXCELLENT", reason,
+                      f"reason should name the configured gate threshold, got: {reason}")
+        # Old format pinned the legacy 210kbps constant — must NOT appear
+        self.assertNotIn("< 210kbps", reason,
+                         f"reason still references legacy 210kbps: {reason}")
+
+    def test_requeue_upgrade_denylist_reason_honours_custom_gate(self):
+        """Custom gate_min_rank=GOOD must surface in the persisted reason.
+
+        Verifies the reason text actually threads cfg through to the
+        denylist entry, not just the decision.
+        """
+        from lib.import_dispatch import _check_quality_gate_core
+        from lib.quality import QualityRankConfig, QualityRank
+        from lib.beets_db import AlbumInfo
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=43, status="imported", verified_lossless=False,
+            current_spectral_bitrate=None, current_spectral_grade=None,
+            mb_release_id="mbid-mid",
+        ))
+
+        # 140 kbps avg → ACCEPTABLE under any cfg, below GOOD threshold.
+        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
+            mock_beets = MagicMock()
+            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
+            mock_beets.__exit__ = MagicMock(return_value=False)
+            mock_beets.get_album_info.return_value = AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=140, avg_bitrate_kbps=140,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            )
+            mock_beets_cls.return_value = mock_beets
+            _check_quality_gate_core(
+                mb_id="mbid-mid", label="Artist - Album",
+                request_id=43,
+                files=[MagicMock(username="middleuser", filename="01.mp3")],
+                db=db,  # type: ignore[arg-type]
+                quality_ranks=QualityRankConfig(gate_min_rank=QualityRank.GOOD),
+            )
+
+        self.assertEqual(len(db.denylist), 1)
+        reason = db.denylist[0].reason or ""
+        self.assertIn("GOOD", reason,
+                      f"reason should name the custom gate_min_rank=GOOD, got: {reason}")
+
     def test_requeue_lossless_uses_intent(self):
         db = self._run_quality_gate("requeue_lossless")
         row = db.request(42)

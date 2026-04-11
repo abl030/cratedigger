@@ -516,6 +516,7 @@ def _compute_rejection_backfill(album_data: GrabListEntry,
             min_bitrate_kbps=info.min_bitrate_kbps,
             spectral_grade=req.get("current_spectral_grade"),
             verified_lossless=bool(req.get("verified_lossless")),
+            cfg=ctx.cfg.quality_ranks,
         )
         if override:
             logger.info(
