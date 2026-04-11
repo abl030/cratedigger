@@ -781,6 +781,9 @@ class QualityRankConfig:
             <codec>.<band>            = <int>
               codecs: opus, mp3_vbr, mp3_cbr, aac
               bands:  transparent, excellent, good, acceptable
+            mp3_vbr_levels            = <rank>,<rank>,... (exactly 10, V0..V9)
+            lossless_codecs           = <codec>,<codec>,... (set, lowercased)
+            mixed_format_precedence   = <codec>,<codec>,... (ordered list, lowercased)
 
         Invalid values raise ValueError at parse time with a diagnostic that
         names the offending key. Missing section silently returns defaults.
@@ -846,6 +849,59 @@ class QualityRankConfig:
             # with section context.
             raise ValueError(f"[{section}] invalid codec bands: {exc}") from exc
 
+        # --- Collection fields (issue #65) ---
+        # CSV with leading/trailing whitespace tolerated. An unset key (raw
+        # is None) and an empty `key = ` both fall through to the default;
+        # an explicit list with no usable values (e.g. just commas) is a
+        # config error so the user gets a diagnostic instead of silently
+        # losing all lossless codecs.
+        def _split_csv(key: str) -> list[str] | None:
+            raw = parser.get(section, key, fallback=None)
+            if raw is None or raw.strip() == "":
+                return None
+            parts = [p.strip() for p in raw.split(",")]
+            parts = [p for p in parts if p]
+            if not parts:
+                raise ValueError(
+                    f"[{section}] {key}: list contains no usable entries "
+                    f"(got {raw!r})")
+            return parts
+
+        # mp3_vbr_levels — exactly 10 entries, each a QualityRank name.
+        levels_parts = _split_csv("mp3_vbr_levels")
+        if levels_parts is None:
+            mp3_vbr_levels = base.mp3_vbr_levels
+        else:
+            if len(levels_parts) != 10:
+                raise ValueError(
+                    f"[{section}] mp3_vbr_levels: expected exactly 10 ranks "
+                    f"(V0..V9), got {len(levels_parts)}")
+            parsed_levels: list[QualityRank] = []
+            for i, name in enumerate(levels_parts):
+                key_norm = name.lower()
+                if key_norm not in _RANK_NAME_TO_VALUE:
+                    raise ValueError(
+                        f"[{section}] mp3_vbr_levels: entry {i} (V{i}) "
+                        f"is {name!r}, expected one of "
+                        f"{sorted(_RANK_NAME_TO_VALUE.keys())}")
+                parsed_levels.append(_RANK_NAME_TO_VALUE[key_norm])
+            mp3_vbr_levels = tuple(parsed_levels)
+
+        # lossless_codecs — frozenset, lowercased, deduplicated.
+        lossless_parts = _split_csv("lossless_codecs")
+        if lossless_parts is None:
+            lossless_codecs = base.lossless_codecs
+        else:
+            lossless_codecs = frozenset(p.lower() for p in lossless_parts)
+
+        # mixed_format_precedence — ordered tuple, lowercased. Order matters
+        # because _reduce_album_format takes the first match.
+        precedence_parts = _split_csv("mixed_format_precedence")
+        if precedence_parts is None:
+            mixed_format_precedence = base.mixed_format_precedence
+        else:
+            mixed_format_precedence = tuple(p.lower() for p in precedence_parts)
+
         return cls(
             bitrate_metric=metric,
             gate_min_rank=gate_min_rank,
@@ -854,9 +910,9 @@ class QualityRankConfig:
             mp3_vbr=mp3_vbr,
             mp3_cbr=mp3_cbr,
             aac=aac,
-            mp3_vbr_levels=base.mp3_vbr_levels,
-            lossless_codecs=base.lossless_codecs,
-            mixed_format_precedence=base.mixed_format_precedence,
+            mp3_vbr_levels=mp3_vbr_levels,
+            lossless_codecs=lossless_codecs,
+            mixed_format_precedence=mixed_format_precedence,
         )
 
     # ------------------------------------------------------------------

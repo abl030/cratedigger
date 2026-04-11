@@ -201,7 +201,50 @@ aac.transparent = 192
 aac.excellent = 144
 aac.good = 112
 aac.acceptable = 80
+
+# Collection fields (issue #65). All three are CSV. Defaults are sensible —
+# you almost certainly do not need to set these.
+mp3_vbr_levels = TRANSPARENT,EXCELLENT,EXCELLENT,GOOD,GOOD,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE
+lossless_codecs = flac,lossless,alac,wav
+mixed_format_precedence = mp3,aac,opus,flac
 ```
+
+### Collection fields (mp3_vbr_levels / lossless_codecs / mixed_format_precedence)
+
+These three fields configure rank-model behavior at the codec-identity layer
+rather than the bitrate-band layer. They were previously dataclass-only;
+issue #65 wires them through the INI parser.
+
+- **`mp3_vbr_levels`** — comma-separated list of exactly 10 rank names
+  (V0..V9). Maps each LAME VBR V-level to a rank when the format hint is
+  an explicit `mp3 v0` / `mp3 v3` / etc. label. Defaults assume LAME's
+  documented V-level quality contract:
+  - V0 → TRANSPARENT, V1-V2 → EXCELLENT, V3-V4 → GOOD, V5-V9 → ACCEPTABLE.
+  - Tighten if you don't trust LAME's claim that V2 is transparent.
+  - Loosen if you encode at V4 and want it to pass the gate.
+- **`lossless_codecs`** — comma-separated set of codec strings (lowercased,
+  deduplicated). The first token of `format_hint` is checked against this
+  set; a match short-circuits to LOSSLESS. Default: `flac, lossless, alac,
+  wav`. Add `ape, dsf, wavpack` if your library carries them.
+- **`mixed_format_precedence`** — comma-separated **ordered** tuple. When an
+  album has tracks in multiple codecs (rare — usually a manually merged
+  album), `_reduce_album_format()` walks this list in order and picks the
+  first codec that appears on disk. The default `mp3, aac, opus, flac` is
+  worst-first, so a mixed FLAC+MP3 album classifies as MP3 (the
+  conservative choice). Reorder if you want a different "canonical codec"
+  policy.
+
+Validation:
+
+- `mp3_vbr_levels` must have **exactly 10** entries; any other count raises
+  `ValueError` at startup.
+- Each `mp3_vbr_levels` entry must be a valid `QualityRank` name
+  (case-insensitive).
+- Empty values (`key = `) fall through to the default; an explicit list
+  containing only whitespace/commas raises so the user gets a diagnostic
+  instead of silently losing all entries.
+- All codec strings are lowercased on parse — `FLAC,Alac,WAV` is identical
+  to `flac,alac,wav`.
 
 Reload by restarting `soularr-web` (the web simulator reads this file on
 every request) and waiting for the next `soularr.timer` fire (5 min).

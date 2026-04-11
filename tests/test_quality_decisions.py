@@ -1597,6 +1597,132 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         # Repo template uses the defaults — assert round-trip equality.
         self.assertEqual(cfg, QualityRankConfig.defaults())
 
+    # ---- Issue #65: collection field parsing -----------------------------
+    # mp3_vbr_levels / lossless_codecs / mixed_format_precedence are now
+    # parseable from [Quality Ranks] as comma-separated values.
+
+    def test_mp3_vbr_levels_parses_full_override(self):
+        """All 10 V-level entries (V0..V9) must parse into the tuple."""
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "mp3_vbr_levels = TRANSPARENT,EXCELLENT,EXCELLENT,GOOD,GOOD,"
+            "ACCEPTABLE,ACCEPTABLE,POOR,POOR,POOR\n"
+        )
+        self.assertEqual(len(cfg.mp3_vbr_levels), 10)
+        self.assertEqual(cfg.mp3_vbr_levels[0], QualityRank.TRANSPARENT)
+        self.assertEqual(cfg.mp3_vbr_levels[2], QualityRank.EXCELLENT)
+        self.assertEqual(cfg.mp3_vbr_levels[7], QualityRank.POOR)
+
+    def test_mp3_vbr_levels_case_insensitive_and_whitespace_tolerant(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "mp3_vbr_levels =  transparent , Excellent ,EXCELLENT, good,good,"
+            " acceptable,ACCEPTABLE,acceptable,Acceptable,acceptable\n"
+        )
+        self.assertEqual(cfg.mp3_vbr_levels,
+                         QualityRankConfig.defaults().mp3_vbr_levels)
+
+    def test_mp3_vbr_levels_wrong_length_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse(
+                "[Quality Ranks]\n"
+                "mp3_vbr_levels = TRANSPARENT,EXCELLENT,GOOD\n"
+            )
+        self.assertIn("mp3_vbr_levels", str(ctx.exception))
+        self.assertIn("10", str(ctx.exception))
+
+    def test_mp3_vbr_levels_invalid_rank_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._parse(
+                "[Quality Ranks]\n"
+                "mp3_vbr_levels = TRANSPARENT,EXCELLENT,EXCELLENT,GOOD,GOOD,"
+                "ACCEPTABLE,ACCEPTABLE,ACCEPTABLE,WHOOPS,ACCEPTABLE\n"
+            )
+        self.assertIn("mp3_vbr_levels", str(ctx.exception))
+        self.assertIn("whoops", str(ctx.exception).lower())
+
+    def test_lossless_codecs_parses(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "lossless_codecs = flac,alac,wav,ape,wavpack\n"
+        )
+        self.assertEqual(cfg.lossless_codecs,
+                         frozenset({"flac", "alac", "wav", "ape", "wavpack"}))
+
+    def test_lossless_codecs_lowercased_and_deduped(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "lossless_codecs = FLAC, Alac , wav , flac\n"
+        )
+        self.assertEqual(cfg.lossless_codecs,
+                         frozenset({"flac", "alac", "wav"}))
+
+    def test_lossless_codecs_empty_falls_through_to_default(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "lossless_codecs = \n"
+        )
+        self.assertEqual(cfg.lossless_codecs,
+                         QualityRankConfig.defaults().lossless_codecs)
+
+    def test_lossless_codecs_empty_list_raises(self):
+        """An explicit empty list (just whitespace/commas) is a config error.
+
+        Distinct from `key = ` (which means "use the default") because here
+        the user is clearly trying to set the field but produced no values.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            self._parse(
+                "[Quality Ranks]\n"
+                "lossless_codecs = , ,\n"
+            )
+        self.assertIn("lossless_codecs", str(ctx.exception))
+
+    def test_mixed_format_precedence_parses_and_preserves_order(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "mixed_format_precedence = aac, opus, mp3, flac\n"
+        )
+        # Order matters — the first match wins in _reduce_album_format.
+        self.assertEqual(
+            cfg.mixed_format_precedence, ("aac", "opus", "mp3", "flac"))
+
+    def test_mixed_format_precedence_lowercased(self):
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "mixed_format_precedence = MP3,AAC,Opus,FLAC\n"
+        )
+        self.assertEqual(
+            cfg.mixed_format_precedence, ("mp3", "aac", "opus", "flac"))
+
+    def test_collection_partial_override(self):
+        """Setting only one collection field leaves the others at defaults."""
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "lossless_codecs = flac,alac,ape\n"
+        )
+        defaults = QualityRankConfig.defaults()
+        self.assertEqual(cfg.lossless_codecs,
+                         frozenset({"flac", "alac", "ape"}))
+        self.assertEqual(cfg.mp3_vbr_levels, defaults.mp3_vbr_levels)
+        self.assertEqual(cfg.mixed_format_precedence,
+                         defaults.mixed_format_precedence)
+
+    def test_collection_full_override_round_trips_through_from_ini(self):
+        """End-to-end: set all three collection fields and verify each one."""
+        cfg = self._parse(
+            "[Quality Ranks]\n"
+            "mp3_vbr_levels = EXCELLENT,EXCELLENT,GOOD,GOOD,ACCEPTABLE,"
+            "ACCEPTABLE,POOR,POOR,POOR,POOR\n"
+            "lossless_codecs = flac,alac,wav,ape,dsf,wavpack\n"
+            "mixed_format_precedence = aac,mp3,opus,flac\n"
+        )
+        self.assertEqual(cfg.mp3_vbr_levels[0], QualityRank.EXCELLENT)
+        self.assertEqual(cfg.mp3_vbr_levels[6], QualityRank.POOR)
+        self.assertIn("ape", cfg.lossless_codecs)
+        self.assertEqual(
+            cfg.mixed_format_precedence, ("aac", "mp3", "opus", "flac"))
+
 
 class TestQualityRankConfigRoundTrip(unittest.TestCase):
     """to_json / from_json must round-trip identically."""
