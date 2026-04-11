@@ -225,6 +225,71 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             "180kbps falls back to the default EXCELLENT gate and requeues.")
         self.assertIsNone(row["search_filetype_override"])
 
+    def test_median_metric_accepts_outlier_album_end_to_end(self):
+        """MEDIAN policy must thread through dispatch → quality gate (#64).
+
+        Album has tracks {60, 60, 245, 245, 245} — three V0 tracks plus two
+        very-quiet intros. Under MIN the album is POOR (60), under AVG it's
+        GOOD (171), and only under MEDIAN does it reach TRANSPARENT (245)
+        and pass the default EXCELLENT gate.
+
+        If load_quality_gate_state (lib/import_dispatch.py) drops the
+        median field when constructing the AudioQualityMeasurement, or if
+        the rank cfg fails to thread through, this test fails because the
+        gate falls back to AVG=171 (GOOD < EXCELLENT) and requeues. This
+        is the only end-to-end coverage for the issue #64 dispatch path.
+        """
+        from lib.quality import QualityRankConfig, RankBitrateMetric
+
+        ir = make_import_result(decision="import", new_min_bitrate=60)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=5,
+            min_bitrate_kbps=60,
+            avg_bitrate_kbps=171,
+            median_bitrate_kbps=245,
+            format="MP3", is_cbr=False, album_path="/Beets/Test")
+
+        custom_cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            quality_ranks=QualityRankConfig(
+                bitrate_metric=RankBitrateMetric.MEDIAN),
+        )
+
+        db = self._run_dispatch(ir, beets_info, cfg=custom_cfg)
+
+        row = db.request(42)
+        self.assertEqual(
+            row["status"], "imported",
+            "MEDIAN policy must thread through dispatch_import_core → "
+            "load_quality_gate_state → measurement_rank. If any hop drops "
+            "median_bitrate_kbps from the AudioQualityMeasurement, the "
+            "gate falls back to avg=171 (GOOD < EXCELLENT) and requeues.")
+        self.assertIsNone(row["search_filetype_override"])
+
+    def test_default_avg_metric_requeues_same_outlier_album(self):
+        """Counterfactual to MEDIAN slice: same album, default cfg, requeues.
+
+        Pinning this proves the difference in the MEDIAN test really comes
+        from the policy switch — not from a hidden change in dispatch flow.
+        """
+        ir = make_import_result(decision="import", new_min_bitrate=60)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=5,
+            min_bitrate_kbps=60,
+            avg_bitrate_kbps=171,
+            median_bitrate_kbps=245,
+            format="MP3", is_cbr=False, album_path="/Beets/Test")
+
+        db = self._run_dispatch(ir, beets_info)
+
+        row = db.request(42)
+        self.assertEqual(
+            row["status"], "wanted",
+            "Default AVG policy on the same outlier album must requeue — "
+            "if this fails, the MEDIAN slice's pass is meaningless.")
+        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+
     def test_native_vbr_import_clears_stale_final_format(self):
         """A later plain MP3 import must clear an old target-format label.
 

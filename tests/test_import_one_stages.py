@@ -209,7 +209,12 @@ class TestExistingMeasurementBuilder(unittest.TestCase):
     """Tests for import_one's existing-measurement wiring."""
 
     def test_override_replaces_avg_metric_too(self):
-        """Spectral override must affect the selected avg metric, not just min."""
+        """Spectral override must affect every selectable rank metric, not just min.
+
+        Issue #64 added MEDIAN as a third metric — override_min_bitrate must
+        drive median too, otherwise a future MEDIAN-policy deployment would
+        silently outvote the override and compare against the original median.
+        """
         from import_one import build_existing_measurement
         from lib.beets_db import AlbumInfo
 
@@ -218,6 +223,7 @@ class TestExistingMeasurementBuilder(unittest.TestCase):
             track_count=10,
             min_bitrate_kbps=320,
             avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
             format="MP3",
             is_cbr=True,
             album_path="/Beets/Test",
@@ -234,6 +240,9 @@ class TestExistingMeasurementBuilder(unittest.TestCase):
         self.assertEqual(
             m.avg_bitrate_kbps, 128,
             "override_min_bitrate must drive comparison under the default avg metric")
+        self.assertEqual(
+            m.median_bitrate_kbps, 128,
+            "override_min_bitrate must drive comparison under MEDIAN policy too")
 
 
 # ============================================================================

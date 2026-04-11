@@ -790,7 +790,7 @@ class QualityRankConfig:
 
         Key names (all lowercase, codec-prefixed for bands):
 
-            bitrate_metric            = min | avg
+            bitrate_metric            = min | avg | median
             gate_min_rank             = unknown|poor|acceptable|good|excellent|transparent|lossless
             within_rank_tolerance_kbps = <int>
             <codec>.<band>            = <int>
@@ -1269,7 +1269,10 @@ class ImportResult:
                           quality.get("post_conversion_min_bitrate"))
         conv_d.setdefault("is_transcode", quality.get("is_transcode", False))
 
-        # Build measurements from scattered fields
+        # Build measurements from scattered fields. v1 rows predate the
+        # avg/median bitrate fields (issue #60 / #64) — leaving them at the
+        # default None makes measurement_rank() fall back to min, which is
+        # the same behavior the v1 row was originally classified under.
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=quality.get("new_min_bitrate"),
             spectral_grade=spectral.get("grade"),

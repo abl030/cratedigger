@@ -61,6 +61,8 @@ class TestImportResultConstruction(unittest.TestCase):
     def test_measurement_defaults(self):
         m = AudioQualityMeasurement()
         self.assertIsNone(m.min_bitrate_kbps)
+        self.assertIsNone(m.avg_bitrate_kbps)
+        self.assertIsNone(m.median_bitrate_kbps)
         self.assertFalse(m.is_cbr)
         self.assertIsNone(m.spectral_grade)
         self.assertIsNone(m.spectral_bitrate_kbps)
