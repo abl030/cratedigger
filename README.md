@@ -1,6 +1,6 @@
 # Cratedigger
 
-A quality-obsessed music acquisition pipeline. Searches Soulseek via [slskd](https://github.com/slskd/slskd), validates downloads against [MusicBrainz](https://musicbrainz.org/) via [beets](https://beets.io/), and curates a library toward verified lossless sources — automatically.
+A quality-obsessed music acquisition pipeline. Searches Soulseek via [slskd](https://github.com/slskd/slskd), validates downloads against [MusicBrainz](https://musicbrainz.org/) or [Discogs](https://www.discogs.com/) via [beets](https://beets.io/), and curates a library toward verified lossless sources — automatically.
 
 Cratedigger doesn't just download albums. It siphons the best available quality out of Soulseek over time: downloading, verifying via spectral analysis, converting, comparing against what's already on disk, and re-queuing for upgrades when better sources appear.
 
@@ -45,8 +45,8 @@ Pipeline DB (PostgreSQL)           |                       |
 ## Features
 
 - **PostgreSQL pipeline DB** as the sole source of truth for album requests, download state, and quality history
-- **Web UI** (`music.ablz.au`) for browsing a local MusicBrainz mirror and adding albums
-- **Beets validation** -- every download validated against the target MusicBrainz release ID before import
+- **Web UI** (`music.ablz.au`) for browsing local MusicBrainz and Discogs mirrors with a source toggle, and adding albums
+- **Beets validation** -- every download validated against the target release ID (MusicBrainz UUID or Discogs numeric) before import
 - **Auto-import** with FLAC->V0 conversion (or configurable target: Opus, MP3 V2, AAC, FLAC on disk), spectral analysis, and quality gating
 - **Async downloads** -- non-blocking: enqueue downloads, persist state to DB, poll on next run. Downloads span multiple 5-minute cycles.
 - **Parallel Soulseek searches** -- `ThreadPoolExecutor` fires all searches concurrently
@@ -56,7 +56,8 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Force-import** -- manually import rejected downloads via CLI or web API
 - **Full audit trail** -- every decision stored as queryable JSONB in PostgreSQL
 - **Typed decision pipeline** -- pure functions in `quality.py`, typed dataclasses throughout, pyright enforced
-- **Comprehensive test suite** -- 1400+ tests (`nix-shell --run "bash scripts/run_tests.sh"`) with a 4-category taxonomy (pure / seam / orchestration / integration slice), shared `FakePipelineDB`/`FakeSlskdAPI` fakes, builders for typed data, and a route contract audit guard that fails at test time if a new web endpoint is added without frontend contract coverage
+- **Discogs as first-class citizen** -- browse, add, and import Discogs releases through the same pipeline as MusicBrainz. Beets auto-routes numeric IDs to the Discogs plugin; local Discogs mirror eliminates external API dependencies.
+- **Comprehensive test suite** -- 1500+ tests (`nix-shell --run "bash scripts/run_tests.sh"`) with a 4-category taxonomy (pure / seam / orchestration / integration slice), shared `FakePipelineDB`/`FakeSlskdAPI` fakes, builders for typed data, and a route contract audit guard that fails at test time if a new web endpoint is added without frontend contract coverage
 
 ## Quality decision pipeline
 
