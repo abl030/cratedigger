@@ -228,6 +228,31 @@ class TestValidateAudio(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_single_bad_file_rejects_album(self):
+        """Even 1 corrupt file out of many should reject the album."""
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            # 10 good files, 1 bad
+            for i in range(10):
+                open(os.path.join(tmpdir, f"good_{i:02d}.mp3"), "w").close()
+            open(os.path.join(tmpdir, "bad.mp3"), "w").close()
+            good = MagicMock(returncode=0, stderr="")
+            bad = MagicMock(returncode=1, stderr="Header missing")
+
+            def side_effect(cmd, **kw):
+                filepath = cmd[4]  # ffmpeg -v error -i <filepath> ...
+                if os.path.basename(filepath) == "bad.mp3":
+                    return bad
+                return good
+
+            with patch("lib.util.sp.run", side_effect=side_effect):
+                result = validate_audio(tmpdir)
+            self.assertFalse(result.valid)
+            self.assertEqual(len(result.failed_files), 1)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class TestDenylist(unittest.TestCase):
 

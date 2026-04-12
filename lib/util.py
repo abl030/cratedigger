@@ -178,8 +178,7 @@ def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
 def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationResult:
     """Check audio integrity of downloaded files via ffmpeg full decode.
 
-    mode: "strict" = any error rejects, "normal" = reject if >10% fail, "off" = skip.
-    Returns: {"valid": bool, "error": str|None, "failed_files": list}
+    mode: "off" = skip, anything else = reject if any file fails.
     """
     if mode == "off":
         return AudioValidationResult()
@@ -233,22 +232,10 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
         logger.info(f"AUDIO_CHECK: all {len(files)} files passed ({mode} mode)")
         return AudioValidationResult()
 
-    fail_pct = len(failed) / len(files)
     detail = "; ".join(f"{name}: {err}" for name, err in failed[:5])
     error_msg = f"{len(failed)}/{len(files)} files failed: {detail}"
-    logger.warning(f"AUDIO_CHECK: {error_msg}")
-
-    if mode == "strict":
-        reject = True
-    else:  # normal
-        reject = fail_pct > 0.10 or any(len(err) > 500 for _, err in failed)
-
-    if reject:
-        logger.warning(f"AUDIO_CHECK: → REJECT ({mode} mode, {fail_pct:.0%} failed)")
-        return AudioValidationResult(valid=False, error=error_msg, failed_files=failed)
-    else:
-        logger.info(f"AUDIO_CHECK: → PASS ({mode} mode, {fail_pct:.0%} failed, below threshold)")
-        return AudioValidationResult(failed_files=failed)
+    logger.warning(f"AUDIO_CHECK: {error_msg} → REJECT ({mode} mode)")
+    return AudioValidationResult(valid=False, error=error_msg, failed_files=failed)
 
 
 # === Track title matching ===
