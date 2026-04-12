@@ -809,6 +809,40 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
 
+    @patch("routes.pipeline.discogs_api.get_release")
+    def test_pipeline_add_discogs_contract(self, mock_get_release):
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        mock_get_release.return_value = {
+            "artist_id": "3840",
+            "artist_name": "Radiohead",
+            "title": "OK Computer",
+            "year": 1997,
+            "country": "Europe",
+            "tracks": [{"title": "Airbag"}],
+        }
+
+        status, data = self._post("/api/pipeline/add", {"discogs_release_id": "83182"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add discogs response")
+        # Verify both columns populated
+        add_call = self.mock_db.add_request.call_args
+        self.assertEqual(add_call.kwargs["mb_release_id"], "83182")
+        self.assertEqual(add_call.kwargs["discogs_release_id"], "83182")
+
+    def test_pipeline_add_discogs_exists_contract(self):
+        self.mock_db.get_request_by_discogs_release_id.return_value = {
+            "id": 503,
+            "status": "imported",
+        }
+
+        status, data = self._post("/api/pipeline/add", {"discogs_release_id": "83182"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
+                                "pipeline add discogs exists response")
+
     @patch("routes.pipeline.apply_transition")
     def test_pipeline_update_contract(self, _mock_transition):
         status, data = self._post("/api/pipeline/update", {"id": 100, "status": "manual"})
