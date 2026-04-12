@@ -639,5 +639,139 @@ class TestSearchFiletypeOverride(unittest.TestCase):
         self.assertIn("OPUS", result.verdict)
 
 
+# ============================================================================
+# Spectral fallback bug — verdict must use real bitrate, not spectral estimate
+# ============================================================================
+
+class TestVerdictSpectralFallback(unittest.TestCase):
+    """Verdicts must show real file bitrate, not the spectral cliff estimate.
+
+    When actual_min_bitrate is NULL (rejected downloads that were never
+    imported), the or-chain in _rejection_verdict falls through to
+    spectral_bitrate — a cliff estimate that answers "what was the original
+    source quality?" not "what bitrate are these files?".
+
+    These tests reproduce exact live scenarios where the UI showed misleading
+    numbers (e.g. "96kbps is not better than existing 128kbps" when both
+    downloads were actually 128kbps min).
+    """
+
+    def test_quality_downgrade_uses_real_bitrate_not_spectral(self):
+        """The Ataris / Welcome the Night bug: actual_min_bitrate is NULL,
+        spectral_bitrate is 96, but the real download is 128kbps min.
+        The import_result JSONB has the correct new_measurement."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="quality_downgrade",
+            actual_min_bitrate=None,
+            spectral_bitrate=96,
+            existing_min_bitrate=128,
+            existing_spectral_bitrate=96,
+            bitrate=128000,
+            import_result={
+                "version": 2,
+                "exit_code": 5,
+                "decision": "downgrade",
+                "new_measurement": {
+                    "min_bitrate_kbps": 128,
+                    "avg_bitrate_kbps": 187,
+                    "median_bitrate_kbps": 192,
+                    "spectral_bitrate_kbps": 96,
+                    "format": "MP3",
+                    "is_cbr": False,
+                    "verified_lossless": False,
+                },
+                "existing_measurement": {
+                    "min_bitrate_kbps": 128,
+                    "avg_bitrate_kbps": 187,
+                    "median_bitrate_kbps": 192,
+                    "spectral_bitrate_kbps": 96,
+                    "format": "MP3",
+                    "is_cbr": False,
+                    "verified_lossless": False,
+                },
+            },
+        ))
+        # Verdict must say 128, not 96
+        self.assertIn("128", result.verdict)
+        self.assertNotIn("96", result.verdict)
+
+    def test_quality_downgrade_without_import_result_uses_container_bitrate(self):
+        """When there's no import_result at all, fall back to bitrate field
+        (container bitrate in bps), not spectral_bitrate."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="quality_downgrade",
+            actual_min_bitrate=None,
+            spectral_bitrate=96,
+            existing_min_bitrate=128,
+            existing_spectral_bitrate=96,
+            bitrate=128000,
+            import_result=None,
+        ))
+        self.assertIn("128", result.verdict)
+        self.assertNotIn("96", result.verdict)
+
+    def test_transcode_downgrade_uses_real_bitrate_not_spectral(self):
+        """Same spectral fallback bug in transcode_downgrade scenario."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="transcode_downgrade",
+            actual_min_bitrate=None,
+            spectral_bitrate=96,
+            existing_min_bitrate=240,
+            existing_spectral_bitrate=None,
+            bitrate=192000,
+            import_result={
+                "version": 2,
+                "exit_code": 6,
+                "decision": "transcode_downgrade",
+                "new_measurement": {"min_bitrate_kbps": 192},
+                "existing_measurement": {"min_bitrate_kbps": 240},
+            },
+        ))
+        self.assertIn("192", result.verdict)
+        self.assertNotIn("96", result.verdict)
+
+    def test_transcode_classify_uses_real_bitrate_not_spectral(self):
+        """_classify_transcode has the same or-chain bug for success transcodes."""
+        result = classify_log_entry(_entry(
+            outcome="success",
+            beets_scenario="transcode_upgrade",
+            actual_min_bitrate=None,
+            spectral_bitrate=96,
+            existing_min_bitrate=192,
+            bitrate=210000,
+            was_converted=True,
+        ))
+        # Should show 210 (bitrate // 1000), not 96 (spectral)
+        self.assertIn("210", result.verdict)
+        self.assertNotIn("96", result.verdict)
+
+    def test_summary_also_uses_real_bitrate(self):
+        """The summary line (collapsed card) inherits from the verdict.
+        If the verdict is wrong, the summary is wrong too."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="quality_downgrade",
+            actual_min_bitrate=None,
+            spectral_bitrate=96,
+            existing_min_bitrate=128,
+            existing_spectral_bitrate=96,
+            bitrate=128000,
+            soulseek_username="nexus15",
+            import_result={
+                "version": 2,
+                "exit_code": 5,
+                "decision": "downgrade",
+                "new_measurement": {"min_bitrate_kbps": 128},
+                "existing_measurement": {"min_bitrate_kbps": 128},
+            },
+        ))
+        self.assertIn("128", result.summary)
+        self.assertNotIn("96", result.summary)
+        self.assertIn("nexus15", result.summary)
+
+
 if __name__ == "__main__":
     unittest.main()

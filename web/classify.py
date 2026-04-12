@@ -159,7 +159,7 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         elif entry.error_message:
             verdict = f"Import error: {entry.error_message}"
         else:
-            verdict = _failure_verdict_from_import_result(entry) or "Import error"
+            verdict = _quality_verdict_from_import_result(entry) or "Import error"
         return ("Failed", "badge-failed", "#a33", verdict)
 
     # --- Force import ---
@@ -205,20 +205,53 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
     return (label, "badge-rejected", "#444", str(entry.outcome or "Unknown outcome"))
 
 
-def _failure_verdict_from_import_result(entry: LogEntry) -> str | None:
-    """Recover a useful verdict from ImportResult JSON for failed rows."""
+def _parse_import_result(entry: LogEntry) -> ImportResult | None:
+    """Parse the import_result JSONB from a LogEntry, or None."""
     raw = entry.import_result
     if raw is None:
         return None
-
     try:
         if isinstance(raw, dict):
-            ir = ImportResult.from_dict(raw)
+            return ImportResult.from_dict(raw)
         elif isinstance(raw, str):
-            ir = ImportResult.from_json(raw)
-        else:
-            return None
+            return ImportResult.from_json(raw)
+        return None
     except (json.JSONDecodeError, TypeError, KeyError):
+        return None
+
+
+def _real_bitrate_kbps(entry: LogEntry) -> int | None:
+    """Best available actual file bitrate in kbps, excluding spectral.
+
+    spectral_bitrate is a cliff estimate ("what was the original source?"),
+    not the file's actual bitrate. It must never appear in non-spectral
+    verdicts. This matches the chain in _build_downloaded_label.
+    """
+    return (entry.actual_min_bitrate
+            or (entry.bitrate // 1000 if entry.bitrate else None))
+
+
+def _comparison_verdict(
+    new_kbps: int | None,
+    old_kbps: int | None,
+    prefix: str = "",
+) -> str:
+    """Build a '… is not better than existing …' verdict string."""
+    new_s = f"{new_kbps}kbps" if new_kbps is not None else "unknown"
+    old_s = f"{old_kbps}kbps" if old_kbps is not None else "unknown"
+    if prefix:
+        return f"{prefix} {new_s} — not better than existing {old_s}"
+    return f"{new_s} is not better than existing {old_s}"
+
+
+def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
+    """Derive a quality comparison verdict from ImportResult JSONB.
+
+    Used by both rejected and failed outcomes — single source of truth
+    for "X is not better than Y" messages.
+    """
+    ir = _parse_import_result(entry)
+    if ir is None:
         return None
 
     new_m = ir.new_measurement
@@ -231,14 +264,10 @@ def _failure_verdict_from_import_result(entry: LogEntry) -> str | None:
                     else existing_m.spectral_bitrate_kbps)
 
     if ir.decision == "downgrade":
-        new_s = f"{new_kbps}kbps" if new_kbps is not None else "unknown"
-        old_s = f"{old_kbps}kbps" if old_kbps is not None else "unknown"
-        return f"{new_s} is not better than existing {old_s}"
+        return _comparison_verdict(new_kbps, old_kbps)
 
     if ir.decision == "transcode_downgrade":
-        new_s = f"{new_kbps}kbps" if new_kbps is not None else "unknown"
-        old_s = f"{old_kbps}kbps" if old_kbps is not None else "unknown"
-        return f"Transcode at {new_s} - not better than existing {old_s}"
+        return _comparison_verdict(new_kbps, old_kbps, prefix="Transcode at")
 
     if ir.error:
         return f"Import error: {ir.error}"
@@ -251,9 +280,7 @@ def _failure_verdict_from_import_result(entry: LogEntry) -> str | None:
 
 def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
     """Classify a transcode_upgrade or transcode_first success."""
-    br = (entry.actual_min_bitrate
-          or entry.spectral_bitrate
-          or (entry.bitrate // 1000 if entry.bitrate else None))
+    br = _real_bitrate_kbps(entry)
     br_str = f"{br}kbps" if br else "unknown bitrate"
     if entry.beets_scenario == "transcode_upgrade":
         ex = entry.existing_min_bitrate or entry.existing_spectral_bitrate
@@ -300,33 +327,30 @@ def _new_import_verdict(entry: LogEntry, is_verified_lossless: bool) -> str:
 def _rejection_verdict(entry: LogEntry) -> str:
     """Build human-readable verdict for a rejected entry.
 
-    Bitrate fields have gaps — actual_min_bitrate is often NULL while
-    bitrate (bps) or spectral_bitrate has the value. Fall through all
-    available sources.
+    For quality comparisons (downgrade, transcode_downgrade), prefer the
+    ImportResult JSONB which has accurate measurements. Fall back to
+    LogEntry fields only when JSONB is unavailable — and never use
+    spectral_bitrate as a proxy for actual file bitrate.
     """
     scenario = entry.beets_scenario
-    # Best available "new" bitrate in kbps
-    new_kbps = (entry.actual_min_bitrate
-                or entry.spectral_bitrate
-                or (entry.bitrate // 1000 if entry.bitrate else None))
-    # Best available "existing" bitrate in kbps
-    old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate
 
-    if scenario == "quality_downgrade":
-        new = f"{new_kbps}kbps" if new_kbps else "unknown"
-        old = f"{old_kbps}kbps" if old_kbps else "unknown"
-        return f"{new} is not better than existing {old}"
+    # Quality comparison scenarios — delegate to ImportResult when available
+    if scenario in ("quality_downgrade", "transcode_downgrade"):
+        ir_verdict = _quality_verdict_from_import_result(entry)
+        if ir_verdict is not None:
+            return ir_verdict
+        # Fallback: use real file bitrate, not spectral
+        new_kbps = _real_bitrate_kbps(entry)
+        old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate
+        if scenario == "transcode_downgrade":
+            return _comparison_verdict(new_kbps, old_kbps, prefix="Transcode at")
+        return _comparison_verdict(new_kbps, old_kbps)
 
     if scenario == "spectral_reject":
-        new = f"{entry.spectral_bitrate}kbps" if entry.spectral_bitrate else "unknown"
+        # Spectral scenario — spectral_bitrate IS the right field here
         old_kbps = entry.existing_spectral_bitrate or entry.existing_min_bitrate
-        old = f"{old_kbps}kbps" if old_kbps else "unknown"
-        return f"Spectral: {new} is not better than existing {old}"
-
-    if scenario == "transcode_downgrade":
-        new = f"{new_kbps}kbps" if new_kbps else "unknown"
-        old = f"{old_kbps}kbps" if old_kbps else "unknown"
-        return f"Transcode at {new} — not better than existing {old}"
+        return _comparison_verdict(
+            entry.spectral_bitrate, old_kbps, prefix="Spectral:")
 
     if scenario == "high_distance":
         dist = (f"{float(entry.beets_distance):.3f}"
