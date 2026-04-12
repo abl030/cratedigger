@@ -26,6 +26,10 @@ Meelo is the self-hosted music server that scans the beets library and serves a 
 
 Beets (v2.5.1, Nix-managed on doc1) is the library's source of truth — it matches albums against MusicBrainz, tags files, organizes them into `/Beets`, and maintains its own SQLite DB at `/mnt/virtio/Music/beets-library.db`. All automated imports go through the JSON harness (`harness/beets_harness.py` via `run_beets_harness.sh`), never raw `beet import`. The `musicbrainz` plugin MUST be in the plugins list or beets returns 0 candidates. Always match by `candidate_id` (MB release UUID), never `candidate_index`. For full details on config, commands, the harness protocol, and troubleshooting, read `docs/beets-primer.md`.
 
+## Discogs Mirror (discogs.ablz.au)
+
+A self-hosted mirror of the Discogs database (~19M releases), serving a Rust JSON API at `https://discogs.ablz.au`. Runs on doc2: nspawn PostgreSQL container + axum HTTP server. Monthly re-import from CC0 XML dumps. Source repo at `~/discogs-api` on doc1. Endpoints: `/api/search?artist=X&title=Y`, `/api/releases/{id}`, `/api/masters/{id}`, `/api/artists/{id}`. For full details on architecture, deployment, debugging, and the NixOS module, read `docs/discogs-mirror.md`.
+
 ## Repository Structure
 
 ```
