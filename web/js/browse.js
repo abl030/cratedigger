@@ -134,6 +134,10 @@ export async function loadBrowseDiscography(aid, name) {
  */
 export async function loadBrowseAnalysis(aid, name) {
   const el = document.getElementById('browse-analysis');
+  if (state.browseSource === 'discogs') {
+    el.innerHTML = '<div class="loading" style="color:#888;">Analysis is not available for Discogs artists (requires MusicBrainz recording IDs).</div>';
+    return;
+  }
   el.innerHTML = '<div class="loading">Loading analysis (this may take a few seconds)...</div>';
   try {
     const r = await fetch(`${API}/api/artist/${aid}/disambiguate`);

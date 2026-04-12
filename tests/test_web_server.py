@@ -1225,7 +1225,7 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
                     "discogs_release_id": "83182",
                 },
             ]
-            status, data = self._get("/api/discogs/search?q=ok+computer")
+            status, data = self._get("/api/discogs/search?q=ok+computer&type=release")
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, {"release_groups"}, "discogs search response")

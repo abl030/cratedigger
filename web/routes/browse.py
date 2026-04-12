@@ -188,20 +188,22 @@ def get_discogs_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if not q:
         h._error("Missing query parameter 'q'")  # type: ignore[attr-defined]
         return
-    search_type = params.get("type", ["release"])[0]
-    if search_type == "artist":
-        artists = discogs_api.search_artists(q)
-        h._json({"artists": artists})  # type: ignore[attr-defined]
-    else:
+    search_type = params.get("type", ["artist"])[0]
+    if search_type == "release":
         results = discogs_api.search_releases(q)
         h._json({"release_groups": results})  # type: ignore[attr-defined]
+    else:
+        artists = discogs_api.search_artists(q)
+        h._json({"artists": artists})  # type: ignore[attr-defined]
 
 
 def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     artist_name = discogs_api.get_artist_name(int(artist_id))
     masters = discogs_api.get_artist_masters(artist_name)
-    # Enrich with library/pipeline status via master IDs as release group equivalents
+    # Discogs has no bootleg/official distinction — mark all as official
+    for m in masters:
+        m["has_official"] = True
     h._json({  # type: ignore[attr-defined]
         "artist_id": artist_id,
         "artist_name": artist_name,
