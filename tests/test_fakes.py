@@ -210,3 +210,31 @@ class TestBuilders(unittest.TestCase):
         self.assertTrue(sc.needs_check)
         self.assertEqual(sc.grade, "suspect")
         self.assertEqual(sc.bitrate, 192)
+
+
+class TestFakePipelineDBDiscogs(unittest.TestCase):
+    """Tests for Discogs-related FakePipelineDB methods."""
+
+    def test_get_request_by_mb_release_id_found(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="abc-uuid"))
+        result = db.get_request_by_mb_release_id("abc-uuid")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], 1)
+
+    def test_get_request_by_mb_release_id_not_found(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="abc-uuid"))
+        self.assertIsNone(db.get_request_by_mb_release_id("other"))
+
+    def test_get_request_by_discogs_release_id_found(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, discogs_release_id="12345"))
+        result = db.get_request_by_discogs_release_id("12345")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], 1)
+
+    def test_get_request_by_discogs_release_id_not_found(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, discogs_release_id="12345"))
+        self.assertIsNone(db.get_request_by_discogs_release_id("99999"))

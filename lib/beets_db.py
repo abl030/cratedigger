@@ -16,6 +16,8 @@ import statistics
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
+from lib.quality import detect_release_source
+
 if TYPE_CHECKING:
     from lib.quality import QualityRankConfig
 
@@ -424,9 +426,9 @@ class BeetsDB:
         Field names here are the API contract — the frontend depends on them.
         """
         mb_id = r[4] or ""
-        has_mb = bool(mb_id) and "-" in str(mb_id)
-        has_discogs = bool(r[14]) or (bool(mb_id) and "-" not in str(mb_id))
-        source = "musicbrainz" if has_mb else ("discogs" if has_discogs else "unknown")
+        source = detect_release_source(str(mb_id))
+        if source == "unknown" and bool(r[14]):
+            source = "discogs"
         return {
             "id": r[0], "album": r[1], "artist": r[2], "year": r[3],
             "mb_albumid": r[4], "type": r[5], "label": r[6],

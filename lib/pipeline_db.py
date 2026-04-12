@@ -131,6 +131,13 @@ class PipelineDB:
         row = cur.fetchone()
         return dict(row) if row else None
 
+    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> dict[str, Any] | None:
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE discogs_release_id = %s", (discogs_release_id,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def delete_request(self, request_id):
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()

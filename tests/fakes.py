@@ -277,6 +277,18 @@ class FakePipelineDB:
     def get_request(self, request_id: int) -> dict[str, Any] | None:
         return copy.deepcopy(self._requests.get(request_id))
 
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
+        for row in self._requests.values():
+            if row.get("mb_release_id") == mb_release_id:
+                return copy.deepcopy(row)
+        return None
+
+    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> dict[str, Any] | None:
+        for row in self._requests.values():
+            if row.get("discogs_release_id") == discogs_release_id:
+                return copy.deepcopy(row)
+        return None
+
     def update_status(self, request_id: int, status: str, **extra: Any) -> None:
         row = self._requests.get(request_id)
         if row is None:
