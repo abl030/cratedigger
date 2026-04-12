@@ -148,6 +148,20 @@ class TestAddAndGetRequest(unittest.TestCase):
         self.assertEqual(req["discogs_release_id"], "12345")
         self.assertIsNone(req["mb_release_id"])
 
+    def test_get_by_discogs_release_id(self):
+        self.db.add_request(
+            artist_name="A",
+            album_title="B",
+            source="request",
+            discogs_release_id="67890",
+        )
+        req = self.db.get_request_by_discogs_release_id("67890")
+        assert req is not None
+        self.assertEqual(req["artist_name"], "A")
+
+    def test_get_by_discogs_release_id_not_found(self):
+        self.assertIsNone(self.db.get_request_by_discogs_release_id("nope"))
+
     def test_delete_request(self):
         req_id = self.db.add_request(
             mb_release_id="del-uuid",

@@ -771,7 +771,7 @@ class TestAlbumRowSource(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir, "test.db")
         _create_test_db(self.db_path)
         # MB album (UUID with hyphens)
-        _insert_album(self.db_path, 1, "aaa-bbb-ccc", [(320000, "/a.mp3")],
+        _insert_album(self.db_path, 1, "aaa0bbb0-cccc-dddd-eeee-ffffffffffff", [(320000, "/a.mp3")],
                        album="MB Album", albumartist="Artist")
         # Discogs album (numeric ID, no hyphens)
         conn = sqlite3.connect(self.db_path)

@@ -2086,5 +2086,32 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
         self.assertEqual(CFG.aac.acceptable, 80)
 
 
+# ============================================================================
+# detect_release_source
+# ============================================================================
+
+class TestDetectReleaseSource(unittest.TestCase):
+    """Test source detection from release ID format."""
+
+    CASES = [
+        # desc, id_string, expected
+        ("MB UUID", "89ad4ac3-39f7-470e-963a-56509c546377", "musicbrainz"),
+        ("MB UUID uppercase", "89AD4AC3-39F7-470E-963A-56509C546377", "musicbrainz"),
+        ("Discogs numeric", "2048516", "discogs"),
+        ("Discogs large numeric", "13524141", "discogs"),
+        ("Discogs single digit", "1", "discogs"),
+        ("empty string", "", "unknown"),
+        ("NONE string", "NONE", "unknown"),
+        ("random text", "not-a-valid-id", "unknown"),
+        ("partial UUID no hyphens", "89ad4ac339f7470e963a56509c546377", "unknown"),
+    ]
+
+    def test_detect_release_source(self):
+        from lib.quality import detect_release_source
+        for desc, id_string, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(detect_release_source(id_string), expected)
+
+
 if __name__ == "__main__":
     unittest.main()
