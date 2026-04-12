@@ -200,6 +200,8 @@ def get_discogs_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     artist_name = discogs_api.get_artist_name(int(artist_id))
+    # Known limitation: searches by artist name, not ID. Homonymous artists
+    # may be mixed. Needs a Discogs API "releases by artist ID" endpoint.
     masters = discogs_api.get_artist_masters(artist_name)
     # Discogs has no bootleg/official distinction — mark all as official
     for m in masters:

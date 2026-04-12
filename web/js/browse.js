@@ -185,8 +185,10 @@ export async function searchArtists(q) {
       if (!rgs.length) { el.innerHTML = '<div class="loading">No results</div>'; return; }
       el.innerHTML = rgs.map(rg => {
         const isVA = rg.artist_id === VA_MBID;
-        const onclick = isVA
-          ? `window.loadReleaseGroup('${rg.id}', this)`
+        // Discogs releases without a master: show pressings inline instead of dead-end artist page
+        const isMasterless = isDiscogs && rg.is_master === false;
+        const onclick = (isVA || isMasterless)
+          ? `window.loadReleaseGroup('${isMasterless ? rg.discogs_release_id || rg.id : rg.id}', this)`
           : `window.openBrowseArtist('${rg.artist_id}', '${esc(rg.artist_name)}')`;
         return `
         <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="${onclick}">
