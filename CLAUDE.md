@@ -16,7 +16,9 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
 
 ## Web UI (music.ablz.au)
 
-A single-page web app for browsing the local MusicBrainz mirror, viewing your beets library, and adding releases to the pipeline. Runs on doc2 as `soularr-web` systemd service. No build step — stdlib `http.server`, vanilla JS, single HTML file. For full details on architecture, API endpoints, frontend features, and deployment, read `docs/webui-primer.md`.
+A single-page web app for browsing the local MusicBrainz mirror and Discogs mirror, viewing your beets library, and adding releases to the pipeline. Runs on doc2 as `soularr-web` systemd service. No build step — stdlib `http.server`, vanilla JS, single HTML file. For full details on architecture, API endpoints, frontend features, and deployment, read `docs/webui-primer.md`.
+
+The browse tab has an MB/Discogs source toggle. When Discogs is selected, search, artist discography, master pressings, and release detail all hit the local Discogs mirror at `discogs.ablz.au`. Discogs releases can be added to the pipeline and flow through the same search → download → validate → import pipeline as MusicBrainz releases. External links are source-aware (musicbrainz.org vs discogs.com).
 
 ## Meelo
 
@@ -28,7 +30,9 @@ Beets (v2.5.1, Nix-managed on doc1) is the library's source of truth — it matc
 
 ## Discogs Mirror (discogs.ablz.au)
 
-A self-hosted mirror of the Discogs database (~19M releases), serving a Rust JSON API at `https://discogs.ablz.au`. Runs on doc2: nspawn PostgreSQL container + axum HTTP server. Monthly re-import from CC0 XML dumps. Source repo at `~/discogs-api` on doc1. Endpoints: `/api/search?artist=X&title=Y`, `/api/releases/{id}`, `/api/masters/{id}`, `/api/artists/{id}`. For full details on architecture, deployment, debugging, and the NixOS module, read `docs/discogs-mirror.md`.
+A self-hosted mirror of the Discogs database (~19M releases), serving a Rust JSON API at `https://discogs.ablz.au`. Runs on doc2: nspawn PostgreSQL container + axum HTTP server. Monthly re-import from CC0 XML dumps. Source repo at `~/discogs-api` on doc1. Endpoints: `/api/search?artist=X&title=Y`, `/api/releases/{id}`, `/api/masters/{id}`, `/api/artists/{id}`, `/api/artists/{id}/releases`. For full details on architecture, deployment, debugging, and the NixOS module, read `docs/discogs-mirror.md`.
+
+Beets' Discogs plugin is patched (Nix `substituteInPlace` in `beets.nix`) to use `discogs.ablz.au` instead of `api.discogs.com`. This makes `--search-id <numeric_id>` hit the local mirror during import.
 
 ## Repository Structure
 
@@ -40,6 +44,7 @@ config.ini              — Config template (not used in production — Nix gene
 web/
   server.py             — Web UI server (http.server, JSON API)
   mb.py                 — MusicBrainz API helpers
+  discogs.py            — Discogs mirror API helpers (search, artist/master/release lookups)
   index.html            — Frontend (vanilla JS, inline CSS)
 lib/
   beets.py              — Beets validation (dry-run import via harness, returns ValidationResult)
@@ -74,6 +79,7 @@ lib/
                            - effective_search_tiers() (merges search_filetype_override + target_format)
                            - should_clear_lossless_search_override() (intent toggle cleanup)
                            - should_cooldown() (global user cooldown decision)
+                           - detect_release_source() (UUID → 'musicbrainz', numeric → 'discogs')
                            Dispatch functions:
                            - dispatch_action() → DispatchAction (mark_done/failed/denylist/requeue flags)
                            - compute_effective_override_bitrate(), extract_usernames()
@@ -115,6 +121,7 @@ migrations/
   001_initial.sql       — Baseline schema (frozen). All future schema changes are new
                            NNN_name.sql files in this directory; the migrator runs them in
                            order and records each in the schema_migrations tracking table.
+  002_discogs_index.sql — Index on discogs_release_id for Discogs browse/add lookups
 scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, quality, query,
                            force-import, manual-import, set-intent, repair-spectral
@@ -444,7 +451,7 @@ Uses `sox` bandpass filtering to detect transcodes. Measures RMS energy in 16 x 
 - **Lo-fi recordings** (Mountain Goats boombox era): Genuine V0 from verified FLAC can produce ~207kbps. The `"mp3 v0"` label classifies as `TRANSPARENT` via `cfg.mp3_vbr_levels[0]` regardless of bitrate, so the gate accepts without needing a `verified_lossless` blanket bypass.
 - **Mixed-source CBR** (e.g. 13 tracks at 320 + 1 track at 192): Looks like VBR to `COUNT(DISTINCT bitrate)` but isn't genuine V0. Quality gate ranks against the bare-codec band table — 192 lands in `GOOD` (< default `EXCELLENT`) → re-queues for upgrade.
 - **Fake FLACs**: MP3 wrapped in FLAC container. Spectral detects cliff pre-conversion, V0 bitrate confirms post-conversion. Source denylisted, but file imported if better than existing.
-- **Discogs-sourced albums**: Numeric IDs instead of MB UUIDs. Cannot use upgrade pipeline. See `TODO.md`.
+- **Discogs-sourced albums**: Numeric IDs stored in `mb_release_id` for pipeline compat. Beets auto-routes numeric IDs to the Discogs plugin via `--search-id`. `detect_release_source()` in `lib/quality.py` distinguishes UUID vs numeric format for conditional UI rendering (links, source badges). The full pipeline (search, download, validate, import, quality gate) works identically for both sources.
 
 ## User Cooldowns (issue #39)
 
@@ -733,7 +740,8 @@ SQL
 ## Known Issues
 
 - **Track name matching**: `album_match()` uses fuzzy filename matching — can match wrong pressings with same title. Track title cross-check added as post-match gate but won't catch all cases.
-- **Discogs-sourced albums**: Numeric IDs instead of MB UUIDs. Cannot use upgrade pipeline. See `TODO.md`.
+- **Discogs analysis tab**: The disambiguate/analysis tab requires MusicBrainz recording IDs. Not available for Discogs-browsed artists (see #81).
+- **Discogs cover art**: Discogs CC0 dump has no images. Discogs-only releases have no cover art in browse UI (see #82).
 
 ## MusicBrainz API
 

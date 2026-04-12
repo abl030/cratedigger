@@ -26,6 +26,7 @@ Browser → https://music.ablz.au
 |------|---------|
 | `web/server.py` | HTTP server with JSON API endpoints |
 | `web/mb.py` | MusicBrainz API helpers (search, artist discography, releases) |
+| `web/discogs.py` | Discogs mirror API helpers (search, artist releases, master pressings) |
 | `web/index.html` | Frontend — single HTML file with inline CSS + JS |
 
 ## API Endpoints
@@ -37,15 +38,20 @@ Browser → https://music.ablz.au
 | `/api/artist/<mbid>` | GET | Artist's release groups + official/bootleg classification |
 | `/api/release-group/<mbid>` | GET | All releases for a release group (paginated from MB) |
 | `/api/release/<mbid>` | GET | Full release details with tracks |
-| `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` |
+| `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` or `{"discogs_release_id": "..."}` |
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Force-import a rejected download `{"download_log_id": N}` |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
+| `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
+| `/api/discogs/artist/<id>` | GET | Artist's releases grouped by master (via `/api/artists/{id}/releases`) |
+| `/api/discogs/master/<id>` | GET | All pressings within a Discogs master release |
+| `/api/discogs/release/<id>` | GET | Full Discogs release details with tracks |
 
 ## Frontend Features
 
-- **Search** — debounced text search, returns MB artists
+- **Source toggle** — MB / Discogs toggle in the browse tab header. Switches all search, artist, and release views between MusicBrainz and Discogs data sources.
+- **Search** — debounced text search, returns artists (or releases in album mode)
 - **Artist discography** — grouped by type (Albums, EPs, Singles, etc.)
   - Split into "own work" vs "Appearances" using artist-credit matching
   - Bootleg-only release groups collapsed at bottom

@@ -1,4 +1,9 @@
-"""Browse/MusicBrainz GET route handlers extracted from server.py."""
+"""Browse GET route handlers — MusicBrainz and Discogs.
+
+MusicBrainz routes use UUID-based IDs (/api/artist/<uuid>, /api/release/<uuid>).
+Discogs routes use numeric IDs (/api/discogs/artist/<int>, /api/discogs/release/<int>).
+Both are enriched with library/pipeline status via check_beets_library() and check_pipeline().
+"""
 from __future__ import annotations
 
 import os

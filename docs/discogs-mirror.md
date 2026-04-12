@@ -32,6 +32,7 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/releases/{id}` | Full release: tracks, genres, styles, identifiers |
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
+| GET | `/api/artists/{id}/releases?page=1&per_page=100` | Paginated releases for an artist (includes masterless) |
 
 ### API Examples
 
