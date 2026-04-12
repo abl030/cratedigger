@@ -18,6 +18,7 @@ from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ig
                              ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                              CLIFF_THRESHOLD_DB_PER_KHZ)
 import mb as mb_api  # type: ignore[import-not-found]
+import discogs as discogs_api  # type: ignore[import-not-found]
 
 
 def _server():
@@ -274,12 +275,52 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
 def post_pipeline_add(h, body: dict) -> None:
     s = _server()
     mbid = body.get("mb_release_id", "").strip()
+    discogs_id = body.get("discogs_release_id", "").strip()
     source = body.get("source", "request")
 
-    if not mbid:
-        h._error("Missing mb_release_id")
+    if not mbid and not discogs_id:
+        h._error("Missing mb_release_id or discogs_release_id")
         return
 
+    if discogs_id:
+        # Discogs flow: store discogs ID in both columns for pipeline compat
+        existing = s._db().get_request_by_discogs_release_id(discogs_id)
+        if not existing:
+            existing = s._db().get_request_by_mb_release_id(discogs_id)
+        if existing:
+            h._json({
+                "status": "exists",
+                "id": existing["id"],
+                "current_status": existing["status"],
+            })
+            return
+
+        release = discogs_api.get_release(int(discogs_id))
+
+        req_id = s._db().add_request(
+            mb_release_id=discogs_id,
+            discogs_release_id=discogs_id,
+            mb_artist_id=str(release.get("artist_id") or ""),
+            artist_name=release["artist_name"],
+            album_title=release["title"],
+            year=release.get("year"),
+            country=release.get("country"),
+            source=source,
+        )
+
+        if release.get("tracks"):
+            s._db().set_tracks(req_id, release["tracks"])
+
+        h._json({
+            "status": "added",
+            "id": req_id,
+            "artist": release["artist_name"],
+            "album": release["title"],
+            "tracks": len(release.get("tracks", [])),
+        })
+        return
+
+    # MusicBrainz flow (unchanged)
     existing = s._db().get_request_by_mb_release_id(mbid)
     if existing:
         h._json({
