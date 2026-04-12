@@ -552,6 +552,10 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/artist/([a-f0-9-]+)/disambiguate$",
         r"^/api/release-group/([a-f0-9-]+)$",
         r"^/api/release/([a-f0-9-]+)$",
+        "/api/discogs/search",
+        r"^/api/discogs/artist/(\d+)$",
+        r"^/api/discogs/master/(\d+)$",
+        r"^/api/discogs/release/(\d+)$",
         "/api/pipeline/log",
         "/api/pipeline/status",
         "/api/pipeline/recent",
@@ -1151,6 +1155,134 @@ class TestBrowseRouteContracts(_WebServerCase):
                                 "disambiguate pressing")
         _assert_required_fields(self, rg["tracks"][0], self.DISAMBIGUATE_TRACK_REQUIRED_FIELDS,
                                 "disambiguate track")
+
+
+class TestDiscogsBrowseRouteContracts(_WebServerCase):
+    """Contract tests for Discogs browse routes."""
+
+    DISCOGS_SEARCH_REQUIRED_FIELDS = {
+        "id", "title", "artist_name", "artist_id",
+    }
+    DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS = {
+        "id", "title", "country", "format",
+        "in_library", "pipeline_status", "pipeline_id",
+    }
+    DISCOGS_RELEASE_REQUIRED_FIELDS = {
+        "id", "title", "artist_name", "tracks",
+        "in_library", "pipeline_status", "pipeline_id",
+    }
+    DISCOGS_ARTIST_REQUIRED_FIELDS = {
+        "artist_id", "artist_name", "release_groups",
+    }
+
+    def test_discogs_search_release_contract(self):
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.search_releases.return_value = [
+                {
+                    "id": "21491",
+                    "title": "OK Computer",
+                    "artist_id": "3840",
+                    "artist_name": "Radiohead",
+                    "primary_type": "",
+                    "first_release_date": "1997",
+                    "artist_disambiguation": "",
+                    "score": 100,
+                    "is_master": True,
+                    "discogs_release_id": "83182",
+                },
+            ]
+            status, data = self._get("/api/discogs/search?q=ok+computer")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"release_groups"}, "discogs search response")
+        _assert_required_fields(self, data["release_groups"][0],
+                                self.DISCOGS_SEARCH_REQUIRED_FIELDS,
+                                "discogs search result")
+
+    def test_discogs_search_artist_contract(self):
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.search_artists.return_value = [
+                {"id": "3840", "name": "Radiohead", "disambiguation": "", "score": 100},
+            ]
+            status, data = self._get("/api/discogs/search?q=radiohead&type=artist")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"artists"}, "discogs artist search response")
+
+    def test_discogs_artist_contract(self):
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.get_artist_name.return_value = "Radiohead"
+            mock_dg.get_artist_masters.return_value = [
+                {
+                    "id": "21491",
+                    "title": "OK Computer",
+                    "type": "",
+                    "secondary_types": [],
+                    "first_release_date": "1997",
+                    "artist_credit": "Radiohead",
+                    "primary_artist_id": "3840",
+                },
+            ]
+            status, data = self._get("/api/discogs/artist/3840")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DISCOGS_ARTIST_REQUIRED_FIELDS,
+                                "discogs artist response")
+
+    def test_discogs_master_contract(self):
+        with patch("web.routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}):
+            mock_dg.get_master_releases.return_value = {
+                "title": "OK Computer",
+                "type": "",
+                "releases": [
+                    {
+                        "id": "83182",
+                        "title": "OK Computer",
+                        "date": "1997",
+                        "country": "Europe",
+                        "status": "Official",
+                        "track_count": 12,
+                        "format": "CD",
+                        "media_count": 1,
+                        "labels": [],
+                    },
+                ],
+            }
+            status, data = self._get("/api/discogs/master/21491")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data["releases"][0],
+                                self.DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS,
+                                "discogs master release")
+
+    def test_discogs_release_contract(self):
+        self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        with patch("web.routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()):
+            mock_dg.get_release.return_value = {
+                "id": "83182",
+                "title": "OK Computer",
+                "artist_name": "Radiohead",
+                "artist_id": "3840",
+                "release_group_id": "21491",
+                "date": "1997",
+                "year": 1997,
+                "country": "Europe",
+                "status": "Official",
+                "tracks": [
+                    {"disc_number": 1, "track_number": 1, "title": "Airbag", "length_seconds": 284},
+                ],
+                "labels": [],
+                "formats": [],
+            }
+            status, data = self._get("/api/discogs/release/83182")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DISCOGS_RELEASE_REQUIRED_FIELDS,
+                                "discogs release detail")
 
 
 class TestBeetsRouteContracts(_WebServerCase):
