@@ -6,6 +6,22 @@ import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
 
 /**
+ * Set the browse metadata source (mb or discogs).
+ * @param {string} src - 'mb' or 'discogs'
+ */
+export function setBrowseSource(src) {
+  state.browseSource = src;
+  const mbBtn = document.getElementById('source-mb');
+  const dgBtn = document.getElementById('source-discogs');
+  if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
+  if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
+  // Clear and re-trigger search
+  state.browseCache = {};
+  const q = /** @type {HTMLInputElement} */ (document.getElementById('q')).value.trim();
+  if (q.length >= 2) searchArtists(q);
+}
+
+/**
  * Set the browse search type (artist or release).
  * @param {string} type - 'artist' or 'release'
  */
@@ -98,10 +114,11 @@ export function switchSubView(view) {
 export async function loadBrowseDiscography(aid, name) {
   const el = document.getElementById('browse-discography');
   el.innerHTML = '<div class="loading">Loading discography...</div>';
-  // Reuse the existing loadArtist logic but target browse-discography
   try {
+    const isDiscogs = state.browseSource === 'discogs';
+    const artistUrl = isDiscogs ? `${API}/api/discogs/artist/${aid}` : `${API}/api/artist/${aid}`;
     const [rgRes, libRes] = await Promise.all([
-      fetch(`${API}/api/artist/${aid}`).then(r => r.json()),
+      fetch(artistUrl).then(r => r.json()),
       fetch(`${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`).then(r => r.json()),
     ]);
     if (!state.browseCache[aid]) state.browseCache[aid] = {};
@@ -154,9 +171,11 @@ export async function searchArtists(q) {
   el.style.display = 'block';
   document.getElementById('browse-artist').style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
+  const isDiscogs = state.browseSource === 'discogs';
+  const searchBase = isDiscogs ? `${API}/api/discogs/search` : `${API}/api/search`;
   try {
     if (state.browseSearchType === 'release') {
-      const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&type=release`);
+      const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}&type=release`);
       const data = await r.json();
       const rgs = data.release_groups || [];
       if (!rgs.length) { el.innerHTML = '<div class="loading">No results</div>'; return; }
@@ -174,7 +193,7 @@ export async function searchArtists(q) {
         <div id="rel-${rg.id}"></div>`;
       }).join('');
     } else {
-      const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+      const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}`);
       const data = await r.json();
       if (!data.artists || !data.artists.length) {
         el.innerHTML = '<div class="loading">No results</div>';

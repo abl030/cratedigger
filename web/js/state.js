@@ -5,8 +5,9 @@
  * All modules import state from here instead of using bare globals.
  */
 
-/** @type {{ browseSearchType: string, browseArtist: {id:string, name:string}|null, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
 export const state = {
+  browseSource: 'mb',
   browseSearchType: 'artist',
   browseArtist: null,
   browseSubView: 'discography',

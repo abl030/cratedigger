@@ -1,6 +1,6 @@
 // @ts-check
-import { API, toast, updatePipelineStatus, pipelineStore } from './state.js';
-import { esc } from './util.js';
+import { API, state, toast, updatePipelineStatus, pipelineStore } from './state.js';
+import { esc, externalReleaseUrl, sourceLabel, detectSource } from './util.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /**
@@ -148,7 +148,9 @@ export async function loadReleaseGroup(id, el) {
   if (relEl.innerHTML) { relEl.innerHTML = ''; return; }
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';
   try {
-    const r = await fetch(`${API}/api/release-group/${id}`);
+    const isDiscogs = state.browseSource === 'discogs';
+    const url = isDiscogs ? `${API}/api/discogs/master/${id}` : `${API}/api/release-group/${id}`;
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     if (data.error) throw new Error(data.error);
@@ -213,10 +215,11 @@ export async function addRelease(mbid, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
+    const idField = detectSource(mbid) === 'discogs' ? 'discogs_release_id' : 'mb_release_id';
     const r = await fetch(`${API}/api/pipeline/add`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mb_release_id: mbid}),
+      body: JSON.stringify({[idField]: mbid}),
     });
     const data = await r.json();
     if (data.status === 'added') {
@@ -255,7 +258,9 @@ export async function toggleReleaseDetail(mbid) {
   el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
   el.classList.add('open');
   try {
-    const r = await fetch(`${API}/api/release/${mbid}`);
+    const isDiscogs = detectSource(mbid) === 'discogs';
+    const url = isDiscogs ? `${API}/api/discogs/release/${mbid}` : `${API}/api/release/${mbid}`;
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     let html = '';
@@ -288,7 +293,7 @@ export async function toggleReleaseDetail(mbid) {
 
     // Links and actions
     html += '<div class="release-links">';
-    html += `<a href="https://musicbrainz.org/release/${mbid}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">MusicBrainz</a>`;
+    html += `<a href="${externalReleaseUrl(mbid)}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${sourceLabel(mbid)}</a>`;
     const detStored = pipelineStore.get(mbid);
     const canAdd = !data.in_library && !(detStored ? detStored.status : data.pipeline_status);
     if (canAdd) {

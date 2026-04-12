@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent } from '../web/js/util.js';
+import { qualityLabel, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -84,6 +84,33 @@ assertEqual(overrideToIntent('lossless'), 'lossless', '"lossless" → lossless')
 assertEqual(overrideToIntent('flac'), 'lossless', '"flac" (backward compat) → lossless');
 assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'default', 'CSV → default');
 assertEqual(overrideToIntent('unknown'), 'default', 'unknown → default');
+
+// --- detectSource tests ---
+console.log('detectSource()');
+assertEqual(detectSource('89ad4ac3-39f7-470e-963a-56509c546377'), 'musicbrainz', 'UUID → musicbrainz');
+assertEqual(detectSource('2048516'), 'discogs', 'numeric → discogs');
+assertEqual(detectSource(''), 'unknown', 'empty → unknown');
+assertEqual(detectSource(null), 'unknown', 'null → unknown');
+assertEqual(detectSource(undefined), 'unknown', 'undefined → unknown');
+assertEqual(detectSource('NONE'), 'unknown', 'NONE → unknown');
+
+// --- externalReleaseUrl tests ---
+console.log('externalReleaseUrl()');
+assertEqual(
+  externalReleaseUrl('89ad4ac3-39f7-470e-963a-56509c546377'),
+  'https://musicbrainz.org/release/89ad4ac3-39f7-470e-963a-56509c546377',
+  'MB UUID → musicbrainz.org'
+);
+assertEqual(
+  externalReleaseUrl('2048516'),
+  'https://www.discogs.com/release/2048516',
+  'Discogs numeric → discogs.com'
+);
+
+// --- sourceLabel tests ---
+console.log('sourceLabel()');
+assertEqual(sourceLabel('89ad4ac3-39f7-470e-963a-56509c546377'), 'MusicBrainz', 'UUID → MusicBrainz');
+assertEqual(sourceLabel('2048516'), 'Discogs', 'numeric → Discogs');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

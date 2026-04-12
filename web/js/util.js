@@ -68,3 +68,35 @@ export function esc(s) {
     .replace(/'/g, '&#39;')
     .replace(/\\/g, '&#92;');
 }
+
+/**
+ * Detect whether a release ID is MusicBrainz (UUID) or Discogs (numeric).
+ * @param {string|null|undefined} id
+ * @returns {'musicbrainz'|'discogs'|'unknown'}
+ */
+export function detectSource(id) {
+  if (!id) return 'unknown';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return 'musicbrainz';
+  if (/^\d+$/.test(id)) return 'discogs';
+  return 'unknown';
+}
+
+/**
+ * Build the external URL for a release based on its source.
+ * @param {string} id
+ * @returns {string}
+ */
+export function externalReleaseUrl(id) {
+  return detectSource(id) === 'musicbrainz'
+    ? `https://musicbrainz.org/release/${id}`
+    : `https://www.discogs.com/release/${id}`;
+}
+
+/**
+ * Short display label for an external source link.
+ * @param {string} id
+ * @returns {string}
+ */
+export function sourceLabel(id) {
+  return detectSource(id) === 'musicbrainz' ? 'MusicBrainz' : 'Discogs';
+}

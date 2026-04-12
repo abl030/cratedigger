@@ -1,6 +1,6 @@
 // @ts-check
 import { API, toast } from './state.js';
-import { esc } from './util.js';
+import { esc, externalReleaseUrl, sourceLabel } from './util.js';
 
 /** @type {boolean} */
 let _loaded = false;
@@ -102,7 +102,7 @@ function renderWrongMatchDetail(e) {
     if (c.label) html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(c.label)}${c.catalognum ? ` / ${esc(c.catalognum)}` : ''}</span></div>`;
   }
   if (e.mb_release_id) {
-    html += `<div class="p-detail-row"><span class="p-detail-label">Target MBID</span><span class="p-detail-value"><a href="https://musicbrainz.org/release/${esc(e.mb_release_id)}" target="_blank" style="color:#6af;font-family:monospace;font-size:0.85em;">${esc(e.mb_release_id)}</a></span></div>`;
+    html += `<div class="p-detail-row"><span class="p-detail-label">Target (${sourceLabel(e.mb_release_id)})</span><span class="p-detail-value"><a href="${externalReleaseUrl(e.mb_release_id)}" target="_blank" style="color:#6af;font-family:monospace;font-size:0.85em;">${esc(e.mb_release_id)}</a></span></div>`;
   }
   if (e.failed_path) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.failed_path)}</span></div>`;

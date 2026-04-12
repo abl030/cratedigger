@@ -1,6 +1,6 @@
 // @ts-check
 import { API, toast, updatePipelineStatus } from './state.js';
-import { esc, qualityLabel, overrideToIntent } from './util.js';
+import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 
 /**
@@ -136,7 +136,9 @@ export async function toggleLibDetail(id) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.85em;word-break:break-all;">${esc(data.path)}</span></div>`;
     }
     if (data.mb_albumid) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">MusicBrainz</span><span class="p-detail-value"><a href="https://musicbrainz.org/release/${data.mb_albumid}" target="_blank" rel="noopener" style="color:#6af;">${data.mb_albumid.slice(0,8)}...</a></span></div>`;
+      const label = sourceLabel(data.mb_albumid);
+      const url = externalReleaseUrl(data.mb_albumid);
+      html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${data.mb_albumid.slice(0,8)}...</a></span></div>`;
     }
     if (data.label) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(data.label)}</span></div>`;
