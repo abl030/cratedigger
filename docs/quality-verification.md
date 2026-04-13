@@ -1,5 +1,9 @@
 # Quality Verification
 
+See also `docs/audio-classification-research.md` for the April 2026 research
+log on classifier trust, corpus evaluation, false-positive risk, and external
+prior art.
+
 ## Gold Standard Pipeline
 
 The highest quality standard for the library:
