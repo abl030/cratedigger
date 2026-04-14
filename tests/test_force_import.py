@@ -40,6 +40,13 @@ def make_db():
 class TestImportOneForceFlag(unittest.TestCase):
     """Test that import_one.main() toggles MAX_DISTANCE from the real CLI flag."""
 
+    def setUp(self) -> None:
+        # import_one.main() calls reset_umask() (sets umask to 0 for the
+        # subprocess chain, GH #84). Restore so later tests keep their default.
+        self._saved_umask = os.umask(0o022)
+        os.umask(self._saved_umask)
+        self.addCleanup(os.umask, self._saved_umask)
+
     def test_force_flag_sets_max_distance_999(self) -> None:
         """--force must set MAX_DISTANCE=999 in the real main() entry point."""
         import import_one

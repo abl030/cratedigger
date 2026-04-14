@@ -342,6 +342,14 @@ class TestRawConfigParserRegression(unittest.TestCase):
 class TestMainCLIParsing(unittest.TestCase):
     """Test the CLI argument parsing and config loading path in main()."""
 
+    def setUp(self):
+        # soularr.main() calls reset_umask() (sets umask to 0 for the pipeline's
+        # subprocess chain, GH #84). Restore the prior umask so later tests in
+        # the same process keep their expected default.
+        self._saved_umask = os.umask(0o022)
+        os.umask(self._saved_umask)
+        self.addCleanup(os.umask, self._saved_umask)
+
     class _StopMain(Exception):
         """Sentinel to stop main() after config parsing in tests."""
 
