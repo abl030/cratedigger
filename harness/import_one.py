@@ -53,9 +53,6 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          comparison_format_hint,
                          determine_verified_lossless,
                          import_quality_decision, transcode_detection)
-
-# Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
-reset_umask()
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
             or "/etc/profiles/per-user/abl030/bin/beet")
@@ -713,6 +710,11 @@ def _emit_and_exit(r) -> NoReturn:
 
 
 def main():
+    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
+    # Done in main() (not at module import) so importing this module for tests
+    # doesn't leak a zero umask into the test process.
+    reset_umask()
+
     parser = argparse.ArgumentParser(description="One-shot beets import for a single album")
     parser.add_argument("path", help="Path to staged album directory")
     parser.add_argument("mb_release_id", help="MusicBrainz release ID")

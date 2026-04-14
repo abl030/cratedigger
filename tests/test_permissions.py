@@ -6,16 +6,14 @@ import stat
 import tempfile
 import unittest
 
-from lib.permissions import (LIBRARY_DIR_MODE, LIBRARY_FILE_MODE,
-                             fix_library_modes, reset_umask)
+from lib.permissions import LIBRARY_DIR_MODE, fix_library_modes, reset_umask
 
 
 class TestResetUmask(unittest.TestCase):
-    def test_returns_previous_mask_and_sets_zero(self):
+    def test_sets_umask_to_zero(self):
         prior = os.umask(0o027)
         try:
             reset_umask()
-            # reset_umask leaves process umask at 0
             current = os.umask(0)
             self.assertEqual(current, 0)
         finally:
@@ -28,7 +26,7 @@ class TestFixLibraryModes(unittest.TestCase):
         album = os.path.join(artist, "Album")
         nested = os.path.join(album, "CD1")
         os.makedirs(nested)
-        # Seed wrong modes — simulate beets creating 0755 dirs and 0644 files
+        # Seed wrong modes — simulate beets creating 0755 dirs.
         os.chmod(artist, 0o755)
         os.chmod(album, 0o755)
         os.chmod(nested, 0o755)
@@ -52,34 +50,38 @@ class TestFixLibraryModes(unittest.TestCase):
             self.assertEqual(self._mode(artist), LIBRARY_DIR_MODE,
                              "artist (parent) dir must also be chmod'd")
 
-    def test_recursive_on_subdirs_and_files(self):
+    def test_recursive_on_subdirs(self):
         with tempfile.TemporaryDirectory() as root:
-            _, album, nested, (f1, f2, cover) = self._make_tree(root)
+            _, album, nested, _ = self._make_tree(root)
             fix_library_modes(album)
             self.assertEqual(self._mode(nested), LIBRARY_DIR_MODE)
-            for f in (f1, f2, cover):
-                self.assertEqual(self._mode(f), LIBRARY_FILE_MODE,
-                                 f"file {f} should be 0o666")
+
+    def test_does_not_touch_files(self):
+        """Issue #84 is about dir accessibility. Files keep their source mode
+        (beets' shutil.copystat preserves it from staging). Broadening file
+        modes is out of scope and could make private files world-writable."""
+        with tempfile.TemporaryDirectory() as root:
+            _, album, _, (f1, f2, cover) = self._make_tree(root)
+            for p in (f1, f2, cover):
+                self.assertEqual(self._mode(p), 0o600)  # seeded mode
+            fix_library_modes(album)
+            for p in (f1, f2, cover):
+                self.assertEqual(self._mode(p), 0o600,
+                                 f"{p}: file mode must not be modified")
 
     def test_nonexistent_path_is_noop(self):
         fix_library_modes("/tmp/soularr-does-not-exist-xyz")
 
-    def test_file_path_chmods_just_the_file(self):
+    def test_file_path_is_noop(self):
+        """Passing a file path should not chmod anything — the helper is
+        strictly about library *directories*."""
         with tempfile.TemporaryDirectory() as root:
             f = os.path.join(root, "lone.mp3")
             with open(f, "wb") as fp:
                 fp.write(b"x")
             os.chmod(f, 0o600)
             fix_library_modes(f)
-            self.assertEqual(self._mode(f), LIBRARY_FILE_MODE)
-
-    def test_survives_unreadable_child(self):
-        # Drop a subdir we cannot chmod cleanly; fn must still succeed overall.
-        with tempfile.TemporaryDirectory() as root:
-            _, album, _, _ = self._make_tree(root)
-            fix_library_modes(album)
-            # Primary invariant: target dir is 0o777 even if some child failed
-            self.assertEqual(self._mode(album), LIBRARY_DIR_MODE)
+            self.assertEqual(self._mode(f), 0o600)
 
 
 if __name__ == "__main__":
