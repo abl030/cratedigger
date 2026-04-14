@@ -308,6 +308,11 @@ class HarnessImportSession(ImportSession):
 def main():
     import argparse
 
+    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
+    # Runs inside the Nix beets env where lib/ is not on sys.path, so inline
+    # the single-line policy rather than import the helper.
+    os.umask(0)
+
     parser = argparse.ArgumentParser(
         description="Beets interactive import harness — JSON over stdin/stdout"
     )

@@ -552,6 +552,10 @@ def main():
         pipeline_db_source, \
         _module_ctx
 
+    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
+    from lib.permissions import reset_umask
+    reset_umask()
+
     parser = argparse.ArgumentParser(description="Soularr music download pipeline")
     parser.add_argument("-c", "--config-dir", default=os.getcwd(),
                         help="Config directory (default: cwd)")
