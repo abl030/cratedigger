@@ -46,12 +46,16 @@ def _bootstrap_import_paths() -> None:
 _bootstrap_import_paths()
 
 from lib.beets_db import AlbumInfo, BeetsDB
+from lib.permissions import fix_library_modes, reset_umask
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, ImportResult,
                          PostflightInfo, QualityRankConfig,
                          comparison_format_hint,
                          determine_verified_lossless,
                          import_quality_decision, transcode_detection)
+
+# Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
+reset_umask()
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 BEET_BIN = (shutil.which("beet")
             or "/etc/profiles/per-user/abl030/bin/beet")
@@ -1163,6 +1167,11 @@ def main():
     if bad_ext_files:
         r.postflight.bad_extensions = bad_ext_files
         _log(f"[EXT-FIX] Fixed {len(bad_ext_files)} file(s) with bad extensions")
+
+    # --- Force library modes ---
+    # Guards against any subprocess layer that dropped umask and created
+    # 0o755 dirs despite the systemd unit's UMask=0000 — see GH #84.
+    fix_library_modes(album_path)
 
     # --- Cleanup staged dir ---
     if os.path.isdir(args.path):
