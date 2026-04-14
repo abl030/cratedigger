@@ -27,37 +27,38 @@ import os
 logger = logging.getLogger(__name__)
 
 LIBRARY_DIR_MODE = 0o777
-LIBRARY_FILE_MODE = 0o666
 
 
 def reset_umask() -> None:
     """Set the process umask to 0, matching the systemd unit's UMask=0000.
 
-    Call this once at every pipeline entry point (soularr.py, import_one.py,
-    beets_harness.py) so subprocesses further down the chain inherit it.
+    Call this at every pipeline entry point (soularr.py main(), import_one.py
+    main(), beets_harness.py main()) so subprocesses further down the chain
+    inherit it. Do NOT call this at module-import time — the umask is
+    process-wide and would leak into any code that imports the module.
     """
     os.umask(0)
 
 
 def fix_library_modes(path: str) -> None:
-    """Recursively chmod a library path to enforce LIBRARY_DIR_MODE / LIBRARY_FILE_MODE.
+    """Recursively chmod a library path's *directories* to LIBRARY_DIR_MODE.
+
+    Issue #84 is specifically about directory accessibility — beets is
+    intermittently creating artist/album dirs as 0o755 despite the systemd
+    unit's UMask=0000, which blocks other users from running `beet fetchart`
+    etc. File modes are set by beets' own `shutil.copystat` when it moves
+    tracks in from staging, so we deliberately do NOT touch files here — that
+    would risk broadening file permissions beyond what the source had.
 
     If `path` is a directory:
       - the directory itself and its immediate parent (typically the artist
         dir above an album dir) are chmod'd to `LIBRARY_DIR_MODE` (0o777)
       - every descendant directory → `LIBRARY_DIR_MODE`
-      - every descendant file → `LIBRARY_FILE_MODE` (0o666)
 
-    If `path` is a regular file, only the file is chmod'd.
-
-    Non-existent paths are a no-op. Per-entry chmod failures are logged and
-    swallowed so one stubborn child cannot block the whole pass.
+    Non-existent or non-directory paths are a no-op. Per-entry chmod failures
+    are logged and swallowed so one stubborn child cannot block the pass.
     """
-    if not os.path.exists(path):
-        return
-
-    if os.path.isfile(path):
-        _safe_chmod(path, LIBRARY_FILE_MODE)
+    if not os.path.isdir(path):
         return
 
     # Target dir itself
@@ -69,11 +70,9 @@ def fix_library_modes(path: str) -> None:
     if parent and parent != path:
         _safe_chmod(parent, LIBRARY_DIR_MODE)
 
-    for root, dirs, files in os.walk(path):
+    for root, dirs, _ in os.walk(path):
         for d in dirs:
             _safe_chmod(os.path.join(root, d), LIBRARY_DIR_MODE)
-        for f in files:
-            _safe_chmod(os.path.join(root, f), LIBRARY_FILE_MODE)
 
 
 def _safe_chmod(path: str, mode: int) -> None:
