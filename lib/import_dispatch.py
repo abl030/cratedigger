@@ -823,6 +823,14 @@ def dispatch_import_from_db(
         db=db,
         request_id=request_id,
         usernames=source_usernames,
+        # Don't propagate the download's spectral into on-disk state on the
+        # force/manual path: if dispatch_import_core subsequently fails
+        # (downgrade, no JSON, timeout), the DB would be left claiming the
+        # failed download is on-disk. The auto path is safe to propagate
+        # because the spectral decision happens immediately before the
+        # import subprocess and a failure there still means the files
+        # ended up in failed_imports/ unchanged.
+        propagate_download_to_existing=False,
     )
 
     if not preimport.valid:

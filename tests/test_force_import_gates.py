@@ -551,5 +551,147 @@ class TestPreimportRejectionPreservesCorruptFiles(unittest.TestCase):
         self.assertIn("02 - track.mp3", vr.get("corrupt_files", []))
 
 
+class TestForceImportDoesNotCorruptSpectralStateOnFailure(unittest.TestCase):
+    """Force/manual import must NOT propagate the download's spectral into
+    on-disk state speculatively: if ``dispatch_import_core`` later fails
+    (downgrade, no JSON, timeout), the DB would otherwise be left claiming
+    the failed download is on-disk, skewing later override/gate decisions.
+
+    Only the MEASURED existing spectral (from beets) is persisted during the
+    preimport gate. The propagation shortcut is reserved for the auto path.
+    """
+
+    def test_propagation_skipped_when_existing_unmeasured(self):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123",
+            min_bitrate=192,                   # something IS on disk
+            current_spectral_grade=None,       # but no measured spectral yet
+            current_spectral_bitrate=None,
+        ))
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        stdout = _make_stdout(ir)
+        # Existing album exists but album_path is not on disk — beets returns
+        # info without a walkable path, so no EXISTING spectral is measured.
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=192,
+            avg_bitrate_kbps=192, format="MP3", is_cbr=True,
+            album_path="/Beets/NonexistentPath")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True,
+            audio_check_mode="normal",
+        )
+        tmpdir = tempfile.mkdtemp()
+        import os
+        with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+            f.write(b"x")
+
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.preimport.validate_audio",
+                       return_value=SimpleNamespace(
+                           valid=True, error=None, failed_files=[])), \
+                 patch("lib.preimport.spectral_analyze",
+                       return_value=_analyze_result(
+                           "likely_transcode", 96, 80.0, 5)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="user1",
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        row = db.request(42)
+        # On the force/manual path the download's spectral must NOT be written
+        # as "current" even though min_bitrate is set. Existing spectral
+        # stays None because /Beets/NonexistentPath isn't walkable.
+        self.assertIsNone(
+            row["current_spectral_grade"],
+            "force-import preimport must not speculatively propagate download spectral")
+        self.assertIsNone(row["current_spectral_bitrate"])
+
+
+class TestAutoPathPreservesSpectralPropagation(unittest.TestCase):
+    """The auto path still propagates: run_preimport_gates with
+    propagate_download_to_existing=True (the default) adopts the download's
+    spectral as current when min_bitrate is set but spectral is unmeasured.
+    """
+
+    def test_auto_path_propagates_download_spectral(self):
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, min_bitrate=256,
+            current_spectral_grade=None, current_spectral_bitrate=None,
+        ))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=256,
+            avg_bitrate_kbps=256, format="MP3", is_cbr=True,
+            album_path="/Beets/NonexistentPath")
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch("lib.preimport.spectral_analyze",
+                   return_value=_analyze_result("suspect", 192, 80.0, 5)), \
+             patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-123",
+                label="Test",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=1,
+                usernames=set(),
+                # Default is True — auto path preserves propagation.
+            )
+
+        row = db.request(1)
+        self.assertEqual(
+            row["current_spectral_grade"], "suspect",
+            "auto path must propagate download spectral when existing unmeasured")
+        self.assertEqual(row["current_spectral_bitrate"], 192)
+
+
+class TestRepairMp3HeadersRecurses(unittest.TestCase):
+    """repair_mp3_headers must walk subdirectories — otherwise nested MP3s
+    with fixable header issues reach ffmpeg unrepaired and falsely reject.
+    """
+
+    def test_mp3val_called_on_nested_file(self):
+        import os
+        from unittest.mock import patch, MagicMock
+        from lib.util import repair_mp3_headers
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            os.makedirs(cd1)
+            nested = os.path.join(cd1, "01.mp3")
+            with open(nested, "wb") as f:
+                f.write(b"fake")
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="")
+                repair_mp3_headers(tmpdir)
+            called_paths = [c[0][0][-1] for c in mock_run.call_args_list]
+            self.assertTrue(
+                any(nested == p for p in called_paths),
+                f"mp3val must be called on nested {nested}, got {called_paths}")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
