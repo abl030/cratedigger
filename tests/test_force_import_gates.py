@@ -103,10 +103,21 @@ class TestForceImportRunsSpectralGate(unittest.TestCase):
         with open(os.path.join(tmpdir, "01 - track.mp3"), "wb") as f:
             f.write(b"fake mp3 content")
 
+        # Patch inspect_local_files so tests don't depend on mutagen reading
+        # fake-byte MP3 files. Real files would be real CBR/VBR; tests
+        # simulate whatever the scenario requires.
+        from lib.preimport import LocalFileInspection
+        inspection_result = LocalFileInspection(
+            filetype="mp3",
+            min_bitrate_bps=download_bitrate * 1000,
+            is_vbr=not is_cbr,
+        )
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
                  patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.import_dispatch.inspect_local_files",
+                       return_value=inspection_result), \
                  patch(
                      "lib.preimport.spectral_analyze",
                      side_effect=[
@@ -462,10 +473,16 @@ class TestForceImportSplitsMultiUserSources(unittest.TestCase):
         with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
             f.write(b"x")
 
+        from lib.preimport import LocalFileInspection
+        inspection = LocalFileInspection(
+            filetype="mp3", min_bitrate_bps=320_000, is_vbr=False)
+
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
                  patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.import_dispatch.inspect_local_files",
+                       return_value=inspection), \
                  patch("lib.preimport.validate_audio",
                        return_value=SimpleNamespace(
                            valid=True, error=None, failed_files=[])), \
@@ -589,10 +606,16 @@ class TestForceImportDoesNotCorruptSpectralStateOnFailure(unittest.TestCase):
         with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
             f.write(b"x")
 
+        from lib.preimport import LocalFileInspection
+        inspection = LocalFileInspection(
+            filetype="mp3", min_bitrate_bps=320_000, is_vbr=False)
+
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
                  patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.import_dispatch.inspect_local_files",
+                       return_value=inspection), \
                  patch("lib.preimport.validate_audio",
                        return_value=SimpleNamespace(
                            valid=True, error=None, failed_files=[])), \
@@ -902,6 +925,100 @@ class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
+    """The persisted-spectral fallback must be grade-aware: a stored
+    ``current_spectral_grade='genuine', current_spectral_bitrate=96`` is
+    stale (genuine files have no cliff). Feeding that 96 kbps into
+    spectral_import_decision would let real transcodes be imported as
+    "upgrades". Matches compute_effective_override_bitrate and
+    load_quality_gate_state — only transcode grades are authoritative.
+    """
+
+    def test_genuine_stored_spectral_ignored(self):
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        # Stored grade=genuine, bitrate=96 — a stale leftover from prior runs.
+        # Not a transcode grade, so the bitrate must NOT be used as authoritative.
+        db.seed_request(make_request_row(
+            id=42,
+            min_bitrate=320,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=96,
+        ))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/NonexistentPath")
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        # Download is a suspect 192kbps transcode. If the fallback used the
+        # stored grade=genuine/bitrate=96 verbatim, 192 > 96 would wrongly
+        # import the transcode. With grade-aware handling, the 96 is ignored
+        # and decision falls back to min_bitrate=320 → reject.
+        with patch("lib.preimport.spectral_analyze",
+                   return_value=_analyze_result(
+                       "likely_transcode", 192, 80.0, 5)), \
+             patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-123",
+                label="Test",
+                download_filetype="mp3",
+                download_min_bitrate_bps=192_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames=set(),
+                propagate_download_to_existing=False,
+            )
+
+        self.assertFalse(
+            result.valid,
+            "stale genuine stored spectral must not be used to import a 192kbps "
+            "transcode over a 320kbps on-disk album")
+        self.assertEqual(result.scenario, "spectral_reject")
+
+
+class TestUnknownVbrSkipsSpectralGate(unittest.TestCase):
+    """When VBR status is unknown (mutagen couldn't read bitrate_mode), the
+    spectral gate must be skipped. Treating unknown as confirmed CBR would
+    falsely reject VBR uploads with damaged headers on the force/manual path.
+    The auto path gets is_vbr from slskd metadata (usually reliable), so the
+    common case still runs; this only affects the unknown-mode edge case.
+    """
+
+    def test_is_vbr_none_skips_spectral(self):
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch("lib.preimport.spectral_analyze") as mock_spectral:
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="",
+                label="Test",
+                download_filetype="mp3",
+                download_min_bitrate_bps=None,
+                download_is_vbr=None,   # mutagen couldn't determine
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=1,
+                usernames=set(),
+            )
+
+        self.assertTrue(result.valid,
+                        "unknown VBR status must not reject at the gate")
+        self.assertEqual(
+            mock_spectral.call_count, 0,
+            "spectral_analyze must NOT run when VBR status is unknown")
 
 
 if __name__ == "__main__":
