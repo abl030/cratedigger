@@ -2408,6 +2408,7 @@ def full_pipeline_decision(
     spectral_bitrate=None,
     # Existing state
     existing_min_bitrate=None,
+    existing_avg_bitrate: int | None = None,
     existing_spectral_bitrate=None,
     override_min_bitrate=None,
     existing_format: str | None = None,
@@ -2500,17 +2501,25 @@ def full_pipeline_decision(
     # otherwise defaults to "MP3" so legacy simulator scenarios (which only
     # carry a min_bitrate) still classify against the MP3 VBR/CBR band
     # tables. Production always provides a real format via BeetsDB.
+    #
+    # avg/median fall back to min_bitrate when the caller didn't supply a
+    # separate avg (legacy scenarios). Supplying existing_avg_bitrate matters
+    # under the default cfg.bitrate_metric=AVG policy — otherwise a VBR album
+    # with avg=245 but min=180 gets ranked off min=180 (GOOD instead of
+    # TRANSPARENT) and downstream comparisons misrepresent production.
     effective_existing_format = existing_format if existing_format is not None else "MP3"
+    _effective_existing_min = (override_min_bitrate
+                               if override_min_bitrate is not None
+                               else existing_min_bitrate)
+    _effective_existing_avg = (override_min_bitrate
+                               if override_min_bitrate is not None
+                               else (existing_avg_bitrate
+                                     if existing_avg_bitrate is not None
+                                     else existing_min_bitrate))
     existing_m = (AudioQualityMeasurement(
-                      min_bitrate_kbps=override_min_bitrate
-                      if override_min_bitrate is not None
-                      else existing_min_bitrate,
-                      avg_bitrate_kbps=override_min_bitrate
-                      if override_min_bitrate is not None
-                      else existing_min_bitrate,
-                      median_bitrate_kbps=override_min_bitrate
-                      if override_min_bitrate is not None
-                      else existing_min_bitrate,
+                      min_bitrate_kbps=_effective_existing_min,
+                      avg_bitrate_kbps=_effective_existing_avg,
+                      median_bitrate_kbps=_effective_existing_avg,
                       format=effective_existing_format,
                       is_cbr=existing_is_cbr)
                   if existing_min_bitrate is not None else None)
@@ -2537,6 +2546,7 @@ def full_pipeline_decision(
             verified_lossless = True
 
         gate_bitrate = min_bitrate
+        gate_avg_bitrate = min_bitrate  # FLAC: lossless, avg == min is fine
         gate_cbr = False
         gate_format = stage2_new_format  # "flac"
     elif is_flac:
@@ -2594,21 +2604,31 @@ def full_pipeline_decision(
         else:
             gate_format = stage2_new_format
 
-        # Use post-conversion bitrate for quality gate
+        # Use post-conversion bitrate for quality gate. The simulator
+        # doesn't take a separate post-conversion avg, so avg == min here;
+        # in production the real avg comes from beets after import.
         gate_bitrate = post_conversion_min_bitrate or min_bitrate
+        gate_avg_bitrate = gate_bitrate
         gate_cbr = False  # V0 conversion always produces VBR
     else:
         # MP3 path: import directly. No format label for native MP3 downloads
         # unless the caller provided one — the rank model falls back to the
         # bare-codec bitrate classification via `new_format=None`.
+        #
+        # Use the caller-supplied avg_bitrate when present (falls back to
+        # min_bitrate otherwise). Under the default cfg.bitrate_metric=AVG
+        # policy a VBR V0 at min=200/avg=245 must rank on avg=245 — otherwise
+        # the import/downgrade comparison and the post-import gate both see
+        # the wrong tier.
         stage2_new_format = comparison_format_hint(
             explicit_format=new_format,
             native_codec_family="MP3",
         )
+        _mp3_avg = avg_bitrate if avg_bitrate is not None else min_bitrate
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=min_bitrate,
-            median_bitrate_kbps=min_bitrate,
+            avg_bitrate_kbps=_mp3_avg,
+            median_bitrate_kbps=_mp3_avg,
             format=stage2_new_format,
             is_cbr=is_cbr)
         result["stage2_import"] = import_quality_decision(
@@ -2621,6 +2641,7 @@ def full_pipeline_decision(
 
         result["imported"] = True
         gate_bitrate = min_bitrate
+        gate_avg_bitrate = _mp3_avg
         gate_cbr = is_cbr
         gate_format = stage2_new_format
 
@@ -2634,8 +2655,8 @@ def full_pipeline_decision(
         gate_spectral_bitrate = spectral_bitrate
     gate_m = AudioQualityMeasurement(
         min_bitrate_kbps=gate_bitrate,
-        avg_bitrate_kbps=gate_bitrate,
-        median_bitrate_kbps=gate_bitrate,
+        avg_bitrate_kbps=gate_avg_bitrate,
+        median_bitrate_kbps=gate_avg_bitrate,
         format=gate_format,
         is_cbr=gate_cbr,
         verified_lossless=verified_lossless,
