@@ -351,6 +351,45 @@ class TestDownloadLog(unittest.TestCase):
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["soulseek_username"], "user2")
 
+    def test_get_log_imported_filter_excludes_rejected_rows(self):
+        """Contract guard: only truly-imported rows count as "imported".
+
+        ``get_log(outcome_filter='imported')`` filters on ``outcome IN
+        ('success', 'force_import')``. Gate-rejected force/manual imports
+        must NOT write ``outcome='force_import'`` or they'd leak into the UI's
+        imported counter and the /api/pipeline/log imported view. Regression
+        guard for the audit that caught this: a gate-rejected force import
+        belongs in the "rejected" filter, not "imported".
+        """
+        # A successful auto import.
+        self.db.log_download(
+            self.req_id, "user-success", "mp3", "/Incoming/A/B",
+            outcome="success", beets_distance=0.05)
+        # A successful force import.
+        self.db.log_download(
+            self.req_id, "user-force", "mp3", "/Incoming/A/B",
+            outcome="force_import", beets_distance=0.0)
+        # A gate-rejected force import (e.g. spectral_reject, audio_corrupt,
+        # nested_layout). Per CLAUDE.md the outcome MUST be "rejected".
+        self.db.log_download(
+            self.req_id, "user-gate", "mp3", "/tmp/reject",
+            outcome="rejected", beets_scenario="spectral_reject")
+
+        imported = self.db.get_log(outcome_filter="imported")
+        outcomes = {row["outcome"] for row in imported}
+        self.assertEqual(
+            outcomes, {"success", "force_import"},
+            f"imported filter must only include success + force_import, "
+            f"got {outcomes}")
+        self.assertNotIn(
+            "rejected", outcomes,
+            "gate-rejected rows must not appear under the imported filter")
+
+        rejected = self.db.get_log(outcome_filter="rejected")
+        rejected_outcomes = {row["outcome"] for row in rejected}
+        self.assertIn("rejected", rejected_outcomes,
+                      "gate-rejected rows must surface under the rejected filter")
+
 
 @requires_postgres
 class TestSearchLog(unittest.TestCase):
