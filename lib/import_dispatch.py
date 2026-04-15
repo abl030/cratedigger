@@ -846,6 +846,7 @@ def dispatch_import_from_db(
                 distance=0.0,
                 scenario=preimport.scenario or "preimport_reject",
                 detail=preimport.detail,
+                failed_path=failed_path,
             ).to_json(),
             staged_path=failed_path,
         )

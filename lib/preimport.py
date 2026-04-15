@@ -341,6 +341,11 @@ def run_preimport_gates(
         result.existing_spectral.bitrate_kbps
         if result.existing_spectral is not None else None
     )
+    # Uses the 4-arg form of spectral_import_decision (matches main's
+    # _apply_spectral_decision exactly). The cliff_track_count is captured on
+    # PreImportGateResult for audit/logging but not forwarded — the
+    # decision-function side of the cliff heuristic lives on a separate branch
+    # and will be wired in once it lands.
     spectral_decision = spectral_import_decision(
         dl_grade, dl_cliff_bitrate, existing_cliff_bitrate,
         existing_min_bitrate=result.existing_min_bitrate,
