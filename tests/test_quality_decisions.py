@@ -42,6 +42,77 @@ from lib.quality import (
 # spectral_import_decision
 # ============================================================================
 
+class TestSpectralGateTrigger(unittest.TestCase):
+    """Test the pre-analysis "would spectral run?" decision (issue #93).
+
+    Mirrors the live gate in lib.preimport._needs_spectral_check. Delivers
+    the input the UI Decisions tab and pipeline-cli quality simulator need
+    to explain which files go through spectral vs. skip.
+    """
+
+    THRESHOLD = 210
+
+    def _run(self, *, is_flac, is_cbr, is_vbr=None, avg=None):
+        from lib.quality import spectral_gate_trigger
+        return spectral_gate_trigger(
+            is_flac=is_flac, is_cbr=is_cbr, is_vbr=is_vbr,
+            avg_bitrate_kbps=avg, vbr_threshold_kbps=self.THRESHOLD,
+        )
+
+    def test_flac_skips(self):
+        """FLAC has its own flow (convert → V0 → transcode_detection)."""
+        self.assertEqual(self._run(is_flac=True, is_cbr=False), "skipped_flac")
+        self.assertEqual(self._run(is_flac=True, is_cbr=True), "skipped_flac")
+        self.assertEqual(
+            self._run(is_flac=True, is_cbr=False, is_vbr=True, avg=245),
+            "skipped_flac",
+            "FLAC always takes precedence over VBR avg")
+
+    def test_cbr_mp3_always_runs(self):
+        """CBR MP3 is the classic transcode-cliff case."""
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=True), "would_run")
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=True, avg=320), "would_run")
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=True, avg=128), "would_run")
+
+    def test_vbr_threshold_table(self):
+        """VBR MP3: gate skips only when avg is known and >= threshold."""
+        CASES = [
+            # (desc, avg, expected)
+            ("avg unknown → would_run (conservative)",  None, "would_run"),
+            ("Go! Team avg 182 < 210",                   182, "would_run"),
+            ("just below threshold 209",                 209, "would_run"),
+            ("at threshold 210 → high avg skip",         210, "skipped_vbr_high_avg"),
+            ("genuine V0 245 → skip",                    245, "skipped_vbr_high_avg"),
+            ("genuine V0 260 → skip",                    260, "skipped_vbr_high_avg"),
+            ("lowfi 96 → would_run",                      96, "would_run"),
+        ]
+        for desc, avg, expected in CASES:
+            with self.subTest(desc=desc, avg=avg):
+                got = self._run(is_flac=False, is_cbr=False,
+                                is_vbr=True, avg=avg)
+                self.assertEqual(got, expected)
+
+    def test_is_vbr_derived_from_is_cbr_when_omitted(self):
+        """Legacy simulator callers that pass is_cbr without is_vbr get
+        sensible default: is_vbr = not is_cbr."""
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=False), "would_run",
+            "derived is_vbr=True with avg=None → gate still runs")
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=False, avg=245),
+            "skipped_vbr_high_avg",
+            "derived is_vbr=True with high avg → skip")
+
+    def test_both_unknown_falls_back_to_would_run(self):
+        """is_cbr=None AND is_vbr=None → conservative default."""
+        self.assertEqual(
+            self._run(is_flac=False, is_cbr=None),
+            "would_run")
+
+
 class TestSpectralImportDecision(unittest.TestCase):
     """Test pre-import spectral decision (MP3/CBR path)."""
 
@@ -536,12 +607,14 @@ import inspect
 
 # The exact keys the simulator reads from the result dict
 EXPECTED_RESULT_KEYS = {
+    "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
     "target_final_format",
 }
 
 # Valid values for each stage (None means stage was skipped)
+VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
                 "transcode_downgrade", "transcode_first",
@@ -552,6 +625,7 @@ VALID_FINAL_STATUS = {None, "imported", "wanted"}
 # The exact parameter names the simulator form submits
 EXPECTED_PARAMS = {
     "is_flac", "min_bitrate", "is_cbr",
+    "is_vbr", "avg_bitrate",
     "spectral_grade", "spectral_bitrate",
     "existing_min_bitrate", "existing_spectral_bitrate",
     "override_min_bitrate",
@@ -670,14 +744,103 @@ class TestFullPipelineContract(unittest.TestCase):
         for key in ("imported", "denylisted", "keep_searching"):
             self.assertIsInstance(r[key], bool, f"{key} should be bool")
 
+    def test_stage0_values_in_contract(self):
+        """Stage 0 gate trigger must be from the known set for every scenario."""
+        # Each call is written out so pyright can type-check against the
+        # full_pipeline_decision signature (bool vs int) — a **kwargs dict
+        # collapses bool→int and breaks type narrowing.
+        results = [
+            # FLAC always skips the MP3 gate
+            full_pipeline_decision(is_flac=True, min_bitrate=0, is_cbr=False),
+            # CBR MP3 always gates
+            full_pipeline_decision(is_flac=False, min_bitrate=320, is_cbr=True),
+            # VBR MP3 with low avg gates (issue #93 Go! Team)
+            full_pipeline_decision(is_flac=False, min_bitrate=126, is_cbr=False,
+                                   is_vbr=True, avg_bitrate=182),
+            # VBR MP3 with high avg skips (genuine V0)
+            full_pipeline_decision(is_flac=False, min_bitrate=220, is_cbr=False,
+                                   is_vbr=True, avg_bitrate=245),
+            # VBR MP3 unknown avg (legacy or resumed) gates
+            full_pipeline_decision(is_flac=False, min_bitrate=200, is_cbr=False,
+                                   is_vbr=True),
+        ]
+        for r in results:
+            self.assertIn(r["stage0_spectral_gate"], VALID_STAGE0,
+                          f"Unexpected stage0 value: {r['stage0_spectral_gate']}")
+
+    def test_stage0_high_avg_vbr_skips_stage1(self):
+        """When stage 0 says skip, stage 1 must be None even if spectral
+        was (accidentally) supplied — otherwise the simulator would
+        misrepresent production behavior, which skips spectral entirely."""
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=220, is_cbr=False,
+            is_vbr=True, avg_bitrate=245,
+            # Caller supplied spectral_grade, but stage 0 says don't gate.
+            spectral_grade="suspect", spectral_bitrate=192,
+            existing_spectral_bitrate=100,
+        )
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
+        self.assertIsNone(
+            r["stage1_spectral"],
+            "stage 1 must not run when the gate trigger said skip — "
+            "production's _needs_spectral_check would short-circuit before "
+            "spectral_analyze is even called")
+
+    def test_stage0_low_avg_vbr_runs_stage1(self):
+        """Go! Team case: VBR avg 182 < 210 → stage 0 would_run → if
+        spectral is provided, stage 1 executes and can reject."""
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=126, is_cbr=False,
+            is_vbr=True, avg_bitrate=182,
+            spectral_grade="likely_transcode", spectral_bitrate=96,
+            existing_spectral_bitrate=128,
+        )
+        self.assertEqual(r["stage0_spectral_gate"], "would_run")
+        # 96 <= 128 → reject in stage 1
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+
+    def test_stage0_flac_preserves_stage1(self):
+        """FLAC path: stage 0 says skipped_flac but stage 1 (modeled as
+        the FLAC post-conversion spectral decision) must still run when
+        spectral data is provided."""
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=10, post_conversion_min_bitrate=245,
+        )
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
+        # Genuine → stage 1 runs and says import
+        self.assertEqual(r["stage1_spectral"], "import")
+
     def test_decision_tree_stage_ids(self):
         """Decision tree must have the expected stages in order."""
         tree = get_decision_tree()
         ids = [s["id"] for s in tree["stages"]]
         self.assertEqual(ids, ["flac_spectral", "flac_convert", "transcode",
                                "verified_lossless", "target_conversion",
-                               "mp3_spectral", "mp3_vbr_note",
+                               "mp3_spectral_gate", "mp3_spectral",
                                "import_decision", "quality_gate", "dispatch"])
+
+    def test_decision_tree_mp3_gate_exposes_threshold(self):
+        """The new mp3_spectral_gate stage must surface the VBR threshold
+        (issue #93) so the UI Decisions tab shows the same cutoff as the
+        live production gate in lib/preimport._needs_spectral_check."""
+        tree = get_decision_tree()
+        stage_map = {s["id"]: s for s in tree["stages"]}
+        self.assertIn("mp3_spectral_gate", stage_map,
+                      "mp3_spectral_gate stage must exist")
+        gate = stage_map["mp3_spectral_gate"]
+        self.assertEqual(gate["function"], "spectral_gate_trigger")
+        outcomes = set(gate["outcomes"])
+        self.assertEqual(outcomes,
+                         {"would_run", "skipped_vbr_high_avg", "skipped_flac"})
+        # Threshold surfaces as part of at least one rule/note
+        threshold = tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"]
+        tree_text = str(gate["rules"]) + str(gate.get("note", ""))
+        self.assertIn(str(threshold), tree_text,
+                      f"threshold {threshold} must appear in gate stage text")
 
     def test_decision_tree_outcomes_match_valid_values(self):
         """Outcomes declared in the tree must match what the contract allows."""
