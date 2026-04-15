@@ -148,20 +148,23 @@ def inspect_local_files(path: str) -> LocalFileInspection:
 
 
 def _needs_spectral_check(filetype: str, is_vbr: bool | None) -> bool:
-    """Spectral check runs on *confidently CBR* MP3 downloads only.
+    """Spectral check runs on non-VBR MP3 downloads.
 
     FLAC uses a different flow (convert → V0 → compare). VBR MP3 carries its
     own bitrate signal. CBR MP3 is where spectral cliff detection pays off.
 
-    Unknown VBR status (``is_vbr is None``) skips the gate. On the force/manual
-    path ``inspect_local_files`` can't always read a file's ``bitrate_mode``
-    (broken headers → mutagen returns None), and treating that as confirmed
-    CBR would falsely reject a VBR upload. The post-import quality gate
-    (rank comparison) still catches transcoded CBR downloads.
+    Unknown VBR (``is_vbr is None``) is routed through the gate — the auto
+    path resumes downloads from ``ActiveDownloadState`` without a VBR field,
+    and skipping spectral on those would be a quality-gate bypass. Callers
+    with ground truth (force/manual) resolve unknown VBR via filesystem
+    inspection (see ``run_preimport_gates``) before this helper is reached,
+    so None here means "really unknown" — the conservative choice is to
+    still gate; genuine VBR uploads will produce "genuine" spectral grades
+    and fall through to import.
     """
     filetype_lower = (filetype or "").lower()
     is_mp3 = "mp3" in filetype_lower and "flac" not in filetype_lower
-    return is_mp3 and is_vbr is False
+    return is_mp3 and not bool(is_vbr)
 
 
 def _analyze_existing(
@@ -324,6 +327,21 @@ def run_preimport_gates(
                 f"({len(result.corrupt_files)} files failed ffmpeg decode)")
             return result
 
+    # --- Resolve VBR status via filesystem inspection when unknown ---
+    # Auto path callers supply VBR from slskd metadata (usually populated,
+    # but None on resumed downloads rebuilt from ActiveDownloadState).
+    # Force/manual callers supply VBR from mutagen (can be None on broken
+    # headers). In both cases, re-inspecting the files on disk here covers
+    # the gap so the spectral gate runs only when we've confirmed CBR.
+    if download_is_vbr is None:
+        filetype_lower = (download_filetype or "").lower()
+        if "mp3" in filetype_lower and "flac" not in filetype_lower:
+            inspection = inspect_local_files(path)
+            if inspection.is_vbr is not None:
+                download_is_vbr = inspection.is_vbr
+                if download_min_bitrate_bps is None:
+                    download_min_bitrate_bps = inspection.min_bitrate_bps
+
     # --- Spectral gate (non-VBR MP3 only) ---
     if not _needs_spectral_check(download_filetype, download_is_vbr):
         return result
@@ -358,8 +376,12 @@ def run_preimport_gates(
         result.existing_spectral = existing_spectral
 
     # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
-    # If the on-disk album can't be freshly analyzed (stale/missing album_path),
-    # fall back to the spectral state already stored on album_requests.
+    # Only fires when BeetsDB FOUND the album (existing_min_bitrate set) but
+    # couldn't measure spectral from its album_path (stale/missing directory).
+    # When BeetsDB returns no album at all — album deleted, beets DB offline,
+    # or first-time import — we must NOT use stale album_requests.min_bitrate
+    # as "proof" that something is still on disk, or the gate would reject
+    # a valid redownload against non-existent state.
     #
     # GRADE-AWARE: only use the stored spectral_bitrate when the grade is a
     # transcode grade (suspect/likely_transcode). A stored
@@ -367,7 +389,9 @@ def run_preimport_gates(
     # and admitting a 96kbps "existing" would let a real transcode be imported
     # as an upgrade. Matches ``compute_effective_override_bitrate`` and
     # ``load_quality_gate_state`` — the same rule applied across the pipeline.
-    if (result.existing_spectral is None
+    beets_knows_album = result.existing_min_bitrate is not None
+    if (beets_knows_album
+            and result.existing_spectral is None
             and db is not None and request_id is not None):
         try:
             req = db.get_request(request_id)
@@ -384,10 +408,6 @@ def run_preimport_gates(
                             f"current_spectral (grade={stored.grade}, "
                             f"bitrate={stored.bitrate_kbps}kbps) — BeetsDB "
                             "lookup returned no spectral measurement")
-                if result.existing_min_bitrate is None:
-                    stored_min = req.get("min_bitrate")
-                    if stored_min is not None:
-                        result.existing_min_bitrate = stored_min
         except Exception:
             logger.debug("failed to read persisted spectral state",
                          exc_info=True)
