@@ -984,41 +984,162 @@ class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
         self.assertEqual(result.scenario, "spectral_reject")
 
 
-class TestUnknownVbrSkipsSpectralGate(unittest.TestCase):
-    """When VBR status is unknown (mutagen couldn't read bitrate_mode), the
-    spectral gate must be skipped. Treating unknown as confirmed CBR would
-    falsely reject VBR uploads with damaged headers on the force/manual path.
-    The auto path gets is_vbr from slskd metadata (usually reliable), so the
-    common case still runs; this only affects the unknown-mode edge case.
+class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
+    """When the caller passes ``is_vbr=None`` (auto-path resumed download
+    or force-path mutagen failure), the gate must attempt to resolve VBR
+    via filesystem inspection before deciding whether to run spectral.
+    Skipping spectral unconditionally on None was a bypass for resumed CBR
+    MP3 downloads rebuilt from ``ActiveDownloadState`` — the auto path's
+    protection must not depend on slskd metadata being preserved.
     """
 
-    def test_is_vbr_none_skips_spectral(self):
+    def test_auto_path_resumed_download_reinspects_to_keep_spectral(self):
+        """is_vbr=None → filesystem inspection fills it in → spectral runs."""
+        import os
+        from unittest.mock import patch
         from lib.config import SoularrConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
         cfg = SoularrConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.spectral_analyze") as mock_spectral:
-            result = run_preimport_gates(
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            inspected = LocalFileInspection(
+                filetype="mp3", min_bitrate_bps=320_000, is_vbr=False)
+            with patch("lib.preimport.inspect_local_files",
+                       return_value=inspected), \
+                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                mock_spectral.return_value = SimpleNamespace(
+                    grade="genuine", estimated_bitrate_kbps=None,
+                    suspect_pct=0.0, tracks=[])
+                run_preimport_gates(
+                    path=tmpdir,
+                    mb_release_id="",
+                    label="Test",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=None,
+                    download_is_vbr=None,   # simulates resumed download
+                    cfg=cfg,
+                    db=db,  # type: ignore[arg-type]
+                    request_id=1,
+                    usernames=set(),
+                )
+            self.assertEqual(
+                mock_spectral.call_count, 1,
+                "resumed download with mp3 files on disk must still get "
+                "spectral gating after inspection resolves is_vbr=False")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_unresolvable_vbr_still_gates(self):
+        """is_vbr=None AND inspection also returns None → still gate.
+
+        The conservative default: genuine VBR uploads produce 'genuine'
+        spectral grades and fall through to import; forcing a genuine-VBR
+        upload through the gate is cheap and safe.
+        """
+        from unittest.mock import patch
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates, LocalFileInspection
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch("lib.preimport.inspect_local_files",
+                   return_value=LocalFileInspection(
+                       filetype="mp3", is_vbr=None)), \
+             patch("lib.preimport.spectral_analyze") as mock_spectral:
+            mock_spectral.return_value = SimpleNamespace(
+                grade="genuine", estimated_bitrate_kbps=None,
+                suspect_pct=0.0, tracks=[])
+            run_preimport_gates(
                 path="/tmp/dl",
                 mb_release_id="",
                 label="Test",
                 download_filetype="mp3",
                 download_min_bitrate_bps=None,
-                download_is_vbr=None,   # mutagen couldn't determine
+                download_is_vbr=None,
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=1,
                 usernames=set(),
             )
-
-        self.assertTrue(result.valid,
-                        "unknown VBR status must not reject at the gate")
         self.assertEqual(
-            mock_spectral.call_count, 0,
-            "spectral_analyze must NOT run when VBR status is unknown")
+            mock_spectral.call_count, 1,
+            "still gate when inspection can't resolve VBR; genuine grade "
+            "falls through to import")
+
+
+class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
+    """When BeetsDB returns no album at all (deleted, not yet imported, or
+    lookup failed), the preimport gate must NOT fabricate 'existing' state
+    from stale album_requests.min_bitrate — doing so would reject a valid
+    redownload against state that doesn't exist on disk.
+    """
+
+    def test_no_beets_album_means_no_fallback(self):
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        # Request row has leftover state from a prior import that no longer
+        # exists in beets (user deleted it, beets DB corrupt, etc.).
+        db.seed_request(make_request_row(
+            id=42,
+            min_bitrate=192,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+        ))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        # BeetsDB returns None → album not in beets.
+        def _mock_beets_db_no_album():
+            mock_beets = MagicMock()
+            mock_beets.get_album_info.return_value = None
+            mock_cls = MagicMock()
+            mock_cls.return_value.__enter__ = MagicMock(return_value=mock_beets)
+            mock_cls.return_value.__exit__ = MagicMock(return_value=False)
+            return mock_cls
+
+        # Download: suspect 192kbps. If the fallback (incorrectly) fired,
+        # it would set existing_min from stale min_bitrate=192 and
+        # existing_spectral from stale 128 → reject 192 <= 192. With the
+        # fallback correctly skipped (beets has no album → nothing on disk),
+        # decision should "import_no_exist" (suspect but nothing on disk).
+        with patch("lib.preimport.spectral_analyze",
+                   return_value=_analyze_result(
+                       "likely_transcode", 192, 80.0, 5)), \
+             patch("lib.beets_db.BeetsDB", _mock_beets_db_no_album()):
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-123",
+                label="Test",
+                download_filetype="mp3",
+                download_min_bitrate_bps=192_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames=set(),
+                propagate_download_to_existing=False,
+            )
+
+        self.assertTrue(
+            result.valid,
+            "redownload of a deleted album must not self-reject against "
+            "stale album_requests.min_bitrate")
+        self.assertIsNone(
+            result.existing_min_bitrate,
+            "existing_min_bitrate must stay None when beets has no album")
+        self.assertIsNone(
+            result.existing_spectral,
+            "existing_spectral must stay None when beets has no album")
 
 
 if __name__ == "__main__":
