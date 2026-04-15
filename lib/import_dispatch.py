@@ -891,6 +891,9 @@ def dispatch_import_from_db(
         # import subprocess and a failure there still means the files
         # ended up in failed_imports/ unchanged.
         propagate_download_to_existing=False,
+        # Reuse the inspection computed for the nested-layout gate to
+        # avoid a second mutagen walk (~100ms per album).
+        precomputed_inspection=inspection,
     )
 
     if not preimport.valid:

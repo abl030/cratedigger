@@ -295,6 +295,7 @@ def run_preimport_gates(
     request_id: int | None = None,
     usernames: set[str] | None = None,
     propagate_download_to_existing: bool = True,
+    precomputed_inspection: "LocalFileInspection | None" = None,
 ) -> PreImportGateResult:
     """Run shared pre-import gates: audio integrity, then spectral transcode detection.
 
@@ -369,10 +370,23 @@ def run_preimport_gates(
     # VBR transcode masquerading as V0 (~180kbps avg). Always inspect MP3
     # downloads so we have avg data; a mutagen walk on a 12-track album is
     # ~100ms and far cheaper than the spectral analysis it might save.
+    #
+    # Asymmetry note: slskd's ``is_vbr`` wins over inspection (only fills
+    # when the caller passed None). This preserves uploader intent — slskd
+    # reports what the uploader tagged the file as, and overriding that
+    # with mutagen's readout on potentially-repaired headers could flip a
+    # genuine CBR to VBR or vice versa. The force/manual path passes
+    # inspection's ``is_vbr`` as ``download_is_vbr`` directly, so neither
+    # source is lost.
+    #
+    # ``precomputed_inspection`` lets the force/manual path (which already
+    # inspected to decide the nested-layout gate) avoid a second mutagen
+    # walk. Auto path passes None and does the walk here.
     avg_bitrate_bps: int | None = None
     filetype_lower = (download_filetype or "").lower()
     if "mp3" in filetype_lower and "flac" not in filetype_lower:
-        inspection = inspect_local_files(path)
+        inspection = (precomputed_inspection if precomputed_inspection is not None
+                      else inspect_local_files(path))
         if download_is_vbr is None and inspection.is_vbr is not None:
             download_is_vbr = inspection.is_vbr
         if download_min_bitrate_bps is None:
