@@ -901,6 +901,17 @@ def cmd_manual_import(db, args):
         print(f"  Request {request_id} has no MusicBrainz release ID.")
         return
 
+    # 2. Resolve and verify the path — matches cmd_force_import so a
+    # manual-import can accept the same relative paths (e.g.
+    # "failed_imports/Foo") without requiring the user to pre-absolutize.
+    resolved_path = _resolve_failed_path(path)
+    if not resolved_path:
+        print(f"  Files not found at: {path}")
+        if not os.path.isabs(path):
+            print(f"  (also tried: {', '.join(os.path.join(b, path) for b in SLSKD_DOWNLOAD_DIRS)})")
+        return
+    path = resolved_path
+
     print(f"  Manual import: {req['artist_name']} - {req['album_title']}")
     print(f"  Path: {path}")
     print(f"  MBID: {mbid}")
