@@ -839,7 +839,9 @@ def dispatch_import_from_db(
             detail=detail,
             error=None,
             requeue=False,
-            outcome_label="rejected",
+            # Preserve source attribution: let SQL queries distinguish
+            # gate-rejected force vs manual imports via download_log.outcome.
+            outcome_label=outcome_label,
             validation_result=ValidationResult(
                 distance=0.0,
                 scenario="nested_layout",
@@ -898,7 +900,9 @@ def dispatch_import_from_db(
             detail=preimport.detail,
             error=None,
             requeue=False,
-            outcome_label="rejected",
+            # Preserve source attribution: gate-rejected force/manual
+            # imports stay filterable by download_log.outcome.
+            outcome_label=outcome_label,
             validation_result=ValidationResult(
                 distance=0.0,
                 scenario=preimport.scenario or "preimport_reject",
@@ -914,9 +918,10 @@ def dispatch_import_from_db(
 
     # Compute override from DB state — grade-aware: current_spectral_bitrate only
     # lowers the override when current_spectral_grade is suspect/likely_transcode.
-    # Re-read the request row so we pick up the spectral state that preimport
-    # just wrote (it propagates download spectral for never-before-analyzed
-    # albums — this makes the downgrade check honest).
+    # Re-read the request row so we pick up the measured existing spectral that
+    # run_preimport_gates just wrote via _persist_spectral_state. (Force/manual
+    # paths pass propagate_download_to_existing=False, so no download-as-proxy
+    # propagation happens — we only pick up what beets actually measured.)
     req = db.get_request(request_id) or req
     override_min_bitrate = compute_effective_override_bitrate(
         req.get("min_bitrate"),
