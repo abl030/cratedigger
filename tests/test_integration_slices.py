@@ -24,12 +24,8 @@ from lib.quality import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
-    make_ctx_with_fake_db,
-    make_download_file,
-    make_grab_list_entry,
     make_import_result,
     make_request_row,
-    make_validation_result,
     patch_dispatch_externals,
 )
 
@@ -414,27 +410,21 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
 
 
 class TestSpectralPropagationSlice(unittest.TestCase):
-    """Integration slice: gather spectral context then apply real decision."""
+    """Integration slice: shared run_preimport_gates updates spectral state + denylists.
+
+    Exercises the pre-import gate pipeline that both the auto-import path
+    (lib.download._process_beets_validation) and the force/manual-import path
+    (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves the
+    function does its side effects — spectral state write + denylist —
+    consistently regardless of caller.
+    """
 
     def test_suspect_download_updates_current_spectral_and_denylists(self):
-        from lib.download import _apply_spectral_decision, _gather_spectral_context
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        ctx = make_ctx_with_fake_db(db)
-        album = make_grab_list_entry(
-            db_request_id=42,
-            mb_release_id="mbid-123",
-            files=[make_download_file(
-                filename="user1\\Music\\01 - Track.mp3",
-                file_dir="user1\\Music",
-                username="user1",
-                bitRate=320,
-                isVariableBitRate=False,
-            )],
-            filetype="mp3",
-        )
-        bv_result = make_validation_result()
         beets_info = AlbumInfo(
             album_id=1,
             track_count=10,
@@ -444,39 +434,46 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             is_cbr=True,
             album_path="/Beets/Test",
         )
+        cfg = SoularrConfig(audio_check_mode="off")
 
         with patch(
-            "lib.download.spectral_analyze",
+            "lib.preimport.spectral_analyze",
             side_effect=[
                 SimpleNamespace(
                     grade="suspect",
                     estimated_bitrate_kbps=128,
                     suspect_pct=90.0,
+                    tracks=[],
                 ),
                 SimpleNamespace(
                     grade="genuine",
                     estimated_bitrate_kbps=320,
                     suspect_pct=0.0,
+                    tracks=[],
                 ),
             ],
-        ), patch("lib.download.BeetsDB", _mock_beets_db(beets_info)), \
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            spec_ctx = _gather_spectral_context(album, "/tmp/download", ctx)
             with self.assertLogs("soularr", level="WARNING") as logs:
-                _apply_spectral_decision(
-                    album,
-                    bv_result,
-                    spec_ctx,
-                    "/tmp/download",
-                    ctx,
+                result = run_preimport_gates(
+                    path="/tmp/download",
+                    mb_release_id="mbid-123",
+                    label="Test Artist - Test Album",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=320_000,
+                    download_is_vbr=False,
+                    cfg=cfg,
+                    db=db,  # type: ignore[arg-type]
+                    request_id=42,
+                    usernames={"user1"},
                 )
 
         row = db.request(42)
         self.assertIn("SPECTRAL REJECT", "\n".join(logs.output))
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertEqual(row["current_spectral_bitrate"], 320)
-        self.assertFalse(bv_result.valid)
-        self.assertEqual(bv_result.scenario, "spectral_reject")
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "spectral_reject")
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(db.denylist[0].username, "user1")
         self.assertIn("spectral: 128kbps <= existing 320kbps",

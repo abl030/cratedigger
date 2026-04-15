@@ -759,9 +759,11 @@ def dispatch_import_from_db(
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
-    Calls dispatch_import_core directly with plain params — no DatabaseSource
-    wrapper, no monkey-patching. All quality checks (downgrade prevention,
-    quality gate, meelo scan, denylist) run identically to auto-import.
+    Runs the same pre-import gates (audio integrity + spectral transcode
+    detection) as the auto path via ``lib.preimport.run_preimport_gates``
+    — only the beets *distance* check is skipped when ``force=True``.
+    All other quality checks (downgrade prevention, quality gate, meelo scan,
+    denylist) run identically to auto-import.
 
     Args:
         db: PipelineDB instance
@@ -772,6 +774,7 @@ def dispatch_import_from_db(
         source_username: Original Soulseek username for force-import audit/denylist flows
     """
     from lib.grab_list import DownloadFile
+    from lib.preimport import inspect_local_files, run_preimport_gates
 
     req = db.get_request(request_id)
     if not req:
@@ -795,8 +798,67 @@ def dispatch_import_from_db(
             username=source_username, size=0,
         )]
 
+    label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
+
+    # --- Shared pre-import gates (audio + spectral) ---
+    # Force only skips the beets distance check (--force in import_one.py);
+    # audio integrity and spectral transcode detection always run so a
+    # force/manual import can't quietly replace an existing copy with a
+    # transcode the auto path would have rejected.
+    inspection = inspect_local_files(failed_path)
+    preimport = run_preimport_gates(
+        path=failed_path,
+        mb_release_id=mbid,
+        label=label,
+        download_filetype=inspection.filetype,
+        download_min_bitrate_bps=inspection.min_bitrate_bps,
+        download_is_vbr=inspection.is_vbr,
+        cfg=cfg,
+        db=db,
+        request_id=request_id,
+        usernames={source_username} if source_username else set(),
+    )
+
+    if not preimport.valid:
+        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
+        logger.warning(
+            f"{mode} REJECTED (preimport gate): {label} "
+            f"scenario={preimport.scenario} detail={preimport.detail}")
+
+        dl_info = DownloadInfo(
+            username=source_username,
+            filetype=inspection.filetype or None,
+            bitrate=inspection.min_bitrate_bps,
+            is_vbr=inspection.is_vbr,
+            download_spectral=preimport.download_spectral,
+            current_spectral=preimport.existing_spectral,
+            existing_min_bitrate=preimport.existing_min_bitrate,
+        )
+        _record_rejection_and_maybe_requeue(
+            db, request_id, dl_info,
+            distance=0.0,
+            scenario=preimport.scenario or "preimport_reject",
+            detail=preimport.detail,
+            error=None,
+            requeue=False,
+            outcome_label="rejected",
+            validation_result=ValidationResult(
+                distance=0.0,
+                scenario=preimport.scenario or "preimport_reject",
+                detail=preimport.detail,
+            ).to_json(),
+            staged_path=failed_path,
+        )
+        return DispatchOutcome(
+            success=False,
+            message=f"Pre-import gate rejected: {preimport.detail or preimport.scenario}")
+
     # Compute override from DB state — grade-aware: current_spectral_bitrate only
     # lowers the override when current_spectral_grade is suspect/likely_transcode.
+    # Re-read the request row so we pick up the spectral state that preimport
+    # just wrote (it propagates download spectral for never-before-analyzed
+    # albums — this makes the downgrade check honest).
+    req = db.get_request(request_id) or req
     override_min_bitrate = compute_effective_override_bitrate(
         req.get("min_bitrate"),
         req.get("current_spectral_bitrate"),
@@ -806,14 +868,22 @@ def dispatch_import_from_db(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
-        label=f"{req.get('artist_name', '')} - {req.get('album_title', '')}",
+        label=label,
         force=force,
         override_min_bitrate=override_min_bitrate,
         target_format=req.get("target_format"),
         verified_lossless_target=cfg.verified_lossless_target,
         beets_harness_path=cfg.beets_harness_path,
         db=db,
-        dl_info=DownloadInfo(username=source_username),
+        dl_info=DownloadInfo(
+            username=source_username,
+            filetype=inspection.filetype or None,
+            bitrate=inspection.min_bitrate_bps,
+            is_vbr=inspection.is_vbr,
+            download_spectral=preimport.download_spectral,
+            current_spectral=preimport.existing_spectral,
+            existing_min_bitrate=preimport.existing_min_bitrate,
+        ),
         distance=0.0,
         scenario="force_import" if force else "manual_import",
         files=files,

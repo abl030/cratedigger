@@ -17,18 +17,14 @@ from typing import Any, Callable, TYPE_CHECKING
 import music_tag
 
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.pipeline_db import RequestSpectralStateUpdate
-from lib.quality import (spectral_import_decision, SpectralContext,
-                         SpectralMeasurement,
-                         ActiveDownloadState, ActiveDownloadFileState,
+from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, decide_download_action,
                          extract_usernames,
                          rejection_backfill_override)
 from lib.import_dispatch import (_build_download_info, dispatch_import)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
-                      repair_mp3_headers, validate_audio, log_validation_result)
-from lib.beets_db import BeetsDB
+                      log_validation_result)
 
 if TYPE_CHECKING:
     from lib.context import SoularrContext
@@ -180,58 +176,6 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
     return bool(downloads) and remote_queue_count == len(downloads)
 
 
-# === Spectral context gathering ===
-
-def _gather_spectral_context(album_data: GrabListEntry, import_folder: str,
-                             ctx: SoularrContext) -> SpectralContext:
-    """Gather spectral analysis data for a non-VBR MP3 download.
-
-    Runs spectral analysis on the downloaded files and (if the album exists
-    in beets) on the existing files for comparison. Returns a SpectralContext
-    with all data needed by spectral_import_decision().
-    """
-    dl_pre = _build_download_info(album_data)
-    filetype_str = (dl_pre.filetype or "").lower()
-    is_vbr = dl_pre.is_vbr or False
-    is_mp3 = "mp3" in filetype_str and "flac" not in filetype_str
-    if not (is_mp3 and not is_vbr):
-        return SpectralContext(needs_check=False)
-
-    spec_ctx = SpectralContext(needs_check=True)
-    try:
-        spectral_result = spectral_analyze(import_folder, trim_seconds=30)
-        spec_ctx.grade = spectral_result.grade
-        spec_ctx.bitrate = spectral_result.estimated_bitrate_kbps
-        spec_ctx.suspect_pct = spectral_result.suspect_pct
-        logger.info(f"SPECTRAL: {album_data.artist} - {album_data.title} "
-                    f"grade={spec_ctx.grade}, estimated_bitrate={spec_ctx.bitrate}kbps, "
-                    f"suspect={spec_ctx.suspect_pct:.0f}%")
-        # Check existing beets files for comparison
-        mb_id = album_data.mb_release_id
-        if mb_id:
-            try:
-                with BeetsDB() as beets:
-                    existing_info = beets.get_album_info(
-                        mb_id, ctx.cfg.quality_ranks)
-                if existing_info:
-                    spec_ctx.existing_min_bitrate = existing_info.min_bitrate_kbps
-                    if os.path.isdir(existing_info.album_path):
-                        existing_spectral = spectral_analyze(
-                            existing_info.album_path, trim_seconds=30)
-                        spec_ctx.existing_spectral_bitrate = (
-                            existing_spectral.estimated_bitrate_kbps)
-                        spec_ctx.existing_spectral_grade = existing_spectral.grade
-                        logger.info(
-                            f"SPECTRAL: existing on disk: "
-                            f"grade={existing_spectral.grade}, "
-                            f"estimated_bitrate="
-                            f"{existing_spectral.estimated_bitrate_kbps}kbps, "
-                            f"beets_min={existing_info.min_bitrate_kbps}kbps")
-            except Exception:
-                logger.exception("SPECTRAL: failed to check existing files")
-    except Exception:
-        logger.exception(f"SPECTRAL: failed for {album_data.artist} - {album_data.title}")
-    return spec_ctx
 
 
 # === Download completion processing ===
@@ -302,8 +246,15 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
 
 def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath: str,
                               ctx: SoularrContext) -> None:
-    """Beets validation sub-path of process_completed_album."""
+    """Beets validation sub-path of process_completed_album.
+
+    After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
+    for the shared audio + spectral gates. The force/manual-import path
+    (``dispatch_import_from_db``) calls the same function — only the beets
+    distance check is path-specific.
+    """
     from lib.beets import beets_validate as _bv
+    from lib.preimport import run_preimport_gates
     bv_result = _bv(ctx.cfg.beets_harness_path, import_folder_fullpath,
                     album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
     # Populate source info
@@ -312,115 +263,35 @@ def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath:
     bv_result.download_folder = import_folder_fullpath
 
     if bv_result.valid:
-        repair_mp3_headers(import_folder_fullpath)
-        audio_result = validate_audio(import_folder_fullpath, ctx.cfg.audio_check_mode)
-        if not audio_result.valid:
+        dl_pre = _build_download_info(album_data)
+        db = (ctx.pipeline_db_source._get_db()
+              if ctx.pipeline_db_source is not None else None)
+        preimport = run_preimport_gates(
+            path=import_folder_fullpath,
+            mb_release_id=album_data.mb_release_id or "",
+            label=f"{album_data.artist} - {album_data.title}",
+            download_filetype=dl_pre.filetype or "",
+            download_min_bitrate_bps=dl_pre.bitrate,
+            download_is_vbr=dl_pre.is_vbr,
+            cfg=ctx.cfg,
+            db=db,
+            request_id=album_data.db_request_id,
+            usernames=usernames_pre,
+        )
+        album_data.download_spectral = preimport.download_spectral
+        album_data.current_spectral = preimport.existing_spectral
+        album_data.current_min_bitrate = preimport.existing_min_bitrate
+        if not preimport.valid:
             bv_result.valid = False
-            bv_result.scenario = "audio_corrupt"
-            bv_result.detail = audio_result.error
-            bv_result.corrupt_files = [
-                name for name, _err in audio_result.failed_files]
-
-    # Spectral check for non-VBR MP3 downloads
-    if bv_result.valid:
-        spec_ctx = _gather_spectral_context(album_data, import_folder_fullpath, ctx)
-        if spec_ctx.needs_check and spec_ctx.grade:
-            _apply_spectral_decision(album_data, bv_result, spec_ctx,
-                                     import_folder_fullpath, ctx)
+            bv_result.scenario = preimport.scenario
+            bv_result.detail = preimport.detail
+            if preimport.corrupt_files:
+                bv_result.corrupt_files = preimport.corrupt_files
 
     if bv_result.valid:
         _handle_valid_result(album_data, bv_result, import_folder_fullpath, ctx)
     else:
         _handle_rejected_result(album_data, bv_result, import_folder_fullpath, ctx)
-
-
-def _apply_spectral_decision(album_data: GrabListEntry, bv_result: ValidationResult,
-                             spec_ctx: SpectralContext,
-                             import_folder_fullpath: str,
-                             ctx: SoularrContext) -> None:
-    """Apply spectral import decision and update album_data/bv_result accordingly."""
-    album_data.download_spectral = SpectralMeasurement.from_parts(
-        spec_ctx.grade, spec_ctx.bitrate)
-    album_data.current_spectral = SpectralMeasurement.from_parts(
-        spec_ctx.existing_spectral_grade, spec_ctx.existing_spectral_bitrate)
-    album_data.current_min_bitrate = spec_ctx.existing_min_bitrate
-
-    # Write on-disk spectral data back to album_requests.
-    # When on-disk spectral is NULL and the download has spectral, propagate
-    # the download's spectral as on-disk — on a downgrade (same tier), the
-    # download's spectral characterizes the same quality tier as what's on disk.
-    request_id = album_data.db_request_id
-    if request_id and ctx.pipeline_db_source:
-        try:
-            spectral_to_write = album_data.current_spectral
-            if (spectral_to_write is None
-                    and album_data.download_spectral is not None
-                    and album_data.current_min_bitrate is not None):
-                # Only propagate when something IS on disk but lacks spectral data.
-                # Without the min_bitrate guard, a new album (nothing on disk) would
-                # adopt the download's spectral as "existing", then reject itself.
-                spectral_to_write = album_data.download_spectral
-                album_data.current_spectral = spectral_to_write
-                logger.info(
-                    f"SPECTRAL PROPAGATE: {album_data.artist} - {album_data.title}"
-                    f" on-disk spectral=NULL, adopting download spectral"
-                    f" grade={spectral_to_write.grade}")
-            if spectral_to_write is not None:
-                db = ctx.pipeline_db_source._get_db()
-                db.update_spectral_state(
-                    request_id,
-                    RequestSpectralStateUpdate(
-                        current=spectral_to_write,
-                    ),
-                )
-        except Exception:
-            logger.exception("Failed to update on-disk spectral data")
-
-    new_quality = spec_ctx.bitrate
-    existing_quality = (
-        album_data.current_spectral.bitrate_kbps
-        if album_data.current_spectral is not None
-        else 0
-    )
-    # Effective existing: matches what spectral_import_decision() uses internally
-    effective_existing = existing_quality or spec_ctx.existing_min_bitrate or 0
-    label = f"{album_data.artist} - {album_data.title}"
-
-    spectral_decision = spectral_import_decision(
-        spec_ctx.grade, new_quality, existing_quality,
-        existing_min_bitrate=spec_ctx.existing_min_bitrate)
-
-    if spectral_decision == "reject":
-        logger.warning(
-            f"SPECTRAL REJECT: {label} "
-            f"new spectral {new_quality}kbps <= existing {effective_existing}kbps")
-        usernames = set(f.username for f in album_data.files if f.username)
-        if request_id and ctx.pipeline_db_source:
-            db = ctx.pipeline_db_source._get_db()
-            for username in usernames:
-                db.add_denylist(request_id, username,
-                                f"spectral: {new_quality}kbps <= existing {effective_existing}kbps")
-            logger.info(f"  Denylisted {usernames} for request {request_id}")
-        # Set bv_result fields so _handle_rejected_result logs one row with spectral detail
-        bv_result.valid = False
-        bv_result.scenario = "spectral_reject"
-        bv_result.detail = f"spectral {new_quality}kbps <= existing {effective_existing}kbps"
-        # Attach spectral info to album_data so _handle_rejected_result picks it up
-        album_data.download_spectral = SpectralMeasurement.from_parts(
-            spec_ctx.grade, new_quality)
-        if album_data.current_spectral is not None:
-            album_data.current_spectral = SpectralMeasurement(
-                grade=album_data.current_spectral.grade,
-                bitrate_kbps=existing_quality,
-            )
-    elif spectral_decision == "import_upgrade":
-        logger.info(
-            f"SPECTRAL UPGRADE: {label} "
-            f"suspect at {new_quality}kbps but > existing {effective_existing}kbps, importing")
-    elif spectral_decision == "import_no_exist":
-        logger.info(
-            f"SPECTRAL: {label} "
-            f"suspect at {new_quality}kbps but no existing album, importing")
 
 
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,

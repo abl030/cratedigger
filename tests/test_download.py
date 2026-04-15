@@ -1,8 +1,12 @@
 """Tests for lib/download.py — download processing functions.
 
-Tests _build_download_info, _gather_spectral_context, cancel_and_delete,
-slskd_download_status, downloads_all_done, poll_active_downloads, grab_most_wanted
-(extracted from soularr.py).
+Tests _build_download_info, cancel_and_delete, slskd_download_status,
+downloads_all_done, poll_active_downloads, grab_most_wanted.
+
+Pre-import gate behavior (audio integrity + spectral transcode detection)
+is shared with the force/manual import paths and tested against
+``lib.preimport.run_preimport_gates`` in ``tests/test_force_import_gates.py``
+and ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 
 import unittest
@@ -12,13 +16,11 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
-from lib.quality import SpectralContext
 from tests.helpers import (
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
-    make_spectral_context,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -357,148 +359,6 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(len(result), 0)
-
-
-class TestGatherSpectralContextFunction(unittest.TestCase):
-    """Test the actual _gather_spectral_context function from lib/download."""
-
-    def test_flac_returns_no_check(self):
-        from lib.download import _gather_spectral_context
-        files = [make_download_file(filename="01.flac", isVariableBitRate=False)]
-        album = make_grab_list_entry(files=files, filetype="flac")
-        ctx = _make_ctx()
-        result = _gather_spectral_context(album, "/tmp/folder", ctx)
-        self.assertIsInstance(result, SpectralContext)
-        self.assertFalse(result.needs_check)
-
-    def test_vbr_mp3_returns_no_check(self):
-        from lib.download import _gather_spectral_context
-        files = [make_download_file(isVariableBitRate=True)]
-        album = make_grab_list_entry(files=files, filetype="mp3")
-        ctx = _make_ctx()
-        result = _gather_spectral_context(album, "/tmp/folder", ctx)
-        self.assertFalse(result.needs_check)
-
-    @patch("lib.download.spectral_analyze")
-    def test_cbr_mp3_runs_analysis(self, mock_spectral):
-        from lib.download import _gather_spectral_context
-        mock_spectral.return_value = MagicMock(
-            grade="genuine", estimated_bitrate_kbps=320, suspect_pct=0.0)
-        files = [make_download_file(bitRate=320, isVariableBitRate=False)]
-        album = make_grab_list_entry(files=files, filetype="mp3",
-                                     mb_release_id="")
-        ctx = _make_ctx()
-        result = _gather_spectral_context(album, "/tmp/folder", ctx)
-        self.assertTrue(result.needs_check)
-        self.assertEqual(result.grade, "genuine")
-        self.assertEqual(result.bitrate, 320)
-
-    @patch("lib.download.BeetsDB")
-    @patch("lib.download.spectral_analyze")
-    def test_cbr_mp3_checks_existing(self, mock_spectral, mock_beets_cls):
-        from lib.download import _gather_spectral_context
-        # New download spectral
-        mock_spectral.return_value = MagicMock(
-            grade="suspect", estimated_bitrate_kbps=192, suspect_pct=80.0)
-        # Existing beets album
-        mock_beets = MagicMock()
-        mock_beets.get_album_info.return_value = MagicMock(
-            min_bitrate_kbps=256, album_path="/tmp/existing")
-        mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-        mock_beets.__exit__ = MagicMock(return_value=False)
-        mock_beets_cls.return_value = mock_beets
-
-        files = [make_download_file(bitRate=320, isVariableBitRate=False)]
-        album = make_grab_list_entry(files=files, filetype="mp3")
-        ctx = _make_ctx()
-
-        with patch("os.path.isdir", return_value=True):
-            # Second spectral call for existing files
-            mock_spectral.side_effect = [
-                MagicMock(grade="suspect", estimated_bitrate_kbps=192, suspect_pct=80.0),
-                MagicMock(grade="genuine", estimated_bitrate_kbps=310, suspect_pct=0.0),
-            ]
-            result = _gather_spectral_context(album, "/tmp/folder", ctx)
-
-        self.assertTrue(result.needs_check)
-        self.assertEqual(result.existing_min_bitrate, 256)
-        self.assertEqual(result.existing_spectral_bitrate, 310)
-
-
-class TestApplySpectralDecision(unittest.TestCase):
-    """Tests spectral state propagation via FakePipelineDB."""
-
-    @patch("lib.download.spectral_import_decision", return_value="accept")
-    def test_existing_genuine_state_propagates_none_bitrate(self, _mock_decision):
-        from lib.download import _apply_spectral_decision
-        from tests.fakes import FakePipelineDB
-        from tests.helpers import make_request_row, make_validation_result
-
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=1))
-        album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = make_ctx_with_fake_db(fake_db)
-        bv_result = make_validation_result()
-        spec_ctx = make_spectral_context(
-            needs_check=True,
-            grade="genuine",
-            existing_min_bitrate=226,
-            existing_spectral_grade="genuine",
-        )
-
-        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
-
-        row = fake_db.request(1)
-        self.assertEqual(row["current_spectral_grade"], "genuine")
-        self.assertIsNone(row["current_spectral_bitrate"])
-
-    def test_new_album_transcode_not_rejected_by_self_propagation(self):
-        """A suspect 96kbps download with nothing on disk should not be rejected."""
-        from lib.download import _apply_spectral_decision
-        from tests.fakes import FakePipelineDB
-        from tests.helpers import make_request_row, make_validation_result
-
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=1))
-        album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = make_ctx_with_fake_db(fake_db)
-        bv_result = make_validation_result()
-        # Nothing on disk: all existing fields are None
-        spec_ctx = make_spectral_context(
-            needs_check=True,
-            grade="likely_transcode",
-            bitrate=96,
-        )
-
-        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
-
-        self.assertTrue(bv_result.valid,
-                        "A suspect download with nothing on disk should not be rejected")
-
-    def test_propagation_still_works_when_album_on_disk_lacks_spectral(self):
-        """Album on disk with no spectral adopts download's spectral as current."""
-        from lib.download import _apply_spectral_decision
-        from tests.fakes import FakePipelineDB
-        from tests.helpers import make_request_row, make_validation_result
-
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=1))
-        album = make_grab_list_entry(db_request_id=1, db_source="request")
-        ctx = make_ctx_with_fake_db(fake_db)
-        bv_result = make_validation_result()
-        # Album on disk at 256kbps, no spectral data yet
-        spec_ctx = make_spectral_context(
-            needs_check=True,
-            grade="suspect",
-            bitrate=192,
-            existing_min_bitrate=256,
-        )
-
-        _apply_spectral_decision(album, bv_result, spec_ctx, "/tmp/folder", ctx)
-
-        row = fake_db.request(1)
-        self.assertEqual(row["current_spectral_grade"], "suspect")
-        self.assertEqual(row["current_spectral_bitrate"], 192)
 
 
 class TestGrabMostWanted(unittest.TestCase):
