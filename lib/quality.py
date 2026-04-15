@@ -1145,9 +1145,16 @@ def _selected_bitrate(m: AudioQualityMeasurement,
     Keeps the metric dispatch in one place — compare_quality does not
     peek into m.avg / m.median / m.min directly.
     """
-    if cfg.bitrate_metric is RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
+    # Use `==` not `is`: RankBitrateMetric is a StrEnum, and the project
+    # has modules that get loaded under two names (``lib.quality`` and
+    # ``quality`` via the PYTHONPATH ``lib`` entry). When a cfg constructed
+    # in one module is compared with an enum member from the other, they
+    # are equal by string value but NOT the same object. Identity-compare
+    # here silently fell through to min_bitrate, breaking the AVG policy
+    # in the web simulator for VBR albums (issue #93 post-deploy probe).
+    if cfg.bitrate_metric == RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
         return m.avg_bitrate_kbps
-    if (cfg.bitrate_metric is RankBitrateMetric.MEDIAN
+    if (cfg.bitrate_metric == RankBitrateMetric.MEDIAN
             and m.median_bitrate_kbps is not None):
         return m.median_bitrate_kbps
     return m.min_bitrate_kbps

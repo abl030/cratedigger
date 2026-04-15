@@ -832,6 +832,55 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
         self.assertEqual(r["final_status"], "wanted")
 
+    def test_selected_bitrate_survives_dual_module_load(self):
+        """Regression for the live deploy bug caught on PR #94.
+
+        ``web/routes/pipeline.py`` used to do
+        ``from quality import full_pipeline_decision`` while ``cfg`` was
+        constructed via ``lib.config`` → ``lib.quality``. Python loaded
+        quality.py twice (once as ``quality``, once as ``lib.quality``)
+        and ``_selected_bitrate``'s ``cfg.bitrate_metric is
+        RankBitrateMetric.AVG`` identity comparison was False — it
+        silently fell through to min_bitrate, breaking AVG policy for
+        VBR albums in the simulator.
+
+        This test constructs a cfg whose bitrate_metric is a StrEnum
+        member EQUAL but not IDENTICAL to the one the function's scope
+        sees. The fix (use ``==`` not ``is``) must hold.
+        """
+        from enum import StrEnum
+        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
+                                 measurement_rank)
+
+        # Fake RankBitrateMetric-equivalent StrEnum: same string values,
+        # different class object. Under `is`, compares False; under `==`,
+        # compares True.
+        class ForeignRankBitrateMetric(StrEnum):
+            MIN = "min"
+            AVG = "avg"
+            MEDIAN = "median"
+
+        cfg = QualityRankConfig.defaults()
+        # Replace cfg.bitrate_metric with the foreign-class equivalent.
+        # dataclasses.replace since QualityRankConfig is frozen.
+        import dataclasses
+        foreign_cfg = dataclasses.replace(
+            cfg, bitrate_metric=ForeignRankBitrateMetric.AVG)  # type: ignore[arg-type]
+
+        m = AudioQualityMeasurement(
+            min_bitrate_kbps=200,
+            avg_bitrate_kbps=245,
+            median_bitrate_kbps=245,
+            format="MP3",
+            is_cbr=False,
+        )
+        # With `==` comparison the AVG policy picks avg=245 → TRANSPARENT.
+        # With `is` comparison it would fall through to min=200 → GOOD.
+        self.assertEqual(
+            measurement_rank(m, foreign_cfg).name, "TRANSPARENT",
+            "cfg.bitrate_metric comparison must be ==, not is — or a "
+            "cross-module-loaded cfg silently breaks the AVG policy")
+
     def test_existing_avg_bitrate_used_in_comparison(self):
         """existing_avg_bitrate flows into the existing measurement so the
         Stage 2 comparison uses the right metric under AVG policy."""

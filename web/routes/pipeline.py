@@ -10,10 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
-                         should_clear_lossless_search_override)
+                         should_clear_lossless_search_override,
+                         get_decision_tree, full_pipeline_decision)
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
 from lib.util import resolve_failed_path  # type: ignore[import-not-found]
-from quality import get_decision_tree, full_pipeline_decision  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
                              ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                              CLIFF_THRESHOLD_DB_PER_KHZ)
