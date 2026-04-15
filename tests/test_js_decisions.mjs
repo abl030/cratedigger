@@ -161,6 +161,8 @@ console.log('\nDS_PRESETS contract');
 for (const [name, preset] of Object.entries(DS_PRESETS)) {
   assert('avg_bitrate' in preset,
          `preset "${name}" missing avg_bitrate — stale field inherited from prior preset`);
+  assert('existing_avg_bitrate' in preset,
+         `preset "${name}" missing existing_avg_bitrate — stale field inherited from prior preset`);
 }
 
 // The vbr_v0 preset must represent genuine V0 (high avg → gate skips)

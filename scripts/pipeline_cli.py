@@ -761,6 +761,11 @@ def cmd_quality(db, args):
     for name, params in scenarios:
         result = full_pipeline_decision(
             existing_min_bitrate=min_br,
+            # Forward avg_bitrate too — under the default AVG policy the
+            # simulator must compare against the real album avg, not min,
+            # or VBR albums rank at the wrong tier in stage 2/3 output
+            # (issue #93 codex round 4).
+            existing_avg_bitrate=avg_br,
             existing_spectral_bitrate=current_br,
             override_min_bitrate=override_min_bitrate,
             existing_format=existing_format_hint,

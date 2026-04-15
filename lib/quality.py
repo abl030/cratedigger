@@ -2682,7 +2682,7 @@ def full_pipeline_decision(
 class OrphanInfo:
     """A detected inconsistency in pipeline DB state."""
     request_id: int
-    issue_type: str  # "corrupt_downloading", "stale_imported_path"
+    issue_type: str  # "corrupt_downloading", "orphaned_download"
     detail: str
 
 
@@ -2690,7 +2690,7 @@ class OrphanInfo:
 class RepairAction:
     """Suggested repair for a detected inconsistency."""
     request_id: int
-    action: str  # "reset_to_wanted", "clear_imported_path", "manual_review"
+    action: str  # "reset_to_wanted", "manual_review"
     detail: str
 
 
