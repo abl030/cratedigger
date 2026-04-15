@@ -22,7 +22,8 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          extract_usernames, narrow_override_on_downgrade,
                          rejection_backfill_override)
 from lib.transitions import apply_transition
-from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
+from lib.util import cleanup_disambiguation_orphans, repair_mp3_headers, trigger_meelo_clean
+from lib.preimport import inspect_local_files, run_preimport_gates
 
 if TYPE_CHECKING:
     from lib.config import SoularrConfig
@@ -774,7 +775,6 @@ def dispatch_import_from_db(
         source_username: Original Soulseek username for force-import audit/denylist flows
     """
     from lib.grab_list import DownloadFile
-    from lib.preimport import inspect_local_files, run_preimport_gates
 
     req = db.get_request(request_id)
     if not req:
@@ -805,6 +805,18 @@ def dispatch_import_from_db(
     # audio integrity and spectral transcode detection always run so a
     # force/manual import can't quietly replace an existing copy with a
     # transcode the auto path would have rejected.
+    #
+    # Repair MP3 headers BEFORE inspect_local_files — broken headers can make
+    # mutagen fail to read bitrate_mode, leaving download_is_vbr=None. Treated
+    # as CBR by the spectral gate, that would falsely reject a VBR album
+    # force-imported here (the auto path only gets headers repaired before
+    # validate_audio, but inspection metadata there comes from slskd, not
+    # filesystem scan — so the problem is unique to force/manual). Idempotent:
+    # run_preimport_gates still calls repair_mp3_headers internally.
+    try:
+        repair_mp3_headers(failed_path)
+    except Exception:
+        logger.debug("pre-inspect mp3 header repair failed", exc_info=True)
     inspection = inspect_local_files(failed_path)
     # download_log.soulseek_username can be a comma-joined list of peers for
     # multi-source downloads. Split before denylisting so a spectral reject

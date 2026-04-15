@@ -693,5 +693,121 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestAudioFailuresPreserveSubdirContext(unittest.TestCase):
+    """When validate_audio walks subdirectories, the failed-file list must
+    record the path relative to the audit root so multi-disc layouts don't
+    collapse ``CD1/01.mp3`` and ``CD2/01.mp3`` into the same entry.
+    """
+
+    def test_nested_failures_keep_subdir_in_name(self):
+        import os
+        from unittest.mock import patch
+        from lib.util import validate_audio
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            cd2 = os.path.join(tmpdir, "CD2")
+            os.makedirs(cd1)
+            os.makedirs(cd2)
+            with open(os.path.join(cd1, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            with open(os.path.join(cd2, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            # Both files fail
+            with patch("lib.util.sp.run") as mock_run:
+                from unittest.mock import MagicMock
+                mock_run.return_value = MagicMock(
+                    returncode=1, stderr="Invalid data")
+                result = validate_audio(tmpdir, "normal")
+            names = [name for name, _err in result.failed_files]
+            self.assertIn("CD1/01.mp3", names,
+                          f"CD1 path must survive in failed_files, got {names}")
+            self.assertIn("CD2/01.mp3", names,
+                          f"CD2 path must survive in failed_files, got {names}")
+
+
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestForceImportRepairsBeforeInspection(unittest.TestCase):
+    """Broken MP3 headers can prevent mutagen from reading bitrate_mode,
+    leaving download_is_vbr=None. The spectral gate then treats the folder
+    as CBR and can spectrally reject a VBR album that the auto path would
+    have skipped. ``dispatch_import_from_db`` must repair headers before
+    inspect_local_files so that VBR detection is accurate.
+    """
+
+    def test_repair_runs_before_inspect(self):
+        import os
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123"))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/Test")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True,
+            audio_check_mode="normal")
+
+        tmpdir = tempfile.mkdtemp()
+        with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+            f.write(b"x")
+
+        try:
+            call_order: list[str] = []
+            original_repair = __import__(
+                "lib.util", fromlist=["repair_mp3_headers"]).repair_mp3_headers
+            original_inspect = __import__(
+                "lib.preimport", fromlist=["inspect_local_files"]).inspect_local_files
+
+            def tracking_repair(p):
+                call_order.append("repair")
+                return original_repair(p)
+
+            def tracking_inspect(p):
+                call_order.append("inspect")
+                return original_inspect(p)
+
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.import_dispatch.repair_mp3_headers",
+                       side_effect=tracking_repair), \
+                 patch("lib.import_dispatch.inspect_local_files",
+                       side_effect=tracking_inspect), \
+                 patch("lib.preimport.validate_audio",
+                       return_value=SimpleNamespace(
+                           valid=True, error=None, failed_files=[])), \
+                 patch("lib.preimport.spectral_analyze",
+                       return_value=_analyze_result("genuine", None)):
+                ext.run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=_make_stdout(make_import_result(
+                        decision="import", new_min_bitrate=320)),
+                    stderr="")
+                dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="user1")
+
+            self.assertIn("repair", call_order,
+                          "repair_mp3_headers must run on force-import path")
+            self.assertIn("inspect", call_order,
+                          "inspect_local_files must run on force-import path")
+            self.assertLess(
+                call_order.index("repair"),
+                call_order.index("inspect"),
+                "repair_mp3_headers must run BEFORE inspect_local_files so "
+                "mutagen can read the repaired bitrate_mode")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
