@@ -627,7 +627,8 @@ EXPECTED_PARAMS = {
     "is_flac", "min_bitrate", "is_cbr",
     "is_vbr", "avg_bitrate",
     "spectral_grade", "spectral_bitrate",
-    "existing_min_bitrate", "existing_spectral_bitrate",
+    "existing_min_bitrate", "existing_avg_bitrate",
+    "existing_spectral_bitrate",
     "override_min_bitrate",
     "existing_format", "existing_is_cbr",
     "post_conversion_min_bitrate", "converted_count",
@@ -800,6 +801,51 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["stage1_spectral"], "reject")
         self.assertEqual(r["final_status"], "wanted")
         self.assertTrue(r["keep_searching"])
+
+    def test_avg_bitrate_flows_into_stage3_rank(self):
+        """Issue #93 round 4: avg_bitrate must flow past stage 0 into the
+        rank comparison. Under the default cfg.bitrate_metric=AVG policy,
+        a VBR V0 at min=200 / avg=245 must rank as TRANSPARENT (accepts).
+        Pre-fix: simulator used min=200 as avg → GOOD < EXCELLENT → requeue.
+        """
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=200, is_cbr=False,
+            is_vbr=True, avg_bitrate=245,
+        )
+        # Stage 0: avg >= threshold → skip
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
+        # Stage 2 uses AVG metric → 245 → TRANSPARENT → import
+        self.assertEqual(r["stage2_import"], "import")
+        # Stage 3 gate: AVG=245 passes EXCELLENT threshold → accept
+        self.assertEqual(r["stage3_quality_gate"], "accept")
+        self.assertEqual(r["final_status"], "imported")
+
+    def test_missing_avg_bitrate_falls_back_to_min(self):
+        """Backward-compat: callers that don't pass avg_bitrate get the
+        legacy behavior (avg == min). Protects existing scenarios that
+        only supply min_bitrate."""
+        # Same min=200 but no avg supplied → ranks on min=200 (GOOD < EXCELLENT)
+        # so the gate requeues for upgrade.
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=200, is_cbr=False,
+        )
+        self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
+        self.assertEqual(r["final_status"], "wanted")
+
+    def test_existing_avg_bitrate_used_in_comparison(self):
+        """existing_avg_bitrate flows into the existing measurement so the
+        Stage 2 comparison uses the right metric under AVG policy."""
+        # Existing is a VBR album at min=200 / avg=245 (TRANSPARENT).
+        # Incoming MP3 at min=210 / avg=210 (EXCELLENT) → worse, reject.
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=210, is_cbr=False,
+            is_vbr=True, avg_bitrate=210,
+            existing_min_bitrate=200,
+            existing_avg_bitrate=245,
+        )
+        # Stage 2 compares avg=210 (EXCELLENT) to existing avg=245 (TRANSPARENT)
+        # → worse → downgrade
+        self.assertEqual(r["stage2_import"], "downgrade")
 
     def test_stage0_flac_preserves_stage1(self):
         """FLAC path: stage 0 says skipped_flac but stage 1 (modeled as
