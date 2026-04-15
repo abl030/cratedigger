@@ -216,10 +216,20 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
         v = _str(key)
         return v in ("true", "1", "yes") if v else False
 
+    # is_vbr defaults to None (not False) so the simulator can tell
+    # "not supplied, derive from is_cbr" apart from "explicit CBR".
+    def _opt_bool(key: str) -> bool | None:
+        v = _str(key)
+        if v is None:
+            return None
+        return v in ("true", "1", "yes")
+
     result = full_pipeline_decision(
         is_flac=_bool("is_flac"),
         min_bitrate=_int("min_bitrate") or 0,
         is_cbr=_bool("is_cbr"),
+        is_vbr=_opt_bool("is_vbr"),
+        avg_bitrate=_int("avg_bitrate"),
         spectral_grade=_str("spectral_grade"),
         spectral_bitrate=_int("spectral_bitrate"),
         existing_min_bitrate=_int("existing_min_bitrate"),

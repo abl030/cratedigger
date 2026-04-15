@@ -104,13 +104,6 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
             apply_transition(db, issue.request_id, "wanted",
                              from_status="downloading")
             print(f"  [{issue.request_id}] Reset to wanted ({issue.issue_type})")
-        elif repair.action == "clear_imported_path":
-            db._execute(
-                "UPDATE album_requests SET imported_path = NULL, updated_at = NOW() "
-                "WHERE id = %s",
-                (issue.request_id,),
-            )
-            print(f"  [{issue.request_id}] Cleared stale imported_path")
         else:
             print(f"  [{issue.request_id}] Skipped: {repair.action} (manual review required)")
 

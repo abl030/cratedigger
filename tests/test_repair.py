@@ -4,7 +4,6 @@ import unittest
 
 from lib.quality import (
     OrphanInfo,
-    RepairAction,
     find_inconsistencies,
     find_orphaned_downloads,
     suggest_repair,
@@ -29,13 +28,29 @@ class TestFindInconsistencies(unittest.TestCase):
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 0)
 
-    def test_wanted_with_stale_imported_path(self):
+    def test_wanted_with_imported_path_is_fine(self):
+        """Issue #93: transcode_upgrade / quality-gate upgrade flows
+        mark_done (persisting imported_path to the real beets destination),
+        then re-queue the row to ``wanted`` to search for something better.
+        The files genuinely live at imported_path during that search, so
+        flagging the row as stale would wipe correct data on the next
+        ``repair.py fix``.
+        """
         rows = [{"id": 2, "status": "wanted",
                  "active_download_state": None,
-                 "imported_path": "/some/path"}]
+                 "imported_path": "/Beets/Artist/Album"}]
         issues = find_inconsistencies(rows)
-        self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].issue_type, "stale_imported_path")
+        self.assertEqual(len(issues), 0,
+                         "wanted + imported_path is a valid upgrade-search state")
+
+    def test_manual_with_imported_path_is_fine(self):
+        """Same rationale as wanted: manual status after a force-import
+        could legitimately carry imported_path until the row is cleared."""
+        rows = [{"id": 4, "status": "manual",
+                 "active_download_state": None,
+                 "imported_path": "/Beets/Artist/Album"}]
+        issues = find_inconsistencies(rows)
+        self.assertEqual(len(issues), 0)
 
     def test_imported_with_path_is_fine(self):
         rows = [{"id": 3, "status": "imported",
@@ -48,8 +63,8 @@ class TestFindInconsistencies(unittest.TestCase):
         rows = [
             {"id": 1, "status": "downloading", "active_download_state": None,
              "imported_path": None},
-            {"id": 2, "status": "wanted", "active_download_state": None,
-             "imported_path": "/stale"},
+            {"id": 2, "status": "downloading", "active_download_state": None,
+             "imported_path": None},
         ]
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 2)
@@ -133,12 +148,6 @@ class TestSuggestRepair(unittest.TestCase):
                            detail="no active_download_state")
         action = suggest_repair(issue)
         self.assertEqual(action.action, "reset_to_wanted")
-
-    def test_stale_imported_path(self):
-        issue = OrphanInfo(request_id=2, issue_type="stale_imported_path",
-                           detail="wanted but has imported_path")
-        action = suggest_repair(issue)
-        self.assertEqual(action.action, "clear_imported_path")
 
     def test_unknown_issue_type(self):
         issue = OrphanInfo(request_id=3, issue_type="unknown",

@@ -1441,6 +1441,45 @@ def parse_import_result(stdout_text: str) -> Optional[ImportResult]:
 # Pre-import spectral decision (MP3/CBR path in process_completed_album)
 # ---------------------------------------------------------------------------
 
+def spectral_gate_trigger(
+    *,
+    is_flac: bool,
+    is_cbr: bool | None,
+    is_vbr: bool | None = None,
+    avg_bitrate_kbps: int | None = None,
+    vbr_threshold_kbps: int,
+) -> str:
+    """Decide whether the preimport spectral gate would run on this file.
+
+    Mirrors ``lib.preimport._needs_spectral_check`` but operates on the
+    simulator's booleans (``is_flac`` / ``is_cbr``) instead of a filetype
+    string, so ``full_pipeline_decision`` and the web UI Decisions tab can
+    explain why the gate fired (or didn't) for a given file.
+
+    Returns one of:
+        "skipped_flac"          — FLACs use convert → V0 → transcode_detection,
+                                  not the MP3 preimport spectral gate
+        "skipped_vbr_high_avg"  — VBR MP3 with avg bitrate >= threshold;
+                                  genuine V0 falls through without analysis
+        "would_run"             — CBR MP3, unknown VBR, or VBR MP3 with avg
+                                  below / equal to / unknown
+
+    When ``is_vbr`` is None but ``is_cbr`` is known, ``is_vbr`` is derived
+    as ``not is_cbr``. Callers that have genuine ambiguity (mutagen failed
+    to read bitrate_mode) pass ``is_vbr=None`` AND ``is_cbr=None`` and the
+    function routes to "would_run" — the conservative choice.
+    """
+    if is_flac:
+        return "skipped_flac"
+    if is_vbr is None and is_cbr is not None:
+        is_vbr = not is_cbr
+    if not is_vbr:
+        return "would_run"
+    if avg_bitrate_kbps is not None and avg_bitrate_kbps >= vbr_threshold_kbps:
+        return "skipped_vbr_high_avg"
+    return "would_run"
+
+
 def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate,
                              existing_min_bitrate=None):
     """Decide whether to import a download based on spectral analysis.
@@ -2207,11 +2246,39 @@ def get_decision_tree(
                         "may be Opus, MP3, AAC, or any other supported format.",
             },
             {
+                "id": "mp3_spectral_gate",
+                "title": "Spectral Gate Trigger",
+                "path": "mp3",
+                "function": "spectral_gate_trigger",
+                "when": "MP3 downloads (pre-analysis decision, issue #93)",
+                "inputs": ["is_cbr", "is_vbr", "avg_bitrate",
+                           "cfg.mp3_vbr.excellent"],
+                "rules": [
+                    {"condition": "CBR MP3",
+                     "result": "would_run", "color": "amber",
+                     "effect": "classic transcode-cliff case"},
+                    {"condition": "VBR MP3 AND avg unknown",
+                     "result": "would_run", "color": "amber",
+                     "effect": "conservative default"},
+                    {"condition": f"VBR MP3 AND avg < {transcode_threshold}kbps",
+                     "result": "would_run", "color": "amber",
+                     "effect": "fake V0 transcode territory — analyze"},
+                    {"condition": f"VBR MP3 AND avg >= {transcode_threshold}kbps",
+                     "result": "skipped_vbr_high_avg", "color": "green",
+                     "effect": "genuine V0 range — skip to Quality Comparison"},
+                ],
+                "outcomes": ["would_run", "skipped_vbr_high_avg",
+                             "skipped_flac"],
+                "note": f"Threshold ({transcode_threshold}kbps) comes from "
+                        f"cfg.mp3_vbr.excellent — same V0 boundary "
+                        f"transcode_detection() uses (single source of truth)",
+            },
+            {
                 "id": "mp3_spectral",
-                "title": "CBR Spectral Check",
+                "title": "Spectral Decision",
                 "path": "mp3",
                 "function": "spectral_import_decision",
-                "when": "CBR MP3 downloads only (VBR skips this)",
+                "when": "MP3 downloads where the gate trigger said would_run",
                 "inputs": ["spectral_grade", "spectral_bitrate",
                            "existing_spectral_bitrate"],
                 "rules": [
@@ -2229,18 +2296,6 @@ def get_decision_tree(
                 ],
                 "outcomes": ["import", "import_upgrade", "import_no_exist",
                              "reject"],
-            },
-            {
-                "id": "mp3_vbr_note",
-                "title": "VBR MP3",
-                "path": "mp3",
-                "function": "(no spectral check)",
-                "when": "VBR MP3 downloads",
-                "inputs": [],
-                "rules": [
-                    {"condition": "VBR bitrate IS the quality signal",
-                     "result": "skip to Quality Comparison", "color": "green"},
-                ],
             },
             {
                 "id": "import_decision",
@@ -2341,6 +2396,13 @@ def full_pipeline_decision(
     is_flac,
     min_bitrate,
     is_cbr,
+    # VBR + avg bitrate for the preimport spectral gate trigger (issue #93).
+    # ``is_vbr`` defaults to ``not is_cbr`` when omitted so legacy callers
+    # retain current behavior. ``avg_bitrate`` gates VBR MP3 through spectral
+    # when below cfg.mp3_vbr.excellent — genuine V0 (~245kbps avg) skips,
+    # fake V0 (~180kbps avg) gets analyzed.
+    is_vbr: bool | None = None,
+    avg_bitrate: int | None = None,
     # Spectral analysis
     spectral_grade=None,
     spectral_bitrate=None,
@@ -2376,18 +2438,20 @@ def full_pipeline_decision(
 
     Returns a dict:
         {
-            "stage1_spectral": str,     # pre-import spectral decision
-            "stage2_import": str,       # import/downgrade/transcode decision
-            "stage3_quality_gate": str,  # post-import quality gate decision
-            "final_status": str,        # what the pipeline DB ends up as
-            "imported": bool,           # whether files were imported to beets
-            "denylisted": bool,         # whether source user gets denylisted
-            "keep_searching": bool,     # whether the system keeps looking for better
+            "stage0_spectral_gate": str,  # would spectral analysis run?
+            "stage1_spectral": str,       # pre-import spectral decision (None when gate skipped)
+            "stage2_import": str,         # import/downgrade/transcode decision
+            "stage3_quality_gate": str,   # post-import quality gate decision
+            "final_status": str,          # what the pipeline DB ends up as
+            "imported": bool,             # whether files were imported to beets
+            "denylisted": bool,           # whether source user gets denylisted
+            "keep_searching": bool,       # whether the system keeps looking for better
         }
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()
     result = {
+        "stage0_spectral_gate": None,
         "stage1_spectral": None,
         "stage2_import": None,
         "stage3_quality_gate": None,
@@ -2398,10 +2462,30 @@ def full_pipeline_decision(
         "target_final_format": None,
     }
 
+    # --- Stage 0: Spectral gate trigger (issue #93) ---
+    # Mirrors lib.preimport._needs_spectral_check. Tells the operator
+    # whether the preimport spectral gate would even run on this file,
+    # so a VBR MP3 transcode masquerading as V0 (avg < threshold) is
+    # distinguishable from genuine V0 in simulator output.
+    gate = spectral_gate_trigger(
+        is_flac=bool(is_flac),
+        is_cbr=is_cbr,
+        is_vbr=is_vbr,
+        avg_bitrate_kbps=avg_bitrate,
+        vbr_threshold_kbps=cfg.mp3_vbr.excellent,
+    )
+    result["stage0_spectral_gate"] = gate
+
     # --- Stage 1: Pre-import spectral (MP3/CBR path) ---
     # For FLACs, spectral runs inside import_one.py instead, but the
     # logic is the same: detect transcodes before importing.
-    if spectral_grade:
+    #
+    # Only run stage 1 when the gate would actually execute. For VBR MP3
+    # with high avg bitrate, production skips spectral entirely — so even
+    # if the caller supplies a spectral_grade, simulating that gate firing
+    # would misrepresent production behavior.
+    stage0_gates_stage1 = gate == "would_run" or is_flac
+    if spectral_grade and stage0_gates_stage1:
         result["stage1_spectral"] = spectral_import_decision(
             spectral_grade, spectral_bitrate, existing_spectral_bitrate or 0)
 
@@ -2630,26 +2714,24 @@ def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
 
     Checks:
     - downloading row with no active_download_state (corrupt crash recovery)
-    - wanted/manual row with stale imported_path
+
+    ``imported_path`` is NOT checked against status: it means "files are on
+    disk at this path" and survives a status=wanted re-queue (transcode
+    upgrade, quality-gate upgrade search). Clearing it on status=wanted
+    would wipe the correct beets destination for any album the pipeline is
+    actively searching for a better version of. See issue #93.
     """
     issues: list[OrphanInfo] = []
     for row in db_rows:
         rid = row["id"]
         status = row["status"]
         state = row.get("active_download_state")
-        path = row.get("imported_path")
 
         if status == "downloading" and not state:
             issues.append(OrphanInfo(
                 request_id=rid,
                 issue_type="corrupt_downloading",
                 detail="downloading with no active_download_state"))
-
-        if status in ("wanted", "manual") and path:
-            issues.append(OrphanInfo(
-                request_id=rid,
-                issue_type="stale_imported_path",
-                detail=f"status={status} but imported_path={path}"))
 
     return issues
 
@@ -2661,11 +2743,6 @@ def suggest_repair(issue: OrphanInfo) -> RepairAction:
             request_id=issue.request_id,
             action="reset_to_wanted",
             detail="Reset downloading row to wanted (transfers gone)")
-    elif issue.issue_type == "stale_imported_path":
-        return RepairAction(
-            request_id=issue.request_id,
-            action="clear_imported_path",
-            detail="Clear stale imported_path on non-imported row")
     else:
         return RepairAction(
             request_id=issue.request_id,
