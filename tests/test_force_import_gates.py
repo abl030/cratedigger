@@ -1142,6 +1142,68 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
             "existing_spectral must stay None when beets has no album")
 
 
+class TestGateRejectionPreservesOutcomeLabel(unittest.TestCase):
+    """Gate-rejected force/manual imports must keep their outcome tag
+    (``force_import``/``manual_import``) in ``download_log.outcome`` so SQL
+    queries can filter by source. Previously the rejection path wrote a
+    generic ``"rejected"``, which made it impossible to tell a gate-rejected
+    force-import from any other rejection after the fact.
+    """
+
+    def _run_audio_corrupt_reject(self, *, force: bool):
+        import os as _os
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123"))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/Test")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True,
+            audio_check_mode="normal")
+
+        tmpdir = tempfile.mkdtemp()
+        with open(_os.path.join(tmpdir, "01.mp3"), "wb") as f:
+            f.write(b"x")
+
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.preimport.validate_audio",
+                       return_value=SimpleNamespace(
+                           valid=False, error="decode failed",
+                           failed_files=[("01.mp3", "decode failed")])), \
+                 patch("lib.preimport.spectral_analyze",
+                       return_value=_analyze_result("genuine", None)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=force,
+                    outcome_label="force_import" if force else "manual_import",
+                    source_username="u1")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return db
+
+    def test_force_import_gate_reject_writes_force_import_outcome(self):
+        db = self._run_audio_corrupt_reject(force=True)
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(self, 0, outcome="force_import",
+                      beets_scenario="audio_corrupt")
+
+    def test_manual_import_gate_reject_writes_manual_import_outcome(self):
+        db = self._run_audio_corrupt_reject(force=False)
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(self, 0, outcome="manual_import",
+                      beets_scenario="audio_corrupt")
+
+
 class TestForceImportRejectsNestedLayout(unittest.TestCase):
     """Force/manual import must reject nested folder layouts at dispatch
     rather than letting them pass the gates and fail downstream in the
