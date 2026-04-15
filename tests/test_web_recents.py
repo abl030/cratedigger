@@ -339,6 +339,20 @@ class TestClassifyVerdict(unittest.TestCase):
             outcome="rejected", beets_scenario="album_name_mismatch"))
         self.assertIn("name mismatch", result.verdict.lower())
 
+    def test_nested_layout_verdict(self):
+        """Gate-rejected force/manual import of a nested folder layout must
+        render a friendly label in the Recents tab, not the raw scenario
+        string. Otherwise operators see the literal "nested_layout" and have
+        to go grepping for what it means.
+        """
+        result = classify_log_entry(_entry(
+            outcome="rejected", beets_scenario="nested_layout"))
+        self.assertIn("nested", result.verdict.lower())
+        self.assertIn("flatten", result.verdict.lower())
+        self.assertNotEqual(
+            result.verdict, "nested_layout",
+            "verdict must be a friendly label, not the raw scenario string")
+
     def test_transcode_upgrade_verdict(self):
         result = classify_log_entry(_entry(
             outcome="success", beets_scenario="transcode_upgrade",
