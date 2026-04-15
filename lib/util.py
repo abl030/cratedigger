@@ -206,6 +206,11 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
 
     failed = []
     for filepath in files:
+        # Use the path relative to folder_path so nested layouts (CD1/01.mp3,
+        # CD2/01.mp3) remain distinguishable in failed_files and the error
+        # message — os.path.basename would collapse same-named tracks across
+        # discs into the same entry.
+        display = os.path.relpath(filepath, folder_path)
         try:
             result = sp.run(
                 ["ffmpeg", "-v", "error", "-i", filepath,
@@ -216,7 +221,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                 stderr = result.stderr.strip()
                 # FLAC missing MD5: re-encode in place to fix, then re-test
                 if filepath.lower().endswith(".flac") and "cannot check MD5 signature" in stderr:
-                    logger.info(f"AUDIO_CHECK: fixing unset MD5: {os.path.basename(filepath)}")
+                    logger.info(f"AUDIO_CHECK: fixing unset MD5: {display}")
                     fix = sp.run(
                         ["flac", "-f", "--verify", filepath],
                         capture_output=True, text=True, timeout=300,
@@ -233,9 +238,9 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                     else:
                         stderr = f"MD5 fix failed: {fix.stderr.strip()[:150]}"
                 err = stderr[:200]
-                failed.append((os.path.basename(filepath), err))
+                failed.append((display, err))
         except sp.TimeoutExpired:
-            failed.append((os.path.basename(filepath), "ffmpeg timeout"))
+            failed.append((display, "ffmpeg timeout"))
         except FileNotFoundError:
             logger.error("AUDIO_CHECK: ffmpeg not found on PATH — skipping audio validation")
             return AudioValidationResult()
