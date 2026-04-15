@@ -90,10 +90,19 @@ class LocalFileInspection:
     Populated by ``inspect_local_files`` so callers of ``run_preimport_gates``
     that have no DownloadFile metadata (force/manual paths) can still supply
     filetype / bitrate / vbr hints.
+
+    ``has_nested_audio`` reports whether any audio files were found below the
+    root directory. Callers should reject nested layouts early: the
+    preimport gates (validate_audio / analyze_album / repair_mp3_headers)
+    recurse, but the downstream beets harness (``harness/import_one.py``)
+    still uses ``os.listdir`` for bitrate measurement and conversion, so a
+    nested force/manual import would pass gates and then produce a
+    misclassified/empty measurement in the harness.
     """
     filetype: str = ""           # comma-separated lowercase extensions
     min_bitrate_bps: int | None = None
     is_vbr: bool | None = None
+    has_nested_audio: bool = False
 
 
 def inspect_local_files(path: str) -> LocalFileInspection:
@@ -114,6 +123,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
     extensions: set[str] = set()
     min_bitrate: int | None = None
     any_vbr: bool | None = None
+    has_nested_audio = False
 
     for root, _dirs, files in os.walk(path):
         for name in files:
@@ -122,6 +132,8 @@ def inspect_local_files(path: str) -> LocalFileInspection:
             ext = name.rsplit(".", 1)[-1].lower()
             if ext not in AUDIO_EXTS:
                 continue
+            if root != path:
+                has_nested_audio = True
             extensions.add(ext)
             if ext == "mp3":
                 full = os.path.join(root, name)
@@ -144,6 +156,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
         filetype=", ".join(sorted(extensions)),
         min_bitrate_bps=min_bitrate,
         is_vbr=any_vbr,
+        has_nested_audio=has_nested_audio,
     )
 
 
