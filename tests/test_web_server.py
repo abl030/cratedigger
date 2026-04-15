@@ -781,6 +781,170 @@ class TestPipelineRouteContracts(_WebServerCase):
             "Go! Team-shape transcode must trigger the gate in the simulator")
 
 
+def _kwargs_to_query(kwargs: dict) -> str:
+    """Serialize scenario kwargs to a query string the way the form would.
+
+    Mirrors the route's decode rules (see ``get_pipeline_simulate`` in
+    ``web/routes/pipeline.py``):
+      - ``None`` → omit (route's ``_str``/``_int``/``_opt_bool`` return None
+        for absent keys; ``_bool`` returns False).
+      - ``True`` / ``False`` → ``"true"`` / ``"false"``.
+      - int → ``str(int)``.
+      - str → URL-encoded (values like ``"opus 128"`` contain spaces).
+
+    Deliberately dumb — the test depends on the route's decoders to
+    round-trip these values. If the route's decoding changes, this
+    helper must change too, or the equivalence guarantee breaks.
+    """
+    from urllib.parse import quote_plus
+    parts: list[str] = []
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            parts.append(f"{k}={'true' if v else 'false'}")
+        else:
+            parts.append(f"{k}={quote_plus(str(v))}")
+    return "&".join(parts)
+
+
+class TestPipelineRouteDirectEquivalence(_WebServerCase):
+    """Every pure-function web route must return the same value as a
+    direct call to the underlying library function with equivalent inputs.
+
+    Why this matters (post-deploy hotfix on PR #94): the route and the
+    library function were computing different answers for the same inputs
+    because ``web/routes/pipeline.py`` had mixed imports of ``quality`` and
+    ``lib.quality``. Python loaded the module twice; ``is EnumMember``
+    compared False across the module boundary; the AVG rank policy
+    silently fell through to min_bitrate in the web simulator.
+
+    Shape-only contract tests (``SIMULATE_REQUIRED_FIELDS``) were green —
+    the response had the right keys with plausible values. Equivalence
+    tests catch the divergence that contract tests can't see.
+
+    ``tests/conftest.py`` puts ``lib/`` on sys.path, reproducing the same
+    PYTHONPATH ambiguity production has. A future regression of the
+    original dual-load bug would fail this test.
+    """
+
+    # Scenario table — each is a direct-call kwargs dict. The helper
+    # translates to query params for the HTTP side. Coverage spans the
+    # stages the route's output exposes + the specific cases that caught
+    # review rounds' issues on PR #94 (VBR gate, avg threshold, AVG
+    # policy, transcode paths).
+    SCENARIOS: list[tuple[str, dict]] = [
+        ("cbr_mp3_basic",
+         dict(is_flac=False, min_bitrate=320, is_cbr=True)),
+        ("vbr_mp3_legacy_no_avg",
+         dict(is_flac=False, min_bitrate=245, is_cbr=False)),
+        ("vbr_mp3_genuine_v0_high_avg_skips_gate",
+         dict(is_flac=False, min_bitrate=200, is_cbr=False,
+              is_vbr=True, avg_bitrate=245)),
+        ("vbr_mp3_low_avg_triggers_gate",
+         dict(is_flac=False, min_bitrate=126, is_cbr=False,
+              is_vbr=True, avg_bitrate=182,
+              spectral_grade="likely_transcode", spectral_bitrate=96)),
+        ("vbr_mp3_low_avg_with_existing_rejected",
+         dict(is_flac=False, min_bitrate=126, is_cbr=False,
+              is_vbr=True, avg_bitrate=182,
+              spectral_grade="likely_transcode", spectral_bitrate=96,
+              existing_min_bitrate=200)),
+        ("flac_genuine_converted_to_v0",
+         dict(is_flac=True, min_bitrate=0, is_cbr=False,
+              spectral_grade="genuine", converted_count=10,
+              post_conversion_min_bitrate=245)),
+        ("flac_suspect_transcode",
+         dict(is_flac=True, min_bitrate=0, is_cbr=False,
+              spectral_grade="suspect", converted_count=10,
+              post_conversion_min_bitrate=190)),
+        ("flac_kept_lossless_target_format",
+         dict(is_flac=True, min_bitrate=900, is_cbr=False,
+              target_format="flac")),
+        ("existing_avg_bitrate_threaded",
+         dict(is_flac=False, min_bitrate=210, is_cbr=False,
+              is_vbr=True, avg_bitrate=210,
+              existing_min_bitrate=200, existing_avg_bitrate=245)),
+        ("downgrade_rejected",
+         dict(is_flac=False, min_bitrate=128, is_cbr=False,
+              existing_min_bitrate=256)),
+        ("spectral_clamp_with_override",
+         dict(is_flac=False, min_bitrate=320, is_cbr=True,
+              spectral_grade="suspect", spectral_bitrate=160,
+              existing_spectral_bitrate=160)),
+        ("verified_lossless_target_opus",
+         dict(is_flac=True, min_bitrate=0, is_cbr=False,
+              spectral_grade="genuine", converted_count=10,
+              post_conversion_min_bitrate=245,
+              verified_lossless_target="opus 128")),
+    ]
+
+    def test_simulate_route_matches_direct_call(self):
+        """For every scenario, calling full_pipeline_decision directly
+        must produce the same dict as hitting /api/pipeline/simulate."""
+        from lib.quality import full_pipeline_decision
+        from lib.config import read_runtime_rank_config
+
+        # The route reads the runtime cfg via `_runtime_rank_config()`.
+        # In the test env there's no /var/lib/soularr/config.ini, so it
+        # falls back to SoularrConfig() defaults. Read it once here so
+        # both sides use identical cfg.
+        cfg = read_runtime_rank_config()
+
+        for name, kwargs in self.SCENARIOS:
+            with self.subTest(scenario=name):
+                direct = full_pipeline_decision(**kwargs, cfg=cfg)
+                status, route = self._get(
+                    f"/api/pipeline/simulate?{_kwargs_to_query(kwargs)}")
+                self.assertEqual(status, 200)
+
+                self.assertEqual(
+                    set(direct.keys()), set(route.keys()),
+                    f"{name}: route result has different keys than direct call")
+                for key in direct:
+                    self.assertEqual(
+                        direct[key], route[key],
+                        f"{name}: {key} differs — "
+                        f"direct={direct[key]!r}, route={route[key]!r}. "
+                        f"Divergence here means the HTTP surface is "
+                        f"computing a different answer than the library "
+                        f"function, e.g. dual-module-load, cfg mismatch, "
+                        f"or a param the route forgot to thread.")
+
+    def test_constants_route_matches_direct_call(self):
+        """get_pipeline_constants must return the same tree as
+        get_decision_tree(cfg=runtime_cfg), plus the hardcoded spectral
+        constants the route overlays."""
+        from lib.quality import get_decision_tree
+        from lib.config import read_runtime_rank_config
+
+        cfg = read_runtime_rank_config()
+        direct = get_decision_tree(cfg=cfg)
+
+        status, route = self._get("/api/pipeline/constants")
+        self.assertEqual(status, 200)
+
+        # Route overlays a handful of spectral_check + policy constants
+        # on top of the tree. Assert the tree structure matches, then
+        # strip the overlay keys before comparing the constants dict.
+        self.assertEqual(route["stages"], direct["stages"],
+                         "decision tree stages must match direct call")
+        self.assertEqual(route["paths"], direct["paths"])
+        self.assertEqual(route["path_labels"], direct["path_labels"])
+
+        overlay_keys = {
+            "HF_DEFICIT_SUSPECT", "HF_DEFICIT_MARGINAL", "ALBUM_SUSPECT_PCT",
+            "MIN_CLIFF_SLICES", "CLIFF_THRESHOLD_DB_PER_KHZ",
+            "rank_gate_min_rank", "rank_bitrate_metric",
+            "rank_within_tolerance_kbps",
+        }
+        route_consts = {k: v for k, v in route["constants"].items()
+                        if k not in overlay_keys}
+        self.assertEqual(
+            route_consts, direct["constants"],
+            "constants (sans route overlay) must match direct call")
+
+
 class TestPipelineMutationRouteContracts(_WebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
