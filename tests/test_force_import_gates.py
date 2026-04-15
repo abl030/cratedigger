@@ -1182,12 +1182,21 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
             "existing_spectral must stay None when beets has no album")
 
 
-class TestGateRejectionPreservesOutcomeLabel(unittest.TestCase):
-    """Gate-rejected force/manual imports must keep their outcome tag
-    (``force_import``/``manual_import``) in ``download_log.outcome`` so SQL
-    queries can filter by source. Previously the rejection path wrote a
-    generic ``"rejected"``, which made it impossible to tell a gate-rejected
-    force-import from any other rejection after the fact.
+class TestGateRejectionWritesRejectedOutcome(unittest.TestCase):
+    """Gate-rejected force/manual imports must write
+    ``download_log.outcome='rejected'`` — NOT ``force_import``/``manual_import``.
+
+    The UI's "imported" counter (``web/routes/pipeline.py``) and the
+    ``get_log(outcome_filter='imported')`` query (``lib/pipeline_db.py``) both
+    treat ``outcome='force_import'`` as a successful import. Per CLAUDE.md,
+    ``force_import``/``manual_import`` are reserved for SUCCESSFUL imports;
+    any rejection (including gate rejections) must write ``outcome='rejected'``
+    or the UI mis-counts the failed import as imported.
+
+    Source attribution on rejections is available via other columns:
+    ``soulseek_username``, the surrounding ``album_requests`` row, and
+    ``beets_scenario`` (e.g. ``spectral_reject``, ``audio_corrupt``,
+    ``nested_layout``).
     """
 
     def _run_audio_corrupt_reject(self, *, force: bool):
@@ -1231,17 +1240,22 @@ class TestGateRejectionPreservesOutcomeLabel(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
         return db
 
-    def test_force_import_gate_reject_writes_force_import_outcome(self):
+    def test_force_import_gate_reject_writes_rejected_outcome(self):
         db = self._run_audio_corrupt_reject(force=True)
         self.assertEqual(len(db.download_logs), 1)
-        db.assert_log(self, 0, outcome="force_import",
-                      beets_scenario="audio_corrupt")
+        # outcome MUST be "rejected" — NOT "force_import" — so the UI's
+        # "imported" counter and /api/pipeline/log's imported filter stay
+        # consistent with album_requests.status.
+        db.assert_log(self, 0, outcome="rejected",
+                      beets_scenario="audio_corrupt",
+                      soulseek_username="u1")
 
-    def test_manual_import_gate_reject_writes_manual_import_outcome(self):
+    def test_manual_import_gate_reject_writes_rejected_outcome(self):
         db = self._run_audio_corrupt_reject(force=False)
         self.assertEqual(len(db.download_logs), 1)
-        db.assert_log(self, 0, outcome="manual_import",
-                      beets_scenario="audio_corrupt")
+        db.assert_log(self, 0, outcome="rejected",
+                      beets_scenario="audio_corrupt",
+                      soulseek_username="u1")
 
 
 class TestForceImportRejectsNestedLayout(unittest.TestCase):

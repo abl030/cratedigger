@@ -839,9 +839,13 @@ def dispatch_import_from_db(
             detail=detail,
             error=None,
             requeue=False,
-            # Preserve source attribution: let SQL queries distinguish
-            # gate-rejected force vs manual imports via download_log.outcome.
-            outcome_label=outcome_label,
+            # outcome="rejected" — force_import/manual_import are reserved for
+            # SUCCESSFUL imports (see CLAUDE.md). The /api/pipeline/log "imported"
+            # counter filters on outcome IN ('success','force_import'), so tagging
+            # a rejection as force_import mis-counts it as imported. Source
+            # attribution for rejections is available via download_log.soulseek_username
+            # + the surrounding request row.
+            outcome_label="rejected",
             validation_result=ValidationResult(
                 distance=0.0,
                 scenario="nested_layout",
@@ -900,9 +904,11 @@ def dispatch_import_from_db(
             detail=preimport.detail,
             error=None,
             requeue=False,
-            # Preserve source attribution: gate-rejected force/manual
-            # imports stay filterable by download_log.outcome.
-            outcome_label=outcome_label,
+            # outcome="rejected" — force_import/manual_import are reserved for
+            # SUCCESSFUL imports (see CLAUDE.md). Tagging a gate-rejection as
+            # force_import would mis-count it as imported in the UI's "imported"
+            # counter (web/routes/pipeline.py and lib/pipeline_db.py::get_log).
+            outcome_label="rejected",
             validation_result=ValidationResult(
                 distance=0.0,
                 scenario=preimport.scenario or "preimport_reject",
