@@ -371,6 +371,68 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_validate_audio_recurses_into_subdirs(self):
+        """validate_audio must walk subdirectories so nested discs are decoded.
+
+        Auto path always passes flat folders, but force/manual-import can point
+        at user folders with ``Album/CD1/*.mp3``. If validate_audio only lists
+        the root, no nested file is decoded and corrupt audio silently passes.
+        """
+        import os
+        from lib.util import validate_audio
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01.mp3"), "wb") as f:
+                f.write(b"bad mp3 bytes")
+            result = validate_audio(tmpdir, "normal")
+            self.assertFalse(
+                result.valid,
+                "nested corrupt MP3 must trigger audio rejection")
+            self.assertTrue(
+                any("01.mp3" in name for name, _ in result.failed_files),
+                f"failed_files must include the nested file, got {result.failed_files}")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_analyze_album_recurses_into_subdirs(self):
+        """analyze_album must walk subdirectories so nested discs are analyzed.
+
+        Without recursion, a multi-disc folder returns an empty result that
+        looks like 'genuine' (no tracks = no cliffs), and the spectral gate
+        silently passes a potential transcode on force/manual-import.
+        """
+        import os
+        from unittest.mock import patch
+        from lib.spectral_check import analyze_album
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01.mp3"), "wb") as f:
+                f.write(b"fake")
+            with patch("lib.spectral_check.analyze_track") as mock_track:
+                mock_track.return_value = SimpleNamespace(
+                    grade="suspect", error=None,
+                    estimated_bitrate_kbps=128,
+                    cliff_detected=True, cliff_freq_hz=12000,
+                )
+                _ = analyze_album(tmpdir)
+            self.assertEqual(
+                mock_track.call_count, 1,
+                "analyze_album must reach the nested file (call_count=0 means "
+                "it only listed the root)")
+            called_path = mock_track.call_args[0][0]
+            self.assertIn("CD1", called_path,
+                          "analyze_album must call analyze_track with the nested path")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class TestForceImportSplitsMultiUserSources(unittest.TestCase):
     """download_log.soulseek_username can be a comma-joined list

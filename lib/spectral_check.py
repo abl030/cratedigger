@@ -231,18 +231,24 @@ def analyze_track(filepath, trim_seconds=30):
 
 
 def analyze_album(folder_path, trim_seconds=30):
-    """Analyze all audio files in a folder.
+    """Analyze all audio files in a folder (walks subdirectories).
 
     Returns an AlbumResult with album-level grade and per-track results.
+
+    Walks subdirectories so multi-disc layouts (``Album/CD1/*.flac``) are
+    analyzed as one album. The auto-import path always passes a flattened
+    folder so recursion is a no-op there; force/manual-import and
+    post-conversion callers can point at user folders with nested discs.
     """
-    files = sorted(
-        f for f in os.listdir(folder_path)
-        if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
-    )
+    files = []
+    for root, _dirs, names in os.walk(folder_path):
+        for f in sorted(names):
+            if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS:
+                files.append(os.path.join(root, f))
 
     track_results = []
-    for fname in files:
-        result = analyze_track(os.path.join(folder_path, fname), trim_seconds)
+    for filepath in files:
+        result = analyze_track(filepath, trim_seconds)
         if result.grade != "error":
             track_results.append(result)
 

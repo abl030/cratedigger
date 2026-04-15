@@ -179,15 +179,21 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
     """Check audio integrity of downloaded files via ffmpeg full decode.
 
     mode: "off" = skip, anything else = reject if any file fails.
+
+    Walks subdirectories so multi-disc layouts (``Album/CD1/*.mp3``) are
+    validated too. The auto-import path always passes a flattened folder
+    so recursion is a no-op there; force/manual-import paths can point at
+    user folders with nested discs.
     """
     if mode == "off":
         return AudioValidationResult()
 
     files = []
-    for f in os.listdir(folder_path):
-        ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
-        if ext in _AUDIO_EXTS:
-            files.append(os.path.join(folder_path, f))
+    for root, _dirs, names in os.walk(folder_path):
+        for f in names:
+            ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+            if ext in _AUDIO_EXTS:
+                files.append(os.path.join(root, f))
 
     if not files:
         return AudioValidationResult()
