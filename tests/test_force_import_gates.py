@@ -56,36 +56,72 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     Keeping them as pure input/output assertions here so the auto path's
     branch-selection logic stays covered without re-introducing the old
     SpectralContext plumbing.
+
+    Signature (see lib/preimport.py::_needs_spectral_check):
+        _needs_spectral_check(filetype, is_vbr, avg_bitrate_kbps,
+                              vbr_threshold_kbps) -> bool
+
+    The VBR branch is gated on ``avg_bitrate_kbps < vbr_threshold_kbps``
+    so transcodes uploaded as fake V0 (avg ~180kbps) are still analyzed.
+    Genuine V0 (avg ~245kbps+) falls through unchanged.
     """
 
+    # Threshold matches cfg.quality_ranks.mp3_vbr.excellent default (210).
+    THRESHOLD = 210
+
+    def _run(self, filetype, is_vbr, avg_kbps=None, threshold=None):
+        from lib.preimport import _needs_spectral_check
+        return _needs_spectral_check(
+            filetype, is_vbr,
+            avg_bitrate_kbps=avg_kbps,
+            vbr_threshold_kbps=threshold if threshold is not None else self.THRESHOLD,
+        )
+
     def test_flac_skips(self):
-        from lib.preimport import _needs_spectral_check
-        self.assertFalse(_needs_spectral_check("flac", False))
-        self.assertFalse(_needs_spectral_check("flac", None))
-        self.assertFalse(_needs_spectral_check("flac", True))
+        # FLAC uses a different flow (convert → V0 → compare).
+        self.assertFalse(self._run("flac", False))
+        self.assertFalse(self._run("flac", None))
+        self.assertFalse(self._run("flac", True))
+        self.assertFalse(self._run("flac", True, avg_kbps=150))
 
-    def test_vbr_mp3_skips(self):
-        from lib.preimport import _needs_spectral_check
-        self.assertFalse(_needs_spectral_check("mp3", True))
+    def test_cbr_mp3_always_runs(self):
+        """CBR MP3 always runs spectral — avg bitrate irrelevant."""
+        self.assertTrue(self._run("mp3", False))
+        self.assertTrue(self._run("mp3", False, avg_kbps=320))
+        self.assertTrue(self._run("mp3", False, avg_kbps=128))
 
-    def test_cbr_mp3_runs(self):
-        from lib.preimport import _needs_spectral_check
-        self.assertTrue(_needs_spectral_check("mp3", False))
-
-    def test_unknown_vbr_mp3_runs_gate_by_default(self):
-        """is_vbr=None routes through the gate — run_preimport_gates resolves
-        VBR via filesystem inspection before reaching this helper."""
-        from lib.preimport import _needs_spectral_check
-        self.assertTrue(_needs_spectral_check("mp3", None))
+    def test_unknown_vbr_mp3_always_runs(self):
+        """is_vbr=None → run (conservative). run_preimport_gates reinspects
+        first, so None here means truly unresolvable."""
+        self.assertTrue(self._run("mp3", None))
+        self.assertTrue(self._run("mp3", None, avg_kbps=245))
 
     def test_mixed_mp3_flac_skips(self):
         """Filetype containing both 'flac' and 'mp3' is treated as non-MP3."""
-        from lib.preimport import _needs_spectral_check
-        self.assertFalse(_needs_spectral_check("flac, mp3", False))
+        self.assertFalse(self._run("flac, mp3", False))
 
     def test_empty_filetype_skips(self):
-        from lib.preimport import _needs_spectral_check
-        self.assertFalse(_needs_spectral_check("", False))
+        self.assertFalse(self._run("", False))
+
+    def test_vbr_threshold_table(self):
+        """VBR branch: gate only when avg is unknown or < threshold."""
+        CASES = [
+            # (desc, avg_kbps, expected)
+            ("avg unknown → gate (conservative)",          None, True),
+            ("go_team case — avg 182 < 210 → gate",         182, True),
+            ("live issue #93 avg 182kbps transcode",        182, True),
+            ("just below threshold — 200 → gate",           200, True),
+            ("at threshold — 210 is NOT below → skip",      210, False),
+            ("genuine V0 avg ~245 → skip",                  245, False),
+            ("genuine V0 avg ~260 → skip",                  260, False),
+            ("very low 96kbps → gate",                       96, True),
+        ]
+        for desc, avg, expected in CASES:
+            with self.subTest(desc=desc, avg=avg):
+                got = self._run("mp3", True, avg_kbps=avg)
+                self.assertEqual(
+                    got, expected,
+                    f"VBR avg={avg} expected {expected}, got {got}")
 
 
 class TestForceImportRunsSpectralGate(unittest.TestCase):
@@ -418,6 +454,68 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
             inspection = inspect_local_files(tmpdir)
             self.assertIn("mp3", inspection.filetype,
                           "subdirectory MP3 must be discovered")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_inspect_reports_avg_bitrate(self):
+        """inspect_local_files must also return avg_bitrate_bps across all
+        MP3 files so run_preimport_gates can decide whether to gate a VBR
+        upload against cfg.quality_ranks.mp3_vbr.excellent.
+
+        A VBR MP3 transcode at avg 182kbps (issue #93, The Go! Team) must be
+        distinguishable from a genuine V0 at avg ~245kbps. Container min
+        alone is not enough — lo-fi V0 can have low-bitrate silent tracks
+        that look identical to a transcode's min.
+        """
+        import os
+        from unittest.mock import patch
+        from lib.preimport import inspect_local_files
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            paths = []
+            for i in range(3):
+                p = os.path.join(tmpdir, f"{i:02}.mp3")
+                with open(p, "wb") as f:
+                    f.write(b"fake mp3")
+                paths.append(p)
+
+            # Simulate three tracks: two at ~240kbps, one at ~260kbps → avg 247.
+            def fake_mp3_open(path):
+                mapping = {
+                    paths[0]: 240_000,
+                    paths[1]: 240_000,
+                    paths[2]: 260_000,
+                }
+                return SimpleNamespace(info=SimpleNamespace(
+                    bitrate=mapping[path], bitrate_mode=2))  # VBR
+
+            with patch("mutagen.mp3.MP3", side_effect=fake_mp3_open):
+                inspection = inspect_local_files(tmpdir)
+
+            self.assertIsNotNone(inspection.avg_bitrate_bps,
+                                 "avg_bitrate_bps must be populated for MP3")
+            assert inspection.avg_bitrate_bps is not None
+            self.assertEqual(inspection.avg_bitrate_bps, (240_000 + 240_000 + 260_000) // 3)
+            self.assertEqual(inspection.min_bitrate_bps, 240_000)
+            self.assertTrue(inspection.is_vbr)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_inspect_avg_bitrate_none_when_no_mp3(self):
+        """Non-MP3 downloads leave avg_bitrate_bps=None (no mutagen walk)."""
+        import os
+        from lib.preimport import inspect_local_files
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.flac"), "wb") as f:
+                f.write(b"fake flac")
+            inspection = inspect_local_files(tmpdir)
+            self.assertIsNone(inspection.avg_bitrate_bps,
+                              "avg_bitrate_bps stays None without any MP3 to read")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1072,6 +1170,172 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 mock_spectral.call_count, 1,
                 "resumed download with mp3 files on disk must still get "
                 "spectral gating after inspection resolves is_vbr=False")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_low_avg_vbr_mp3_runs_spectral(self):
+        """Issue #93: VBR MP3 at avg 182kbps (below 210 threshold) MUST gate.
+
+        The Go! Team - Are You Ready for More?: uploaded as VBR MP3 with
+        126min / 182avg kbps. Current gate skips all VBR MP3 → transcode
+        imports through. Post-fix: the gate runs spectral because avg
+        (182) < cfg.quality_ranks.mp3_vbr.excellent (210) → transcode
+        correctly caught.
+        """
+        import os
+        from unittest.mock import patch
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates, LocalFileInspection
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            # Inspected: VBR MP3, avg 182kbps — the live issue #93 shape.
+            inspected = LocalFileInspection(
+                filetype="mp3",
+                min_bitrate_bps=126_000,
+                avg_bitrate_bps=182_000,
+                is_vbr=True,
+            )
+            with patch("lib.preimport.inspect_local_files",
+                       return_value=inspected), \
+                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                mock_spectral.return_value = SimpleNamespace(
+                    grade="likely_transcode",
+                    estimated_bitrate_kbps=96,
+                    suspect_pct=80.0,
+                    tracks=[SimpleNamespace(cliff_detected=True)
+                            for _ in range(5)])
+                result = run_preimport_gates(
+                    path=tmpdir,
+                    mb_release_id="",   # no existing album
+                    label="Go! Team - Are You Ready for More?",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=126_000,
+                    download_is_vbr=True,
+                    cfg=cfg,
+                    db=db,  # type: ignore[arg-type]
+                    request_id=1,
+                    usernames=set(),
+                )
+            self.assertEqual(
+                mock_spectral.call_count, 1,
+                "VBR MP3 at avg 182kbps (< 210kbps threshold) must run "
+                "spectral — this is the live issue #93 bug: current code "
+                "skips all VBR MP3 and lets transcodes through")
+            # Grade came back likely_transcode → should populate download_spectral
+            self.assertIsNotNone(
+                result.download_spectral,
+                "download_spectral must be populated after gate runs")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_high_avg_vbr_mp3_skips_spectral(self):
+        """Genuine V0 at avg 245kbps (>= 210 threshold) must keep skipping.
+
+        Guard: the threshold fix must not over-gate. Genuine V0 uploads
+        have high avg bitrates; trusting the VBR metadata here preserves
+        current behavior and avoids unnecessary ~8s-per-track spectral
+        analysis on every genuine VBR download.
+        """
+        import os
+        from unittest.mock import patch
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates, LocalFileInspection
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            inspected = LocalFileInspection(
+                filetype="mp3",
+                min_bitrate_bps=220_000,
+                avg_bitrate_bps=245_000,   # genuine V0 range
+                is_vbr=True,
+            )
+            with patch("lib.preimport.inspect_local_files",
+                       return_value=inspected), \
+                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                run_preimport_gates(
+                    path=tmpdir,
+                    mb_release_id="",
+                    label="Genuine V0 Album",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=220_000,
+                    download_is_vbr=True,
+                    cfg=cfg,
+                    db=db,  # type: ignore[arg-type]
+                    request_id=1,
+                    usernames=set(),
+                )
+            self.assertEqual(
+                mock_spectral.call_count, 0,
+                "genuine V0 (avg 245kbps >= 210kbps) must skip spectral "
+                "to avoid wasted analysis on good files")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_vbr_mp3_without_avg_still_gates(self):
+        """VBR MP3 with avg=None → still gate (conservative).
+
+        When mutagen can't compute avg (corrupt files, empty folder), the
+        gate must fall through to running spectral rather than skipping.
+        Matches the ``is_vbr=None`` handling — err on the side of analyzing.
+        """
+        import os
+        from unittest.mock import patch
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates, LocalFileInspection
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            inspected = LocalFileInspection(
+                filetype="mp3",
+                min_bitrate_bps=None,
+                avg_bitrate_bps=None,   # mutagen couldn't read
+                is_vbr=True,
+            )
+            with patch("lib.preimport.inspect_local_files",
+                       return_value=inspected), \
+                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                mock_spectral.return_value = SimpleNamespace(
+                    grade="genuine", estimated_bitrate_kbps=None,
+                    suspect_pct=0.0, tracks=[])
+                run_preimport_gates(
+                    path=tmpdir,
+                    mb_release_id="",
+                    label="Unknown Avg",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=None,
+                    download_is_vbr=True,
+                    cfg=cfg,
+                    db=db,  # type: ignore[arg-type]
+                    request_id=1,
+                    usernames=set(),
+                )
+            self.assertEqual(
+                mock_spectral.call_count, 1,
+                "VBR MP3 with unknown avg must still gate — conservative "
+                "default; genuine VBR uploads produce 'genuine' spectral "
+                "grades and fall through")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

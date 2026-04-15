@@ -121,11 +121,21 @@ def _do_mark_done(
     dest_path: str | None,
     outcome_label: str = "success",
     detail: str | None = None,
+    imported_path: str | None = None,
 ) -> None:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
     Takes PipelineDB directly instead of going through DatabaseSource.
     Uses outcome_label for download_log (e.g. "force_import" instead of "success").
+
+    ``imported_path`` is the beets destination (from
+    ``ImportResult.postflight.imported_path``) — what shows up in the UI's
+    "Imported to" label. ``dest_path`` is the source/staging path passed to
+    the importer. When callers have both (auto/force/manual paths that ran
+    beets), they pass ``imported_path`` so ``album_requests.imported_path``
+    reflects the actual on-disk location. Callers that only stage for manual
+    review (``album_source.mark_done``) leave ``imported_path=None``; it
+    falls back to ``dest_path`` so legacy behavior is preserved (issue #93).
     """
     from lib.quality import SpectralMeasurement, is_verified_lossless
     from lib.pipeline_db import RequestSpectralStateUpdate
@@ -133,7 +143,7 @@ def _do_mark_done(
     update_fields: dict[str, object] = dict(
         beets_distance=distance,
         beets_scenario=scenario,
-        imported_path=dest_path,
+        imported_path=imported_path if imported_path else dest_path,
     )
     verified_lossless = (
         bool(dl_info.verified_lossless_override)
@@ -536,7 +546,8 @@ def dispatch_import_core(
                 _do_mark_done(
                     db, request_id, dl_info,
                     distance=distance, scenario=scenario,
-                    dest_path=path, outcome_label=outcome_label)
+                    dest_path=path, outcome_label=outcome_label,
+                    imported_path=ir.postflight.imported_path)
                 if decision in ("import", "preflight_existing"):
                     if prev_br is not None or new_br is not None:
                         try:

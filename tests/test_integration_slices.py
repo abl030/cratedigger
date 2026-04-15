@@ -118,6 +118,36 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
 
+    def test_imported_path_reflects_beets_destination(self):
+        """Issue #93: ``album_requests.imported_path`` must be the beets
+        destination (``ir.postflight.imported_path``), not the source/staging
+        path passed to dispatch_import_core.
+
+        Pre-fix: ``imported_path`` stored the source
+        ``/mnt/virtio/music/slskd/failed_imports/...`` even though beets
+        moved files to ``/mnt/virtio/Music/Beets/...``. UI's "Imported to"
+        label displayed the source, confusing users.
+        """
+        ir = make_import_result(
+            decision="import",
+            new_min_bitrate=245,
+            imported_path="/Beets/Test Artist/2005 - Test Album_",
+        )
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+
+        db = self._run_dispatch(ir, beets_info)
+
+        row = db.request(42)
+        self.assertEqual(
+            row["imported_path"],
+            "/Beets/Test Artist/2005 - Test Album_",
+            "album_requests.imported_path must reflect the beets "
+            "destination from ImportResult.postflight, not dispatch's "
+            "source path (the /tmp staging/failed_imports dir)")
+
     def test_import_quality_requeue_upgrade(self):
         """VBR 180kbps → quality gate requeues for upgrade → wanted, denylist."""
         ir = make_import_result(decision="import", new_min_bitrate=180)
