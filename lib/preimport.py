@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from lib.pipeline_db import RequestSpectralStateUpdate
-from lib.quality import SpectralMeasurement, spectral_import_decision
+from lib.quality import (SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement,
+                         spectral_import_decision)
 from lib.util import repair_mp3_headers, validate_audio
 
 if TYPE_CHECKING:
@@ -147,14 +148,20 @@ def inspect_local_files(path: str) -> LocalFileInspection:
 
 
 def _needs_spectral_check(filetype: str, is_vbr: bool | None) -> bool:
-    """Spectral check runs on non-VBR MP3 downloads only.
+    """Spectral check runs on *confidently CBR* MP3 downloads only.
 
     FLAC uses a different flow (convert → V0 → compare). VBR MP3 carries its
     own bitrate signal. CBR MP3 is where spectral cliff detection pays off.
+
+    Unknown VBR status (``is_vbr is None``) skips the gate. On the force/manual
+    path ``inspect_local_files`` can't always read a file's ``bitrate_mode``
+    (broken headers → mutagen returns None), and treating that as confirmed
+    CBR would falsely reject a VBR upload. The post-import quality gate
+    (rank comparison) still catches transcoded CBR downloads.
     """
     filetype_lower = (filetype or "").lower()
     is_mp3 = "mp3" in filetype_lower and "flac" not in filetype_lower
-    return is_mp3 and not bool(is_vbr)
+    return is_mp3 and is_vbr is False
 
 
 def _analyze_existing(
@@ -352,12 +359,14 @@ def run_preimport_gates(
 
     # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
     # If the on-disk album can't be freshly analyzed (stale/missing album_path),
-    # fall back to the spectral state already stored on album_requests. Without
-    # this, spectral_import_decision() would compare against the container
-    # bitrate (existing_min) and reject a genuine upgrade — e.g. a 192kbps
-    # transcode rejected as <= 320 even though current_spectral_bitrate already
-    # says the on-disk copy is only 128kbps. Pre-refactor the force/manual path
-    # reached compute_effective_override_bitrate() and allowed the upgrade.
+    # fall back to the spectral state already stored on album_requests.
+    #
+    # GRADE-AWARE: only use the stored spectral_bitrate when the grade is a
+    # transcode grade (suspect/likely_transcode). A stored
+    # ``grade=genuine, bitrate=96`` is stale (genuine files have no cliff),
+    # and admitting a 96kbps "existing" would let a real transcode be imported
+    # as an upgrade. Matches ``compute_effective_override_bitrate`` and
+    # ``load_quality_gate_state`` — the same rule applied across the pipeline.
     if (result.existing_spectral is None
             and db is not None and request_id is not None):
         try:
@@ -365,13 +374,16 @@ def run_preimport_gates(
             if req:
                 stored_grade = req.get("current_spectral_grade")
                 stored_bitrate = req.get("current_spectral_bitrate")
-                stored = SpectralMeasurement.from_parts(stored_grade, stored_bitrate)
-                if stored is not None:
-                    result.existing_spectral = stored
-                    logger.info(
-                        f"SPECTRAL: {label} using persisted current_spectral "
-                        f"(grade={stored.grade}, bitrate={stored.bitrate_kbps}kbps)"
-                        " — BeetsDB lookup returned no spectral measurement")
+                if stored_grade in SPECTRAL_TRANSCODE_GRADES:
+                    stored = SpectralMeasurement.from_parts(
+                        stored_grade, stored_bitrate)
+                    if stored is not None:
+                        result.existing_spectral = stored
+                        logger.info(
+                            f"SPECTRAL: {label} using persisted "
+                            f"current_spectral (grade={stored.grade}, "
+                            f"bitrate={stored.bitrate_kbps}kbps) — BeetsDB "
+                            "lookup returned no spectral measurement")
                 if result.existing_min_bitrate is None:
                     stored_min = req.get("min_bitrate")
                     if stored_min is not None:
