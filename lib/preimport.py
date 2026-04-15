@@ -69,14 +69,6 @@ class PreImportGateResult:
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
-    download_min_bitrate_kbps: int | None = None
-
-
-def _normalize_bps_to_kbps(value: int | None) -> int | None:
-    """Normalize a bitrate that may be bps or kbps to kbps."""
-    if value is None:
-        return None
-    return value // 1000 if value > 1000 else value
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -357,9 +349,6 @@ def run_preimport_gates(
     # --- Spectral gate (non-VBR MP3 only) ---
     if not _needs_spectral_check(download_filetype, download_is_vbr):
         return result
-
-    dl_bitrate_kbps = _normalize_bps_to_kbps(download_min_bitrate_bps)
-    result.download_min_bitrate_kbps = dl_bitrate_kbps
 
     try:
         dl_sp = spectral_analyze(path, trim_seconds=30)
