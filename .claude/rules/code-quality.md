@@ -43,7 +43,7 @@
 - The simulator must show the full rejection cycle: import/reject decision → spectral propagation → backfill decision → next search tiers. Not just the import decision in isolation.
 
 ## Pipeline Bug Reproduction — Red/Green on Real Code Paths
-- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `_apply_spectral_decision`) with mocked album state matching the live scenario.
+- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `lib.preimport.run_preimport_gates`) with mocked state matching the live scenario.
 - **RED first**: reproduce the exact live scenario as a test. Mock up the album state from `pipeline-cli show <id>` (status, spectral fields, min_bitrate). Run the test and confirm it fails with the same symptom as production.
 - **GREEN**: fix the production code, confirm the test passes.
 - **Guard both directions**: add a test for the fixed case AND a test that the original valid behavior still works (e.g. propagation still works when an album IS on disk but lacks spectral data).
@@ -129,7 +129,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
   - `TestDispatchThroughQualityGate` — runs dispatch_import_core → real parse_import_result → real _check_quality_gate_core
   - `TestQualityGateVerifiedLosslessBypass`, `TestQualityGateSpectralOverride`
   - `TestDispatchNoJsonResult`, `TestForceImportSlice`
-  - `TestSpectralPropagationSlice` — runs `_gather_spectral_context` → `_apply_spectral_decision` end-to-end
+  - `TestSpectralPropagationSlice` — runs `run_preimport_gates` end-to-end (audio + spectral)
 - **Required for every new high-risk orchestration boundary.** If you add a new pipeline path (a new dispatch decision, a new quality gate branch, a new spectral state transition), add a slice that exercises it with real code.
 
 ### Shared test infrastructure inventory

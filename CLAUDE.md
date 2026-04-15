@@ -52,16 +52,27 @@ lib/
   config.py             — SoularrConfig dataclass (typed config from config.ini)
   context.py            — SoularrContext dataclass (replaces module globals for extracted functions).
                            Includes cooled_down_users cache populated at cycle start.
-  download.py           — Async download polling, completion processing, spectral context
-                           gathering, slskd transfer helpers. All functions accept ctx.
+  download.py           — Async download polling, completion processing, slskd
+                           transfer helpers. All functions accept ctx. Delegates
+                           the shared pre-import gates (audio + spectral) to
+                           lib/preimport.py via _process_beets_validation.
                            Key functions: poll_active_downloads(), process_completed_album(),
                            build_active_download_state(), reconstruct_grab_list_entry(),
                            rederive_transfer_ids(), grab_most_wanted() (enqueue-only, non-blocking).
   grab_list.py          — GrabList: wanted-album selection with priority/ordering
   import_dispatch.py    — Auto-import decision tree: runs import_one.py, uses
                            dispatch_action() flags for mark_done/failed/denylist/requeue.
-                           Quality gate.
+                           Quality gate. dispatch_import_from_db() (force/manual
+                           entry point) calls lib.preimport.run_preimport_gates
+                           first, so the only gate force/manual skip is the beets
+                           *distance* check — every other quality gate is shared.
   import_service.py     — Force-import/manual-import service layer, ImportOutcome dataclass
+  preimport.py          — Shared pre-import quality gates (audio integrity + spectral
+                           transcode detection). Single source of truth called by
+                           both the auto path (lib.download) and the force/manual
+                           path (lib.import_dispatch). Key functions:
+                           run_preimport_gates(), inspect_local_files(),
+                           PreImportGateResult dataclass.
   pipeline_db.py        — PipelineDB class (PostgreSQL CRUD, queries, get_download_log_entry).
                            Schema is NOT this class's responsibility — see lib/migrator.py.
                            Search logging: log_search(), get_search_history(), get_search_history_batch()
