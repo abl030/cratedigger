@@ -164,6 +164,7 @@ export function renderSimulatorForm() {
       <span class="ds-preset" onclick="window.dsPreset('genuine_flac')">Genuine FLAC</span>
       <span class="ds-preset" onclick="window.dsPreset('cbr320')">CBR 320 (no spectral)</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_v0')">VBR V0 MP3</span>
+      <span class="ds-preset" onclick="window.dsPreset('vbr_transcode')">VBR Transcode (#93)</span>
     </div>
     <div class="ds-form" id="ds-form">
       <div class="ds-field">
@@ -247,9 +248,13 @@ export function renderSimulatorForm() {
 }
 
 /** @type {Object<string, Object<string, string>>} */
+// Every preset explicitly sets avg_bitrate so switching presets resets
+// the field — a stale value from a prior run would otherwise produce the
+// wrong stage0_spectral_gate decision (issue #93 codex round 3).
+// FLAC presets set avg_bitrate='' since the gate skips FLAC unconditionally.
 export const DS_PRESETS = {
   virginia: {
-    is_flac: 'true', min_bitrate: '', is_cbr: 'false',
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
     existing_min_bitrate: '192', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
@@ -257,7 +262,7 @@ export const DS_PRESETS = {
     target_format: '', verified_lossless_target: '',
   },
   mtngoats: {
-    is_flac: 'false', min_bitrate: '138', is_cbr: 'false',
+    is_flac: 'false', min_bitrate: '138', is_cbr: 'false', avg_bitrate: '138',
     spectral_grade: 'genuine', spectral_bitrate: '128',
     existing_min_bitrate: '173', existing_spectral_bitrate: '128',
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
@@ -265,7 +270,7 @@ export const DS_PRESETS = {
     target_format: '', verified_lossless_target: '',
   },
   genuine_flac: {
-    is_flac: 'true', min_bitrate: '', is_cbr: 'false',
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
     existing_min_bitrate: '192', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
@@ -273,7 +278,7 @@ export const DS_PRESETS = {
     target_format: '', verified_lossless_target: 'opus 128',
   },
   cbr320: {
-    is_flac: 'false', min_bitrate: '320', is_cbr: 'true',
+    is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
     spectral_grade: '', spectral_bitrate: '',
     existing_min_bitrate: '', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
@@ -281,8 +286,19 @@ export const DS_PRESETS = {
     target_format: '', verified_lossless_target: '',
   },
   vbr_v0: {
-    is_flac: 'false', min_bitrate: '245', is_cbr: 'false',
+    // Genuine V0: avg 245 >= threshold → stage 0 = skipped_vbr_high_avg.
+    is_flac: 'false', min_bitrate: '245', is_cbr: 'false', avg_bitrate: '245',
     spectral_grade: '', spectral_bitrate: '',
+    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
+  },
+  vbr_transcode: {
+    // Go! Team shape (issue #93): avg 182 < threshold → stage 0 = would_run,
+    // then stage 1 rejects on the supplied likely_transcode spectral.
+    is_flac: 'false', min_bitrate: '126', is_cbr: 'false', avg_bitrate: '182',
+    spectral_grade: 'likely_transcode', spectral_bitrate: '96',
     existing_min_bitrate: '', existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
