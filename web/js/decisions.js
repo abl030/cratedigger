@@ -185,6 +185,10 @@ export function renderSimulatorForm() {
         </select>
       </div>
       <div class="ds-field">
+        <label>Avg bitrate (kbps, VBR gate)</label>
+        <input type="number" id="ds-avg_bitrate" placeholder="gate threshold 210">
+      </div>
+      <div class="ds-field">
         <label>Spectral grade</label>
         <select id="ds-spectral_grade">
           <option value="">(none)</option>
@@ -304,7 +308,8 @@ export function dsPreset(name) {
  * Run the decision simulator with current form values.
  */
 export async function runSimulator() {
-  const fields = ['is_flac','min_bitrate','is_cbr','spectral_grade','spectral_bitrate',
+  const fields = ['is_flac','min_bitrate','is_cbr','avg_bitrate',
+    'spectral_grade','spectral_bitrate',
     'existing_min_bitrate','existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
     'target_format','verified_lossless_target'];
@@ -333,7 +338,8 @@ export function renderSimulatorResults(r) {
   function stageColor(val) {
     if (!val) return 'ds-skip';
     if (['import', 'import_upgrade', 'import_no_exist', 'accept',
-         'preflight_existing'].includes(val)) return 'ds-green';
+         'preflight_existing',
+         'skipped_vbr_high_avg', 'skipped_flac'].includes(val)) return 'ds-green';
     if (['reject', 'downgrade', 'transcode_downgrade'].includes(val)) return 'ds-red';
     return 'ds-amber';
   }
@@ -349,6 +355,7 @@ export function renderSimulatorResults(r) {
   }
 
   let html = '<div class="ds-results">';
+  html += stageHtml('Stage 0: Spectral Gate Trigger', r.stage0_spectral_gate);
   html += stageHtml('Stage 1: Pre-import Spectral', r.stage1_spectral);
   html += stageHtml('Stage 2: Import Decision', r.stage2_import);
   html += stageHtml('Stage 3: Quality Gate', r.stage3_quality_gate);
