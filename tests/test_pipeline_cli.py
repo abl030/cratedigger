@@ -593,6 +593,7 @@ class TestCmdQuality(unittest.TestCase):
         def fake_full_pipeline_decision(**kwargs):
             captured_kwargs.append(kwargs)
             return {
+                "stage0_spectral_gate": "would_run",
                 "stage1_spectral": None,
                 "stage2_import": "import",
                 "stage3_quality_gate": "accept",
@@ -692,6 +693,7 @@ class TestCmdQuality(unittest.TestCase):
 
         def fake_full_pipeline_decision(**kwargs):
             return {
+                "stage0_spectral_gate": "would_run",
                 "stage1_spectral": None,
                 "stage2_import": "import",
                 "stage3_quality_gate": "accept",

@@ -73,6 +73,11 @@ class DownloadScenario:
     converted_count: int = 0
     post_conversion_min_bitrate: int | None = None
     new_format: str | None = None  # explicit format hint for the rank model
+    # VBR + avg bitrate drive the preimport spectral gate (issue #93).
+    # is_vbr defaults to None (simulator derives it from is_cbr); pass
+    # explicitly only for scenarios where is_vbr != not is_cbr.
+    is_vbr: bool | None = None
+    avg_bitrate: int | None = None
 
     def dl_params(self) -> dict:
         """Download-side kwargs for full_pipeline_decision()."""
@@ -80,6 +85,8 @@ class DownloadScenario:
             "is_flac": self.is_flac,
             "min_bitrate": self.min_bitrate,
             "is_cbr": self.is_cbr,
+            "is_vbr": self.is_vbr,
+            "avg_bitrate": self.avg_bitrate,
             "spectral_grade": self.spectral_grade,
             "spectral_bitrate": self.spectral_bitrate,
             "converted_count": self.converted_count,
@@ -95,6 +102,7 @@ class SimResult:
     keep_searching: bool
     denylisted: bool
     final_status: str | None
+    stage0_spectral_gate: str | None
     stage1_spectral: str | None
     stage2_import: str | None
     stage3_quality_gate: str | None
@@ -148,10 +156,19 @@ DOWNLOAD_SCENARIOS = [
                      spectral_grade="genuine",
                      converted_count=0,
                      post_conversion_min_bitrate=None),
-    # MP3 VBR
-    DownloadScenario("mp3_v0_240", False, 240, False),
-    DownloadScenario("mp3_v0_low_205", False, 205, False),
-    DownloadScenario("mp3_v2_190", False, 190, False),
+    # MP3 VBR (avg_bitrate drives the preimport spectral gate — issue #93)
+    DownloadScenario("mp3_v0_240", False, 240, False,
+                     is_vbr=True, avg_bitrate=245),
+    DownloadScenario("mp3_v0_low_205", False, 205, False,
+                     is_vbr=True, avg_bitrate=205),
+    DownloadScenario("mp3_v2_190", False, 190, False,
+                     is_vbr=True, avg_bitrate=190),
+    # VBR transcode masquerading as V0 (Go! Team shape from issue #93).
+    # Low avg + likely_transcode spectral → stage 0 gates, stage 1 rejects.
+    DownloadScenario("vbr_transcode_go_team_shape", False, 126, False,
+                     is_vbr=True, avg_bitrate=182,
+                     spectral_grade="likely_transcode",
+                     spectral_bitrate=96),
     # CBR no spectral
     DownloadScenario("cbr_320_no_spectral", False, 320, True),
     DownloadScenario("cbr_256_no_spectral", False, 256, True),
@@ -241,6 +258,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
         keep_searching=result["keep_searching"],
         denylisted=result["denylisted"],
         final_status=result["final_status"],
+        stage0_spectral_gate=result["stage0_spectral_gate"],
         stage1_spectral=result["stage1_spectral"],
         stage2_import=result["stage2_import"],
         stage3_quality_gate=result["stage3_quality_gate"],
@@ -264,6 +282,39 @@ class TestSimulatorInvariants(unittest.TestCase):
         # No duplicate names
         self.assertEqual(len(ALBUM_MAP), len(ALBUM_STATES))
         self.assertEqual(len(DL_MAP), len(DOWNLOAD_SCENARIOS))
+
+    def test_stage0_gate_propagates(self):
+        """Issue #93: every simulation must populate stage0_spectral_gate
+        so the CLI + web UI can explain why spectral ran or didn't."""
+        VALID = {"would_run", "skipped_vbr_high_avg", "skipped_flac"}
+        album = ALBUM_MAP["fresh_request"]
+        for dl in DOWNLOAD_SCENARIOS:
+            with self.subTest(dl=dl.name):
+                r = simulate(album, dl)
+                self.assertIn(r.stage0_spectral_gate, VALID,
+                              f"{dl.name}: stage0={r.stage0_spectral_gate}")
+
+    def test_vbr_high_avg_skips_spectral_stage(self):
+        """Genuine V0 download (avg 245) must have stage0=skipped_vbr_high_avg
+        AND stage1 must not run. This locks the production semantic the CLI
+        simulator must explain: 'we trust the VBR bitrate signal, no analysis'."""
+        album = ALBUM_MAP["fresh_request"]
+        r = simulate(album, DL_MAP["mp3_v0_240"])
+        self.assertEqual(r.stage0_spectral_gate, "skipped_vbr_high_avg")
+        self.assertIsNone(
+            r.stage1_spectral,
+            "high-avg VBR must skip spectral entirely, not model a "
+            "decision on it")
+
+    def test_vbr_low_avg_runs_spectral_stage(self):
+        """Go! Team shape: VBR avg 182 + likely_transcode spectral → stage 0
+        gates, stage 1 fires and rejects. The live issue #93 scenario."""
+        album = ALBUM_MAP["vbr_v0_no_spectral"]
+        r = simulate(album, DL_MAP["vbr_transcode_go_team_shape"])
+        self.assertEqual(r.stage0_spectral_gate, "would_run")
+        self.assertIn(r.stage1_spectral,
+                      ("reject", "import_upgrade", "import_no_exist"),
+                      "gate fired, stage 1 must have a real spectral decision")
 
     def test_final_status_always_set(self):
         """Every simulation must produce a definitive final_status."""

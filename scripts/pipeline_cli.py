@@ -716,12 +716,22 @@ def cmd_quality(db, args):
             spectral_grade="suspect", converted_count=12,
             post_conversion_min_bitrate=245)),
         # --- MP3 VBR downloads ---
-        ("MP3 V0 (240kbps)", dict(
-            is_flac=False, min_bitrate=240, is_cbr=False)),
-        ("MP3 V0 (low, 205kbps)", dict(
-            is_flac=False, min_bitrate=205, is_cbr=False)),
-        ("MP3 V2 (190kbps)", dict(
-            is_flac=False, min_bitrate=190, is_cbr=False)),
+        # avg_bitrate drives the new preimport spectral gate (issue #93):
+        # VBR with avg >= cfg.mp3_vbr.excellent skips spectral entirely,
+        # below gates through analysis even without a spectral_grade input.
+        ("MP3 V0 genuine (avg 245kbps, gate skips)", dict(
+            is_flac=False, min_bitrate=240, is_cbr=False,
+            is_vbr=True, avg_bitrate=245)),
+        ("MP3 V0 (low, avg 205kbps, gate runs)", dict(
+            is_flac=False, min_bitrate=205, is_cbr=False,
+            is_vbr=True, avg_bitrate=205)),
+        ("VBR transcode (Go! Team shape, avg 182kbps)", dict(
+            is_flac=False, min_bitrate=126, is_cbr=False,
+            is_vbr=True, avg_bitrate=182,
+            spectral_grade="likely_transcode", spectral_bitrate=96)),
+        ("MP3 V2 (avg 190kbps, gate runs)", dict(
+            is_flac=False, min_bitrate=190, is_cbr=False,
+            is_vbr=True, avg_bitrate=190)),
         # --- MP3 CBR downloads (no spectral) ---
         ("CBR 320 (no spectral)", dict(
             is_flac=False, min_bitrate=320, is_cbr=True)),
@@ -769,7 +779,9 @@ def cmd_quality(db, args):
             parts.append("keep searching")
         final = result["final_status"] or "?"
         decision_chain = " → ".join(
-            f"{s}={result[s]}" for s in ["stage1_spectral", "stage2_import", "stage3_quality_gate"]
+            f"{s}={result[s]}"
+            for s in ["stage0_spectral_gate", "stage1_spectral",
+                      "stage2_import", "stage3_quality_gate"]
             if result[s] is not None)
 
         print(f"    {name}:")

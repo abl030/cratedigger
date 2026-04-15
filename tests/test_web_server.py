@@ -627,6 +627,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         "id", "title", "path", "function", "when", "inputs", "rules",
     }
     SIMULATE_REQUIRED_FIELDS = {
+        "stage0_spectral_gate",
         "stage1_spectral", "stage2_import", "stage3_quality_gate",
         "final_status", "imported", "denylisted", "keep_searching",
         "target_final_format",
@@ -735,6 +736,7 @@ class TestPipelineRouteContracts(_WebServerCase):
     @patch("routes.pipeline.full_pipeline_decision")
     def test_pipeline_simulate_threads_target_format(self, mock_simulate):
         mock_simulate.return_value = {
+            "stage0_spectral_gate": "skipped_flac",
             "stage1_spectral": None,
             "stage2_import": "import",
             "stage3_quality_gate": "accept",
@@ -752,6 +754,31 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             mock_simulate.call_args.kwargs["target_format"], "flac")
+
+    def test_pipeline_simulate_threads_avg_bitrate_to_stage0(self):
+        """Issue #93: the web simulator must accept avg_bitrate and return
+        stage0_spectral_gate so the UI can drive/display the new gate.
+        """
+        # VBR MP3 with high avg → stage 0 must say skipped_vbr_high_avg
+        status, data = self._get(
+            "/api/pipeline/simulate?"
+            "is_flac=false&min_bitrate=240&is_cbr=false&is_vbr=true&avg_bitrate=245"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            data["stage0_spectral_gate"], "skipped_vbr_high_avg",
+            "high-avg VBR must short-circuit the spectral gate in the "
+            "web simulator (matches production lib.preimport)")
+
+        # VBR MP3 with low avg → stage 0 must say would_run
+        status, data = self._get(
+            "/api/pipeline/simulate?"
+            "is_flac=false&min_bitrate=126&is_cbr=false&is_vbr=true&avg_bitrate=182"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            data["stage0_spectral_gate"], "would_run",
+            "Go! Team-shape transcode must trigger the gate in the simulator")
 
 
 class TestPipelineMutationRouteContracts(_WebServerCase):
