@@ -366,6 +366,9 @@ def _rejection_verdict(entry: LogEntry) -> str:
     if scenario == "album_name_mismatch":
         return "Album name mismatch"
 
+    if scenario == "nested_layout":
+        return "Nested folder layout (flatten first)"
+
     return str(scenario) if scenario else "Rejected"
 
 
