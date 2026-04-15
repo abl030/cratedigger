@@ -70,7 +70,6 @@ class PreImportGateResult:
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
     download_min_bitrate_kbps: int | None = None
-    cliff_track_count: int | None = None
 
 
 def _normalize_bps_to_kbps(value: int | None) -> int | None:
@@ -371,7 +370,6 @@ def run_preimport_gates(
             1 for track in getattr(dl_sp, "tracks", [])
             if getattr(track, "cliff_detected", False)
         )
-        result.cliff_track_count = cliff_count
         result.download_spectral = SpectralMeasurement.from_parts(
             dl_grade, dl_cliff_bitrate)
         logger.info(
@@ -379,7 +377,9 @@ def run_preimport_gates(
             f"estimated_bitrate={dl_cliff_bitrate}kbps, "
             f"suspect={dl_suspect_pct:.0f}%, cliffs={cliff_count}")
     except Exception:
-        logger.exception(f"SPECTRAL: failed to analyze download for {label}")
+        # Keep the log prefix pre-refactor had ("SPECTRAL: failed for ...")
+        # so operators grepping for it continue to match.
+        logger.exception(f"SPECTRAL: failed for {label}")
         return result
 
     # --- Existing-album lookup + analysis ---
@@ -442,11 +442,10 @@ def run_preimport_gates(
         result.existing_spectral.bitrate_kbps
         if result.existing_spectral is not None else None
     )
-    # Uses the 4-arg form of spectral_import_decision (matches main's
-    # _apply_spectral_decision exactly). The cliff_track_count is captured on
-    # PreImportGateResult for audit/logging but not forwarded — the
-    # decision-function side of the cliff heuristic lives on a separate branch
-    # and will be wired in once it lands.
+    # 4-arg form matches main's _apply_spectral_decision exactly. The
+    # cliff-count heuristic (``download_min_bitrate`` + ``cliff_track_count``
+    # kwargs on spectral_import_decision) lives on a separate branch with
+    # its own tests; wire it in here once that lands.
     spectral_decision = spectral_import_decision(
         dl_grade, dl_cliff_bitrate, existing_cliff_bitrate,
         existing_min_bitrate=result.existing_min_bitrate,
