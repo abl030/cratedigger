@@ -122,23 +122,29 @@ def stage_to_ai(album_data: GrabListEntry, source_path: str, staging_dir: str) -
 # === Audio validation ===
 
 def repair_mp3_headers(folder_path: str) -> None:
-    """Run mp3val -f on all MP3 files to fix header issues before audio validation."""
-    for f in os.listdir(folder_path):
-        if not f.lower().endswith(".mp3"):
-            continue
-        filepath = os.path.join(folder_path, f)
-        try:
-            result = sp.run(["mp3val", "-f", "-nb", filepath],
-                            capture_output=True, text=True, timeout=60)
-            if "FIXED" in result.stdout:
-                logger.info(f"MP3VAL: fixed {f}")
-        except FileNotFoundError:
-            logger.warning("MP3VAL: mp3val not found on PATH — skipping header repair")
-            return
-        except sp.TimeoutExpired:
-            logger.warning(f"MP3VAL: timeout on {f}")
-        except Exception:
-            logger.exception(f"MP3VAL: error on {f}")
+    """Run mp3val -f on all MP3 files to fix header issues before audio validation.
+
+    Walks subdirectories so nested multi-disc layouts are repaired too —
+    must match validate_audio's traversal or fixable header issues inside
+    subdirectories reach ffmpeg unrepaired and falsely reject the import.
+    """
+    for root, _dirs, files in os.walk(folder_path):
+        for f in files:
+            if not f.lower().endswith(".mp3"):
+                continue
+            filepath = os.path.join(root, f)
+            try:
+                result = sp.run(["mp3val", "-f", "-nb", filepath],
+                                capture_output=True, text=True, timeout=60)
+                if "FIXED" in result.stdout:
+                    logger.info(f"MP3VAL: fixed {f}")
+            except FileNotFoundError:
+                logger.warning("MP3VAL: mp3val not found on PATH — skipping header repair")
+                return
+            except sp.TimeoutExpired:
+                logger.warning(f"MP3VAL: timeout on {f}")
+            except Exception:
+                logger.exception(f"MP3VAL: error on {f}")
 
 
 from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS

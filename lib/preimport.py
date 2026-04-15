@@ -200,17 +200,30 @@ def _persist_spectral_state(
     existing_spectral: SpectralMeasurement | None,
     existing_min_bitrate: int | None,
     label: str,
+    propagate_download_to_existing: bool = True,
 ) -> SpectralMeasurement | None:
     """Write the on-disk spectral state to album_requests.
 
-    When there's no measured existing spectral but there IS an existing
-    album on disk (existing_min_bitrate set), propagate the download's
-    spectral as current. Without the min-bitrate guard, a fresh album with
-    nothing on disk would adopt its own download spectral and self-reject.
+    When ``propagate_download_to_existing`` is True and there's no measured
+    existing spectral but there IS an existing album on disk
+    (existing_min_bitrate set), adopt the download's spectral as the current
+    on-disk measurement. This helps same-tier downgrade detection for
+    subsequent imports — the download and on-disk characterize the same
+    quality tier, so reusing the download's spectral is a reasonable proxy.
+
+    Pass ``propagate_download_to_existing=False`` from the force/manual
+    import path: that path evaluates the gate *before* the subprocess import
+    runs, so propagating a download's spectral into on-disk state would be
+    speculative. If the downstream import fails (downgrade, no JSON,
+    timeout) the DB would otherwise be left claiming that the failed
+    download is on-disk, skewing later ``compute_effective_override_bitrate``
+    and quality-gate decisions.
+
     Returns the measurement actually written (or None if nothing to write).
     """
     to_write = existing_spectral
     if (to_write is None
+            and propagate_download_to_existing
             and download_spectral is not None
             and existing_min_bitrate is not None):
         to_write = download_spectral
@@ -240,6 +253,7 @@ def run_preimport_gates(
     db: "PipelineDB | None" = None,
     request_id: int | None = None,
     usernames: set[str] | None = None,
+    propagate_download_to_existing: bool = True,
 ) -> PreImportGateResult:
     """Run shared pre-import gates: audio integrity, then spectral transcode detection.
 
@@ -338,6 +352,7 @@ def run_preimport_gates(
             existing_spectral=result.existing_spectral,
             existing_min_bitrate=result.existing_min_bitrate,
             label=label,
+            propagate_download_to_existing=propagate_download_to_existing,
         )
         result.existing_spectral = written
 
