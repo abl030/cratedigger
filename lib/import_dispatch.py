@@ -806,6 +806,12 @@ def dispatch_import_from_db(
     # force/manual import can't quietly replace an existing copy with a
     # transcode the auto path would have rejected.
     inspection = inspect_local_files(failed_path)
+    # download_log.soulseek_username can be a comma-joined list of peers for
+    # multi-source downloads. Split before denylisting so a spectral reject
+    # blocks each real peer, not the literal combined string.
+    source_usernames: set[str] = {
+        u.strip() for u in (source_username or "").split(",") if u.strip()
+    }
     preimport = run_preimport_gates(
         path=failed_path,
         mb_release_id=mbid,
@@ -816,7 +822,7 @@ def dispatch_import_from_db(
         cfg=cfg,
         db=db,
         request_id=request_id,
-        usernames={source_username} if source_username else set(),
+        usernames=source_usernames,
     )
 
     if not preimport.valid:
@@ -847,6 +853,7 @@ def dispatch_import_from_db(
                 scenario=preimport.scenario or "preimport_reject",
                 detail=preimport.detail,
                 failed_path=failed_path,
+                corrupt_files=list(preimport.corrupt_files),
             ).to_json(),
             staged_path=failed_path,
         )

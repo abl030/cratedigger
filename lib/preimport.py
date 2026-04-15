@@ -96,7 +96,11 @@ class LocalFileInspection:
 
 
 def inspect_local_files(path: str) -> LocalFileInspection:
-    """Scan ``path`` for audio files and report filetype + bitrate + VBR hints.
+    """Scan ``path`` recursively for audio files and report filetype + bitrate + VBR hints.
+
+    Walks subdirectories so multi-disc layouts (e.g. ``Album/CD1/*.mp3``)
+    classify correctly — otherwise the spectral gate silently skips nested
+    manual/force imports because ``download_filetype`` comes back empty.
 
     Uses mutagen for MP3 VBR detection; all other bitrate/filetype info comes
     from extensions and file headers. Exceptions are swallowed so a corrupt or
@@ -110,29 +114,30 @@ def inspect_local_files(path: str) -> LocalFileInspection:
     min_bitrate: int | None = None
     any_vbr: bool | None = None
 
-    for name in os.listdir(path):
-        full = os.path.join(path, name)
-        if not os.path.isfile(full) or "." not in name:
-            continue
-        ext = name.rsplit(".", 1)[-1].lower()
-        if ext not in AUDIO_EXTS:
-            continue
-        extensions.add(ext)
-        if ext == "mp3":
-            try:
-                from mutagen.mp3 import MP3  # type: ignore[import-untyped]
-                mp3 = MP3(full)
-                br = getattr(mp3.info, "bitrate", None)
-                br_mode = getattr(mp3.info, "bitrate_mode", None)
-                if br is not None:
-                    min_bitrate = br if min_bitrate is None else min(min_bitrate, br)
-                # mutagen BitrateMode: UNKNOWN=0, CBR=1, VBR=2, ABR=3
-                if br_mode is not None:
-                    is_vbr_file = int(br_mode) in (2, 3)
-                    any_vbr = is_vbr_file if any_vbr is None else (any_vbr or is_vbr_file)
-            except Exception:
-                logger.debug(f"inspect_local_files: failed to read {full}",
-                             exc_info=True)
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            if "." not in name:
+                continue
+            ext = name.rsplit(".", 1)[-1].lower()
+            if ext not in AUDIO_EXTS:
+                continue
+            extensions.add(ext)
+            if ext == "mp3":
+                full = os.path.join(root, name)
+                try:
+                    from mutagen.mp3 import MP3  # type: ignore[import-untyped]
+                    mp3 = MP3(full)
+                    br = getattr(mp3.info, "bitrate", None)
+                    br_mode = getattr(mp3.info, "bitrate_mode", None)
+                    if br is not None:
+                        min_bitrate = br if min_bitrate is None else min(min_bitrate, br)
+                    # mutagen BitrateMode: UNKNOWN=0, CBR=1, VBR=2, ABR=3
+                    if br_mode is not None:
+                        is_vbr_file = int(br_mode) in (2, 3)
+                        any_vbr = is_vbr_file if any_vbr is None else (any_vbr or is_vbr_file)
+                except Exception:
+                    logger.debug(f"inspect_local_files: failed to read {full}",
+                                 exc_info=True)
 
     return LocalFileInspection(
         filetype=", ".join(sorted(extensions)),

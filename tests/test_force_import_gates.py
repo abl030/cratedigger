@@ -347,5 +347,147 @@ class TestForceImportStillSkipsBeetsDistance(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestInspectLocalFilesRecursive(unittest.TestCase):
+    """inspect_local_files() must walk subdirectories so multi-disc layouts
+    (``Album/CD1/*.mp3``) classify correctly — otherwise the spectral gate
+    silently skips nested manual/force imports.
+    """
+
+    def test_multi_disc_layout_detects_mp3(self):
+        """Audio files under a subdirectory must be discovered."""
+        import os
+        from lib.preimport import inspect_local_files
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01 - track.mp3"), "wb") as f:
+                f.write(b"fake")
+            inspection = inspect_local_files(tmpdir)
+            self.assertIn("mp3", inspection.filetype,
+                          "subdirectory MP3 must be discovered")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestForceImportSplitsMultiUserSources(unittest.TestCase):
+    """download_log.soulseek_username can be a comma-joined list
+    (``"disc1user, disc2user"``) when the download pulled from multiple peers.
+    The preimport denylist must block each real peer, not the literal string.
+    """
+
+    def test_comma_separated_usernames_split_before_denylist(self):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=903, status="manual", mb_release_id="mbid-luce",
+            min_bitrate=96, current_spectral_bitrate=96,
+            current_spectral_grade="likely_transcode",
+        ))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=96,
+            avg_bitrate_kbps=96, format="MP3", is_cbr=True,
+            album_path="/Beets/Luce")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True, audio_check_mode="normal",
+        )
+        tmpdir = tempfile.mkdtemp()
+        import os
+        with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+            f.write(b"x")
+
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.preimport.validate_audio",
+                       return_value=SimpleNamespace(
+                           valid=True, error=None, failed_files=[])), \
+                 patch("lib.preimport.spectral_analyze",
+                       side_effect=[
+                           _analyze_result("likely_transcode", 96, 80.0, 5),
+                           _analyze_result("likely_transcode", 96, 80.0, 5),
+                       ]), \
+                 patch("os.path.isdir", return_value=True):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                dispatch_import_from_db(
+                    db, request_id=903, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="disc1user, disc2user",
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        usernames = {e.username for e in db.denylist}
+        self.assertIn("disc1user", usernames)
+        self.assertIn("disc2user", usernames)
+        self.assertNotIn("disc1user, disc2user", usernames,
+                         "must not denylist the literal combined string")
+
+
+class TestPreimportRejectionPreservesCorruptFiles(unittest.TestCase):
+    """Audio-corrupt rejection in the preimport path must preserve the list of
+    corrupt files in ``download_log.validation_result`` for debuggability — the
+    auto path preserves this, force/manual must match.
+    """
+
+    def test_corrupt_files_land_in_validation_result_jsonb(self):
+        import json
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123",
+        ))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/Test")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True,
+            audio_check_mode="normal",
+        )
+        tmpdir = tempfile.mkdtemp()
+        import os
+        with open(os.path.join(tmpdir, "01 - track.mp3"), "wb") as f:
+            f.write(b"bad")
+
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch("lib.preimport.validate_audio",
+                       return_value=SimpleNamespace(
+                           valid=False,
+                           error="ffmpeg decode failed",
+                           failed_files=[
+                               ("01 - track.mp3", "ffmpeg decode failed"),
+                               ("02 - track.mp3", "Header missing"),
+                           ])), \
+                 patch("lib.preimport.spectral_analyze",
+                       return_value=_analyze_result("genuine", None)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="user1",
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertEqual(len(db.download_logs), 1)
+        vr = json.loads(db.download_logs[0].validation_result or "{}")
+        self.assertEqual(vr.get("scenario"), "audio_corrupt")
+        self.assertIn("01 - track.mp3", vr.get("corrupt_files", []))
+        self.assertIn("02 - track.mp3", vr.get("corrupt_files", []))
+
+
 if __name__ == "__main__":
     unittest.main()
