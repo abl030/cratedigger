@@ -48,6 +48,46 @@ def _analyze_result(grade: str, bitrate: int | None, suspect_pct: float = 0.0,
     )
 
 
+class TestNeedsSpectralCheckDecisions(unittest.TestCase):
+    """Pure-function coverage for ``_needs_spectral_check``.
+
+    The equivalent tests used to live on the deleted
+    ``TestGatherSpectralContextFunction`` (flac skips, VBR skips, CBR runs).
+    Keeping them as pure input/output assertions here so the auto path's
+    branch-selection logic stays covered without re-introducing the old
+    SpectralContext plumbing.
+    """
+
+    def test_flac_skips(self):
+        from lib.preimport import _needs_spectral_check
+        self.assertFalse(_needs_spectral_check("flac", False))
+        self.assertFalse(_needs_spectral_check("flac", None))
+        self.assertFalse(_needs_spectral_check("flac", True))
+
+    def test_vbr_mp3_skips(self):
+        from lib.preimport import _needs_spectral_check
+        self.assertFalse(_needs_spectral_check("mp3", True))
+
+    def test_cbr_mp3_runs(self):
+        from lib.preimport import _needs_spectral_check
+        self.assertTrue(_needs_spectral_check("mp3", False))
+
+    def test_unknown_vbr_mp3_runs_gate_by_default(self):
+        """is_vbr=None routes through the gate — run_preimport_gates resolves
+        VBR via filesystem inspection before reaching this helper."""
+        from lib.preimport import _needs_spectral_check
+        self.assertTrue(_needs_spectral_check("mp3", None))
+
+    def test_mixed_mp3_flac_skips(self):
+        """Filetype containing both 'flac' and 'mp3' is treated as non-MP3."""
+        from lib.preimport import _needs_spectral_check
+        self.assertFalse(_needs_spectral_check("flac, mp3", False))
+
+    def test_empty_filetype_skips(self):
+        from lib.preimport import _needs_spectral_check
+        self.assertFalse(_needs_spectral_check("", False))
+
+
 class TestForceImportRunsSpectralGate(unittest.TestCase):
     """Force-import must run the spectral gate — not just skip beets distance.
 
