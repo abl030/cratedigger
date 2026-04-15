@@ -818,6 +818,37 @@ def dispatch_import_from_db(
     except Exception:
         logger.debug("pre-inspect mp3 header repair failed", exc_info=True)
     inspection = inspect_local_files(failed_path)
+
+    # --- Reject nested-folder layouts early ---
+    # The preimport gates (validate_audio / analyze_album / repair_mp3_headers)
+    # recurse, but the downstream harness (harness/import_one.py) still uses
+    # os.listdir for bitrate measurement and conversion. A nested force/manual
+    # import would pass gates and then produce an empty/misclassified
+    # measurement — better to fail fast with a clear message so the user can
+    # flatten the folder themselves. Auto-path downloads are already
+    # flattened by process_completed_album, so this only affects force/manual.
+    if inspection.has_nested_audio:
+        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
+        detail = ("Audio files are in subdirectories — flatten the folder "
+                  "before import (multi-disc layouts are not supported here).")
+        logger.warning(f"{mode} REJECTED (nested layout): {label} — {detail}")
+        _record_rejection_and_maybe_requeue(
+            db, request_id, DownloadInfo(username=source_username),
+            distance=0.0,
+            scenario="nested_layout",
+            detail=detail,
+            error=None,
+            requeue=False,
+            outcome_label="rejected",
+            validation_result=ValidationResult(
+                distance=0.0,
+                scenario="nested_layout",
+                detail=detail,
+                failed_path=failed_path,
+            ).to_json(),
+            staged_path=failed_path,
+        )
+        return DispatchOutcome(success=False, message=detail)
     # download_log.soulseek_username can be a comma-joined list of peers for
     # multi-source downloads. Split before denylisting so a spectral reject
     # blocks each real peer, not the literal combined string.

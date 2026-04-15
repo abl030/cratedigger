@@ -1142,5 +1142,61 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
             "existing_spectral must stay None when beets has no album")
 
 
+class TestForceImportRejectsNestedLayout(unittest.TestCase):
+    """Force/manual import must reject nested folder layouts at dispatch
+    rather than letting them pass the gates and fail downstream in the
+    beets harness (which uses os.listdir, not os.walk). Clear failure
+    early > silent misclassification late.
+    """
+
+    def test_nested_layout_rejected_with_clear_detail(self):
+        import os
+        import json
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", mb_release_id="mbid-123"))
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/Test")
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True,
+            audio_check_mode="off")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cd1 = os.path.join(tmpdir, "CD1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01.mp3"), "wb") as f:
+                f.write(b"fake")
+
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                result = dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="user1")
+
+            self.assertFalse(result.success,
+                             "nested layout must be rejected")
+            self.assertFalse(
+                _import_one_called(ext.run),
+                "import_one.py must NOT run when nested layout is detected")
+            self.assertEqual(len(db.download_logs), 1)
+            db.assert_log(self, 0, beets_scenario="nested_layout")
+            vr = json.loads(db.download_logs[0].validation_result or "{}")
+            self.assertEqual(vr.get("scenario"), "nested_layout")
+            self.assertIn("subdir", (vr.get("detail") or "").lower())
+            self.assertEqual(vr.get("failed_path"), tmpdir,
+                             "failed_path must round-trip for debug/retry")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
