@@ -185,7 +185,8 @@ class TestCmdForceImport(unittest.TestCase):
 
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
-    def test_failed_manual_import_prints_error(self, _mock_print):
+    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    def test_failed_manual_import_prints_error(self, _mock_resolve, _mock_print):
         from lib.import_dispatch import DispatchOutcome
         db = MagicMock()
         db.get_request.return_value = make_request_row(
@@ -206,7 +207,8 @@ class TestCmdManualImport(unittest.TestCase):
         _mock_print.assert_any_call("  [FAIL] Rejected: quality_downgrade — new 192kbps <= existing 320kbps")
 
     @patch("builtins.print")
-    def test_manual_import_calls_dispatch_from_db(self, _mock_print):
+    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    def test_manual_import_calls_dispatch_from_db(self, _mock_resolve, _mock_print):
         from lib.import_dispatch import DispatchOutcome
         db = MagicMock()
         db.get_request.return_value = make_request_row(
@@ -224,6 +226,50 @@ class TestCmdManualImport(unittest.TestCase):
             db, request_id=123, failed_path="/tmp/Album",
             force=False, outcome_label="manual_import",
         )
+
+    @patch("builtins.print")
+    @patch("pipeline_cli._resolve_failed_path",
+           return_value="/mnt/virtio/music/slskd/failed_imports/Foo - Bar")
+    def test_manual_import_resolves_relative_path(self, _mock_resolve, _mock_print):
+        """Manual-import must resolve relative paths the same way force-import
+        does, so a user can type ``failed_imports/Foo - Bar`` without
+        pre-absolutizing. Matches cmd_force_import behavior.
+        """
+        from lib.import_dispatch import DispatchOutcome
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=123, status="manual", min_bitrate=320,
+            mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        )
+        mock_outcome = DispatchOutcome(success=True, message="ok")
+        with patch("lib.import_dispatch.dispatch_import_from_db",
+                    return_value=mock_outcome) as mock_dispatch:
+            args = MagicMock(id=123, path="failed_imports/Foo - Bar")
+            pipeline_cli.cmd_manual_import(db, args)
+
+        _mock_resolve.assert_called_once_with("failed_imports/Foo - Bar")
+        mock_dispatch.assert_called_once_with(
+            db, request_id=123,
+            failed_path="/mnt/virtio/music/slskd/failed_imports/Foo - Bar",
+            force=False, outcome_label="manual_import",
+        )
+
+    @patch("builtins.print")
+    @patch("pipeline_cli._resolve_failed_path", return_value=None)
+    def test_manual_import_aborts_when_path_cannot_be_resolved(
+        self, _mock_resolve, mock_print
+    ):
+        """When the path can't be resolved, abort without calling dispatch."""
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=123, status="manual", min_bitrate=320,
+            mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        )
+        with patch("lib.import_dispatch.dispatch_import_from_db") as mock_dispatch:
+            args = MagicMock(id=123, path="nonexistent/path")
+            pipeline_cli.cmd_manual_import(db, args)
+        mock_dispatch.assert_not_called()
+        mock_print.assert_any_call("  Files not found at: nonexistent/path")
 
 
 class TestCmdQuery(unittest.TestCase):
