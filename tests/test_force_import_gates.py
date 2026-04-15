@@ -809,5 +809,100 @@ class TestForceImportRepairsBeforeInspection(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
+    """When BeetsDB can't walk the on-disk album_path (stale/missing), the
+    gate must fall back to the spectral state already stored on
+    album_requests. Otherwise spectral_import_decision compares against
+    existing_min_bitrate (container) and can reject a genuine upgrade —
+    e.g. 192kbps transcode rejected as <= 320 even though
+    current_spectral_bitrate says the on-disk copy is only 128kbps.
+    """
+
+    def test_stored_spectral_used_when_beets_lookup_empty(self):
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        # Request row has stored spectral: on-disk is actually a 128 transcode,
+        # even though beets reports 320 as the container min_bitrate.
+        db.seed_request(make_request_row(
+            id=42,
+            min_bitrate=320,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+        ))
+        # Beets knows the album exists at 320 but its album_path is not on
+        # disk, so _analyze_existing returns (320, None) — no measured spectral.
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3", is_cbr=True,
+            album_path="/Beets/NonexistentPath")
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch("lib.preimport.spectral_analyze",
+                   return_value=_analyze_result(
+                       "likely_transcode", 192, 80.0, 5)), \
+             patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-123",
+                label="Test",
+                download_filetype="mp3",
+                download_min_bitrate_bps=192_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames=set(),
+                propagate_download_to_existing=False,
+            )
+
+        # With stored spectral fallback, the decision compares
+        # new_spectral=192kbps vs stored_existing_spectral=128kbps → import.
+        # Without the fallback it compares 192 vs min_bitrate=320 → reject.
+        self.assertTrue(
+            result.valid,
+            "192kbps upgrade over 128kbps-spectral existing must not be rejected")
+
+
+class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
+    """MP3 header repair must run regardless of audio_check_mode — installs
+    that disable ffmpeg validation still rely on mp3val to fix fixable
+    header issues before spectral analysis and the import subprocess.
+    Matches the pre-refactor auto-path behavior.
+    """
+
+    def test_repair_runs_with_audio_check_off(self):
+        import os
+        from unittest.mock import patch
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        cfg = SoularrConfig(audio_check_mode="off")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
+                f.write(b"x")
+            with patch("lib.preimport.repair_mp3_headers") as mock_repair, \
+                 patch("lib.preimport.spectral_analyze",
+                       return_value=_analyze_result("genuine", None)):
+                run_preimport_gates(
+                    path=tmpdir,
+                    mb_release_id="",  # skip existing lookup
+                    label="Test",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=None,
+                    download_is_vbr=None,
+                    cfg=cfg,
+                    usernames=set(),
+                )
+            self.assertEqual(
+                mock_repair.call_count, 1,
+                "repair_mp3_headers must run even with audio_check_mode=off")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

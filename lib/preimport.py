@@ -293,12 +293,18 @@ def run_preimport_gates(
     """
     result = PreImportGateResult()
 
+    # --- MP3 header repair (unconditional) ---
+    # mp3val runs regardless of audio_check_mode: deployments with
+    # audio_check=off still want fixable MP3 header issues cleaned up before
+    # spectral analysis and the import subprocess. Matches the auto path's
+    # original behavior pre-refactor.
+    try:
+        repair_mp3_headers(path)
+    except Exception:
+        logger.debug("repair_mp3_headers failed", exc_info=True)
+
     # --- Audio integrity gate ---
     if cfg.audio_check_mode != "off":
-        try:
-            repair_mp3_headers(path)
-        except Exception:
-            logger.debug("repair_mp3_headers failed", exc_info=True)
         audio_result = validate_audio(path, cfg.audio_check_mode)
         if not audio_result.valid:
             result.valid = False
@@ -343,6 +349,36 @@ def run_preimport_gates(
         existing_min, existing_spectral = _analyze_existing(mb_release_id, cfg)
         result.existing_min_bitrate = existing_min
         result.existing_spectral = existing_spectral
+
+    # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
+    # If the on-disk album can't be freshly analyzed (stale/missing album_path),
+    # fall back to the spectral state already stored on album_requests. Without
+    # this, spectral_import_decision() would compare against the container
+    # bitrate (existing_min) and reject a genuine upgrade — e.g. a 192kbps
+    # transcode rejected as <= 320 even though current_spectral_bitrate already
+    # says the on-disk copy is only 128kbps. Pre-refactor the force/manual path
+    # reached compute_effective_override_bitrate() and allowed the upgrade.
+    if (result.existing_spectral is None
+            and db is not None and request_id is not None):
+        try:
+            req = db.get_request(request_id)
+            if req:
+                stored_grade = req.get("current_spectral_grade")
+                stored_bitrate = req.get("current_spectral_bitrate")
+                stored = SpectralMeasurement.from_parts(stored_grade, stored_bitrate)
+                if stored is not None:
+                    result.existing_spectral = stored
+                    logger.info(
+                        f"SPECTRAL: {label} using persisted current_spectral "
+                        f"(grade={stored.grade}, bitrate={stored.bitrate_kbps}kbps)"
+                        " — BeetsDB lookup returned no spectral measurement")
+                if result.existing_min_bitrate is None:
+                    stored_min = req.get("min_bitrate")
+                    if stored_min is not None:
+                        result.existing_min_bitrate = stored_min
+        except Exception:
+            logger.debug("failed to read persisted spectral state",
+                         exc_info=True)
 
     # --- Persist spectral state to DB (if wired) ---
     if db is not None and request_id is not None:
