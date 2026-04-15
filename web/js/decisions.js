@@ -208,6 +208,10 @@ export function renderSimulatorForm() {
         <input type="number" id="ds-existing_min_bitrate" placeholder="in beets">
       </div>
       <div class="ds-field">
+        <label>Existing avg bitrate (kbps)</label>
+        <input type="number" id="ds-existing_avg_bitrate" placeholder="AVG policy">
+      </div>
+      <div class="ds-field">
         <label>Existing spectral bitrate</label>
         <input type="number" id="ds-existing_spectral_bitrate" placeholder="on disk">
       </div>
@@ -256,7 +260,8 @@ export const DS_PRESETS = {
   virginia: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
-    existing_min_bitrate: '192', existing_spectral_bitrate: '',
+    existing_min_bitrate: '192', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
@@ -264,7 +269,8 @@ export const DS_PRESETS = {
   mtngoats: {
     is_flac: 'false', min_bitrate: '138', is_cbr: 'false', avg_bitrate: '138',
     spectral_grade: 'genuine', spectral_bitrate: '128',
-    existing_min_bitrate: '173', existing_spectral_bitrate: '128',
+    existing_min_bitrate: '173', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '128',
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
@@ -272,7 +278,8 @@ export const DS_PRESETS = {
   genuine_flac: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
-    existing_min_bitrate: '192', existing_spectral_bitrate: '',
+    existing_min_bitrate: '192', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
@@ -280,7 +287,8 @@ export const DS_PRESETS = {
   cbr320: {
     is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
     spectral_grade: '', spectral_bitrate: '',
-    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
@@ -289,7 +297,8 @@ export const DS_PRESETS = {
     // Genuine V0: avg 245 >= threshold → stage 0 = skipped_vbr_high_avg.
     is_flac: 'false', min_bitrate: '245', is_cbr: 'false', avg_bitrate: '245',
     spectral_grade: '', spectral_bitrate: '',
-    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
@@ -299,7 +308,8 @@ export const DS_PRESETS = {
     // then stage 1 rejects on the supplied likely_transcode spectral.
     is_flac: 'false', min_bitrate: '126', is_cbr: 'false', avg_bitrate: '182',
     spectral_grade: 'likely_transcode', spectral_bitrate: '96',
-    existing_min_bitrate: '', existing_spectral_bitrate: '',
+    existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
@@ -326,7 +336,8 @@ export function dsPreset(name) {
 export async function runSimulator() {
   const fields = ['is_flac','min_bitrate','is_cbr','avg_bitrate',
     'spectral_grade','spectral_bitrate',
-    'existing_min_bitrate','existing_spectral_bitrate','override_min_bitrate',
+    'existing_min_bitrate','existing_avg_bitrate',
+    'existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
     'target_format','verified_lossless_target'];
   const params = new URLSearchParams();
