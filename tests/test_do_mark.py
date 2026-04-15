@@ -69,6 +69,39 @@ class TestDoMarkDone(unittest.TestCase):
         assert log.beets_distance is not None
         self.assertAlmostEqual(log.beets_distance, 0.05)
 
+    def test_imported_path_falls_back_to_dest_when_unset(self):
+        """Legacy behavior: album_requests.imported_path = dest_path when
+        no explicit imported_path is supplied (non-beets paths, like
+        staged-for-manual-review via album_source.mark_done)."""
+        db = self._call()
+        self.assertEqual(
+            db.request(42)["imported_path"],
+            "/tmp/staged/Artist - Album",
+            "legacy callers without an explicit imported_path fall through")
+
+    def test_imported_path_param_overrides_dest(self):
+        """Issue #93: dispatch must propagate ir.postflight.imported_path
+        (actual beets destination) instead of dest_path (source/staging).
+
+        Pre-fix: album_requests.imported_path showed
+        /mnt/virtio/music/slskd/failed_imports/... (source)
+        Post-fix: it shows /mnt/virtio/Music/Beets/Artist/Album (destination)."""
+        db = self._call(
+            imported_path="/Beets/Artist/2005 - Album_",
+        )
+        self.assertEqual(
+            db.request(42)["imported_path"],
+            "/Beets/Artist/2005 - Album_",
+            "explicit imported_path (from ImportResult.postflight) must win")
+
+    def test_imported_path_none_still_falls_back(self):
+        """Explicit imported_path=None is equivalent to omitting — fall back
+        to dest_path. Protects callers that conditionally pass None."""
+        db = self._call(imported_path=None)
+        self.assertEqual(
+            db.request(42)["imported_path"],
+            "/tmp/staged/Artist - Album")
+
 
 class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
     """Rejection recording must log failure and optionally requeue."""

@@ -89,9 +89,14 @@ class LocalFileInspection:
     still uses ``os.listdir`` for bitrate measurement and conversion, so a
     nested force/manual import would pass gates and then produce a
     misclassified/empty measurement in the harness.
+
+    ``avg_bitrate_bps`` is the mean bitrate across all readable MP3 files —
+    used by the VBR spectral-gate threshold (issue #93). Genuine V0 averages
+    ~240-260kbps; VBR transcodes masquerading as V0 average well below that.
     """
     filetype: str = ""           # comma-separated lowercase extensions
     min_bitrate_bps: int | None = None
+    avg_bitrate_bps: int | None = None
     is_vbr: bool | None = None
     has_nested_audio: bool = False
 
@@ -113,6 +118,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
 
     extensions: set[str] = set()
     min_bitrate: int | None = None
+    mp3_bitrates: list[int] = []
     any_vbr: bool | None = None
     has_nested_audio = False
 
@@ -135,6 +141,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                     br_mode = getattr(mp3.info, "bitrate_mode", None)
                     if br is not None:
                         min_bitrate = br if min_bitrate is None else min(min_bitrate, br)
+                        mp3_bitrates.append(br)
                     # mutagen BitrateMode: UNKNOWN=0, CBR=1, VBR=2, ABR=3
                     if br_mode is not None:
                         is_vbr_file = int(br_mode) in (2, 3)
@@ -143,32 +150,52 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                     logger.debug(f"inspect_local_files: failed to read {full}",
                                  exc_info=True)
 
+    avg_bitrate = sum(mp3_bitrates) // len(mp3_bitrates) if mp3_bitrates else None
+
     return LocalFileInspection(
         filetype=", ".join(sorted(extensions)),
         min_bitrate_bps=min_bitrate,
+        avg_bitrate_bps=avg_bitrate,
         is_vbr=any_vbr,
         has_nested_audio=has_nested_audio,
     )
 
 
-def _needs_spectral_check(filetype: str, is_vbr: bool | None) -> bool:
-    """Spectral check runs on non-VBR MP3 downloads.
+def _needs_spectral_check(
+    filetype: str,
+    is_vbr: bool | None,
+    *,
+    avg_bitrate_kbps: int | None = None,
+    vbr_threshold_kbps: int | None = None,
+) -> bool:
+    """Decide whether to run spectral analysis as a preimport gate.
 
-    FLAC uses a different flow (convert → V0 → compare). VBR MP3 carries its
-    own bitrate signal. CBR MP3 is where spectral cliff detection pays off.
+    Rules:
+      - Non-MP3 (FLAC, ALAC, ...) → skip. FLAC uses a different flow (convert
+        → V0 → compare); other codecs have no cliff-detection calibration.
+      - CBR MP3 or unknown VBR (is_vbr is None) → run. CBR is the classic
+        transcode-cliff case; unknown VBR is the conservative default
+        (issue #39: resumed downloads without slskd metadata).
+      - VBR MP3 → run only when ``avg_bitrate_kbps`` is unknown (conservative)
+        or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg 182kbps
+        (well below genuine V0's ~240-260kbps range) was an obvious transcode
+        that the old ``is_vbr``-only gate let through. The threshold comes
+        from ``cfg.quality_ranks.mp3_vbr.excellent`` — the same value
+        ``transcode_detection()`` already uses as its VBR transcode boundary.
 
-    Unknown VBR (``is_vbr is None``) is routed through the gate — the auto
-    path resumes downloads from ``ActiveDownloadState`` without a VBR field,
-    and skipping spectral on those would be a quality-gate bypass. Callers
-    with ground truth (force/manual) resolve unknown VBR via filesystem
-    inspection (see ``run_preimport_gates``) before this helper is reached,
-    so None here means "really unknown" — the conservative choice is to
-    still gate; genuine VBR uploads will produce "genuine" spectral grades
-    and fall through to import.
+    ``avg_bitrate_kbps`` / ``vbr_threshold_kbps`` are keyword-only to keep
+    the call site self-documenting: the VBR branch requires both to skip, so
+    callers pass both or neither.
     """
     filetype_lower = (filetype or "").lower()
     is_mp3 = "mp3" in filetype_lower and "flac" not in filetype_lower
-    return is_mp3 and not bool(is_vbr)
+    if not is_mp3:
+        return False
+    if not bool(is_vbr):
+        return True
+    if avg_bitrate_kbps is None or vbr_threshold_kbps is None:
+        return True
+    return avg_bitrate_kbps < vbr_threshold_kbps
 
 
 def _analyze_existing(
@@ -331,23 +358,37 @@ def run_preimport_gates(
                 f"({len(result.corrupt_files)} files failed ffmpeg decode)")
             return result
 
-    # --- Resolve VBR status via filesystem inspection when unknown ---
-    # Auto path callers supply VBR from slskd metadata (usually populated,
-    # but None on resumed downloads rebuilt from ActiveDownloadState).
-    # Force/manual callers supply VBR from mutagen (can be None on broken
-    # headers). In both cases, re-inspecting the files on disk here covers
-    # the gap so the spectral gate runs only when we've confirmed CBR.
-    if download_is_vbr is None:
-        filetype_lower = (download_filetype or "").lower()
-        if "mp3" in filetype_lower and "flac" not in filetype_lower:
-            inspection = inspect_local_files(path)
-            if inspection.is_vbr is not None:
-                download_is_vbr = inspection.is_vbr
-                if download_min_bitrate_bps is None:
-                    download_min_bitrate_bps = inspection.min_bitrate_bps
+    # --- Resolve VBR status and avg bitrate via filesystem inspection ---
+    # Callers supply VBR/min_bitrate from different sources:
+    #   * Auto path → slskd metadata (usually populated, but None on resumed
+    #     downloads rebuilt from ActiveDownloadState).
+    #   * Force/manual path → mutagen on the local files (can be None on
+    #     broken headers).
+    # Neither source provides an average bitrate, which the VBR threshold
+    # gate (issue #93) needs to tell genuine V0 (~245kbps avg) apart from a
+    # VBR transcode masquerading as V0 (~180kbps avg). Always inspect MP3
+    # downloads so we have avg data; a mutagen walk on a 12-track album is
+    # ~100ms and far cheaper than the spectral analysis it might save.
+    avg_bitrate_bps: int | None = None
+    filetype_lower = (download_filetype or "").lower()
+    if "mp3" in filetype_lower and "flac" not in filetype_lower:
+        inspection = inspect_local_files(path)
+        if download_is_vbr is None and inspection.is_vbr is not None:
+            download_is_vbr = inspection.is_vbr
+        if download_min_bitrate_bps is None:
+            download_min_bitrate_bps = inspection.min_bitrate_bps
+        avg_bitrate_bps = inspection.avg_bitrate_bps
 
-    # --- Spectral gate (non-VBR MP3 only) ---
-    if not _needs_spectral_check(download_filetype, download_is_vbr):
+    # --- Spectral gate ---
+    # Threshold: cfg.quality_ranks.mp3_vbr.excellent (the same V0 boundary
+    # transcode_detection() uses). Single source of truth per the
+    # "No Parallel Code Paths" rule — retuning one also retunes the other.
+    avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
+    if not _needs_spectral_check(
+        download_filetype, download_is_vbr,
+        avg_bitrate_kbps=avg_bitrate_kbps,
+        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
+    ):
         return result
 
     try:
