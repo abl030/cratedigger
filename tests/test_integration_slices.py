@@ -597,6 +597,61 @@ class TestForceImportSlice(unittest.TestCase):
         self.assertEqual(row["status"], "imported")
         db.assert_log(self, 0, outcome="force_import")
 
+    def test_force_import_imported_path_reflects_beets_destination(self):
+        """Issue #93 was reported against force-import specifically:
+        album_requests.imported_path must reflect the beets destination
+        (ir.postflight.imported_path), not the source failed_imports/ path.
+
+        Guards that the fix propagates through dispatch_import_from_db →
+        dispatch_import_core → _do_mark_done end-to-end. Parallel to
+        TestDispatchThroughQualityGate.test_imported_path_reflects_beets_destination
+        which covers the auto path.
+        """
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=833, status="manual", mb_release_id="mbid-go-team",
+            imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
+        ))
+
+        # The beets destination lives in ir.postflight.imported_path.
+        ir = make_import_result(
+            decision="import",
+            new_min_bitrate=320,
+            imported_path="/Beets/The Go! Team/2005 - Are You Ready for More_",
+        )
+        stdout = _make_stdout(ir)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.config.read_runtime_config", return_value=cfg):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                dispatch_import_from_db(
+                    db, request_id=833, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True, source_username="ttttsv",
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        row = db.request(833)
+        self.assertEqual(
+            row["imported_path"],
+            "/Beets/The Go! Team/2005 - Are You Ready for More_",
+            "force-import must overwrite the stale source path with "
+            "ir.postflight.imported_path (the actual beets destination)")
+
 
 if __name__ == "__main__":
     unittest.main()
