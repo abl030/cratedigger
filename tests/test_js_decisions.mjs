@@ -11,7 +11,7 @@
  * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
  */
 
-import { loadDecisions, renderPolicyBadges } from '../web/js/decisions.js';
+import { loadDecisions, renderPolicyBadges, DS_PRESETS } from '../web/js/decisions.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -152,6 +152,26 @@ await loadDecisions();
 assert(fetchCalls === 2, `expected loadDecisions() to fetch twice, got ${fetchCalls}`);
 assertContains(decisionsEl.innerHTML, 'GOOD', 'second tab open renders fresh gate rank');
 assertContains(decisionsEl.innerHTML, '10 kbps', 'second tab open renders fresh tolerance');
+
+// --- DS_PRESETS contract: avg_bitrate must be explicit in every preset ---
+// Issue #93 round 3: presets that omit avg_bitrate inherit a stale value
+// from a prior run, silently producing the wrong stage0_spectral_gate.
+// This pins the contract: every preset sets avg_bitrate (even to '' for FLAC).
+console.log('\nDS_PRESETS contract');
+for (const [name, preset] of Object.entries(DS_PRESETS)) {
+  assert('avg_bitrate' in preset,
+         `preset "${name}" missing avg_bitrate — stale field inherited from prior preset`);
+}
+
+// The vbr_v0 preset must represent genuine V0 (high avg → gate skips)
+assert(DS_PRESETS.vbr_v0.avg_bitrate === '245',
+       `vbr_v0 preset must have avg_bitrate='245' (genuine V0), got ${DS_PRESETS.vbr_v0.avg_bitrate}`);
+
+// The vbr_transcode preset must trigger the gate (low avg)
+assert(DS_PRESETS.vbr_transcode !== undefined,
+       'vbr_transcode preset missing — documents the Go! Team shape from issue #93');
+assert(DS_PRESETS.vbr_transcode.avg_bitrate === '182',
+       `vbr_transcode preset must have avg_bitrate='182' (below 210 threshold), got ${DS_PRESETS.vbr_transcode.avg_bitrate}`);
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
