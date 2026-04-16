@@ -1743,7 +1743,7 @@ class DispatchAction:
     denylist: bool = False
     requeue: bool = False
     cleanup: bool = True
-    trigger_meelo: bool = False
+    trigger_notifiers: bool = False
     run_quality_gate: bool = False
 
 
@@ -1753,13 +1753,13 @@ def dispatch_action(decision: str) -> DispatchAction:
     Encodes the if/elif dispatch chain from dispatch_import().
     """
     if decision in ("import", "preflight_existing"):
-        return DispatchAction(mark_done=True, trigger_meelo=True,
+        return DispatchAction(mark_done=True, trigger_notifiers=True,
                               run_quality_gate=True, cleanup=True)
     elif decision == "downgrade":
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision in ("transcode_upgrade", "transcode_first"):
         return DispatchAction(mark_done=True, denylist=True, requeue=True,
-                              trigger_meelo=True, cleanup=True)
+                              trigger_notifiers=True, cleanup=True)
     elif decision == "transcode_downgrade":
         return DispatchAction(record_rejection=True, denylist=True, requeue=True,
                               cleanup=True)

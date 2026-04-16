@@ -86,6 +86,11 @@ class SoularrConfig:
     plex_library_section_id: Optional[str] = None
     plex_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/prom_music"
 
+    # --- Jellyfin ---
+    jellyfin_url: Optional[str] = None
+    jellyfin_token: Optional[str] = None
+    jellyfin_library_id: Optional[str] = None  # optional; full refresh if unset
+
     # --- Paths (derived from args) ---
     var_dir: str = "."
     lock_file_path: str = ""
@@ -204,6 +209,10 @@ class SoularrConfig:
             plex_token=get("Plex", "token") or None,
             plex_library_section_id=get("Plex", "library_section_id") or None,
             plex_path_map=get("Plex", "path_map") or None,
+            # Jellyfin
+            jellyfin_url=get("Jellyfin", "url") or None,
+            jellyfin_token=get("Jellyfin", "token") or None,
+            jellyfin_library_id=get("Jellyfin", "library_id") or None,
             # Paths
             var_dir=var_dir,
             lock_file_path=os.path.join(var_dir, ".soularr.lock"),

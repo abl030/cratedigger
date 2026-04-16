@@ -533,5 +533,58 @@ class TestTriggerPlexScan(unittest.TestCase):
         trigger_plex_scan(self._make_cfg(), "/Beets/Artist/Album")  # best-effort
 
 
+class TestTriggerJellyfinScan(unittest.TestCase):
+    """Tests for trigger_jellyfin_scan()."""
+
+    def _make_cfg(self, url: str | None = "http://jelly:8096",
+                  token: str | None = "api-key-123",
+                  library_id: str | None = None):
+        cfg = MagicMock()
+        cfg.jellyfin_url = url
+        cfg.jellyfin_token = token
+        cfg.jellyfin_library_id = library_id
+        return cfg
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_calls_library_refresh_endpoint(self, mock_urlopen):
+        from lib.util import trigger_jellyfin_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_jellyfin_scan(self._make_cfg())
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("/Library/Refresh", req.full_url)
+        self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
+        self.assertEqual(req.get_method(), "POST")
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_scoped_refresh_with_library_id(self, mock_urlopen):
+        from lib.util import trigger_jellyfin_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_jellyfin_scan(self._make_cfg(library_id="abc123"))
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("/Items/abc123/Refresh", req.full_url)
+        self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
+
+    def test_noop_when_no_url(self):
+        from lib.util import trigger_jellyfin_scan
+        trigger_jellyfin_scan(self._make_cfg(url=None))  # should not raise
+
+    def test_noop_when_no_token(self):
+        from lib.util import trigger_jellyfin_scan
+        trigger_jellyfin_scan(self._make_cfg(token=None))  # should not raise
+
+    @patch("lib.util.urllib.request.urlopen", side_effect=Exception("connection refused"))
+    def test_does_not_raise_on_failure(self, mock_urlopen):
+        from lib.util import trigger_jellyfin_scan
+        trigger_jellyfin_scan(self._make_cfg())  # best-effort, no raise
+
+
 if __name__ == "__main__":
     unittest.main()

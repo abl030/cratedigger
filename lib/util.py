@@ -426,6 +426,38 @@ def trigger_plex_scan(cfg: SoularrConfig, imported_path: str | None = None) -> N
         logger.warning(f"PLEX: scan trigger failed: {e}")
 
 
+# === Jellyfin integration ===
+
+
+def trigger_jellyfin_scan(cfg: SoularrConfig) -> None:
+    """Trigger a Jellyfin library scan after import. Best-effort — failures don't block.
+
+    If jellyfin_library_id is set, refreshes just that library item.
+    Otherwise triggers a full library refresh.
+    """
+    if not cfg.jellyfin_url or not cfg.jellyfin_token:
+        logger.debug("JELLYFIN: skipped scan (no url or token configured)")
+        return
+    try:
+        if cfg.jellyfin_library_id:
+            url = f"{cfg.jellyfin_url}/Items/{cfg.jellyfin_library_id}/Refresh"
+        else:
+            url = f"{cfg.jellyfin_url}/Library/Refresh"
+        req = urllib.request.Request(
+            url,
+            method="POST",
+            headers={"X-Emby-Token": cfg.jellyfin_token},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        if cfg.jellyfin_library_id:
+            logger.info(f"JELLYFIN: triggered library refresh for item {cfg.jellyfin_library_id}")
+        else:
+            logger.info("JELLYFIN: triggered full library refresh")
+    except Exception as e:
+        logger.warning(f"JELLYFIN: scan trigger failed: {e}")
+
+
 # === Validation logging ===
 
 def log_validation_result(album_data: GrabListEntry, result: ValidationResult,

@@ -308,20 +308,22 @@ def patch_dispatch_externals():
     """Patch external edges shared by all dispatch_import_core tests.
 
     Patches: sp.run, _cleanup_staged_dir, trigger_meelo_scan,
-    trigger_plex_scan, cleanup_disambiguation_orphans.
+    trigger_plex_scan, trigger_jellyfin_scan, cleanup_disambiguation_orphans.
 
     Does NOT patch parse_import_result, _check_quality_gate_core,
     BeetsDB, or read_runtime_config — callers nest those as needed.
 
-    Yields a SimpleNamespace with attributes: run, cleanup, meelo, plex, orphans.
+    Yields a SimpleNamespace with attributes: run, cleanup, meelo, plex, jellyfin, orphans.
     run is pre-configured with returncode=0, stdout="", stderr="".
     """
     with patch("lib.import_dispatch.sp.run") as run, \
          patch("lib.import_dispatch._cleanup_staged_dir") as cleanup, \
          patch("lib.util.trigger_meelo_scan") as meelo, \
          patch("lib.util.trigger_plex_scan") as plex, \
+         patch("lib.util.trigger_jellyfin_scan") as jellyfin, \
          patch("lib.import_dispatch.cleanup_disambiguation_orphans",
                return_value=[]) as orphans:
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         yield types.SimpleNamespace(
-            run=run, cleanup=cleanup, meelo=meelo, plex=plex, orphans=orphans)
+            run=run, cleanup=cleanup, meelo=meelo, plex=plex,
+            jellyfin=jellyfin, orphans=orphans)

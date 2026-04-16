@@ -1,7 +1,7 @@
 """Integration slice tests — real code paths with minimal patching.
 
 These exercise real orchestration flows end-to-end, patching only external
-edges: subprocess (sp.run), filesystem cleanup, network calls (meelo/plex),
+edges: subprocess (sp.run), filesystem cleanup, network calls (meelo/plex/jellyfin),
 and BeetsDB (requires real beets SQLite DB on disk).
 
 The key difference from unit/orchestration tests is that parse_import_result

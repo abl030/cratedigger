@@ -462,13 +462,14 @@ def dispatch_import_core(
     """Core import dispatch — takes plain params + PipelineDB directly.
 
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
-    denylist, quality gate, meelo/plex scan, cleanup). Returns DispatchOutcome.
+    denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
     Used by dispatch_import() (auto-import adapter) and dispatch_import_from_db()
     (force/manual import) — eliminates the need for heavyweight wrapper objects.
     """
     from lib.util import trigger_meelo_scan as _trigger_meelo
     from lib.util import trigger_plex_scan as _trigger_plex
+    from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     import_script = os.path.join(
         os.path.dirname(beets_harness_path), "import_one.py")
@@ -668,9 +669,10 @@ def dispatch_import_core(
                     db=db,
                     quality_ranks=cfg.quality_ranks if cfg is not None else None,
                 )
-            if action.trigger_meelo and cfg is not None:
+            if action.trigger_notifiers and cfg is not None:
                 _trigger_meelo(cfg)
                 _trigger_plex(cfg, ir.postflight.imported_path)
+                _trigger_jellyfin(cfg)
             if action.cleanup:
                 _cleanup_staged_dir(path)
             if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:

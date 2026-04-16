@@ -170,6 +170,7 @@ class TestDispatchImport(unittest.TestCase):
             "db": db,
             "mock_cleanup": ext.cleanup,
             "mock_meelo": ext.meelo,
+            "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
         }
 
@@ -180,6 +181,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
         r["mock_meelo"].assert_called_once()
+        r["mock_jellyfin"].assert_called_once()
         r["mock_cleanup"].assert_called_once()
         r["mock_gate"].assert_called_once()
 

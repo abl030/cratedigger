@@ -149,7 +149,7 @@ tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash
   helpers.py            — Shared builders + helpers: make_request_row, make_import_result,
                            make_validation_result, make_download_info, make_download_file,
                            make_grab_list_entry, make_spectral_context, make_ctx_with_fake_db,
-                           patch_dispatch_externals (5-patch context manager for dispatch tests).
+                           patch_dispatch_externals (6-patch context manager for dispatch tests).
   test_fakes.py         — Self-tests for fakes.py and helpers.py builders.
   test_integration_slices.py — Integration slices (TestDispatchThroughQualityGate,
                            TestQualityGateVerifiedLosslessBypass, TestQualityGateSpectralOverride,
@@ -299,7 +299,7 @@ All quality decisions are pure functions in `lib/quality.py` — no I/O, no data
 3. **`transcode_detection(spectral_grade, cfg)`** — Post-conversion: was this FLAC actually a transcode? Spectral grade is authoritative when available (suspect/likely_transcode = transcode, genuine/marginal = not transcode). Bitrate fallback uses `cfg.mp3_vbr.excellent` (default 210 kbps) only when spectral is unavailable — tracks retuning automatically (#66).
 4. **`quality_gate_decision()`** — Post-import: accept, or re-queue for better quality?
 5. **`determine_verified_lossless()`** — Single source of truth for verified lossless status. `is_verified_lossless()` is the legacy fallback for old download_log rows.
-6. **`dispatch_action()`** — Post-import_one.py: map decision string to action flags (mark_done/failed, denylist, requeue, trigger_meelo, quality_gate). Used by `dispatch_import()`.
+6. **`dispatch_action()`** — Post-import_one.py: map decision string to action flags (mark_done/failed, denylist, requeue, trigger_notifiers, quality_gate). Used by `dispatch_import()`.
 7. **`compute_effective_override_bitrate()`** — Return the lower of container/spectral bitrate (conservative). Used for `--override-min-bitrate`.
 8. **`verify_filetype()`** — Pre-search: does a slskd file dict match an allowed filetype spec? (VBR V0/V2, CBR, min bitrate, bitdepth/samplerate)
 9. **`should_cooldown()`** — User cooldown: given a user's last N download outcomes, should they be temporarily skipped? Pure function, delegates from `check_and_apply_cooldown()` in pipeline_db.
