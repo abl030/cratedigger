@@ -155,9 +155,12 @@ class TestMergeDiscographies(unittest.TestCase):
 class TestAnnotateInLibrary(unittest.TestCase):
     def test_mb_row_matched_by_release_group_id(self):
         rg = {"id": "rg-uuid", "title": "OK Computer"}
-        lib = [{"mb_releasegroupid": "rg-uuid", "album": "Different Title"}]
+        lib = [{"mb_releasegroupid": "rg-uuid", "album": "Different Title",
+                "formats": "MP3", "min_bitrate": 245000}]
         annotate_in_library([rg], [], lib)
         self.assertTrue(rg["in_library"])
+        self.assertEqual(rg["library_format"], "MP3")
+        self.assertEqual(rg["library_min_bitrate"], 245)
 
     def test_mb_row_matched_by_title_when_no_rgid(self):
         rg = {"id": "rg-uuid", "title": "OK Computer"}
@@ -207,6 +210,26 @@ class TestAnnotateInLibrary(unittest.TestCase):
             [{"id": "1", "title": "X"}],
             [{}],
         )
+
+    def test_rank_fn_invoked_on_match(self):
+        """Caller plugs in a codec-aware rank fn; the matched row picks
+        up library_rank from it."""
+        rg = {"id": "rg", "title": "X"}
+        lib = [{"mb_releasegroupid": "rg", "album": "X",
+                "formats": "Opus", "min_bitrate": 128000}]
+        # Stub rank_fn — would be the real quality_rank wrapper in prod
+        def rank_fn(fmt, kbps):
+            return "transparent" if (fmt == "Opus" and kbps == 128) else "unknown"
+        annotate_in_library([rg], [], lib, rank_fn=rank_fn)
+        self.assertEqual(rg["library_rank"], "transparent")
+
+    def test_no_quality_fields_when_unmatched(self):
+        rg = {"id": "rg", "title": "Unowned"}
+        annotate_in_library([rg], [], [])
+        self.assertFalse(rg["in_library"])
+        self.assertNotIn("library_format", rg)
+        self.assertNotIn("library_min_bitrate", rg)
+        self.assertNotIn("library_rank", rg)
 
 
 if __name__ == "__main__":

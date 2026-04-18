@@ -3,6 +3,7 @@ import { state, API, toast } from './state.js';
 import { esc } from './util.js';
 import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
 import { renderTypedSections, classify as groupingClassify } from './grouping.js';
+import { renderStatusBadges } from './badges.js';
 import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
 
@@ -274,10 +275,16 @@ function compareRow(mb, discogs) {
   const badges = [];
   if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`);
   if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`);
-  // Row-level in-library badge — true if EITHER side is in library
-  // (same logical album, owned via either source).
-  const inLibrary = (mb && mb.in_library) || (discogs && discogs.in_library);
-  const libBadge = inLibrary ? '<span class="badge badge-library">in library</span>' : '';
+  // Row-level in-library badge via the unified renderer. Pull quality
+  // fields off whichever side is in library (prefer MB when both — MB
+  // rows are the canonical match key).
+  const libSide = (mb && mb.in_library) ? mb : ((discogs && discogs.in_library) ? discogs : null);
+  const libBadge = libSide ? renderStatusBadges({
+    in_library: true,
+    library_format: libSide.library_format,
+    library_min_bitrate: libSide.library_min_bitrate,
+    library_rank: libSide.library_rank,
+  }) : '';
   const mbId = mb ? mb.id : '';
   const dgId = discogs ? discogs.id : '';
   return `

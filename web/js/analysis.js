@@ -3,6 +3,7 @@ import { state, API, toast, updatePipelineStatus, pipelineStore } from './state.
 import { esc } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
+import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /** @type {string[]} */
@@ -41,12 +42,16 @@ export function renderDisambiguateInto(targetEl) {
  * @returns {string} HTML string
  */
 export function renderDisambRG(rg) {
-  let badges = '';
-  if (rg.library_status) badges += '<span class="badge badge-library">in library</span>';
-  if (rg.pipeline_status === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
-  if (rg.pipeline_status === 'downloading') badges += '<span class="badge badge-downloading">downloading</span>';
-  if (rg.pipeline_status === 'imported') badges += '<span class="badge badge-imported">imported</span>';
-  if (rg.pipeline_status === 'manual') badges += '<span class="badge badge-manual">manual</span>';
+  // Unified renderer. Analysis row uses `library_status` (truthy when
+  // any pressing is in library) — normalize to in_library so the
+  // shared renderer reads the same shape.
+  const badges = renderStatusBadges({
+    in_library: !!rg.library_status,
+    library_format: rg.library_format,
+    library_min_bitrate: rg.library_min_bitrate,
+    library_rank: rg.library_rank,
+    pipeline_status: rg.pipeline_status,
+  });
 
   let statusBadge;
   if (rg.covered_by) {
@@ -111,14 +116,14 @@ export function toggleDisambRGTracks(rgId) {
     html += '<div style="margin-bottom:8px;color:#888;font-size:0.85em;">Pressings:</div>';
     html += rg.pressings.map((p, i) => {
       const color = _PRESSING_COLORS[i % _PRESSING_COLORS.length];
-      // Overlay local pipeline store (captures mutations since last API fetch)
-      const stored = pipelineStore.get(p.release_id);
-      const pStatus = stored ? stored.status : p.pipeline_status;
-      let badges = '';
-      if (p.in_library) badges += '<span class="badge badge-library">in library</span>';
-      if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
-      if (pStatus === 'downloading') badges += '<span class="badge badge-downloading">downloading</span>';
-      if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
+      const badges = renderStatusBadges({
+        id: p.release_id,
+        in_library: p.in_library,
+        library_format: p.library_format,
+        library_min_bitrate: p.library_min_bitrate,
+        library_rank: p.library_rank,
+        pipeline_status: p.pipeline_status,
+      });
       // Same standardised 4-button toolbar as Discography / Library / Compare.
       const toolbar = renderActionToolbar({
         id: p.release_id,

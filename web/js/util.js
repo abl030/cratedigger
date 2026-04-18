@@ -23,6 +23,38 @@ export function qualityLabel(formats, kbps) {
 }
 
 /**
+ * Compact one-letter format code + bitrate tier, suitable for inline
+ * badge use. Examples: "M V2", "M 320", "F", "O 128", "AL".
+ *
+ * Format code map:
+ *   MP3 → M, FLAC → F, ALAC → AL, WAV → W, OPUS → O, AAC → A, OGG → OG
+ *   Anything else → upper-cased name as-is.
+ *
+ * Bitrate tiers match qualityLabel(): >=295 → 320, >=220 → V0,
+ * >=170 → V2, else raw kbps. Lossless formats (FLAC/ALAC/WAV) skip
+ * the bitrate suffix.
+ *
+ * @param {string|null|undefined} formats
+ * @param {number|null|undefined} kbps
+ * @returns {string}
+ */
+export function qualityLabelShort(formats, kbps) {
+  if (!formats) return '?';
+  const raw = formats.split(',')[0].trim().toUpperCase();
+  const codeMap = {
+    MP3: 'M', FLAC: 'F', ALAC: 'AL', WAV: 'W',
+    OPUS: 'O', AAC: 'A', OGG: 'OG',
+  };
+  const fmt = codeMap[raw] || raw;
+  if (raw === 'FLAC' || raw === 'ALAC' || raw === 'WAV') return fmt;
+  if (!kbps || kbps <= 0) return fmt;
+  if (kbps >= 295) return fmt + ' 320';
+  if (kbps >= 220) return fmt + ' V0';
+  if (kbps >= 170) return fmt + ' V2';
+  return fmt + ' ' + kbps;
+}
+
+/**
  * Convert a UTC ISO string to AWST (UTC+8) ISO-like string.
  * @param {string} isoStr - UTC ISO date string
  * @returns {string} AWST datetime as "YYYY-MM-DDTHH:MM:SS"

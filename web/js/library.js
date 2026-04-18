@@ -3,6 +3,7 @@ import { API, toast, updatePipelineStatus } from './state.js';
 import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
+import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
 
 /**
@@ -74,11 +75,22 @@ export function renderLibraryResults(albums, targetEl) {
         album: a.album || '',
         track_count: a.track_count || 0,
       }, { size: 'small' }) : '';
+      // Library rows are by definition in_library, so the unified
+      // renderer always emits the quality-aware badge — same code path
+      // discography/compare/analysis use.
+      const badges = renderStatusBadges({
+        id: a.mb_albumid,
+        in_library: true,
+        library_format: a.formats,
+        library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
+        library_rank: a.library_rank,
+        pipeline_status: a.pipeline_status,
+      });
       return `
         <div class="lib-item" onclick="window.toggleLibDetail(${a.id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(a.album)}</div>
+              <div class="p-title">${esc(a.album)}${badges}</div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;">
               ${toolbar}
@@ -87,7 +99,6 @@ export function renderLibraryResults(albums, targetEl) {
           </div>
           <div class="p-meta">
             <span>${a.year || '?'}</span>
-            <span>${qualityLabel(a.formats, a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0)}</span>
             ${a.country ? `<span>${a.country}</span>` : ''}
             ${a.type ? `<span>${a.type}</span>` : ''}
             <span>added ${added}</span>

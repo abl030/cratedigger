@@ -49,50 +49,74 @@ def annotate_in_library(
     mb_groups: list[dict],
     discogs_groups: list[dict],
     library_albums: list[dict],
+    rank_fn=None,
 ) -> None:
-    """Mutate each row in mb_groups + discogs_groups to add `in_library: bool`.
+    """Mutate each row in mb_groups + discogs_groups to add in-library flags.
 
-    A row is considered in-library if any beets album from this artist
-    matches it via:
+    Sets per-row:
+      - in_library: bool
+      - library_format: str (e.g. "MP3", "FLAC") — only when matched
+      - library_min_bitrate: int (kbps) — only when matched
+      - library_rank: str — only when matched and rank_fn provided
+        (lowercase rank name from lib.quality.QualityRank, e.g.
+        "transparent", "lossless", "poor")
+
+    Match strategies (any one is enough):
       - mb_releasegroupid (MB rows)
       - mb_albumid (Discogs rows — beets stores numeric Discogs IDs there)
-      - normalized title (catches Discogs imports tagged with MB IDs and
-        cross-source matches the explicit ID lookup misses)
+      - normalized title fallback (cross-source)
 
-    Mutates in place. Intended to be called once per request after the
-    discography + library albums are fetched, so the front end gets the
-    same in-library badge at the row level that the expanded pressings
-    view shows per pressing.
+    rank_fn: optional callable(format_str, bitrate_kbps) -> str. Lets the
+    caller plug in the codec-aware quality_rank computation without
+    pulling the rank config into this pure module.
     """
-    lib_rgids: set[str] = set()
-    lib_mbids: set[str] = set()
-    lib_titles: set[str] = set()
+    # Map -> matched album dict (not just bool) so we can also set
+    # quality fields when a row hits.
+    lib_by_rgid: dict[str, dict] = {}
+    lib_by_mbid: dict[str, dict] = {}
+    lib_by_title: dict[str, dict] = {}
     for a in library_albums:
         rgid = a.get("mb_releasegroupid")
-        if rgid:
-            lib_rgids.add(str(rgid))
+        if rgid and str(rgid) not in lib_by_rgid:
+            lib_by_rgid[str(rgid)] = a
         mbid = a.get("mb_albumid")
-        if mbid:
-            lib_mbids.add(str(mbid))
+        if mbid and str(mbid) not in lib_by_mbid:
+            lib_by_mbid[str(mbid)] = a
         title = a.get("album", "")
         if title:
-            lib_titles.add(normalize_title(title))
+            tn = normalize_title(title)
+            if tn and tn not in lib_by_title:
+                lib_by_title[tn] = a
+
+    def _attach(row: dict, match: dict) -> None:
+        row["in_library"] = True
+        fmt = match.get("formats") or ""
+        # min_bitrate from beets is in bps; convert to kbps for display
+        # consistency.
+        br_bps = match.get("min_bitrate") or 0
+        kbps = (br_bps // 1000) if br_bps else 0
+        row["library_format"] = fmt
+        row["library_min_bitrate"] = kbps
+        if rank_fn:
+            row["library_rank"] = rank_fn(fmt, kbps)
 
     for rg in mb_groups:
         rid = str(rg.get("id", ""))
         title_norm = normalize_title(rg.get("title", ""))
-        rg["in_library"] = (
-            (rid and rid in lib_rgids)
-            or (title_norm and title_norm in lib_titles)
-        )
+        match = lib_by_rgid.get(rid) or (lib_by_title.get(title_norm) if title_norm else None)
+        if match:
+            _attach(rg, match)
+        else:
+            rg["in_library"] = False
 
     for master in discogs_groups:
         mid = str(master.get("id", ""))
         title_norm = normalize_title(master.get("title", ""))
-        master["in_library"] = (
-            (mid and mid in lib_mbids)
-            or (title_norm and title_norm in lib_titles)
-        )
+        match = lib_by_mbid.get(mid) or (lib_by_title.get(title_norm) if title_norm else None)
+        if match:
+            _attach(master, match)
+        else:
+            master["in_library"] = False
 
 
 def merge_discographies(

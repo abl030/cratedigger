@@ -153,6 +153,49 @@ def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
             apply_pipeline_bitrate_override(a, pi)
 
 
+_rank_cfg_cache = None
+
+
+def _rank_cfg():
+    """Cached QualityRankConfig from runtime config.ini.
+
+    Falls back to defaults if the ini can't be read (e.g. tests / first-
+    boot). The cache is module-scoped — a deploy restart picks up any
+    [Quality Ranks] changes via the soularr-web service restart that
+    deploy.md guarantees.
+    """
+    global _rank_cfg_cache
+    if _rank_cfg_cache is None:
+        try:
+            from lib.config import read_runtime_rank_config
+            _rank_cfg_cache = read_runtime_rank_config()
+        except Exception:
+            from lib.quality import QualityRankConfig
+            _rank_cfg_cache = QualityRankConfig.defaults()
+    return _rank_cfg_cache
+
+
+def compute_library_rank(format_str: str | None, bitrate_kbps: int | None) -> str:
+    """Codec-aware quality rank label for a beets album.
+
+    Single source of truth for the in-library badge's tier — same logic
+    the import gate uses, so what you see in the badge matches what the
+    pipeline's quality decisions act on. Returns lowercase rank name
+    ('lossless', 'transparent', 'excellent', 'good', 'acceptable',
+    'poor', 'unknown'). Treats MP3 as VBR — soularr's pipeline only
+    produces VBR-V0 MP3, and for the bitrate buckets the badge cares
+    about the VBR-vs-CBR distinction barely matters at the display level.
+    """
+    if not format_str:
+        return "unknown"
+    fmt = format_str.split(",")[0].strip()
+    if not fmt:
+        return "unknown"
+    from lib.quality import quality_rank
+    rank = quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=_rank_cfg())
+    return rank.name.lower()
+
+
 def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
     """Apply pipeline DB min_bitrate and upgrade_queued flag to a beets album dict.
 

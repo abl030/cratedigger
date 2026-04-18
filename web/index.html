@@ -64,6 +64,17 @@
   .badge-force { background: #1a2a4a; color: #6af; }
   .badge-failed { background: #4a1a1a; color: #d66; }
   .badge-library { background: #1a3a5a; color: #6af; }
+  /* Codec-aware rank tiers — same colour scheme as the rest of the
+     status badges. Used for the "in library" badge when the backend
+     supplies library_rank (computed via lib.quality.quality_rank, which
+     is what the import gate uses — single source of truth). */
+  .badge-rank-lossless    { background: #1a3a5a; color: #6cf; }
+  .badge-rank-transparent { background: #1a4a2a; color: #6d6; }
+  .badge-rank-excellent   { background: #2a4a1a; color: #cd6; }
+  .badge-rank-good        { background: #4a3a1a; color: #ec6; }
+  .badge-rank-acceptable  { background: #4a2a1a; color: #d96; }
+  .badge-rank-poor        { background: #4a1a1a; color: #d66; }
+  .badge-rank-unknown     { background: #2a2a2a; color: #888; }
   .badge-wanted { background: #5a3a1a; color: #fa6; }
   .badge-downloading { background: #1a3a5a; color: #6cf; }
   .badge-imported { background: #1a4a2a; color: #6d6; }

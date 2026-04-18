@@ -57,21 +57,26 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         return
     albums = srv.get_library_artist(name, mbid)
     # Enrich with pipeline_status / pipeline_id / upgrade_queued so the
-    # standardised action toolbar (Add request / Upgrade / Remove
-    # request / Remove from beets) can show accurate per-row state.
+    # standardised action toolbar (Acquire / Remove from beets) shows
+    # accurate per-row state. Also compute library_rank so the unified
+    # badge renderer can colour the in-library badge by codec-aware tier.
     mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
-    if mbids:
-        in_pipeline = srv.check_pipeline(mbids)
-        for a in albums:
-            pi = in_pipeline.get(str(a.get("mb_albumid", "")))
-            if pi:
-                a["pipeline_status"] = pi["status"]
-                a["pipeline_id"] = pi["id"]
-                if pi.get("status") == "wanted" and (pi.get("search_filetype_override") or pi.get("target_format")):
-                    a["upgrade_queued"] = True
-            else:
-                a["pipeline_status"] = None
-                a["pipeline_id"] = None
+    in_pipeline = srv.check_pipeline(mbids) if mbids else {}
+    for a in albums:
+        pi = in_pipeline.get(str(a.get("mb_albumid", "")))
+        if pi:
+            a["pipeline_status"] = pi["status"]
+            a["pipeline_id"] = pi["id"]
+            if pi.get("status") == "wanted" and (pi.get("search_filetype_override") or pi.get("target_format")):
+                a["upgrade_queued"] = True
+        else:
+            a["pipeline_status"] = None
+            a["pipeline_id"] = None
+        # Codec-aware rank for the in-library badge.
+        fmt = a.get("formats") or ""
+        br_bps = a.get("min_bitrate") or 0
+        kbps = (br_bps // 1000) if br_bps else 0
+        a["library_rank"] = srv.compute_library_rank(fmt, kbps)
     h._json({"albums": albums})  # type: ignore[attr-defined]
 
 
@@ -89,7 +94,7 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     name = params.get("name", [""])[0].strip()
     if name:
         lib = srv.get_library_artist(name, artist_id)
-        annotate_in_library(rgs, [], lib)
+        annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
     h._json({"release_groups": rgs})  # type: ignore[attr-defined]
 
 
@@ -125,16 +130,26 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
                 pip_id = pip["id"]
                 break
 
-        # Look up beets album IDs for in-library pressings
+        # Look up beets album IDs + on-disk quality for in-library pressings
         lib_mbids = [p.release_id for p in rg.pressings if p.release_id in in_library]
         b = srv._beets_db()
         beets_ids = b.get_album_ids_by_mbids(lib_mbids) if lib_mbids and b else {}
+        quality = b.check_mbids_detail(lib_mbids) if lib_mbids and b else {}
+
+        # RG-level quality: pick the first in-library pressing's quality
+        # so the disambiguate row badge shows on-disk format/rank too.
+        rg_quality = None
+        for rid in rg.release_ids:
+            if rid in quality:
+                rg_quality = quality[rid]
+                break
 
         pressings_json = []
         for p in rg.pressings:
             p_lib = p.release_id in in_library
             p_pip = in_pipeline.get(p.release_id)
-            pressings_json.append({
+            pq = quality.get(p.release_id) or {}
+            entry = {
                 "release_id": p.release_id,
                 "title": p.title,
                 "date": p.date,
@@ -146,9 +161,15 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
                 "beets_album_id": beets_ids.get(p.release_id),
                 "pipeline_status": p_pip["status"] if p_pip else None,
                 "pipeline_id": p_pip["id"] if p_pip else None,
-            })
+            }
+            if pq:
+                entry["library_format"] = pq.get("beets_format") or ""
+                entry["library_min_bitrate"] = pq.get("beets_bitrate") or 0
+                entry["library_rank"] = srv.compute_library_rank(
+                    entry["library_format"], entry["library_min_bitrate"])
+            pressings_json.append(entry)
 
-        rgs_json.append({
+        rg_dict = {
             "release_group_id": rg.release_group_id,
             "title": rg.title,
             "primary_type": rg.primary_type,
@@ -170,7 +191,13 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
                 }
                 for t in rg.tracks
             ],
-        })
+        }
+        if rg_quality:
+            rg_dict["library_format"] = rg_quality.get("beets_format") or ""
+            rg_dict["library_min_bitrate"] = rg_quality.get("beets_bitrate") or 0
+            rg_dict["library_rank"] = srv.compute_library_rank(
+                rg_dict["library_format"], rg_dict["library_min_bitrate"])
+        rgs_json.append(rg_dict)
 
     artist_name = srv.mb_api.get_artist_name(artist_id)
     h._json({  # type: ignore[attr-defined]
@@ -187,14 +214,23 @@ def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], r
     mbids = [r["id"] for r in data["releases"]]
     in_library = srv.check_beets_library(mbids)
     in_pipeline = srv.check_pipeline(mbids)
-    # Map mbid -> beets album id so the Remove-from-beets toolbar
-    # button can address the right row directly.
+    # Map mbid -> beets album id + on-disk quality so the standard
+    # toolbar (Remove from beets) and badge renderer (in library +
+    # codec-aware rank) can render without extra round-trips.
     b = srv._beets_db()
     beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
+    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
     for r in data["releases"]:
-        r["in_library"] = r["id"] in in_library
-        r["beets_album_id"] = beets_ids.get(r["id"])
-        pi = in_pipeline.get(r["id"])
+        rid = r["id"]
+        r["in_library"] = rid in in_library
+        r["beets_album_id"] = beets_ids.get(rid)
+        q = quality.get(rid)
+        if q:
+            r["library_format"] = q.get("beets_format") or ""
+            r["library_min_bitrate"] = q.get("beets_bitrate") or 0
+            r["library_rank"] = srv.compute_library_rank(
+                r["library_format"], r["library_min_bitrate"])
+        pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
     h._json(data)  # type: ignore[attr-defined]
@@ -207,11 +243,16 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
     req = srv._db().get_request_by_mb_release_id(release_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
-    # Include beets track info + album id if in library
+    # Include beets track info + album id + on-disk quality if in library
     b = srv._beets_db()
     if data["in_library"] and b:
         beets_ids = b.get_album_ids_by_mbids([release_id])
         data["beets_album_id"] = beets_ids.get(release_id)
+        quality = b.check_mbids_detail([release_id]).get(release_id) or {}
+        data["library_format"] = quality.get("beets_format") or ""
+        data["library_min_bitrate"] = quality.get("beets_bitrate") or 0
+        data["library_rank"] = srv.compute_library_rank(
+            data["library_format"], data["library_min_bitrate"])
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
@@ -249,7 +290,7 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     name = params.get("name", [""])[0].strip() or artist_name
     if name:
         lib = srv.get_library_artist(name, "")
-        annotate_in_library([], masters, lib)
+        annotate_in_library([], masters, lib, rank_fn=srv.compute_library_rank)
     h._json({  # type: ignore[attr-defined]
         "artist_id": artist_id,
         "artist_name": artist_name,
@@ -266,10 +307,18 @@ def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     in_pipeline = srv.check_pipeline(release_ids)
     b = srv._beets_db()
     beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
+    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
     for r in data["releases"]:
-        r["in_library"] = r["id"] in in_library
-        r["beets_album_id"] = beets_ids.get(r["id"])
-        pi = in_pipeline.get(r["id"])
+        rid = r["id"]
+        r["in_library"] = rid in in_library
+        r["beets_album_id"] = beets_ids.get(rid)
+        q = quality.get(rid)
+        if q:
+            r["library_format"] = q.get("beets_format") or ""
+            r["library_min_bitrate"] = q.get("beets_bitrate") or 0
+            r["library_rank"] = srv.compute_library_rank(
+                r["library_format"], r["library_min_bitrate"])
+        pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
     h._json(data)  # type: ignore[attr-defined]
@@ -288,6 +337,11 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
     if data["in_library"] and b:
         beets_ids = b.get_album_ids_by_mbids([release_id])
         data["beets_album_id"] = beets_ids.get(release_id)
+        quality = b.check_mbids_detail([release_id]).get(release_id) or {}
+        data["library_format"] = quality.get("beets_format") or ""
+        data["library_min_bitrate"] = quality.get("beets_bitrate") or 0
+        data["library_rank"] = srv.compute_library_rank(
+            data["library_format"], data["library_min_bitrate"])
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
@@ -362,7 +416,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     # query is keyed by name with mbid for the UUID-match fast path.
     if name:
         lib = srv.get_library_artist(name, mbid)
-        annotate_in_library(mb_groups, discogs_groups, lib)
+        annotate_in_library(mb_groups, discogs_groups, lib, rank_fn=srv.compute_library_rank)
 
     merged = merge_discographies(mb_groups, discogs_groups)
 

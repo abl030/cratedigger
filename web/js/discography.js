@@ -3,6 +3,7 @@ import { API, state, toast, updatePipelineStatus, pipelineStore } from './state.
 import { esc, externalReleaseUrl, sourceLabel, detectSource } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
+import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /**
@@ -39,11 +40,11 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
       const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
         ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-      const libBadge = rg.in_library ? '<span class="badge badge-library">in library</span>' : '';
+      const badges = renderStatusBadges(rg);
       return `
         <div class="rg">
           <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
-            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${libBadge}
+            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}
           </div>
           <div class="releases" id="rel-${rg.id}"></div>
         </div>
@@ -137,17 +138,9 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const bootleg = all.filter(r => r.status && r.status !== 'Official');
 
     function renderRelease(rel) {
-      // Overlay local pipeline store (captures mutations since last API fetch)
-      const stored = pipelineStore.get(rel.id);
-      const pStatus = stored ? stored.status : rel.pipeline_status;
-      let badges = '';
-      if (rel.in_library) badges += '<span class="badge badge-library">in library</span>';
-      if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
-      if (pStatus === 'downloading') badges += '<span class="badge badge-downloading">downloading</span>';
-      if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
-      if (pStatus === 'manual') badges += '<span class="badge badge-manual">manual</span>';
-      // Hand the standardised 4-button toolbar all the context it needs;
-      // it decides which buttons are enabled vs greyed.
+      const badges = renderStatusBadges(rel);
+      // Hand the standardised toolbar all the context it needs;
+      // it decides which button is the live action.
       const toolbar = renderActionToolbar({
         ...rel,
         artist: state.browseArtist?.name || '',
