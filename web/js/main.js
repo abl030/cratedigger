@@ -6,7 +6,7 @@
  */
 
 import { state } from './state.js';
-import { searchArtists, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare } from './browse.js';
+import { searchArtists, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow } from './browse.js';
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, renderRecentsItems } from './recents.js';
 import { loadPipeline, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
@@ -67,6 +67,7 @@ Object.assign(window, {
   setBrowseSource,
   openBrowseArtist,
   openBrowseArtistFromCompare,
+  toggleCompareRow,
   closeBrowseArtist,
   switchSubView,
   searchArtists,

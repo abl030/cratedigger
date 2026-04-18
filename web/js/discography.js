@@ -140,15 +140,26 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
 
 /**
  * Load and display releases for a release group.
- * @param {string} id - MusicBrainz release group ID
- * @param {HTMLElement} el - The clicked element
+ *
+ * @param {string} id - MusicBrainz release group ID or Discogs master ID
+ * @param {HTMLElement} el - The clicked element (kept for signature compat)
+ * @param {Object} [opts]
+ * @param {HTMLElement} [opts.targetEl] - Where to render. Defaults to
+ *   document.getElementById('rel-' + id) so existing call sites still work.
+ *   Compare view passes its own div so its IDs don't collide with the
+ *   Discography view's `rel-${id}` ones.
+ * @param {string} [opts.source] - 'mb' or 'discogs'. Defaults to
+ *   state.browseSource. Compare view passes the explicit source so MB and
+ *   Discogs pressings can be loaded independently for the same row.
  */
-export async function loadReleaseGroup(id, el) {
-  const relEl = document.getElementById('rel-' + id);
+export async function loadReleaseGroup(id, el, opts = {}) {
+  const relEl = opts.targetEl || document.getElementById('rel-' + id);
+  if (!relEl) return;
   if (relEl.innerHTML) { relEl.innerHTML = ''; return; }
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';
   try {
-    const isDiscogs = state.browseSource === 'discogs';
+    const source = opts.source || state.browseSource;
+    const isDiscogs = source === 'discogs';
     const url = isDiscogs ? `${API}/api/discogs/master/${id}` : `${API}/api/release-group/${id}`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);

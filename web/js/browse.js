@@ -1,7 +1,7 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc } from './util.js';
-import { renderArtistDiscography } from './discography.js';
+import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
 import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
 
@@ -246,7 +246,10 @@ export async function loadBrowseCompare(aid, name) {
 
 /**
  * Render a row in the compare view. `mb` and `discogs` may be null when the
- * row only exists on one side.
+ * row only exists on one side. The row header is clickable to expand inline
+ * pressings; source badges (MB/Discogs) navigate to that source's full
+ * discography view for the same artist.
+ *
  * @param {Object|null} mb
  * @param {Object|null} discogs
  */
@@ -255,22 +258,66 @@ function compareRow(mb, discogs) {
   const title = ref.title || '?';
   const year = (ref.first_release_date || '').slice(0, 4) || '?';
   const type = ref.type || '';
-  // Badges are clickable: jump into that source's discography for this artist
-  // so the user can browse pressings / hit Add. v1 doesn't render inline
-  // pressings here — that lives in the existing Discography sub-tab.
+  // Stable per-row key for the expansion divs. Use both IDs when present so
+  // each side has its own render target (avoids ID collisions when the same
+  // album appears as both 'both' and 'only' rows for different artists).
+  const slot = `${mb ? mb.id : 'x'}__${discogs ? discogs.id : 'x'}`;
   const mbBadge = mb
     ? `<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`
     : '<span class="library-src library-src-muted">MB —</span>';
   const dgBadge = discogs
     ? `<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`
     : '<span class="library-src library-src-muted">Discogs —</span>';
+  const mbId = mb ? mb.id : '';
+  const dgId = discogs ? discogs.id : '';
   return `
-    <div class="rg" style="display:flex;align-items:center;gap:8px;padding:4px 0;">
-      <span class="rg-year">${year}</span>
-      <span class="rg-title">${esc(title)}</span>
-      ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
-      <span style="margin-left:auto;display:flex;gap:4px;">${mbBadge}${dgBadge}</span>
+    <div class="rg">
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;"
+           onclick="window.toggleCompareRow('${slot}', '${mbId}', '${dgId}')">
+        <span style="color:#888;font-size:0.8em;width:10px;display:inline-block;" id="cmp-chev-${slot}">▶</span>
+        <span class="rg-year">${year}</span>
+        <span class="rg-title">${esc(title)}</span>
+        ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
+        <span style="margin-left:auto;display:flex;gap:4px;">${mbBadge}${dgBadge}</span>
+      </div>
+      <div id="cmp-pressings-${slot}" style="display:none;padding:4px 0 8px 16px;">
+        ${mb ? `<div style="font-size:0.75em;color:#6d6;margin-top:6px;">MusicBrainz pressings</div>
+                <div class="releases" id="rel-cmp-mb-${slot}"></div>` : ''}
+        ${discogs ? `<div style="font-size:0.75em;color:#da6;margin-top:6px;">Discogs pressings</div>
+                     <div class="releases" id="rel-cmp-dg-${slot}"></div>` : ''}
+      </div>
     </div>`;
+}
+
+/**
+ * Toggle the expansion of a compare row. On first open, fetches MB and/or
+ * Discogs pressings via the shared loadReleaseGroup helper (with explicit
+ * source so each side renders into its own div). Reusing loadReleaseGroup
+ * means Add buttons, in-library badges, and pipelineStore overlays behave
+ * identically to the Discography view.
+ *
+ * @param {string} slot
+ * @param {string} mbId - empty string when the row has no MB side
+ * @param {string} dgId - empty string when the row has no Discogs side
+ */
+export async function toggleCompareRow(slot, mbId, dgId) {
+  const wrap = document.getElementById('cmp-pressings-' + slot);
+  const chev = document.getElementById('cmp-chev-' + slot);
+  if (!wrap) return;
+  const isOpen = wrap.style.display !== 'none';
+  wrap.style.display = isOpen ? 'none' : 'block';
+  if (chev) chev.textContent = isOpen ? '▶' : '▼';
+  if (isOpen) return;
+  // First-open fetches. loadReleaseGroup is idempotent — second call on the
+  // same el toggles, so we only call when the target is empty.
+  if (mbId) {
+    const mbEl = document.getElementById('rel-cmp-mb-' + slot);
+    if (mbEl && !mbEl.innerHTML) loadReleaseGroup(mbId, mbEl, { targetEl: mbEl, source: 'mb' });
+  }
+  if (dgId) {
+    const dgEl = document.getElementById('rel-cmp-dg-' + slot);
+    if (dgEl && !dgEl.innerHTML) loadReleaseGroup(dgId, dgEl, { targetEl: dgEl, source: 'discogs' });
+  }
 }
 
 /**
