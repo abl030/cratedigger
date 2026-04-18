@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "lib"))
 
 import mb as mb_api  # noqa: E402
 import discogs as discogs_api  # noqa: E402
+from lib.artist_compare import merge_discographies  # noqa: E402
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -248,11 +249,78 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
     h._json(data)  # type: ignore[attr-defined]
 
 
+def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+    """Side-by-side discography from both MB and Discogs for one artist.
+
+    Resolves both source artist IDs from the supplied name (and optional
+    explicit IDs to skip the lookup), fetches each source's discography,
+    and fuzzy-merges by title+year via lib.artist_compare.merge_discographies.
+
+    Returns three buckets so the UI can show what each source uniquely
+    contributes plus the matched-on-both core catalog.
+    """
+    srv = _server()
+    name = params.get("name", [""])[0].strip()
+    if not name:
+        h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
+        return
+    mbid = params.get("mbid", [""])[0].strip()
+    discogs_id = params.get("discogs_id", [""])[0].strip()
+
+    mb_artist: dict | None = None
+    discogs_artist: dict | None = None
+
+    if not mbid:
+        hits = srv.mb_api.search_artists(name)
+        for a in hits:
+            if (a.get("name") or "").lower() == name.lower():
+                mbid = a["id"]
+                mb_artist = {"id": a["id"], "name": a["name"]}
+                break
+        if not mbid and hits:
+            mbid = hits[0]["id"]
+            mb_artist = {"id": hits[0]["id"], "name": hits[0]["name"]}
+    else:
+        mb_artist = {"id": mbid, "name": name}
+
+    if not discogs_id:
+        hits = discogs_api.search_artists(name)
+        for a in hits:
+            if (a.get("name") or "").lower() == name.lower():
+                discogs_id = a["id"]
+                discogs_artist = {"id": a["id"], "name": a["name"]}
+                break
+        if not discogs_id and hits:
+            discogs_id = hits[0]["id"]
+            discogs_artist = {"id": hits[0]["id"], "name": hits[0]["name"]}
+    else:
+        discogs_artist = {"id": discogs_id, "name": name}
+
+    mb_groups: list[dict] = []
+    if mbid:
+        mb_groups = srv.mb_api.get_artist_release_groups(mbid)
+
+    discogs_groups: list[dict] = []
+    if discogs_id:
+        discogs_groups = discogs_api.get_artist_releases(int(discogs_id))
+
+    merged = merge_discographies(mb_groups, discogs_groups)
+
+    h._json({  # type: ignore[attr-defined]
+        "mb_artist": mb_artist,
+        "discogs_artist": discogs_artist,
+        "both": merged.both,
+        "mb_only": merged.mb_only,
+        "discogs_only": merged.discogs_only,
+    })
+
+
 # ── Route tables ─────────────────────────────────────────────────────
 
 GET_ROUTES: dict[str, object] = {
     "/api/search": get_search,
     "/api/library/artist": get_library_artist,
+    "/api/artist/compare": get_artist_compare,
     "/api/discogs/search": get_discogs_search,
 }
 

@@ -29,6 +29,7 @@
   .library-src { font-size: 0.7em; padding: 1px 6px; border-radius: 3px; }
   .library-src-mb { background: #1a3a2a; color: #6d6; }
   .library-src-discogs { background: #3a2a1a; color: #da6; }
+  .library-src-muted { background: #2a2a2a; color: #555; }
   .type-section { margin-bottom: 12px; }
   .type-header { padding: 6px 10px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .type-header:hover { color: #8cb; }
@@ -225,10 +226,12 @@
       <button class="p-btn active-status" id="subnav-discography" onclick="switchSubView('discography')">Discography</button>
       <button class="p-btn" id="subnav-analysis" onclick="switchSubView('analysis')">Analysis</button>
       <button class="p-btn" id="subnav-library" onclick="switchSubView('library')">Library</button>
+      <button class="p-btn" id="subnav-compare" onclick="switchSubView('compare')">Compare</button>
     </div>
     <div id="browse-discography"></div>
     <div id="browse-analysis" style="display:none;"></div>
     <div id="browse-library" style="display:none;"></div>
+    <div id="browse-compare" style="display:none;"></div>
   </div>
 </div>
 

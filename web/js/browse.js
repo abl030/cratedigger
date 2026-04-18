@@ -6,17 +6,59 @@ import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
 
 /**
- * Set the browse metadata source (mb or discogs).
+ * Look up an artist on the requested source by name. Returns the best match
+ * (exact name preferred, else top-scored result), or null if no hits.
+ * @param {string} name
+ * @param {string} src - 'mb' or 'discogs'
+ * @returns {Promise<{id:string, name:string}|null>}
+ */
+async function findArtistOnSource(name, src) {
+  const url = src === 'discogs'
+    ? `${API}/api/discogs/search?q=${encodeURIComponent(name)}&type=artist`
+    : `${API}/api/search?q=${encodeURIComponent(name)}`;
+  try {
+    const r = await fetch(url);
+    const data = await r.json();
+    const artists = data.artists || [];
+    if (!artists.length) return null;
+    const lc = name.toLowerCase();
+    const exact = artists.find(a => (a.name || '').toLowerCase() === lc);
+    return exact || artists[0];
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Set the browse metadata source (mb or discogs). Preserves artist context
+ * when possible: if an artist is currently selected, look up the equivalent
+ * on the new source and re-render in place instead of dumping back to search.
  * @param {string} src - 'mb' or 'discogs'
  */
-export function setBrowseSource(src) {
+export async function setBrowseSource(src) {
+  if (state.browseSource === src) return;
   state.browseSource = src;
   const mbBtn = document.getElementById('source-mb');
   const dgBtn = document.getElementById('source-discogs');
   if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
   if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
-  // Clear and re-trigger search
   state.browseCache = {};
+
+  // Sticky artist context across the toggle.
+  if (state.browseArtist) {
+    const prevName = state.browseArtist.name;
+    const match = await findArtistOnSource(prevName, src);
+    if (match) {
+      state.browseArtist = { id: String(match.id), name: match.name };
+      document.getElementById('browse-artist-name').textContent = match.name;
+      switchSubView(state.browseSubView || 'discography');
+      return;
+    }
+    toast(`No ${src === 'discogs' ? 'Discogs' : 'MusicBrainz'} match for ${prevName}`, true);
+    state.browseArtist = null;
+    document.getElementById('browse-artist').style.display = 'none';
+  }
+
   const q = /** @type {HTMLInputElement} */ (document.getElementById('q')).value.trim();
   if (q.length >= 2) searchArtists(q);
 }
@@ -86,7 +128,7 @@ export function invalidateBrowseArtist() {
  */
 export function switchSubView(view) {
   state.browseSubView = view;
-  ['discography', 'analysis', 'library'].forEach(v => {
+  ['discography', 'analysis', 'library', 'compare'].forEach(v => {
     document.getElementById('browse-' + v).style.display = v === view ? 'block' : 'none';
     document.getElementById('subnav-' + v).className = 'p-btn' + (v === view ? ' active-status' : '');
   });
@@ -104,6 +146,9 @@ export function switchSubView(view) {
   if (view === 'library' && !state.browseCache[aid].library) {
     loadBrowseLibrary(aid, name);
   }
+  if (view === 'compare' && !state.browseCache[aid].compare) {
+    loadBrowseCompare(aid, name);
+  }
 }
 
 /**
@@ -117,9 +162,16 @@ export async function loadBrowseDiscography(aid, name) {
   try {
     const isDiscogs = state.browseSource === 'discogs';
     const artistUrl = isDiscogs ? `${API}/api/discogs/artist/${aid}` : `${API}/api/artist/${aid}`;
+    // Beets only stores MB UUIDs in mb_albumartistid; sending the numeric
+    // Discogs ID would skip the UUID match and only return Discogs-tagged
+    // albums, hiding the rest of the user's catalog. Pass empty mbid on the
+    // Discogs path so the backend falls through to a pure name match.
+    const libUrl = isDiscogs
+      ? `${API}/api/library/artist?name=${encodeURIComponent(name)}`
+      : `${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`;
     const [rgRes, libRes] = await Promise.all([
       fetch(artistUrl).then(r => r.json()),
-      fetch(`${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`).then(r => r.json()),
+      fetch(libUrl).then(r => r.json()),
     ]);
     if (!state.browseCache[aid]) state.browseCache[aid] = {};
     state.browseCache[aid].discography = true;
@@ -158,12 +210,130 @@ export async function loadBrowseLibrary(aid, name) {
   const el = document.getElementById('browse-library');
   el.innerHTML = '<div class="loading">Loading library...</div>';
   try {
-    const r = await fetch(`${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`);
+    // See loadBrowseDiscography: skip mbid on Discogs path (numeric ID isn't
+    // a valid MB UUID, would suppress all non-Discogs-tagged albums).
+    const isDiscogs = state.browseSource === 'discogs';
+    const url = isDiscogs
+      ? `${API}/api/library/artist?name=${encodeURIComponent(name)}`
+      : `${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`;
+    const r = await fetch(url);
     const data = await r.json();
     if (!state.browseCache[aid]) state.browseCache[aid] = {};
     state.browseCache[aid].library = true;
     renderLibraryResultsInto(el, data.albums || []);
   } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
+}
+
+/**
+ * Load the merged MB+Discogs comparison for a browse artist.
+ * @param {string} aid - Artist ID (MB UUID or numeric Discogs ID)
+ * @param {string} name - Artist name
+ */
+export async function loadBrowseCompare(aid, name) {
+  const el = document.getElementById('browse-compare');
+  el.innerHTML = '<div class="loading">Loading both sources (this may take ~5-15s)...</div>';
+  try {
+    const isDiscogs = state.browseSource === 'discogs';
+    const idParam = isDiscogs ? `discogs_id=${encodeURIComponent(aid)}` : `mbid=${encodeURIComponent(aid)}`;
+    const url = `${API}/api/artist/compare?name=${encodeURIComponent(name)}&${idParam}`;
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!state.browseCache[aid]) state.browseCache[aid] = {};
+    state.browseCache[aid].compare = true;
+    renderCompare(el, data);
+  } catch (_e) { el.innerHTML = '<div class="loading">Failed to load comparison</div>'; }
+}
+
+/**
+ * Render a row in the compare view. `mb` and `discogs` may be null when the
+ * row only exists on one side.
+ * @param {Object|null} mb
+ * @param {Object|null} discogs
+ */
+function compareRow(mb, discogs) {
+  const ref = mb || discogs;
+  const title = ref.title || '?';
+  const year = (ref.first_release_date || '').slice(0, 4) || '?';
+  const type = ref.type || '';
+  // Badges are clickable: jump into that source's discography for this artist
+  // so the user can browse pressings / hit Add. v1 doesn't render inline
+  // pressings here — that lives in the existing Discography sub-tab.
+  const mbBadge = mb
+    ? `<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`
+    : '<span class="library-src library-src-muted">MB —</span>';
+  const dgBadge = discogs
+    ? `<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`
+    : '<span class="library-src library-src-muted">Discogs —</span>';
+  return `
+    <div class="rg" style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+      <span class="rg-year">${year}</span>
+      <span class="rg-title">${esc(title)}</span>
+      ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
+      <span style="margin-left:auto;display:flex;gap:4px;">${mbBadge}${dgBadge}</span>
+    </div>`;
+}
+
+/**
+ * @param {HTMLElement} el
+ * @param {Object} data
+ */
+function renderCompare(el, data) {
+  const both = data.both || [];
+  const mbOnly = data.mb_only || [];
+  const dgOnly = data.discogs_only || [];
+  const mbName = data.mb_artist?.name || '—';
+  const dgName = data.discogs_artist?.name || '—';
+
+  const sortBy = (rows, getter) => {
+    return [...rows].sort((a, b) => (getter(a) || '').localeCompare(getter(b) || ''));
+  };
+  const bothSorted = sortBy(both, p => (p.mb || p.discogs).first_release_date || '');
+  const mbOnlySorted = sortBy(mbOnly, r => r.first_release_date || '');
+  const dgOnlySorted = sortBy(dgOnly, r => r.first_release_date || '');
+
+  el.innerHTML = `
+    <div style="font-size:13px;color:#888;margin-bottom:10px;">
+      MB artist: <b>${esc(mbName)}</b> · Discogs artist: <b>${esc(dgName)}</b>
+    </div>
+    <div class="type-section">
+      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
+        On both sources <span class="type-count">${both.length}</span>
+      </div>
+      <div class="type-body open">${bothSorted.map(p => compareRow(p.mb, p.discogs)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+    </div>
+    <div class="type-section">
+      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#9cf;">
+        Only on MusicBrainz <span class="type-count">${mbOnly.length}</span>
+      </div>
+      <div class="type-body">${mbOnlySorted.map(r => compareRow(r, null)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+    </div>
+    <div class="type-section">
+      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#fc9;">
+        Only on Discogs <span class="type-count">${dgOnly.length}</span>
+      </div>
+      <div class="type-body">${dgOnlySorted.map(r => compareRow(null, r)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+    </div>`;
+}
+
+/**
+ * Switch source then open an artist (used by Compare row badges to jump into
+ * the matched-source's discography view).
+ * @param {string} id
+ * @param {string} name
+ * @param {string} src
+ */
+export function openBrowseArtistFromCompare(id, name, src) {
+  // Switch source synchronously without sticky-context lookup; we already
+  // know exactly which artist to open on the new source.
+  state.browseSource = src;
+  const mbBtn = document.getElementById('source-mb');
+  const dgBtn = document.getElementById('source-discogs');
+  if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
+  if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
+  state.browseCache = {};
+  state.browseArtist = { id, name };
+  document.getElementById('browse-artist-name').textContent = name;
+  switchSubView('discography');
 }
 
 /**

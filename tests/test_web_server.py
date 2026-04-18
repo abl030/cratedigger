@@ -548,6 +548,7 @@ class TestRouteContractAudit(unittest.TestCase):
     CLASSIFIED_ROUTES = {
         "/api/search",
         "/api/library/artist",
+        "/api/artist/compare",
         r"^/api/artist/([a-f0-9-]+)$",
         r"^/api/artist/([a-f0-9-]+)/disambiguate$",
         r"^/api/release-group/([a-f0-9-]+)$",
@@ -1302,6 +1303,49 @@ class TestBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, {"albums"}, "library artist response")
         _assert_required_fields(self, data["albums"][0], self.LIBRARY_ALBUM_REQUIRED_FIELDS,
                                 "library artist album")
+
+    def test_artist_compare_contract(self):
+        """Compare endpoint returns mb_artist, discogs_artist, and three buckets."""
+        mb_rg = {
+            "id": self.RG_ID,
+            "title": "OK Computer",
+            "type": "Album",
+            "secondary_types": [],
+            "first_release_date": "1997-05-21",
+            "artist_credit": "Radiohead",
+            "primary_artist_id": self.ARTIST_ID,
+        }
+        discogs_rg = {
+            "id": "21491",
+            "title": "OK Computer",
+            "type": "Album",
+            "secondary_types": [],
+            "first_release_date": "1997",
+            "artist_credit": "Radiohead",
+            "primary_artist_id": "3840",
+        }
+        # server.py loads routes via `from routes import browse` (sys.path hack),
+        # so the canonical module is `routes.browse`, not `web.routes.browse`.
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("routes.browse.discogs_api") as mock_dg:
+            mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
+            mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_dg.search_artists.return_value = [{"id": "3840", "name": "Radiohead"}]
+            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            status, data = self._get("/api/artist/compare?name=Radiohead")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data,
+            {"mb_artist", "discogs_artist", "both", "mb_only", "discogs_only"},
+            "artist compare response",
+        )
+        # Same title + same year → matched
+        self.assertEqual(len(data["both"]), 1)
+        self.assertEqual(data["mb_only"], [])
+        self.assertEqual(data["discogs_only"], [])
+        self.assertEqual(data["both"][0]["mb"]["id"], self.RG_ID)
+        self.assertEqual(data["both"][0]["discogs"]["id"], "21491")
 
     def test_artist_release_groups_contract(self):
         release_group = {
