@@ -319,7 +319,8 @@ export async function upgradeAlbum(mbid, btn) {
       btn.style.color = '#6a9';
       updatePipelineStatus(mbid, 'wanted', data.id);
       const br = data.min_bitrate ? ` from ${data.min_bitrate}kbps` : '';
-      toast(`Upgrade queued${br} — searching flac, v0, 320`);
+      const tiers = data.search_filetype_override || 'default';
+      toast(`Upgrade queued${br} — searching ${tiers}`);
     } else {
       btn.textContent = 'Error';
       toast(data.error || 'Upgrade failed', true);
