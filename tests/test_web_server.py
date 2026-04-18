@@ -1053,6 +1053,40 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                 "pipeline upgrade response")
 
     @patch("routes.pipeline.apply_transition")
+    @patch("routes.pipeline.discogs_api.get_release")
+    @patch("routes.pipeline.mb_api.get_release")
+    def test_pipeline_upgrade_discogs_new_request_uses_discogs_api(
+        self, mock_mb_get, mock_dg_get, _mock_transition,
+    ):
+        """Numeric mb_release_id (Discogs) routes to discogs_api, not mb_api."""
+        self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        self.mock_db.add_request.return_value = 999
+        mock_dg_get.return_value = {
+            "id": "12856590",
+            "title": "New.Old.Rare",
+            "artist_name": "Blueline Medic",
+            "artist_id": "3640",
+            "year": 2010,
+            "country": "Australia",
+            "tracks": [],
+        }
+
+        status, data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "12856590"},
+        )
+
+        self.assertEqual(status, 200)
+        mock_dg_get.assert_called_once_with(12856590)
+        mock_mb_get.assert_not_called()
+        # Confirm Discogs ID is mirrored into both columns for pipeline-compat
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["mb_release_id"], "12856590")
+        self.assertEqual(add_kwargs["discogs_release_id"], "12856590")
+        _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
+                                "pipeline upgrade response (discogs)")
+
+    @patch("routes.pipeline.apply_transition")
     def test_pipeline_set_quality_contract(self, _mock_transition):
         self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
 

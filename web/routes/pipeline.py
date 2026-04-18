@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
                          should_clear_lossless_search_override,
-                         get_decision_tree, full_pipeline_decision)
+                         get_decision_tree, full_pipeline_decision,
+                         detect_release_source)
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
 from lib.util import resolve_failed_path  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
@@ -413,6 +414,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         return
 
     quality = QUALITY_UPGRADE_TIERS
+    source = detect_release_source(mbid)
 
     min_bitrate = None
     b = s._beets_db()
@@ -420,6 +422,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         min_bitrate = b.get_min_bitrate(mbid)
 
     existing = s._db().get_request_by_mb_release_id(mbid)
+    if not existing and source == "discogs":
+        existing = s._db().get_request_by_discogs_release_id(mbid)
     if existing:
         req_id = existing["id"]
         apply_transition(s._db(), req_id, "wanted",
@@ -433,16 +437,29 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             "search_filetype_override": quality,
         })
     else:
-        release = mb_api.get_release(mbid)
-        req_id = s._db().add_request(
-            mb_release_id=mbid,
-            mb_artist_id=release.get("artist_id"),
-            artist_name=release["artist_name"],
-            album_title=release["title"],
-            year=release.get("year"),
-            country=release.get("country"),
-            source="request",
-        )
+        if source == "discogs":
+            release = discogs_api.get_release(int(mbid))
+            req_id = s._db().add_request(
+                mb_release_id=mbid,
+                discogs_release_id=mbid,
+                mb_artist_id=str(release.get("artist_id") or ""),
+                artist_name=release["artist_name"],
+                album_title=release["title"],
+                year=release.get("year"),
+                country=release.get("country"),
+                source="request",
+            )
+        else:
+            release = mb_api.get_release(mbid)
+            req_id = s._db().add_request(
+                mb_release_id=mbid,
+                mb_artist_id=release.get("artist_id"),
+                artist_name=release["artist_name"],
+                album_title=release["title"],
+                year=release.get("year"),
+                country=release.get("country"),
+                source="request",
+            )
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
         # Newly added request — status is already 'wanted', set quality override
