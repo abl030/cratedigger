@@ -384,5 +384,51 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
             self.assertFalse(os.path.exists(flac_path))
 
 
+# ============================================================================
+# _find_target_candidate — int-vs-str MBID matching at the import stage
+# ============================================================================
+
+class TestFindTargetCandidate(unittest.TestCase):
+    """Same int-vs-str trap as lib/beets.py::beets_validate (PR #98).
+
+    The validation stage was fixed there; the import stage in
+    import_one.py had a separate copy of the same broken comparison.
+    Without coercion, every Discogs candidate that *passed* validation
+    would still fail at import with `[SKIP] MBID … not in N candidates`.
+    """
+
+    def test_int_album_id_matches_str_target(self):
+        """Discogs candidate with int album_id matches str DB mb_release_id."""
+        from import_one import _find_target_candidate
+        cands = [{"album_id": 2085134, "distance": 0.05}]
+        self.assertEqual(_find_target_candidate(cands, "2085134"), 0)
+
+    def test_str_album_id_matches_str_target(self):
+        """MusicBrainz UUID path still works."""
+        from import_one import _find_target_candidate
+        uuid = "f100b6b0-6daa-4c9b-b33a-3e14c564cf58"
+        cands = [{"album_id": uuid, "distance": 0.02}]
+        self.assertEqual(_find_target_candidate(cands, uuid), 0)
+
+    def test_no_match_returns_none(self):
+        from import_one import _find_target_candidate
+        cands = [{"album_id": 999999}, {"album_id": "other-uuid"}]
+        self.assertIsNone(_find_target_candidate(cands, "2085134"))
+
+    def test_picks_first_match_when_multiple(self):
+        """Stable ordering: first match wins."""
+        from import_one import _find_target_candidate
+        cands = [
+            {"album_id": "wrong"},
+            {"album_id": 2085134},      # int, target match
+            {"album_id": "2085134"},    # str, also match — but earlier wins
+        ]
+        self.assertEqual(_find_target_candidate(cands, "2085134"), 1)
+
+    def test_empty_candidates_returns_none(self):
+        from import_one import _find_target_candidate
+        self.assertIsNone(_find_target_candidate([], "2085134"))
+
+
 if __name__ == "__main__":
     unittest.main()

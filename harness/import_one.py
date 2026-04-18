@@ -69,6 +69,19 @@ _current_result: ImportResult | None = None
 _rank_cfg: QualityRankConfig = QualityRankConfig.defaults()
 
 
+def _find_target_candidate(candidates: list, target_mbid) -> int | None:
+    """Return the index of the candidate whose `album_id` matches the
+    target, or None. str() on both sides — beets' Discogs plugin emits
+    int album_ids while target_mbid is the str DB column. Same int-vs-str
+    trap as lib/beets.py::beets_validate (PR #98).
+    """
+    target = str(target_mbid)
+    for i, c in enumerate(candidates):
+        if str(c.get("album_id", "")) == target:
+            return i
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Pure stage decision functions — extracted from main() for testability
 # ---------------------------------------------------------------------------
@@ -617,18 +630,12 @@ def run_import(path, mb_release_id):
 
             elif msg_type in ("choose_match", "choose_item"):
                 candidates = msg.get("candidates", [])
-
-                # Find candidate matching our target MBID
-                matched_idx = None
-                for i, c in enumerate(candidates):
-                    if c.get("album_id", "") == mb_release_id:
-                        matched_idx = i
-                        break
+                matched_idx = _find_target_candidate(candidates, mb_release_id)
 
                 if matched_idx is None:
                     proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
                     proc.stdin.flush()
-                    avail = [c.get("album_id", "?") for c in candidates]
+                    avail = [str(c.get("album_id", "?")) for c in candidates]
                     print(f"  [SKIP] MBID {mb_release_id} not in {len(candidates)} candidates: {avail}",
                           file=sys.stderr)
                     if proc.poll() is None:
