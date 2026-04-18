@@ -380,14 +380,16 @@ def main():
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
-        # Flush any lingering keys from previous cache generations so backend
-        # changes (e.g. an updated discogs.py normalizer) take effect
-        # immediately on restart instead of being masked by stale entries.
-        # Covers both the legacy `web:*` routing namespace (removed in #101
-        # but may still exist on in-place upgrades) and the `meta:*`
-        # pure-metadata namespace that wraps mb/discogs helper outputs.
+        # Flush only the legacy `web:*` routing namespace on startup. It
+        # was removed in #101 but may still hold stale overlay-baked
+        # responses on in-place upgrades.
+        #
+        # Do NOT flush `meta:*` here — it's the 24h pure-metadata cache
+        # that should survive routine restarts (Codex review). If a
+        # helper-shape change needs to invalidate cached metadata (rare
+        # — e.g. a discogs.py normalizer tweak), bump the cache key
+        # prefix in the helper or flush `meta:*` manually during deploy.
         cache.invalidate_pattern("web:*")
-        cache.invalidate_pattern("meta:*")
 
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api

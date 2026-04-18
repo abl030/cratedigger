@@ -153,6 +153,56 @@ class TestMetaNamespace(_CacheTestBase):
             "no-op cache must call fetch every time (never cache-hit)")
 
 
+class TestStartupFlushLeavesMetaAlone(unittest.TestCase):
+    """Server startup flushes legacy `web:*` routing cache but MUST NOT
+    touch the pure `meta:*` metadata namespace. Flushing it on every
+    `systemctl restart soularr-web` would defeat the 24h cache —
+    Codex review on PR #104.
+    """
+
+    def test_main_does_not_invalidate_meta_pattern(self) -> None:
+        """Source-level regression guard. `main()` in web/server.py
+        must not call `cache.invalidate_pattern('meta:*')`. If a future
+        change wants to flush metadata, do it per-key via a version
+        prefix bump, not a blanket startup wipe."""
+        import ast
+        import os
+
+        server_py = os.path.join(
+            os.path.dirname(__file__), "..", "web", "server.py")
+        with open(server_py) as f:
+            tree = ast.parse(f.read())
+
+        main_fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == "main"),
+            None,
+        )
+        self.assertIsNotNone(main_fn,
+                             "couldn't locate main() in web/server.py")
+        assert main_fn is not None  # narrow for pyright
+
+        for node in ast.walk(main_fn):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            is_invalidate = (
+                isinstance(fn, ast.Attribute)
+                and fn.attr == "invalidate_pattern"
+            )
+            if not is_invalidate:
+                continue
+            if not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                self.assertNotEqual(
+                    arg.value, "meta:*",
+                    "main() must not flush meta:* on startup — that "
+                    "defeats the 24h MB/Discogs metadata cache on every "
+                    "restart. See Codex review on PR #104.")
+
+
 class TestMemoizeMetaFresh(_CacheTestBase):
     """`fresh=True` is the bypass used by POST handlers that persist
     metadata into the pipeline DB. A 24h stale cache read on an add /
