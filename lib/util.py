@@ -34,6 +34,33 @@ class AudioValidationResult:
     failed_files: list[tuple[str, str]] = field(default_factory=list)
 
 
+# === Subprocess env for beets ===
+
+def beets_subprocess_env() -> dict[str, str]:
+    """Env for subprocesses that invoke beets (directly or via the harness
+    and import_one.py). Single source of truth for the HOME override.
+
+    Beets resolves its config from `$HOME/.config/beets/config.yaml`. The
+    soularr systemd service runs as root with HOME=/root; the Nix Home
+    Manager beets config (including the Discogs plugin token and the patched
+    base URL for the local Discogs mirror) lives at /home/abl030/.config/.
+    Without the override, the Discogs plugin silently returns 0 candidates
+    for every --search-id <numeric_id> → scenario=mbid_not_found on every
+    Discogs validation. This hit every Blueline Medic - Apology Wars
+    attempt (download_log 3604–3616) post-PR #100.
+
+    Every subprocess that runs beets must use this env:
+      - lib/beets.py::beets_validate (harness for validation)
+      - lib/import_dispatch.py (launches import_one.py)
+      - harness/import_one.py (launches the harness + `beet move`)
+      - web/routes/pipeline.py (ban-source `beet remove`)
+
+    os.environ is snapshotted at CALL time, not import time, so tests that
+    patch the environment see the patched values.
+    """
+    return {**os.environ, "HOME": "/home/abl030"}
+
+
 # === Filesystem utilities ===
 
 def sanitize_folder_name(folder_name: str) -> str:

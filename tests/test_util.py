@@ -586,5 +586,48 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         trigger_jellyfin_scan(self._make_cfg())  # best-effort, no raise
 
 
+class TestBeetsSubprocessEnv(unittest.TestCase):
+    """beets_subprocess_env() is the single source of truth for the env dict
+    used by every subprocess that invokes beets (directly or via the harness
+    / import_one.py). Beets reads `~/.config/beets/config.yaml`; when soularr
+    runs as the systemd service (root, HOME=/root), the Nix Home Manager
+    beets config isn't there and the Discogs plugin returns 0 candidates for
+    every --search-id. See live failures in download_log for Blueline Medic.
+    """
+
+    def test_helper_exists_and_returns_dict(self) -> None:
+        from lib.util import beets_subprocess_env
+        env = beets_subprocess_env()
+        self.assertIsInstance(env, dict)
+
+    def test_home_overridden_to_home_manager_profile(self) -> None:
+        """HOME must point to the user profile where beets config lives,
+        regardless of what HOME is in the caller's environment."""
+        from lib.util import beets_subprocess_env
+        with patch.dict(os.environ, {"HOME": "/root"}, clear=False):
+            env = beets_subprocess_env()
+        self.assertEqual(env["HOME"], "/home/abl030")
+
+    def test_inherits_other_env_vars(self) -> None:
+        """Non-HOME vars pass through unchanged — PATH, PYTHONPATH etc. must
+        still reach the subprocess."""
+        from lib.util import beets_subprocess_env
+        sentinel = "SOULARR_TEST_SENTINEL_VAR_XYZ"
+        with patch.dict(os.environ, {sentinel: "present"}, clear=False):
+            env = beets_subprocess_env()
+        self.assertEqual(env.get(sentinel), "present")
+
+    def test_picks_up_environ_at_call_time(self) -> None:
+        """Not a frozen module-level snapshot — os.environ is read fresh
+        each call so test-time patching works and any late-set var shows up."""
+        from lib.util import beets_subprocess_env
+        with patch.dict(os.environ, {"LATE_BOUND_VAR": "first"}, clear=False):
+            env1 = beets_subprocess_env()
+        with patch.dict(os.environ, {"LATE_BOUND_VAR": "second"}, clear=False):
+            env2 = beets_subprocess_env()
+        self.assertEqual(env1["LATE_BOUND_VAR"], "first")
+        self.assertEqual(env2["LATE_BOUND_VAR"], "second")
+
+
 if __name__ == "__main__":
     unittest.main()
