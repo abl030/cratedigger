@@ -88,15 +88,19 @@ clearStore();
   assertExcludes(html, '>Add request</button>', 'no Add request when wanted');
 }
 
-console.log('Acquire button — downloading → Remove request disabled');
+console.log('Acquire button — downloading → Remove request enabled (cancellable)');
 clearStore();
 {
+  // User report: "downloading" pressing showed Remove request greyed
+  // out. The backend's /api/pipeline/delete handles any status, so
+  // there's no reason to disable. Soularr's next poll cycle drops
+  // any orphan slskd transfer when the row is gone.
   const html = renderActionToolbar({
     id: 'rel-5', in_library: false,
     pipeline_status: 'downloading', pipeline_id: 300,
   });
   assertContains(html, '>Remove request</button>', 'downloading shows Remove request label');
-  assertExcludes(html, 'window.disambRemove', 'Remove request disabled mid-download');
+  assertContains(html, 'window.disambRemove(300', 'Remove request enabled mid-download');
 }
 
 console.log('Acquire button — pipeline=imported (no library) → Upgrade enabled');

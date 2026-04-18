@@ -17,17 +17,16 @@
  *   [Remove from beets] enabled when in library and beets album id known
  *
  * Acquire decision tree (highest priority first):
- *   1. pipeline_status === 'wanted'  → "Remove request" enabled
- *      (cancels both fresh add-requests and queued upgrades — the
- *      user's mental model: "wanted means it's in the pipeline,
- *      remove it")
- *   2. pipeline_status === 'downloading' → "Remove request" disabled
- *      (in flight; backend can't cancel mid-download cleanly)
- *   3. in_library OR pipeline_status === 'imported' → "Upgrade" enabled
+ *   1. pipeline_status in ('wanted', 'downloading') → "Remove request"
+ *      enabled. Backend's /api/pipeline/delete handles any status —
+ *      it removes the row and soularr's next poll cycle ignores the
+ *      orphaned slskd transfer. User's mental model: "if it's in the
+ *      pipeline, I can remove it".
+ *   2. in_library OR pipeline_status === 'imported' → "Upgrade" enabled
  *      (own it / previously imported — re-queue for higher quality)
- *   4. !in_library AND no pipeline_status → "Add request" enabled
+ *   3. !in_library AND no pipeline_status → "Add request" enabled
  *      (fresh request)
- *   5. else (manual review, etc) → "Add request" disabled
+ *   4. else (manual review, etc) → "Add request" disabled
  *
  * Action handlers are window-bound globals (addRelease, upgradeAlbum,
  * disambRemove, confirmDeleteBeets) — defined elsewhere; this module
@@ -82,14 +81,12 @@ export function renderActionToolbar(item, opts = {}) {
   // full priority order. The key invariant: at most one of Add/Upgrade/
   // Remove request is meaningful at any time, so we collapse them.
   let acquireBtn;
-  if (pStatus === 'wanted' && pId) {
-    // Cancellable. Covers fresh add-requests AND queued upgrades —
-    // the user's framing: "if album is wanted (either path), Remove
-    // request".
+  if ((pStatus === 'wanted' || pStatus === 'downloading') && pId) {
+    // Cancellable. Backend deletes the row regardless of status; if a
+    // download is in flight, soularr's next poll ignores the orphan
+    // slskd transfer. Covers fresh add-requests, queued upgrades, and
+    // mid-download cancels.
     acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;
-  } else if (pStatus === 'downloading') {
-    // In flight; can't cleanly cancel mid-download.
-    acquireBtn = `<button class="btn" style="${baseStyle}" disabled>Remove request</button>`;
   } else if (inLibrary || pStatus === 'imported') {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum('${escId}', this)">Upgrade</button>`;
   } else if (!inLibrary && !pStatus) {
