@@ -1,6 +1,7 @@
 // @ts-check
 import { state, API, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc } from './util.js';
+import { renderTypedSections } from './grouping.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /** @type {string[]} */
@@ -24,16 +25,12 @@ export function renderDisambiguateInto(targetEl) {
     <strong>${esc(d.artist_name)}</strong> — ${rgs.length} release groups (excl. live), ${withUnique} with unique tracks, ${covered} fully covered
   </div>`;
 
-  // Sort: albums first, then EPs, then singles, then by date
-  const tierOrder = {Album: 1, EP: 2, Single: 3, Other: 4};
-  const sorted = [...rgs].sort((a, b) => {
-    const ta = tierOrder[a.primary_type] || 4;
-    const tb = tierOrder[b.primary_type] || 4;
-    if (ta !== tb) return ta - tb;
-    return (a.first_date || '').localeCompare(b.first_date || '');
+  // Same Albums/EPs/Singles sectioning the other browse sub-tabs use.
+  // Analysis rows expose `primary_type` and `first_date` (not the
+  // standard `first_release_date`), so override the date extractor.
+  html += renderTypedSections(rgs, renderDisambRG, {
+    dateOf: (r) => String(r.first_date || ''),
   });
-
-  html += sorted.map(rg => renderDisambRG(rg)).join('');
   el.innerHTML = html;
 }
 
