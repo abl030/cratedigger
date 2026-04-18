@@ -41,23 +41,21 @@ function clearStore() {
   pipelineStore.clear();
 }
 
-console.log('renderActionToolbar — fresh row (not in library, not in pipeline)');
+console.log('renderActionToolbar — fresh row (Add request enabled)');
 clearStore();
 {
   const html = renderActionToolbar({ id: 'rel-1', in_library: false });
-  assertContains(html, 'Add request', 'has Add request label');
-  assertContains(html, 'Upgrade', 'has Upgrade label');
-  assertContains(html, 'Remove request', 'has Remove request label');
-  assertContains(html, 'Remove from beets', 'has Remove from beets label');
+  assertContains(html, '>Add request</button>', 'shows Add request label');
+  assertContains(html, '>Remove request</button>', 'shows Remove request label');
+  assertContains(html, '>Remove from beets</button>', 'shows Remove from beets label');
   // Add enabled, others disabled
   assertContains(html, 'window.addRelease', 'Add request is wired up');
-  assertContains(html, '>Upgrade</button>', 'Upgrade renders');
-  assertExcludes(html, 'window.upgradeAlbum', 'Upgrade is disabled (no handler)');
+  assertExcludes(html, 'window.upgradeAlbum', 'Upgrade not used in this state');
   assertExcludes(html, 'window.disambRemove', 'Remove request is disabled');
   assertExcludes(html, 'window.confirmDeleteBeets', 'Remove from beets is disabled');
 }
 
-console.log('renderActionToolbar — in library, not in pipeline');
+console.log('renderActionToolbar — in library (Acquire collapses to Upgrade)');
 clearStore();
 {
   const html = renderActionToolbar({
@@ -68,20 +66,18 @@ clearStore();
     album: 'Plastic Skies',
     track_count: 12,
   });
-  // Add request: disabled (already owned)
-  assertExcludes(html, 'window.addRelease', 'Add request disabled when owned');
-  // Upgrade: enabled
-  assertContains(html, "window.upgradeAlbum('rel-2'", 'Upgrade enabled when in library');
-  // Remove request: disabled (no pipeline entry)
-  assertExcludes(html, 'window.disambRemove', 'Remove request disabled with no pipeline entry');
+  // Acquire button shows Upgrade when in library
+  assertContains(html, '>Upgrade</button>', 'Acquire shows Upgrade when in library');
+  assertExcludes(html, '>Add request</button>', 'no separate Add request button');
+  assertContains(html, "window.upgradeAlbum('rel-2'", 'Upgrade wired up');
   // Remove from beets: enabled
-  assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets enabled with beets_album_id');
+  assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets enabled');
   assertContains(html, "'Bodyjar'", 'artist passed to delete confirm');
   assertContains(html, "'Plastic Skies'", 'album passed to delete confirm');
   assertContains(html, ', 12)', 'track count passed to delete confirm');
 }
 
-console.log('renderActionToolbar — pipeline status wanted');
+console.log('renderActionToolbar — pipeline status wanted (in flight, neither add nor upgrade)');
 clearStore();
 {
   const html = renderActionToolbar({
@@ -90,17 +86,16 @@ clearStore();
     pipeline_status: 'wanted',
     pipeline_id: 100,
   });
-  // Add: disabled (already in pipeline)
-  assertExcludes(html, 'window.addRelease', 'Add disabled when already in pipeline');
-  // Upgrade: disabled (not imported, not in library)
-  assertExcludes(html, 'window.upgradeAlbum', 'Upgrade disabled when only wanted');
+  // Acquire defaults to disabled "Add request" since nothing actionable
+  assertContains(html, '>Add request</button>', 'shows Add request label disabled');
+  assertExcludes(html, 'window.addRelease', 'Add disabled (already in pipeline)');
+  assertExcludes(html, 'window.upgradeAlbum', 'Upgrade disabled (only wanted)');
   // Remove request: enabled
   assertContains(html, 'window.disambRemove(100', 'Remove request enabled with pipeline_id');
-  // Remove from beets: disabled
-  assertExcludes(html, 'window.confirmDeleteBeets', 'Remove from beets disabled (not in library)');
+  assertExcludes(html, 'window.confirmDeleteBeets', 'Remove from beets disabled');
 }
 
-console.log('renderActionToolbar — pipeline status imported (queue another upgrade)');
+console.log('renderActionToolbar — pipeline status imported (Acquire shows Upgrade)');
 clearStore();
 {
   const html = renderActionToolbar({
@@ -109,13 +104,13 @@ clearStore();
     pipeline_status: 'imported',
     pipeline_id: 101,
   });
-  // Upgrade: enabled when imported
-  assertContains(html, 'window.upgradeAlbum', 'Upgrade enabled when pipeline=imported');
-  // Remove request: disabled (not 'wanted')
-  assertExcludes(html, 'window.disambRemove', 'Remove request disabled when not wanted');
+  // Acquire shows Upgrade when pipeline=imported
+  assertContains(html, '>Upgrade</button>', 'Acquire shows Upgrade when imported');
+  assertContains(html, 'window.upgradeAlbum', 'Upgrade wired up');
+  assertExcludes(html, 'window.disambRemove', 'Remove request disabled (not wanted)');
 }
 
-console.log('renderActionToolbar — upgrade already queued');
+console.log('renderActionToolbar — upgrade already queued (Acquire shows Queued)');
 clearStore();
 {
   const html = renderActionToolbar({
@@ -124,7 +119,6 @@ clearStore();
     beets_album_id: 50,
     upgrade_queued: true,
   });
-  // Upgrade button shows "Queued" disabled
   assertContains(html, '>Queued</button>', 'shows Queued label when upgrade queued');
   assertExcludes(html, 'window.upgradeAlbum', 'no upgrade handler when queued');
 }
@@ -133,7 +127,6 @@ console.log('renderActionToolbar — pipelineStore overlay');
 clearStore();
 pipelineStore.set('rel-6', { status: 'wanted', id: 200 });
 {
-  // Backend says no pipeline; pipelineStore says wanted. Store wins.
   const html = renderActionToolbar({
     id: 'rel-6',
     in_library: false,
@@ -147,10 +140,9 @@ console.log('renderActionToolbar — never crashes on minimal input');
 clearStore();
 {
   const html = renderActionToolbar({ id: 'rel-7' });
-  assertContains(html, 'Add request', 'minimal input still renders all 4 buttons');
-  assertContains(html, 'Upgrade', 'minimal input renders Upgrade');
-  assertContains(html, 'Remove request', 'minimal input renders Remove request');
-  assertContains(html, 'Remove from beets', 'minimal input renders Remove from beets');
+  assertContains(html, '>Add request</button>', 'minimal input renders Acquire button');
+  assertContains(html, '>Remove request</button>', 'minimal input renders Remove request');
+  assertContains(html, '>Remove from beets</button>', 'minimal input renders Remove from beets');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

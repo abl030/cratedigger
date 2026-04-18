@@ -1,19 +1,26 @@
 // @ts-check
 
 /**
- * Standardised 4-button action toolbar for any release/album row across
+ * Standardised 3-button action toolbar for any release/album row across
  * the browse sub-tabs (Discography, Library, Analysis, Compare). Every
  * button is always rendered; non-applicable ones are disabled (greyed)
  * so the row's available actions read at a glance.
  *
  * Buttons:
- *   [Add request]      enabled when not in library AND not in pipeline
- *   [Upgrade]          enabled when in library OR pipeline status is
- *                      'imported'; shows "Queued" when upgrade is
- *                      already queued
- *   [Remove request]   enabled when pipeline status is 'wanted'
- *                      (the only cancellable state)
+ *   [Acquire]           context-aware:
+ *                         - "Add request" enabled when not in library
+ *                           AND not in pipeline
+ *                         - "Upgrade" enabled when in library OR
+ *                           pipeline status is 'imported'
+ *                         - "Queued" disabled when upgrade already queued
+ *                         - "Add request" disabled otherwise (in flight)
+ *   [Remove request]    enabled when pipeline status is 'wanted'
+ *                       (the only cancellable state)
  *   [Remove from beets] enabled when in library and beets album id known
+ *
+ * Add request and Upgrade are mutually exclusive in their enabled
+ * states (you either don't have it → add, or you have it → upgrade)
+ * so one collapsing button reads clearer than two side-by-side.
  *
  * Action handlers are window-bound globals (addRelease, upgradeAlbum,
  * disambRemove, confirmDeleteBeets) — defined elsewhere; this module
@@ -69,19 +76,21 @@ export function renderActionToolbar(item, opts = {}) {
   const album = esc(item.album || '');
   const trackCount = item.track_count || 0;
 
-  // Add request
-  const addBtn = canAdd
-    ? `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease('${escId}', this)">Add request</button>`
-    : `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
-
-  // Upgrade
-  let upgradeBtn;
+  // Acquire — collapses Add request + Upgrade into one context-aware
+  // button. Their enabled states are mutually exclusive, so showing
+  // them side by side wastes space and produces redundant greyed-out
+  // buttons next to live ones.
+  let acquireBtn;
   if (upgradeQueued) {
-    upgradeBtn = `<button class="btn" style="${baseStyle}border-color:#6a9;color:#6a9;" disabled>Queued</button>`;
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}border-color:#6a9;color:#6a9;" disabled>Queued</button>`;
   } else if (canUpgrade) {
-    upgradeBtn = `<button class="btn" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum('${escId}', this)">Upgrade</button>`;
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum('${escId}', this)">Upgrade</button>`;
+  } else if (canAdd) {
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease('${escId}', this)">Add request</button>`;
   } else {
-    upgradeBtn = `<button class="btn" style="${baseStyle}" disabled>Upgrade</button>`;
+    // In flight (wanted/downloading/manual) — neither add nor upgrade
+    // is meaningful; Remove request handles the cancel path.
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
   }
 
   // Remove request (cancel a wanted entry)
@@ -94,5 +103,5 @@ export function renderActionToolbar(item, opts = {}) {
     ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, '${artist}', '${album}', ${trackCount})">Remove from beets</button>`
     : `<button class="btn" style="${baseStyle}" disabled>Remove from beets</button>`;
 
-  return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${addBtn}${upgradeBtn}${removeReqBtn}${removeBeetsBtn}</span>`;
+  return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeReqBtn}${removeBeetsBtn}</span>`;
 }
