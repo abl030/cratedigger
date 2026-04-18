@@ -58,8 +58,12 @@ Implement the fix as a refactor per scope.md — fix the structure, not just the
 Invoke Codex's built-in code review on the PR branch:
 
 ```bash
-codex exec review --base main -o /tmp/codex-review.txt "Review this PR using the soularr-pr-review-fix skill. Review only — do not push fixes. Focus on: correctness bugs, test gaps, rule violations from CLAUDE.md and .claude/rules/, unfinished wiring."
+codex exec review --base main -o /tmp/codex-review.txt
 ```
+
+**IMPORTANT — argument parsing quirk:** `codex exec review` rejects a positional `[PROMPT]` argument when `--base <BRANCH>` is used (despite what `codex exec review --help` suggests is supported). Pass `--base main -o /tmp/codex-review.txt` with **no prompt** — Codex picks up the project's review configuration automatically. A custom prompt is only valid with `--uncommitted` or `--commit <SHA>`. The error you'll see if you include both: `the argument '--base <BRANCH>' cannot be used with '[PROMPT]'`.
+
+The review writes a concise verdict to `/tmp/codex-review.txt`; the streaming stdout includes the full review trace.
 
 Read `/tmp/codex-review.txt` and parse the findings:
 - If Codex found real issues: fix them, re-run tests, add a commit, push
