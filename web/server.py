@@ -238,11 +238,21 @@ class Handler(BaseHTTPRequestHandler):
 
     # Routes that should be cached, mapped to their TTL.
     # Prefix-matched: "/api/artist" matches "/api/artist/<id>" etc.
+    # Order matters: first matching prefix wins (see _cache_ttl_for_path).
+    # Specific paths that bake pipeline_status + in_library into the payload
+    # MUST come before their broader prefix so they get the short TTL.
+    # Soularr's pipeline-side status transitions (downloading -> imported,
+    # quality-gate re-queue -> wanted) happen outside the web UI's POST
+    # invalidation paths, so a long TTL leaves stale badges in the UI for
+    # hours. TTL_LIBRARY caps the staleness at 5min. See issue tracker for
+    # the architectural fix (split MB metadata cache from pipeline overlay).
     _CACHE_TTLS: dict[str, int] = {
         "/api/search": cache.TTL_MB,
         "/api/artist": cache.TTL_MB,
-        "/api/release-group": cache.TTL_MB,
-        "/api/release": cache.TTL_MB,
+        "/api/release-group": cache.TTL_LIBRARY,
+        "/api/release": cache.TTL_LIBRARY,
+        "/api/discogs/master": cache.TTL_LIBRARY,
+        "/api/discogs/release": cache.TTL_LIBRARY,
         "/api/discogs": cache.TTL_MB,
         "/api/library": cache.TTL_LIBRARY,
         "/api/beets": cache.TTL_LIBRARY,
