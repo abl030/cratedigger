@@ -25,22 +25,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("soularr-web")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-sys.path.insert(0, os.path.dirname(__file__))
+# Ensure repo root is importable when run as __main__ so `from lib.X` /
+# `from web.X` resolve without relying on PYTHONPATH.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
 if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
-import web.cache as cache
-import mb as mb_api
-from beets_db import BeetsDB
-from pipeline_db import PipelineDB
-from routes import browse as _browse_routes  # type: ignore[import-untyped]
-from routes import library as _library_routes  # type: ignore[import-untyped]
-from routes import imports as _imports_routes  # type: ignore[import-untyped]
-from routes import pipeline as _pipeline_routes  # type: ignore[import-untyped]
+from web import cache as cache
+from web import mb as mb_api
+from lib.beets_db import BeetsDB
+from lib.pipeline_db import PipelineDB
+from web.routes import browse as _browse_routes
+from web.routes import library as _library_routes
+from web.routes import imports as _imports_routes
+from web.routes import pipeline as _pipeline_routes
 
 _db_dsn = None
 

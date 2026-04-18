@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, TYPE_CHECKING
@@ -37,10 +36,7 @@ MAX_FILE_RETRIES = 5
 # Lazy import for spectral analysis — avoids hard dep on sox at import time
 def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """Proxy to spectral_check.analyze_album (lazy import)."""
-    lib_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lib")
-    if lib_dir not in sys.path:
-        sys.path.insert(0, lib_dir)
-    from spectral_check import analyze_album
+    from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 

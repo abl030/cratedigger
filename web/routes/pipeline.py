@@ -1,31 +1,26 @@
 """Pipeline API route handlers, extracted from server.py."""
 
 import json
-import os
 import re
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
-from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
+from web.classify import classify_log_entry, LogEntry
+from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
                          get_decision_tree, full_pipeline_decision,
                          detect_release_source)
-from lib.transitions import apply_transition  # type: ignore[import-not-found]
-from lib.util import beets_subprocess_env, resolve_failed_path  # type: ignore[import-not-found]
-from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
-                             ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
-                             CLIFF_THRESHOLD_DB_PER_KHZ)
-import mb as mb_api  # type: ignore[import-not-found]
-import discogs as discogs_api  # type: ignore[import-not-found]
+from lib.transitions import apply_transition
+from lib.util import beets_subprocess_env, resolve_failed_path
+from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
+                                ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
+                                CLIFF_THRESHOLD_DB_PER_KHZ)
+from web import mb as mb_api
+from web import discogs as discogs_api
 
 
 def _server():
     """Deferred import to avoid circular deps."""
-    from web import server  # type: ignore[import-not-found]
+    from web import server
     return server
 
 

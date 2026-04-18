@@ -29,9 +29,8 @@ from typing import Optional
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from spectral_check import analyze_album, AlbumResult
+from lib.spectral_check import analyze_album, AlbumResult
 from lib.quality import (quality_gate_decision, full_pipeline_decision,
                          spectral_import_decision, import_quality_decision,
                          transcode_detection, QUALITY_MIN_BITRATE_KBPS)

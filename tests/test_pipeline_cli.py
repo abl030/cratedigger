@@ -13,11 +13,8 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
-sys.path.insert(0, os.path.abspath(_scripts_dir))
-import pipeline_cli
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from scripts import pipeline_cli
 from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -44,7 +41,7 @@ SAMPLE_MB_RELEASE = {
 
 
 def make_db():
-    from pipeline_db import PipelineDB
+    from lib.pipeline_db import PipelineDB
     db = PipelineDB(TEST_DSN)
     for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
@@ -60,7 +57,7 @@ class TestCmdAdd(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    @patch("pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_with_mbid(self, mock_fetch):
         mock_fetch.return_value = SAMPLE_MB_RELEASE
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
@@ -76,7 +73,7 @@ class TestCmdAdd(unittest.TestCase):
         tracks = self.db.get_tracks(req["id"])
         self.assertEqual(len(tracks), 3)
 
-    @patch("pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_duplicate_skipped(self, mock_fetch):
         self.db.add_request(
             mb_release_id="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
@@ -155,7 +152,7 @@ class TestTracksFromMbRelease(unittest.TestCase):
 
 class TestCmdForceImport(unittest.TestCase):
     @patch("builtins.print")
-    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Test Album")
     def test_force_import_passes_source_username_to_dispatch(self, _mock_resolve, _mock_print):
         from lib.import_dispatch import DispatchOutcome
 
@@ -185,7 +182,7 @@ class TestCmdForceImport(unittest.TestCase):
 
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
-    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
     def test_failed_manual_import_prints_error(self, _mock_resolve, _mock_print):
         from lib.import_dispatch import DispatchOutcome
         db = MagicMock()
@@ -207,7 +204,7 @@ class TestCmdManualImport(unittest.TestCase):
         _mock_print.assert_any_call("  [FAIL] Rejected: quality_downgrade — new 192kbps <= existing 320kbps")
 
     @patch("builtins.print")
-    @patch("pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
     def test_manual_import_calls_dispatch_from_db(self, _mock_resolve, _mock_print):
         from lib.import_dispatch import DispatchOutcome
         db = MagicMock()
@@ -228,7 +225,7 @@ class TestCmdManualImport(unittest.TestCase):
         )
 
     @patch("builtins.print")
-    @patch("pipeline_cli._resolve_failed_path",
+    @patch("scripts.pipeline_cli._resolve_failed_path",
            return_value="/mnt/virtio/music/slskd/failed_imports/Foo - Bar")
     def test_manual_import_resolves_relative_path(self, _mock_resolve, _mock_print):
         """Manual-import must resolve relative paths the same way force-import
@@ -255,7 +252,7 @@ class TestCmdManualImport(unittest.TestCase):
         )
 
     @patch("builtins.print")
-    @patch("pipeline_cli._resolve_failed_path", return_value=None)
+    @patch("scripts.pipeline_cli._resolve_failed_path", return_value=None)
     def test_manual_import_aborts_when_path_cannot_be_resolved(
         self, _mock_resolve, mock_print
     ):
@@ -620,13 +617,13 @@ class TestCmdQuality(unittest.TestCase):
             }
 
         stdout = io.StringIO()
-        with patch("pipeline_cli._load_runtime_rank_config",
+        with patch("scripts.pipeline_cli._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
-             patch("pipeline_cli._load_runtime_verified_lossless_target",
+             patch("scripts.pipeline_cli._load_runtime_verified_lossless_target",
                    return_value=runtime_target or ""), \
-             patch("pipeline_cli._load_beets_album_info",
+             patch("scripts.pipeline_cli._load_beets_album_info",
                    return_value=beets_info), \
-             patch("quality.full_pipeline_decision",
+             patch("lib.quality.full_pipeline_decision",
                    side_effect=fake_full_pipeline_decision), \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(db, MagicMock(id=request_row["id"]))
@@ -722,13 +719,13 @@ class TestCmdQuality(unittest.TestCase):
         db = MagicMock()
         db.get_request.return_value = request_row
         stdout = io.StringIO()
-        with patch("pipeline_cli._load_runtime_rank_config",
+        with patch("scripts.pipeline_cli._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
-             patch("pipeline_cli._load_runtime_verified_lossless_target",
+             patch("scripts.pipeline_cli._load_runtime_verified_lossless_target",
                    return_value=""), \
-             patch("pipeline_cli._load_beets_album_info",
+             patch("scripts.pipeline_cli._load_beets_album_info",
                    return_value=beets_info), \
-             patch("quality.full_pipeline_decision",
+             patch("lib.quality.full_pipeline_decision",
                    side_effect=fake_full_pipeline_decision), \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(db, MagicMock(id=9))

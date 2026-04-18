@@ -1,13 +1,11 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
-import os, re, sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import os
+import re
 
 
 def _server():
-    from web import server  # type: ignore[import-not-found]
+    from web import server
     return server
 
 

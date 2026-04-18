@@ -47,12 +47,12 @@ OTHER_MBID = "cccccccc-4444-5555-6666-dddddddddddd"
 class TestRunImportKeptDuplicate(unittest.TestCase):
     """Test that run_import correctly reports kept_duplicate."""
 
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_keep_different_edition_sets_kept_duplicate(self, mock_popen, mock_select):
         """When resolve_duplicate has a different MBID and we say keep,
         kept_duplicate should be True."""
-        import import_one
+        from harness import import_one
 
         messages = [
             {"type": "resolve_duplicate", "duplicate_mbids": [OTHER_MBID]},
@@ -72,12 +72,12 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(kept_duplicate)
 
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_replace_same_mbid_not_kept_duplicate(self, mock_popen, mock_select):
         """When resolve_duplicate has the same MBID (stale entry), we say
         remove — kept_duplicate should be False."""
-        import import_one
+        from harness import import_one
 
         messages = [
             {"type": "resolve_duplicate", "duplicate_mbids": [TARGET_MBID]},
@@ -96,11 +96,11 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(kept_duplicate)
 
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_no_duplicate_not_kept(self, mock_popen, mock_select):
         """Normal import without duplicate resolution — kept_duplicate False."""
-        import import_one
+        from harness import import_one
 
         messages = [
             {"type": "choose_match", "candidates": [
@@ -118,14 +118,14 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(kept_duplicate)
 
-    @patch("import_one.os.killpg")
-    @patch("import_one.os.getpgid", return_value=12345)
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.os.killpg")
+    @patch("harness.import_one.os.getpgid", return_value=12345)
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_timeout_returns_false_kept_duplicate(self, mock_popen, mock_select,
                                                   mock_getpgid, mock_killpg):
         """On timeout, kept_duplicate should be False."""
-        import import_one
+        from harness import import_one
 
         proc = MagicMock()
         proc.pid = 12345
@@ -145,11 +145,11 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse(kept_duplicate)
 
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_skip_returns_false_kept_duplicate(self, mock_popen, mock_select):
         """When MBID not found in candidates (skip), kept_duplicate False."""
-        import import_one
+        from harness import import_one
 
         messages = [
             {"type": "choose_match", "candidates": [
@@ -167,11 +167,11 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertFalse(kept_duplicate)
 
-    @patch("import_one.select.select")
-    @patch("import_one.subprocess.Popen")
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_harness_nonzero_after_apply_returns_error(self, mock_popen, mock_select):
         """A harness crash after applying a candidate must still fail run_import."""
-        import import_one
+        from harness import import_one
 
         messages = [
             {"type": "choose_match", "candidates": [
@@ -199,12 +199,12 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
 class TestDisambiguateBeetMove(unittest.TestCase):
     """Test that beet move is called when kept_duplicate is True."""
 
-    @patch("import_one.subprocess.run")
+    @patch("harness.import_one.subprocess.run")
     def test_beet_move_called_after_kept_duplicate(self, mock_run):
         """When kept_duplicate=True, subprocess.run(['beet', 'move', ...])
         should be called."""
-        import import_one
-        from quality import PostflightInfo
+        from harness import import_one
+        from lib.quality import PostflightInfo
 
         # Create mock for beet move call
         move_result = MagicMock()
@@ -213,7 +213,7 @@ class TestDisambiguateBeetMove(unittest.TestCase):
 
         # Mock BeetsDB to return updated path after move
         mock_beets = MagicMock()
-        from beets_db import AlbumInfo
+        from lib.beets_db import AlbumInfo
         moved_info = AlbumInfo(
             album_id=42, track_count=11,
             min_bitrate_kbps=245, is_cbr=False,
@@ -256,7 +256,7 @@ class TestDisambiguateBeetMove(unittest.TestCase):
 
     def test_beet_move_not_called_without_kept_duplicate(self):
         """When kept_duplicate=False, no beet move should occur."""
-        from quality import PostflightInfo
+        from lib.quality import PostflightInfo
 
         pf = PostflightInfo(beets_id=42, track_count=11,
                             imported_path="/Beets/The National/2010 - High Violet")

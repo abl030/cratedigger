@@ -33,26 +33,25 @@ from decimal import Decimal
 
 import psycopg2
 
-REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
-sys.path.insert(0, os.path.join(REPO_ROOT, "web"))
-from pipeline_db import PipelineDB, DEFAULT_DSN
-from util import resolve_failed_path as _shared_resolve_failed_path
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from lib.pipeline_db import PipelineDB, DEFAULT_DSN
+from lib.util import resolve_failed_path as _shared_resolve_failed_path
 
 MB_API = "http://192.168.1.35:5200/ws/2"
 
 
 def _load_runtime_rank_config():
     """Load the runtime QualityRankConfig from the active config.ini."""
-    from config import read_runtime_rank_config
+    from lib.config import read_runtime_rank_config
 
     return read_runtime_rank_config()
 
 
 def _load_runtime_verified_lossless_target() -> str:
     """Load the runtime verified_lossless_target from the active config.ini."""
-    from config import read_verified_lossless_target
+    from lib.config import read_verified_lossless_target
 
     return read_verified_lossless_target()
 
@@ -71,7 +70,7 @@ def _quality_preview_target_label(
 
 def _load_beets_album_info(mb_release_id, rank_cfg):
     """Best-effort Beets album lookup for current quality metadata."""
-    from beets_db import BeetsDB
+    from lib.beets_db import BeetsDB
 
     if not mb_release_id:
         return None
@@ -144,7 +143,7 @@ def cmd_list(db, args):
 
 
 def cmd_add(db, args):
-    from quality import detect_release_source
+    from lib.quality import detect_release_source
     release_id = args.mbid
     source = args.source
     id_source = detect_release_source(release_id)
@@ -591,10 +590,10 @@ def cmd_show(db, args):
 
 def cmd_quality(db, args):
     """Show quality state and simulate decisions for common download scenarios."""
-    from quality import (full_pipeline_decision, quality_gate_decision,
-                         AudioQualityMeasurement, gate_rank,
-                         rejection_backfill_override,
-                         search_tiers, compute_effective_override_bitrate)
+    from lib.quality import (full_pipeline_decision, quality_gate_decision,
+                             AudioQualityMeasurement, gate_rank,
+                             rejection_backfill_override,
+                             search_tiers, compute_effective_override_bitrate)
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -951,7 +950,7 @@ def cmd_repair_spectral(db, args):
     causing the quality gate to requeue indefinitely (issue #18).
     """
     from lib.import_dispatch import load_quality_gate_state
-    from quality import quality_gate_decision
+    from lib.quality import quality_gate_decision
 
     rank_cfg = _load_runtime_rank_config()
 

@@ -1,23 +1,18 @@
 """Manual import route handlers — scan, import, wrong matches."""
 
 import json
-import os
 import shutil
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-from lib.manual_import import (  # type: ignore[import-not-found]
+from lib.manual_import import (
     scan_complete_folder,
     match_folders_to_requests,
     ImportRequest,
 )
-from lib.util import resolve_failed_path  # type: ignore[import-not-found]
+from lib.util import resolve_failed_path
 
 
 def _server():
-    from web import server  # type: ignore[import-not-found]
+    from web import server
     return server
 
 

@@ -33,7 +33,7 @@ def make_db():
     Schema is migrated once in conftest.py at session start. This helper
     just truncates all tables for an isolated test slate.
     """
-    import pipeline_db
+    from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
     for table in ["user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
@@ -784,7 +784,7 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertIsNone(req["current_spectral_bitrate"])
 
     def test_update_spectral_state_updates_both_pairs(self):
-        import pipeline_db
+        from lib import pipeline_db
         from lib.quality import SpectralMeasurement
 
         self.db.update_spectral_state(
@@ -805,7 +805,7 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(req["current_spectral_bitrate"], 245)
 
     def test_update_spectral_state_on_disk_only_clears_nulls(self):
-        import pipeline_db
+        from lib import pipeline_db
         from lib.quality import SpectralMeasurement
 
         self.db.update_status(

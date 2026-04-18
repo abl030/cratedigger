@@ -150,11 +150,7 @@ class DatabaseSource:
 
     def _get_db(self):
         if self._db is None:
-            import sys
-            lib_dir = os.path.join(os.path.dirname(__file__), "lib")
-            if lib_dir not in sys.path:
-                sys.path.insert(0, lib_dir)
-            from pipeline_db import PipelineDB
+            from lib.pipeline_db import PipelineDB
             self._db = PipelineDB(self.dsn)
         return self._db
 

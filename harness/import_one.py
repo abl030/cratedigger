@@ -33,14 +33,12 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LIB_DIR = os.path.join(ROOT_DIR, "lib")
 
 
 def _bootstrap_import_paths() -> None:
-    """Ensure standalone harness runs can import both lib.* and top-level modules."""
-    for path in (ROOT_DIR, LIB_DIR):
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    """Ensure standalone harness runs can import lib.* via the repo root."""
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
 
 
 _bootstrap_import_paths()
@@ -1169,7 +1167,7 @@ def main():
             os.rename(item_path, new_path)
             # Update beets DB (writable connection for this fix)
             import sqlite3 as _sqlite3
-            from beets_db import DEFAULT_BEETS_DB
+            from lib.beets_db import DEFAULT_BEETS_DB
             with _sqlite3.connect(DEFAULT_BEETS_DB) as fix_conn:
                 fix_conn.execute("UPDATE items SET path = ? WHERE id = ?",
                                  (new_path.encode(), item_id))

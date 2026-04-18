@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -44,10 +43,7 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     use this proxy (not the one in lib.download) so patches on
     ``lib.preimport.spectral_analyze`` take effect.
     """
-    lib_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lib")
-    if lib_dir not in sys.path:
-        sys.path.insert(0, lib_dir)
-    from spectral_check import analyze_album
+    from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 

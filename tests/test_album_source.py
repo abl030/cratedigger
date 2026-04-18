@@ -94,7 +94,7 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
 class TestDatabaseSource(unittest.TestCase):
     def _make_source(self):
         """Create a DatabaseSource with test PostgreSQL DB."""
-        from pipeline_db import PipelineDB
+        from lib.pipeline_db import PipelineDB
         db = PipelineDB(TEST_DSN)
         for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
             db._execute(f"TRUNCATE {table} CASCADE")

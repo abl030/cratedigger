@@ -8,18 +8,10 @@ import json
 import logging
 import subprocess as sp
 
-import os
-import sys
-
 import msgspec
 
-# Ensure lib/ is importable whether called from project root or lib/
-_lib_dir = os.path.dirname(os.path.abspath(__file__))
-if _lib_dir not in sys.path:
-    sys.path.insert(0, _lib_dir)
-
-from quality import ValidationResult, ChooseMatchMessage
-from util import beets_subprocess_env
+from lib.quality import ValidationResult, ChooseMatchMessage
+from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("soularr")
 
