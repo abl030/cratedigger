@@ -137,6 +137,8 @@ class TestGetMasterReleases(unittest.TestCase):
                 "id": 83182,
                 "title": "OK Computer",
                 "country": "Europe",
+                "released": "1997-06-16",
+                "track_count": 12,
                 "formats": [{"name": "CD", "qty": 1}],
                 "labels": [{"id": 2294, "name": "Parlophone", "catno": "X"}],
             },
@@ -144,6 +146,8 @@ class TestGetMasterReleases(unittest.TestCase):
                 "id": 105704,
                 "title": "OK Computer",
                 "country": "US",
+                "released": "1997-07-01",
+                "track_count": 12,
                 "formats": [{"name": "CD", "qty": 1}],
                 "labels": [],
             },
@@ -163,6 +167,24 @@ class TestGetMasterReleases(unittest.TestCase):
         self.assertEqual(result["releases"][0]["id"], "83182")
         self.assertEqual(result["releases"][0]["country"], "Europe")
         self.assertEqual(result["releases"][0]["format"], "CD")
+        self.assertEqual(result["releases"][0]["date"], "1997-06-16")
+        self.assertEqual(result["releases"][0]["track_count"], 12)
+
+    def test_track_count_defaults_to_zero_when_missing(self):
+        """Discogs CC0 dump occasionally lacks tracklists; fall back to 0
+        rather than the old format-quantity fudge that displayed '1t'."""
+        master = {
+            "id": 1,
+            "title": "Sparse",
+            "releases": [
+                {"id": 99, "title": "Sparse", "country": "AU",
+                 "formats": [{"name": "CD", "qty": 1}], "labels": []},
+            ],
+        }
+        with _mock_urlopen(master):
+            result = get_master_releases(1)
+        self.assertEqual(result["releases"][0]["track_count"], 0)
+        self.assertEqual(result["releases"][0]["date"], "")
 
 
 class TestSearchReleases(unittest.TestCase):

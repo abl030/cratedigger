@@ -201,14 +201,13 @@ def get_master_releases(master_id: int) -> dict:
     for r in data.get("releases", []):
         formats = r.get("formats", [])
         format_names = [f.get("name", "?") for f in formats]
-        track_count = sum(f.get("qty", 1) for f in formats)  # approximate
         releases.append({
             "id": str(r["id"]),
             "title": r.get("title", data.get("title", "")),
             "date": r.get("released", ""),
             "country": r.get("country", ""),
             "status": "Official",
-            "track_count": track_count,
+            "track_count": r.get("track_count", 0),
             "format": ", ".join(format_names) if format_names else "?",
             "media_count": len(formats),
             "labels": r.get("labels", []),
