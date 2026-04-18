@@ -2615,7 +2615,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         }
 
         with patch("web.server.mb_api") as mock_mb, \
-                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
@@ -2662,7 +2662,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
         # First request — misspelled name. Skeleton gets cached.
         with patch("web.server.mb_api") as mock_mb, \
-                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
@@ -2688,7 +2688,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         # the canonical Radiohead, and the skeleton cache must have been
         # reused (no re-fetch of the release-group metadata).
         with patch("web.server.mb_api") as mock_mb, \
-                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
@@ -2725,7 +2725,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
         def _run(lib_albums: list[dict]) -> dict:
             with patch("web.server.mb_api") as mock_mb, \
-                    patch("routes.browse.discogs_api") as mock_dg, \
+                    patch("web.routes.browse.discogs_api") as mock_dg, \
                     patch("web.server.get_library_artist",
                           return_value=lib_albums):
                 mock_mb.search_artists.return_value = [
