@@ -241,6 +241,13 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
         verified_lossless=_bool("verified_lossless"),
         target_format=_str("target_format"),
         verified_lossless_target=_str("verified_lossless_target"),
+        # Preimport gate inputs (issue #91). Defaults preserve legacy simulator
+        # behavior — a caller that omits these runs the pipeline as if audio
+        # validation passed and the auto path flattened the download.
+        audio_check_mode=_str("audio_check_mode") or "normal",
+        audio_corrupt=_bool("audio_corrupt"),
+        import_mode=_str("import_mode") or "auto",
+        has_nested_audio=_bool("has_nested_audio"),
         cfg=_runtime_rank_config(),
     )
     h._json(result)

@@ -1503,6 +1503,51 @@ def spectral_gate_trigger(
     return "would_run"
 
 
+def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
+    """Decide the outcome of the preimport audio-integrity gate.
+
+    Mirrors the first check in ``lib.preimport.run_preimport_gates``:
+    ``validate_audio`` runs an ffmpeg full-decode pass unless the operator
+    has set ``[Beets Validation] audio_check = off``.
+
+    Returns one of:
+        "skipped_off"     — cfg.audio_check_mode == "off", validate_audio is not called
+        "reject_corrupt"  — validate_audio reported one or more failed files
+        "pass"            — validation ran and every file decoded cleanly
+
+    Keeping this as its own pure helper lets ``full_pipeline_decision`` and
+    the Decisions tab document a distinct "you have audio_check off" path,
+    which is a common source of surprise when an obvious-looking corrupt
+    download gets through in one deployment but not another.
+    """
+    if audio_check_mode == "off":
+        return "skipped_off"
+    return "reject_corrupt" if audio_corrupt else "pass"
+
+
+def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
+    """Decide the outcome of the preimport nested-folder gate.
+
+    Mirrors ``lib.import_dispatch.dispatch_import_from_db``'s fail-fast
+    rejection of nested force/manual imports: the preimport gates recurse,
+    but the downstream ``harness/import_one.py`` still uses ``os.listdir``
+    for bitrate measurement and conversion. A nested force/manual import
+    would pass the gates and then produce an empty/misclassified measurement.
+
+    The auto path is already flattened by ``process_completed_album`` before
+    dispatch runs, so the gate is only relevant for ``import_mode`` of
+    ``"force"`` or ``"manual"``.
+
+    Returns one of:
+        "skipped_auto"   — auto path; nested detection doesn't run here
+        "reject_nested"  — force/manual path, nested audio files present
+        "pass"           — force/manual path, flat layout
+    """
+    if import_mode == "auto":
+        return "skipped_auto"
+    return "reject_nested" if has_nested_audio else "pass"
+
+
 def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate,
                              existing_min_bitrate=None):
     """Decide whether to import a download based on spectral analysis.
@@ -2178,6 +2223,55 @@ def get_decision_tree(
         "path_labels": {"flac": "FLAC path", "mp3": "MP3 path"},
         "stages": [
             {
+                "id": "preimport_audio",
+                "title": "Preimport Audio Integrity",
+                "path": "shared",
+                "function": "preimport_audio_gate",
+                "when": "Every import path, before any FLAC/MP3 branching "
+                        "(lib.preimport.run_preimport_gates step 1)",
+                "inputs": ["cfg.audio_check_mode", "validate_audio() result"],
+                "rules": [
+                    {"condition": "audio_check_mode = off",
+                     "result": "skipped_off", "color": "amber",
+                     "effect": "gate disabled by config, nothing is rejected here"},
+                    {"condition": "validate_audio reports no failed files",
+                     "result": "pass", "color": "green"},
+                    {"condition": "validate_audio reports one or more failed files",
+                     "result": "reject_corrupt", "color": "red",
+                     "effect": "import rejected, files moved to failed_imports/"},
+                ],
+                "outcomes": ["pass", "reject_corrupt", "skipped_off"],
+                "note": "Runs ffmpeg full-decode on every audio file. Flip to "
+                        "'off' under [Beets Validation] audio_check to bypass "
+                        "the gate (e.g. while debugging a false positive).",
+            },
+            {
+                "id": "preimport_nested",
+                "title": "Preimport Nested-Layout Gate",
+                "path": "shared",
+                "function": "preimport_nested_gate",
+                "when": "Force-import and manual-import paths only — the auto "
+                        "path flattens downloads before dispatch",
+                "inputs": ["import_mode", "inspect_local_files().has_nested_audio"],
+                "rules": [
+                    {"condition": "import_mode = auto",
+                     "result": "skipped_auto", "color": "green",
+                     "effect": "auto path flattens upstream; nested detection "
+                               "is not a gate here"},
+                    {"condition": "force/manual + flat layout",
+                     "result": "pass", "color": "green"},
+                    {"condition": "force/manual + audio files in subfolders",
+                     "result": "reject_nested", "color": "red",
+                     "effect": "harness.import_one uses os.listdir for "
+                               "bitrate/convert; nested layouts would silently "
+                               "misclassify — reject with 'flatten the folder' detail"},
+                ],
+                "outcomes": ["pass", "reject_nested", "skipped_auto"],
+                "note": "Only the force/manual paths hit this gate; the auto "
+                        "pipeline flattens downloads in process_completed_album "
+                        "before dispatch runs.",
+            },
+            {
                 "id": "flac_spectral",
                 "title": "Spectral Analysis",
                 "path": "flac",
@@ -2447,6 +2541,12 @@ def full_pipeline_decision(
     target_format=None,
     # New download format label (codec-aware, passed through to measurements)
     new_format: str | None = None,
+    # Preimport gates (issue #91). Default to a passing audio check + the auto
+    # path so legacy simulator calls don't change behavior.
+    audio_check_mode: str = "normal",
+    audio_corrupt: bool = False,
+    import_mode: str = "auto",
+    has_nested_audio: bool = False,
     # Rank-model config (defaults() for legacy callers)
     cfg: "QualityRankConfig | None" = None,
 ):
@@ -2474,7 +2574,9 @@ def full_pipeline_decision(
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()
-    result = {
+    result: dict[str, Any] = {
+        "preimport_audio": None,
+        "preimport_nested": None,
         "stage0_spectral_gate": None,
         "stage1_spectral": None,
         "stage2_import": None,
@@ -2485,6 +2587,31 @@ def full_pipeline_decision(
         "keep_searching": False,
         "target_final_format": None,
     }
+
+    # --- Preimport audio gate (issue #91) ---
+    # Mirrors lib.preimport.run_preimport_gates step 1. Runs before any
+    # FLAC/MP3 branching — a corrupt download is rejected regardless of
+    # codec or spectral grade. When audio_check_mode is "off" the gate is
+    # reported as "skipped_off" so the Decisions tab can distinguish
+    # "config disabled the gate" from "gate passed".
+    audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
+    result["preimport_audio"] = audio_outcome
+    if audio_outcome == "reject_corrupt":
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+        return result
+
+    # --- Preimport nested-layout gate (issue #91) ---
+    # Force/manual paths only — the auto path flattens downloads before
+    # dispatch. Sim reports "skipped_auto" on the auto path so the
+    # Decisions tab documents this difference without implying auto rejects
+    # nested downloads.
+    nested_outcome = preimport_nested_gate(import_mode, has_nested_audio)
+    result["preimport_nested"] = nested_outcome
+    if nested_outcome == "reject_nested":
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+        return result
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
     # Mirrors lib.preimport._needs_spectral_check. Tells the operator
