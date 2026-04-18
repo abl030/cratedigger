@@ -18,7 +18,11 @@ def _get(url: str) -> dict:
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Connection", "close")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    # Single-word release searches against ~19M rows can take 15-30s on the
+    # mirror; the request always succeeds eventually. Generous timeout so the
+    # web UI doesn't 500 on broad queries (use the in-flight Redis cache to
+    # short-circuit repeats).
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read())
 
 

@@ -380,6 +380,10 @@ def main():
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
+        # Flush stale web:* keys so backend changes (e.g. updated discogs.py
+        # normalizer) take effect immediately on restart instead of being
+        # masked by 24h-TTL MB/discogs entries.
+        cache.invalidate_pattern("web:*")
 
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
