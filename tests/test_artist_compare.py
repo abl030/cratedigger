@@ -151,6 +151,37 @@ class TestMergeDiscographies(unittest.TestCase):
         result = merge_discographies([], [])
         self.assertIsInstance(result, CompareBuckets)
 
+    def test_dedupes_case_only_discogs_duplicates(self):
+        """The Beatles 'Twist and Shout' case from the user — two Discogs
+        masters with case-only title difference should collapse into one
+        cross-source row, not produce a bonus discogs_only entry."""
+        mb_rg = _mb("Twist and Shout", "1964", id="mb-1")
+        dg_a = _dg("Twist and Shout", "1964", id="dg-A")
+        dg_b = _dg("Twist And Shout", "1964", id="dg-B")  # capitalised And
+        result = merge_discographies([mb_rg], [dg_a, dg_b])
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0]["mb"]["id"], "mb-1")
+        self.assertEqual(result.both[0]["discogs"]["id"], "dg-A")  # first survives
+        self.assertEqual(result.discogs_only, [])
+        self.assertEqual(result.mb_only, [])
+
+    def test_within_source_dedup_preserves_unique_titles(self):
+        """Dedup must not collapse genuinely different titles."""
+        result = merge_discographies(
+            [],
+            [_dg("Album One", "2000"), _dg("Album Two", "2000")],
+        )
+        self.assertEqual(len(result.discogs_only), 2)
+
+    def test_within_source_dedup_respects_year_distance(self):
+        """Same title in years far apart (e.g. self-titled re-release a
+        decade later) stays as two rows."""
+        result = merge_discographies(
+            [],
+            [_dg("Self Titled", "1990"), _dg("Self Titled", "2010")],
+        )
+        self.assertEqual(len(result.discogs_only), 2)
+
 
 class TestAnnotateInLibrary(unittest.TestCase):
     def test_mb_row_matched_by_release_group_id(self):

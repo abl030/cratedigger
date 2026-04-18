@@ -119,12 +119,50 @@ def annotate_in_library(
             master["in_library"] = False
 
 
+def _dedupe_within_source(rows: list[dict], year_tolerance: int) -> list[dict]:
+    """Collapse same-normalized-title + year-within-tolerance duplicates.
+
+    Within a single source, multiple entries with effectively the same
+    title (e.g. "Twist And Shout" and "Twist and Shout" — different
+    Discogs masters from data-entry inconsistency) read as duplicates
+    once normalised. Keep the first (input order) as canonical, drop
+    the rest. Matches the merge function's same-title+year-tolerance
+    rule so a row that survives dedup also survives cross-source merge.
+    """
+    seen: list[tuple[str, int | None]] = []
+    result: list[dict] = []
+    for r in rows:
+        norm = normalize_title(r.get("title", ""))
+        if not norm:
+            result.append(r)
+            continue
+        year = extract_year(r.get("first_release_date", ""))
+        is_dup = False
+        for s_norm, s_year in seen:
+            if s_norm != norm:
+                continue
+            if year is None or s_year is None:
+                is_dup = True
+                break
+            if abs(year - s_year) <= year_tolerance:
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append((norm, year))
+            result.append(r)
+    return result
+
+
 def merge_discographies(
     mb_groups: list[dict],
     discogs_groups: list[dict],
     year_tolerance: int = 2,
 ) -> CompareBuckets:
     """Bucket MB + Discogs release groups by fuzzy title+year match.
+
+    Pre-pass: collapse within-source duplicates (e.g. two Discogs
+    masters that only differ in title casing) so the cross-source
+    merge sees one logical row per album per source.
 
     Match rule, in order:
       1. Normalized title equality is required.
@@ -134,6 +172,9 @@ def merge_discographies(
 
     Each Discogs entry can match at most one MB entry.
     """
+    mb_groups = _dedupe_within_source(mb_groups, year_tolerance)
+    discogs_groups = _dedupe_within_source(discogs_groups, year_tolerance)
+
     by_norm: dict[str, list[int]] = defaultdict(list)
     for i, d in enumerate(discogs_groups):
         norm = normalize_title(d.get("title", ""))
