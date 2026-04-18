@@ -1192,5 +1192,56 @@ class TestUserCooldowns(unittest.TestCase):
         self.assertFalse(result)
 
 
+@requires_postgres
+class TestAdvisoryLock(unittest.TestCase):
+    """Issue #92: ``PipelineDB.advisory_lock`` must cross-session-serialize.
+
+    A second session trying the same ``(namespace, key)`` must see ``False``
+    while the first session holds the lock, and must succeed once the first
+    session releases. This guards the force/manual-import concurrency fix
+    in ``dispatch_import_from_db``.
+    """
+
+    NS = 0x46494D50  # ADVISORY_LOCK_NAMESPACE_IMPORT
+
+    def setUp(self):
+        self.db1 = make_db()  # truncates + gives us a fresh connection
+        from lib import pipeline_db
+        self.db2 = pipeline_db.PipelineDB(TEST_DSN)
+
+    def tearDown(self):
+        self.db1.close()
+        self.db2.close()
+
+    def test_lock_acquired_when_free(self):
+        with self.db1.advisory_lock(self.NS, 12345) as acquired:
+            self.assertTrue(acquired)
+
+    def test_second_session_blocked_then_unblocked(self):
+        with self.db1.advisory_lock(self.NS, 12345) as acquired1:
+            self.assertTrue(acquired1)
+            with self.db2.advisory_lock(self.NS, 12345) as acquired2:
+                self.assertFalse(acquired2)
+        # After the first session releases, the second can acquire.
+        with self.db2.advisory_lock(self.NS, 12345) as acquired3:
+            self.assertTrue(acquired3)
+
+    def test_different_keys_do_not_collide(self):
+        with self.db1.advisory_lock(self.NS, 12345) as a1:
+            self.assertTrue(a1)
+            with self.db2.advisory_lock(self.NS, 67890) as a2:
+                self.assertTrue(a2)
+
+    def test_lock_released_on_exception(self):
+        """Exception raised inside the with-block must still release the lock."""
+        with self.assertRaises(RuntimeError):
+            with self.db1.advisory_lock(self.NS, 12345) as acquired:
+                self.assertTrue(acquired)
+                raise RuntimeError("boom")
+        # Lock must be free now — a different session can acquire it.
+        with self.db2.advisory_lock(self.NS, 12345) as a2:
+            self.assertTrue(a2)
+
+
 if __name__ == "__main__":
     unittest.main()

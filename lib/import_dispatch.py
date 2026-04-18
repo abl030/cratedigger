@@ -780,6 +780,12 @@ def dispatch_import_from_db(
     All other quality checks (downgrade prevention, quality gate, meelo scan,
     denylist) run identically to auto-import.
 
+    Concurrency (issue #92): a per-``request_id`` advisory lock is taken up
+    front. Two concurrent force/manual imports on the same request (double-
+    click in the UI, racing CLI invocations) would otherwise each run the
+    full pipeline and write duplicate ``download_log`` rows. The second
+    caller fast-fails without side effects.
+
     Args:
         db: PipelineDB instance
         request_id: Album request ID
@@ -788,6 +794,36 @@ def dispatch_import_from_db(
         outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
         source_username: Original Soulseek username for force-import audit/denylist flows
     """
+    from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+    with db.advisory_lock(ADVISORY_LOCK_NAMESPACE_IMPORT, request_id) as acquired:
+        if not acquired:
+            mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
+            logger.warning(
+                f"{mode} SKIPPED: request {request_id} — "
+                f"another import is already in progress")
+            return DispatchOutcome(
+                success=False,
+                message=f"Another import is already in progress for request {request_id}",
+            )
+        return _dispatch_import_from_db_locked(
+            db, request_id, failed_path,
+            force=force,
+            outcome_label=outcome_label,
+            source_username=source_username,
+        )
+
+
+def _dispatch_import_from_db_locked(
+    db: "PipelineDB",
+    request_id: int,
+    failed_path: str,
+    *,
+    force: bool,
+    outcome_label: str,
+    source_username: str | None,
+) -> "DispatchOutcome":
+    """Body of dispatch_import_from_db, called once the advisory lock is held."""
     from lib.grab_list import DownloadFile
 
     req = db.get_request(request_id)

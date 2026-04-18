@@ -11,9 +11,10 @@ Usage:
 """
 
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 
 import psycopg2
 import psycopg2.extras
@@ -25,6 +26,12 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
+
+# Advisory-lock namespace for force/manual-import concurrency protection
+# (issue #92). The two-arg pg_advisory_lock takes (int4, int4); the first
+# arg is a per-feature namespace constant, the second is the request_id.
+# 0x46494D50 = ASCII "FIMP" — recognisable in pg_locks during debugging.
+ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
 
 # Schema is managed by lib/migrator.py via numbered files in migrations/.
 # PipelineDB itself never runs DDL — see scripts/migrate_db.py and the
@@ -91,6 +98,36 @@ class PipelineDB:
         else:
             cur.execute(sql)
         return cur
+
+    @contextmanager
+    def advisory_lock(self, namespace: int, key: int) -> Iterator[bool]:
+        """Try to acquire a session-level PostgreSQL advisory lock. Non-blocking.
+
+        Yields ``True`` if acquired, ``False`` if another session already
+        holds it. Always releases on ``__exit__`` when acquired.
+
+        Used to serialise operations that must not run concurrently on the
+        same ``(namespace, key)`` pair across different DB sessions — e.g.
+        two ``pipeline-cli force-import`` invocations racing on the same
+        ``request_id`` (issue #92). Advisory locks are reentrant within a
+        single session, so this only protects against inter-session races;
+        the web server (single-threaded ``HTTPServer``) already serialises
+        within its own session.
+        """
+        self._ensure_conn()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (namespace, key))
+            row = cur.fetchone()
+        acquired = bool(row and row[0])
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_unlock(%s, %s)", (namespace, key)
+                    )
+                    cur.fetchone()
 
     # --- album_requests CRUD ---
 

@@ -99,6 +99,19 @@ class TestFakePipelineDB(unittest.TestCase):
         # Extra field goes into .extra dict
         self.assertEqual(db.download_logs[0].extra["spectral_grade"], "genuine")
 
+    def test_advisory_lock_default_yields_true(self):
+        db = FakePipelineDB()
+        with db.advisory_lock(0x1234, 42) as acquired:
+            self.assertTrue(acquired)
+        self.assertEqual(db.advisory_lock_calls, [(0x1234, 42)])
+
+    def test_advisory_lock_configurable(self):
+        db = FakePipelineDB()
+        db.set_advisory_lock_result(False)
+        with db.advisory_lock(0x1234, 42) as acquired:
+            self.assertFalse(acquired)
+        self.assertEqual(db.advisory_lock_calls, [(0x1234, 42)])
+
 
 class TestFakeSlskdAPI(unittest.TestCase):
     def test_get_downloads_returns_queued_snapshots(self):

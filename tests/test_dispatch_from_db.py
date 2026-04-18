@@ -160,6 +160,95 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         self.assertTrue(hasattr(r["result"], "success"))
         self.assertTrue(hasattr(r["result"], "message"))
 
+
+class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
+    """Issue #92: concurrent force/manual-import on the same request_id
+    must not write duplicate download_log rows. dispatch_import_from_db
+    takes a per-request advisory lock; if another session holds it, the
+    call fast-fails without running any gates, subprocesses, or log writes.
+    """
+
+    def _seed_db(self) -> "FakePipelineDB":
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="mbid-123", status="manual",
+            artist_name="Son Ambulance", album_title="Someone Else's Deja Vu",
+        ))
+        return db
+
+    def _dispatch(self, db: "FakePipelineDB"):
+        from lib.import_dispatch import dispatch_import_from_db
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.config.read_runtime_config",
+                       return_value=SoularrConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                )
+                return result, ext, tmpdir
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_lock_acquired_with_request_id_key(self):
+        """Happy path: advisory_lock is called with the import namespace + request_id."""
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+        db = self._seed_db()
+        self._dispatch(db)
+        self.assertIn((ADVISORY_LOCK_NAMESPACE_IMPORT, 42), db.advisory_lock_calls)
+
+    def test_contention_fast_fails_without_side_effects(self):
+        """When the advisory lock is not acquired: no subprocess, no log, no status change."""
+        db = self._seed_db()
+        db.set_advisory_lock_result(False)
+        result, ext, _ = self._dispatch(db)
+
+        self.assertFalse(result.success)
+        self.assertIn("already in progress", result.message.lower())
+        # No import_one.py subprocess
+        ext.run.assert_not_called()
+        # No download_log rows
+        self.assertEqual(db.download_logs, [])
+        # Status unchanged
+        self.assertEqual(db.request(42)["status"], "manual")
+        # No denylist / cooldown / attempt recording
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.recorded_attempts, [])
+
+    def test_contention_skips_preimport_gates(self):
+        """Contended call must not even run inspect_local_files / run_preimport_gates."""
+        db = self._seed_db()
+        db.set_advisory_lock_result(False)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            from lib.import_dispatch import dispatch_import_from_db
+            with patch("lib.import_dispatch.run_preimport_gates") as mock_gates, \
+                 patch("lib.import_dispatch.inspect_local_files") as mock_inspect, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=SoularrConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                )
+            self.assertFalse(result.success)
+            mock_gates.assert_not_called()
+            mock_inspect.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
     def test_dispatch_import_from_db_uses_shared_runtime_config_reader(self):
         from lib.import_dispatch import dispatch_import_from_db

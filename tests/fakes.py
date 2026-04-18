@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import copy
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
 
@@ -251,7 +252,9 @@ class FakePipelineDB:
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.clear_download_state_calls: list[int] = []
+        self.advisory_lock_calls: list[tuple[int, int]] = []
         self._cooldown_result: bool | Callable[[str], bool] = False
+        self._advisory_lock_result: bool = True
 
     # --- Seeding ---
 
@@ -271,6 +274,22 @@ class FakePipelineDB:
         for per-user conditional results.
         """
         self._cooldown_result = result
+
+    def set_advisory_lock_result(self, result: bool) -> None:
+        """Configure what advisory_lock yields (True = acquired, False = contended)."""
+        self._advisory_lock_result = result
+
+    @contextmanager
+    def advisory_lock(self, namespace: int, key: int) -> Iterator[bool]:
+        """In-memory stand-in for ``PipelineDB.advisory_lock``.
+
+        Records every ``(namespace, key)`` invocation and yields the value set
+        via ``set_advisory_lock_result`` (default ``True``). Tests that want to
+        simulate contention flip the flag to ``False`` before calling the code
+        under test.
+        """
+        self.advisory_lock_calls.append((namespace, key))
+        yield self._advisory_lock_result
 
     # --- PipelineDB interface methods ---
 
