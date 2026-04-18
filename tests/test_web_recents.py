@@ -787,5 +787,245 @@ class TestVerdictSpectralFallback(unittest.TestCase):
         self.assertIn("nexus15", result.summary)
 
 
+# ============================================================================
+# Point-in-time bitrate — per-row verdicts must NOT use current album state
+# ============================================================================
+
+class TestPerRowBitrateIsPointInTime(unittest.TestCase):
+    """Every per-row display (verdict, summary, downloaded_label) must resolve
+    the 'downloaded' bitrate from this row's state at the time of that
+    download — never from album_requests.min_bitrate (which the recents query
+    JOINs in as request_min_bitrate and which reflects the album's *current*
+    state at query time).
+
+    Live reproducer: request 1055 (Velella Velella - Bay of Biscay), two
+    successive download_log rows:
+      - row 3628 (brandlos, earlier): imported 119kbps → UI should say '128→119'
+      - row 3631 (Ceezles, later):    imported 162kbps → UI should say '119→162'
+    Both rows have download_log.actual_min_bitrate = NULL, but the JSONB
+    carries the correct new_measurement.min_bitrate_kbps. The old code fell
+    through to request_min_bitrate (=162, the current album state), so both
+    rows painted '→162' as the 'to' value — inventing a fake self-upgrade
+    for the older row.
+    """
+
+    def _brandlos_row(self):
+        """Earlier of two successive upgrades — column NULL, JSONB has 119.
+        Must display as '128 → 119', not '128 → 162'."""
+        return _entry(
+            outcome="success",
+            existing_min_bitrate=128,
+            actual_min_bitrate=None,          # pre-fix rows have NULL
+            bitrate=119000,                   # container bitrate (legacy signal)
+            request_min_bitrate=162,          # current album state via JOIN
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {
+                    "min_bitrate_kbps": 119,
+                    "avg_bitrate_kbps": 179,
+                    "median_bitrate_kbps": 181,
+                    "format": "MP3",
+                    "is_cbr": False,
+                    "verified_lossless": False,
+                    "spectral_grade": "likely_transcode",
+                    "spectral_bitrate_kbps": 160,
+                },
+                "existing_measurement": {
+                    "min_bitrate_kbps": 128,
+                    "spectral_grade": "genuine",
+                },
+            },
+        )
+
+    # ---- _upgrade_verdict (line 193) ----
+
+    def test_upgrade_verdict_uses_point_in_time_bitrate(self):
+        """The headline bug: two successive upgrades both show current album
+        state as the 'to' bitrate. Must use this row's new_measurement."""
+        result = classify_log_entry(self._brandlos_row())
+        self.assertIn("119", result.verdict,
+                      f"verdict must contain 119 (this download), got: {result.verdict!r}")
+        self.assertNotIn("162", result.verdict,
+                         f"verdict must NOT contain 162 (current album state): {result.verdict!r}")
+
+    def test_upgrade_verdict_reads_from_import_result_when_column_null(self):
+        """Historical rows with NULL actual_min_bitrate must render correctly
+        from the JSONB — no retroactive reindex needed."""
+        result = classify_log_entry(self._brandlos_row())
+        self.assertIn("128", result.verdict)  # existing
+        self.assertIn("119", result.verdict)  # new, from JSONB
+        self.assertTrue(result.verdict.startswith("Upgrade:"),
+                        f"expected 'Upgrade:' prefix, got: {result.verdict!r}")
+
+    # ---- _build_summary (line 404) for the Upgraded branch ----
+
+    def test_upgrade_summary_uses_point_in_time_bitrate(self):
+        """The collapsed-card summary inherits the verdict for upgrades, so it
+        must also be point-in-time (not current album state)."""
+        entry = self._brandlos_row()
+        entry.soulseek_username = "brandlos"
+        result = classify_log_entry(entry)
+        self.assertIn("119", result.summary)
+        self.assertNotIn("162", result.summary)
+        self.assertIn("brandlos", result.summary)
+
+    # ---- _build_summary (line 404) for the Imported branch ----
+
+    def test_imported_summary_uses_point_in_time_bitrate(self):
+        """New-import rows (existing_min_bitrate=None) still share the same
+        or-chain bug. If a request later gets upgraded, the 'Imported' summary
+        for the historical row must not inherit the newer state."""
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=None,         # first import
+            actual_min_bitrate=None,           # column NULL
+            bitrate=128000,
+            request_min_bitrate=320,           # album got upgraded later
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {"min_bitrate_kbps": 128},
+                "existing_measurement": None,
+            },
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(result.badge, "Imported")
+        self.assertIn("128", result.summary)
+        self.assertNotIn("320", result.summary)
+
+    # ---- _new_import_verdict (line 312) ----
+
+    def test_new_import_verdict_uses_point_in_time_bitrate(self):
+        """Same or-chain in _new_import_verdict."""
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=None,
+            actual_min_bitrate=None,
+            bitrate=128000,
+            request_min_bitrate=320,
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {"min_bitrate_kbps": 128},
+            },
+        )
+        result = classify_log_entry(entry)
+        self.assertIn("128", result.verdict)
+        self.assertNotIn("320", result.verdict)
+
+    # ---- _classify_search_filetype_override (line 300-301) ----
+
+    def test_search_filetype_override_uses_point_in_time_bitrate(self):
+        """The 'Replaced unverified CBR with X' label must reflect this row's
+        bitrate tier, not the album's current state. Point-in-time 243kbps
+        renders as 'V0'; leaked current-state 350kbps would render as '320'."""
+        entry = _entry(
+            outcome="success",
+            search_filetype_override="flac",
+            existing_min_bitrate=320,
+            actual_min_bitrate=None,
+            bitrate=243000,
+            request_min_bitrate=350,           # aliases to '320' tier
+            actual_filetype="mp3",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {"min_bitrate_kbps": 243},
+            },
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertIn("V0", result.verdict,
+                      f"expected V0 tier (from 243kbps), got: {result.verdict!r}")
+        self.assertNotIn("320", result.verdict,
+                         f"verdict leaked current-state 320 tier: {result.verdict!r}")
+
+    # ---- _build_downloaded_label (line 432-434) ----
+
+    def test_downloaded_label_uses_point_in_time_bitrate(self):
+        """downloaded_label builds from actual_min_bitrate or bitrate//1000;
+        it already avoids request_min_bitrate. But for retroactive
+        correctness (NULL column rows), the JSONB should be consulted first."""
+        entry = _entry(
+            outcome="success",
+            actual_min_bitrate=None,
+            bitrate=119000,
+            request_min_bitrate=162,
+            actual_filetype="mp3",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {"min_bitrate_kbps": 119},
+            },
+        )
+        result = classify_log_entry(entry)
+        # The label must reflect this row's download, not current state.
+        self.assertIn("119", result.downloaded_label)
+        self.assertNotIn("162", result.downloaded_label)
+
+    # ---- Parametrized guard: current album state never leaks into a per-row
+    # display regardless of which render path runs. ----
+
+    def test_current_album_state_never_leaks_into_per_row_display(self):
+        """Invariant: when actual_min_bitrate is NULL and JSONB has a valid
+        new_measurement, no per-row string (verdict, summary, downloaded_label)
+        contains the request_min_bitrate value. Guards against adding a new
+        display call site that copies the old or-chain.
+
+        ALIEN must be in the range quality_label renders literally (<170kbps,
+        otherwise it would be aliased to a tier name like 'V0' or '320' and
+        hide the leak). Point-in-time values are chosen in a different
+        tier range so the bug is unambiguous.
+        """
+        ALIEN = 157          # <170 → renders as 'MP3 157k', stays literal
+        POINT_IN_TIME = 245  # ≥220 → renders as 'MP3 V0', no digit overlap
+        scenarios = [
+            ("upgrade",
+             _entry(outcome="success",
+                    existing_min_bitrate=128,
+                    actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
+                    request_min_bitrate=ALIEN,
+                    import_result={
+                        "version": 2, "decision": "import",
+                        "new_measurement": {"min_bitrate_kbps": POINT_IN_TIME},
+                        "existing_measurement": {"min_bitrate_kbps": 128},
+                    })),
+            ("new_import",
+             _entry(outcome="success",
+                    existing_min_bitrate=None,
+                    actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
+                    request_min_bitrate=ALIEN,
+                    import_result={
+                        "version": 2, "decision": "import",
+                        "new_measurement": {"min_bitrate_kbps": POINT_IN_TIME},
+                    })),
+            ("search_filetype_override",
+             _entry(outcome="success",
+                    search_filetype_override="flac",
+                    existing_min_bitrate=320,
+                    actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
+                    request_min_bitrate=ALIEN,
+                    import_result={
+                        "version": 2, "decision": "import",
+                        "new_measurement": {"min_bitrate_kbps": POINT_IN_TIME},
+                    })),
+        ]
+        alien = str(ALIEN)
+        for desc, entry in scenarios:
+            with self.subTest(desc=desc):
+                result = classify_log_entry(entry)
+                self.assertNotIn(
+                    alien, result.verdict,
+                    f"{desc}: verdict leaked current album state: {result.verdict!r}")
+                self.assertNotIn(
+                    alien, result.summary,
+                    f"{desc}: summary leaked current album state: {result.summary!r}")
+                self.assertNotIn(
+                    alien, result.downloaded_label,
+                    f"{desc}: downloaded_label leaked current album state: "
+                    f"{result.downloaded_label!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

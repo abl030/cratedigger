@@ -190,7 +190,7 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
                 return _classify_search_filetype_override(entry, is_verified_lossless)
             verdict = _upgrade_verdict(
                 entry.existing_min_bitrate,
-                entry.actual_min_bitrate or entry.request_min_bitrate,
+                _downloaded_min_bitrate_kbps(entry),
                 entry.was_converted, entry.original_filetype,
                 is_verified_lossless,
                 actual_filetype=entry.actual_filetype)
@@ -220,15 +220,39 @@ def _parse_import_result(entry: LogEntry) -> ImportResult | None:
         return None
 
 
-def _real_bitrate_kbps(entry: LogEntry) -> int | None:
-    """Best available actual file bitrate in kbps, excluding spectral.
+def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
+    """The min bitrate of the file that was downloaded for THIS log row.
 
-    spectral_bitrate is a cliff estimate ("what was the original source?"),
-    not the file's actual bitrate. It must never appear in non-spectral
-    verdicts. This matches the chain in _build_downloaded_label.
+    Point-in-time — reflects this download's state, not the album's current
+    state. Callers MUST NOT fall back to ``entry.request_min_bitrate`` for
+    per-row displays: request_min_bitrate is ``album_requests.min_bitrate``
+    at query time (the album's current state), so after a subsequent upgrade
+    it no longer matches what this row imported. Using it to paint the 'to'
+    bitrate in an older Recents card invents a fake self-upgrade (see live
+    reproducer request 1055: brandlos's 119k import was painted as 162k
+    because that's Ceezles's later upgrade).
+
+    Priority chain:
+        1. ``entry.actual_min_bitrate`` — denormalized column, populated by
+           ``_populate_dl_info_from_import_result`` on the auto-import path
+           since the ``actual_min_bitrate`` fix.
+        2. ``ir.new_measurement.min_bitrate_kbps`` — authoritative JSONB,
+           present on every row. Fixes historical rows (pre-column-fix)
+           retroactively without a backfill migration.
+        3. ``entry.bitrate`` (bps) — legacy container bitrate, last resort.
+
+    ``spectral_bitrate`` is a cliff estimate ("what was the original source?"),
+    not the file's actual bitrate. It must never appear here.
     """
-    return (entry.actual_min_bitrate
-            or (entry.bitrate // 1000 if entry.bitrate else None))
+    if entry.actual_min_bitrate:
+        return entry.actual_min_bitrate
+    ir = _parse_import_result(entry)
+    if ir is not None and ir.new_measurement is not None:
+        if ir.new_measurement.min_bitrate_kbps is not None:
+            return ir.new_measurement.min_bitrate_kbps
+    if entry.bitrate:
+        return entry.bitrate // 1000
+    return None
 
 
 def _comparison_verdict(
@@ -280,7 +304,7 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
 
 def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
     """Classify a transcode_upgrade or transcode_first success."""
-    br = _real_bitrate_kbps(entry)
+    br = _downloaded_min_bitrate_kbps(entry)
     br_str = f"{br}kbps" if br else "unknown bitrate"
     if entry.beets_scenario == "transcode_upgrade":
         ex = entry.existing_min_bitrate or entry.existing_spectral_bitrate
@@ -297,8 +321,7 @@ def _classify_search_filetype_override(
 ) -> tuple[str, str, str, str]:
     """Classify a search_filetype_override upgrade (replacing unverified CBR)."""
     fmt = entry.actual_filetype or entry.filetype or "mp3"
-    cur_label = quality_label(fmt, entry.actual_min_bitrate
-                              or entry.request_min_bitrate or 0)
+    cur_label = quality_label(fmt, _downloaded_min_bitrate_kbps(entry) or 0)
     parts = [f"Replaced unverified CBR with {cur_label}"]
     if entry.was_converted and entry.original_filetype:
         parts.append(f"from {entry.original_filetype.upper()}")
@@ -309,7 +332,7 @@ def _classify_search_filetype_override(
 
 def _new_import_verdict(entry: LogEntry, is_verified_lossless: bool) -> str:
     """Build verdict for a new import (nothing on disk before)."""
-    br = entry.actual_min_bitrate or entry.request_min_bitrate
+    br = _downloaded_min_bitrate_kbps(entry)
     fmt = entry.actual_filetype or entry.filetype or "mp3"
     label = quality_label(fmt, br or 0)
     parts = [label]
@@ -340,7 +363,7 @@ def _rejection_verdict(entry: LogEntry) -> str:
         if ir_verdict is not None:
             return ir_verdict
         # Fallback: use real file bitrate, not spectral
-        new_kbps = _real_bitrate_kbps(entry)
+        new_kbps = _downloaded_min_bitrate_kbps(entry)
         old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate
         if scenario == "transcode_downgrade":
             return _comparison_verdict(new_kbps, old_kbps, prefix="Transcode at")
@@ -401,7 +424,7 @@ def _build_summary(entry: LogEntry, badge: str, verdict: str) -> str:
 
     if badge == "Imported":
         # Show format label for new imports
-        br = entry.actual_min_bitrate or entry.request_min_bitrate
+        br = _downloaded_min_bitrate_kbps(entry)
         fmt = entry.actual_filetype or entry.filetype or "mp3"
         label = quality_label(fmt, br or 0)
         if entry.was_converted and entry.original_filetype:
@@ -429,9 +452,7 @@ def _build_downloaded_label(entry: LogEntry) -> str:
     if not fmt:
         return ""
 
-    br_kbps = (entry.actual_min_bitrate
-               or (entry.bitrate // 1000 if entry.bitrate else None)
-               or 0)
+    br_kbps = _downloaded_min_bitrate_kbps(entry) or 0
 
     if entry.was_converted and entry.original_filetype:
         conv_label = quality_label(fmt, br_kbps)
