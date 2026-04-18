@@ -150,5 +150,44 @@ class TestNarrowSearchContract(unittest.TestCase):
         self.assertTrue(catch_all)
 
 
+class TestResolveUserRequeueOverride(unittest.TestCase):
+    """resolve_user_requeue_override: pick override for user-initiated requeue.
+
+    The quality gate narrows search_filetype_override to a stricter value
+    (e.g. 'lossless' for CBR 320 that needs verified lossless). User
+    actions that re-queue for search (Upgrade button, status reset, ban
+    source) must preserve that narrowing — otherwise the same tier the
+    gate intentionally closed gets re-opened and the pipeline re-downloads
+    the same quality, which gets rejected as a downgrade in a loop.
+
+    Returns QUALITY_UPGRADE_TIERS only when no override is currently set.
+    """
+
+    def _resolve(self, existing):
+        from lib.quality import resolve_user_requeue_override
+        return resolve_user_requeue_override(existing)
+
+    def test_none_falls_back_to_full_tiers(self):
+        self.assertEqual(self._resolve(None), QUALITY_UPGRADE_TIERS)
+
+    def test_empty_string_falls_back_to_full_tiers(self):
+        """Empty string is treated like NULL — no prior narrowing to preserve."""
+        self.assertEqual(self._resolve(""), QUALITY_UPGRADE_TIERS)
+
+    def test_lossless_preserved(self):
+        """Quality gate set 'lossless' after CBR 320 import → preserve."""
+        self.assertEqual(self._resolve("lossless"), "lossless")
+
+    def test_narrowed_preserved(self):
+        """narrow_override_on_downgrade output survives user requeue clicks."""
+        self.assertEqual(
+            self._resolve("lossless,mp3 v0"), "lossless,mp3 v0")
+
+    def test_full_tiers_preserved_even_when_matches_default(self):
+        """If the existing value already equals the fallback, pass it through unchanged."""
+        self.assertEqual(
+            self._resolve(QUALITY_UPGRADE_TIERS), QUALITY_UPGRADE_TIERS)
+
+
 if __name__ == "__main__":
     unittest.main()

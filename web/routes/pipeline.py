@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from classify import classify_log_entry, LogEntry  # type: ignore[import-not-found]
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignore[import-not-found]
+                         resolve_user_requeue_override,
                          should_clear_lossless_search_override,
                          get_decision_tree, full_pipeline_decision,
                          detect_release_source)
@@ -391,7 +392,11 @@ def post_pipeline_update(h, body: dict) -> None:
         b = s._beets_db()
         if mbid and b:
             if b.album_exists(mbid):
-                quality = QUALITY_UPGRADE_TIERS
+                # Preserve a stricter existing override (e.g. "lossless"
+                # set by the quality gate) — reverting status shouldn't
+                # re-open tiers the gate intentionally closed.
+                quality = resolve_user_requeue_override(
+                    req.get("search_filetype_override"))
                 min_br = b.get_min_bitrate(mbid)
         kwargs: dict[str, object] = {"from_status": req["status"]}
         if quality is not None:
@@ -413,7 +418,6 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         h._error("Missing mb_release_id")
         return
 
-    quality = QUALITY_UPGRADE_TIERS
     source = detect_release_source(mbid)
 
     min_bitrate = None
@@ -425,6 +429,13 @@ def post_pipeline_upgrade(h, body: dict) -> None:
     if not existing and source == "discogs":
         existing = s._db().get_request_by_discogs_release_id(mbid)
     if existing:
+        # Preserve a stricter existing override (e.g. "lossless" set by
+        # the quality gate after a CBR 320 import) so clicking Upgrade
+        # doesn't re-open tiers the gate already closed, which would
+        # re-enqueue same-quality MP3 sources that get rejected as
+        # downgrades in a loop.
+        quality = resolve_user_requeue_override(
+            existing.get("search_filetype_override"))
         req_id = existing["id"]
         apply_transition(s._db(), req_id, "wanted",
                          from_status=existing["status"],
@@ -437,6 +448,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             "search_filetype_override": quality,
         })
     else:
+        # Brand-new request — no prior override to preserve.
+        quality = QUALITY_UPGRADE_TIERS
         if source == "discogs":
             release = discogs_api.get_release(int(mbid))
             req_id = s._db().add_request(
@@ -623,11 +636,13 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
     req = s._db().get_request(int(req_id))
     if req:
-        quality = req.get("search_filetype_override") or QUALITY_UPGRADE_TIERS
+        quality = resolve_user_requeue_override(
+            req.get("search_filetype_override"))
         min_br = req.get("min_bitrate")
-        ban_kwargs: dict[str, object] = {"from_status": req["status"]}
-        if quality is not None:
-            ban_kwargs["search_filetype_override"] = quality
+        ban_kwargs: dict[str, object] = {
+            "from_status": req["status"],
+            "search_filetype_override": quality,
+        }
         if min_br is not None:
             ban_kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)

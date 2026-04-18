@@ -1140,6 +1140,144 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                 "pipeline delete response")
 
 
+class TestUserRequeueOverridePreservation(_WebServerCase):
+    """User-initiated requeue endpoints must preserve a stricter existing
+    search_filetype_override — e.g. 'lossless' set by the quality gate after a
+    CBR 320 import. Clicking Upgrade or flipping status back to wanted must not
+    re-open MP3 tiers the gate intentionally closed (which would trigger
+    redundant re-downloads of the same-or-worse quality).
+
+    ban_source already does the right thing via `req.get(...) or QUALITY_UPGRADE_TIERS`;
+    this class guards upgrade + update against regressing to a blind clobber,
+    and pins ban_source's behaviour so future refactors don't drop it.
+    """
+
+    RELEASE_ID = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+
+    def setUp(self) -> None:
+        import web.server as srv
+        self._srv = srv
+        self._orig_beets = srv._beets
+        # Beets stub: update() only hits this via album_exists / get_min_bitrate.
+        # A live beets DB is the usual preceding state for a requeue.
+        self._beets = MagicMock()
+        self._beets.album_exists.return_value = True
+        self._beets.get_min_bitrate.return_value = 320
+        srv._beets = self._beets
+
+    def tearDown(self) -> None:
+        self._srv._beets = self._orig_beets
+
+    def _override_passed(self, mock_transition) -> object:
+        """Extract the search_filetype_override kwarg from the last apply_transition call."""
+        self.assertTrue(mock_transition.call_args_list,
+                        "apply_transition was not called")
+        last = mock_transition.call_args_list[-1]
+        return last.kwargs.get("search_filetype_override", "<MISSING>")
+
+    # -- Upgrade --------------------------------------------------------
+
+    @patch("routes.pipeline.apply_transition")
+    def test_upgrade_preserves_stricter_override(self, mock_transition):
+        """Upgrade on an imported album with override='lossless' must keep it."""
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=1704, status="imported", min_bitrate=320,
+            search_filetype_override="lossless",
+        )
+
+        status, _data = self._post("/api/pipeline/upgrade",
+                                    {"mb_release_id": self.RELEASE_ID})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition), "lossless")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_upgrade_preserves_narrowed_override(self, mock_transition):
+        """Upgrade must preserve a post-downgrade-narrow like 'lossless,mp3 v0'."""
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=1704, status="imported", min_bitrate=320,
+            search_filetype_override="lossless,mp3 v0",
+        )
+
+        status, _data = self._post("/api/pipeline/upgrade",
+                                    {"mb_release_id": self.RELEASE_ID})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition), "lossless,mp3 v0")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_upgrade_falls_back_to_full_tiers_when_no_override(self, mock_transition):
+        """Upgrade on an imported album with no override falls back to the full ladder."""
+        from lib.quality import QUALITY_UPGRADE_TIERS
+
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=1704, status="imported", min_bitrate=160,
+            search_filetype_override=None,
+        )
+
+        status, _data = self._post("/api/pipeline/upgrade",
+                                    {"mb_release_id": self.RELEASE_ID})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition),
+                         QUALITY_UPGRADE_TIERS)
+
+    # -- Update (status → wanted) ---------------------------------------
+
+    @patch("routes.pipeline.apply_transition")
+    def test_update_to_wanted_preserves_stricter_override(self, mock_transition):
+        """Flipping an imported album back to wanted must preserve 'lossless'."""
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+            search_filetype_override="lossless",
+        )
+
+        status, _data = self._post("/api/pipeline/update",
+                                    {"id": 1704, "status": "wanted"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition), "lossless")
+
+    @patch("routes.pipeline.apply_transition")
+    def test_update_to_wanted_falls_back_to_full_tiers_when_no_override(
+            self, mock_transition):
+        """Flipping imported→wanted with no override uses the full upgrade ladder."""
+        from lib.quality import QUALITY_UPGRADE_TIERS
+
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=160,
+            search_filetype_override=None,
+        )
+
+        status, _data = self._post("/api/pipeline/update",
+                                    {"id": 1704, "status": "wanted"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition),
+                         QUALITY_UPGRADE_TIERS)
+
+    # -- Ban source (regression pin) ------------------------------------
+
+    @patch("routes.pipeline.apply_transition")
+    def test_ban_source_preserves_stricter_override(self, mock_transition):
+        """Pin: ban_source already preserves override. Guard against future regression."""
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+            search_filetype_override="lossless",
+        )
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            "mb_release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self._override_passed(mock_transition), "lossless")
+
+
 class TestManualImportRouteContracts(_WebServerCase):
     """Contract tests for manual import routes."""
 
