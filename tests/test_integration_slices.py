@@ -776,6 +776,21 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             format="MP3", is_cbr=False, verified_lossless=False,
             spectral_grade="genuine", spectral_bitrate_kbps=128,
         )
+
+        # Pin the decision logic directly. dispatch_import_core trusts the
+        # ``decision`` field in the harness-emitted JSON and does not recompute
+        # it — so without this, a regression in compare_quality()/
+        # import_quality_decision() (e.g. returning "downgrade" when min drops
+        # 128→119) could still leave the slice below green. Fail-fast here so
+        # the critique is the decision call itself, not the dispatch wiring.
+        from lib.quality import import_quality_decision
+        self.assertEqual(
+            import_quality_decision(new, existing), "import",
+            "compare_quality must rank new above existing on AVG (179>172) "
+            "despite MIN regressing and spectral flipping to likely_transcode. "
+            "If this fails, the slice below is moot — fix the decision, not "
+            "the slice.")
+
         ir = self._ir_import(new, existing)
         # Post-import, beets reflects the newly-imported files (brandlos's).
         beets_info = AlbumInfo(
@@ -846,6 +861,17 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             format="MP3", is_cbr=False, verified_lossless=False,
             spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
         )
+
+        # Direct assertion on the decision function — see rationale on the
+        # twin assertion in test_step1. Locks compare_quality behavior, not
+        # just dispatch wiring.
+        from lib.quality import import_quality_decision
+        self.assertEqual(
+            import_quality_decision(new, existing), "import",
+            "compare_quality must rank new above existing on AVG (225>179). "
+            "If this fails, the slice below is moot — fix the decision, not "
+            "the slice.")
+
         ir = self._ir_import(new, existing)
         beets_info = AlbumInfo(
             album_id=1, track_count=16,
