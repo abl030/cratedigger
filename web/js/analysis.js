@@ -2,6 +2,7 @@
 import { state, API, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc } from './util.js';
 import { renderTypedSections } from './grouping.js';
+import { renderActionToolbar } from './release_actions.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /** @type {string[]} */
@@ -113,33 +114,29 @@ export function toggleDisambRGTracks(rgId) {
       // Overlay local pipeline store (captures mutations since last API fetch)
       const stored = pipelineStore.get(p.release_id);
       const pStatus = stored ? stored.status : p.pipeline_status;
-      const pId = stored ? stored.id : p.pipeline_id;
       let badges = '';
       if (p.in_library) badges += '<span class="badge badge-library">in library</span>';
       if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
       if (pStatus === 'downloading') badges += '<span class="badge badge-downloading">downloading</span>';
       if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
-
-      const canAdd = !p.in_library && !pStatus;
-      const canRemove = pStatus === 'wanted' && pId;
-      const canDeleteLib = p.in_library && p.beets_album_id;
-      let btnHtml;
-      if (canAdd) {
-        btnHtml = `<button class="btn btn-add" style="font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.addRelease('${p.release_id}', this)">Add</button>`;
-      } else if (canRemove) {
-        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove</button>`;
-      } else if (canDeleteLib) {
-        btnHtml = `<button class="btn" style="background:#3a2a2a;color:#f88;font-size:0.8em;padding:2px 8px;" onclick="event.stopPropagation(); window.disambDeleteFromLibrary(${p.beets_album_id}, ${pId || 'null'}, this)">Delete from library</button>`;
-      } else {
-        btnHtml = `<button class="btn btn-add" disabled style="font-size:0.8em;padding:2px 8px;">${p.in_library ? 'Owned' : pStatus || '?'}</button>`;
-      }
+      // Same standardised 4-button toolbar as Discography / Library / Compare.
+      const toolbar = renderActionToolbar({
+        id: p.release_id,
+        in_library: p.in_library,
+        beets_album_id: p.beets_album_id,
+        pipeline_status: p.pipeline_status,
+        pipeline_id: p.pipeline_id,
+        artist: state.disambData?.artist_name || '',
+        album: p.title || '',
+        track_count: p.track_count || 0,
+      }, { size: 'small' });
 
       const exCount = pressingExclusiveCounts[i];
       const uLabel = exCount > 0 ? `<span style="color:${color};font-weight:600;margin-left:6px;">${exCount} exclusive</span>` : '';
 
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;">
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;gap:8px;">
         <span><span style="color:${color};font-weight:bold;">●</span> ${esc(p.title)}${badges} <span style="color:#777;">${p.country || '?'} ${p.date || '?'} — ${esc(p.format)} — ${p.track_count}t</span>${uLabel}</span>
-        ${btnHtml}
+        ${toolbar}
       </div>`;
     }).join('');
   }

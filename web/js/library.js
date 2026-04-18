@@ -2,6 +2,7 @@
 import { API, toast, updatePipelineStatus } from './state.js';
 import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
+import { renderActionToolbar } from './release_actions.js';
 import { renderDownloadHistoryItem } from './history.js';
 
 /**
@@ -59,6 +60,20 @@ export function renderLibraryResults(albums, targetEl) {
     function renderAlbum(a) {
       const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
       const mbid = a.mb_albumid || '';
+      // Library row is always in_library by definition. beets_album_id is
+      // the row's beets DB id. Pipeline state comes from the route's
+      // _enrich step (pipeline_status / pipeline_id / upgrade_queued).
+      const toolbar = mbid ? renderActionToolbar({
+        id: mbid,
+        in_library: true,
+        beets_album_id: a.id,
+        pipeline_status: a.pipeline_status || null,
+        pipeline_id: a.pipeline_id || null,
+        upgrade_queued: !!a.upgrade_queued,
+        artist: a.artist || '',
+        album: a.album || '',
+        track_count: a.track_count || 0,
+      }, { size: 'small' }) : '';
       return `
         <div class="lib-item" onclick="window.toggleLibDetail(${a.id})">
           <div class="p-top">
@@ -66,10 +81,7 @@ export function renderLibraryResults(albums, targetEl) {
               <div class="p-title">${esc(a.album)}</div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;">
-              ${mbid ? (a.upgrade_queued
-                ? `<button class="p-btn upgrade-btn" style="padding:2px 8px;font-size:0.7em;border-color:#6a9;color:#6a9;" disabled>Queued</button>`
-                : `<button class="p-btn upgrade-btn" style="padding:2px 8px;font-size:0.7em;" onclick="event.stopPropagation(); window.upgradeAlbum('${mbid}', this)">Upgrade</button>`
-              ) : ''}
+              ${toolbar}
               <span style="font-size:0.75em;color:#666;">${a.track_count}t</span>
             </div>
           </div>

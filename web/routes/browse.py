@@ -56,6 +56,22 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
         return
     albums = srv.get_library_artist(name, mbid)
+    # Enrich with pipeline_status / pipeline_id / upgrade_queued so the
+    # standardised action toolbar (Add request / Upgrade / Remove
+    # request / Remove from beets) can show accurate per-row state.
+    mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
+    if mbids:
+        in_pipeline = srv.check_pipeline(mbids)
+        for a in albums:
+            pi = in_pipeline.get(str(a.get("mb_albumid", "")))
+            if pi:
+                a["pipeline_status"] = pi["status"]
+                a["pipeline_id"] = pi["id"]
+                if pi.get("status") == "wanted" and (pi.get("search_filetype_override") or pi.get("target_format")):
+                    a["upgrade_queued"] = True
+            else:
+                a["pipeline_status"] = None
+                a["pipeline_id"] = None
     h._json({"albums": albums})  # type: ignore[attr-defined]
 
 
@@ -171,8 +187,13 @@ def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], r
     mbids = [r["id"] for r in data["releases"]]
     in_library = srv.check_beets_library(mbids)
     in_pipeline = srv.check_pipeline(mbids)
+    # Map mbid -> beets album id so the Remove-from-beets toolbar
+    # button can address the right row directly.
+    b = srv._beets_db()
+    beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
     for r in data["releases"]:
         r["in_library"] = r["id"] in in_library
+        r["beets_album_id"] = beets_ids.get(r["id"])
         pi = in_pipeline.get(r["id"])
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
@@ -186,12 +207,16 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
     req = srv._db().get_request_by_mb_release_id(release_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
-    # Include beets track info if in library
+    # Include beets track info + album id if in library
     b = srv._beets_db()
     if data["in_library"] and b:
+        beets_ids = b.get_album_ids_by_mbids([release_id])
+        data["beets_album_id"] = beets_ids.get(release_id)
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
+    else:
+        data["beets_album_id"] = None
     h._json(data)  # type: ignore[attr-defined]
 
 
@@ -239,8 +264,11 @@ def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     release_ids = [r["id"] for r in data["releases"]]
     in_library = srv.check_beets_library(release_ids)
     in_pipeline = srv.check_pipeline(release_ids)
+    b = srv._beets_db()
+    beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
     for r in data["releases"]:
         r["in_library"] = r["id"] in in_library
+        r["beets_album_id"] = beets_ids.get(r["id"])
         pi = in_pipeline.get(r["id"])
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
@@ -258,9 +286,13 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
     data["pipeline_id"] = req["id"] if req else None
     b = srv._beets_db()
     if data["in_library"] and b:
+        beets_ids = b.get_album_ids_by_mbids([release_id])
+        data["beets_album_id"] = beets_ids.get(release_id)
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
+    else:
+        data["beets_album_id"] = None
     h._json(data)  # type: ignore[attr-defined]
 
 

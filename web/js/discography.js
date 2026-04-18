@@ -2,6 +2,7 @@
 import { API, state, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource } from './util.js';
 import { renderTypedSections } from './grouping.js';
+import { renderActionToolbar } from './release_actions.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /**
@@ -139,30 +140,26 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       // Overlay local pipeline store (captures mutations since last API fetch)
       const stored = pipelineStore.get(rel.id);
       const pStatus = stored ? stored.status : rel.pipeline_status;
-      const pId = stored ? stored.id : rel.pipeline_id;
       let badges = '';
       if (rel.in_library) badges += '<span class="badge badge-library">in library</span>';
       if (pStatus === 'wanted') badges += '<span class="badge badge-wanted">wanted</span>';
       if (pStatus === 'downloading') badges += '<span class="badge badge-downloading">downloading</span>';
       if (pStatus === 'imported') badges += '<span class="badge badge-imported">imported</span>';
       if (pStatus === 'manual') badges += '<span class="badge badge-manual">manual</span>';
-      const canAdd = !rel.in_library && !pStatus;
-      const canRemove = pStatus === 'wanted' && pId;
-      let btnHtml;
-      if (canAdd) {
-        btnHtml = `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${rel.id}', this)">Add</button>`;
-      } else if (canRemove) {
-        btnHtml = `<button class="btn" style="background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove</button>`;
-      } else {
-        btnHtml = `<button class="btn btn-add" disabled>${rel.in_library ? 'Owned' : pStatus || '?'}</button>`;
-      }
+      // Hand the standardised 4-button toolbar all the context it needs;
+      // it decides which buttons are enabled vs greyed.
+      const toolbar = renderActionToolbar({
+        ...rel,
+        artist: state.browseArtist?.name || '',
+        album: rel.title,
+      }, { size: 'small' });
       return `
         <div class="release" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
           </div>
-          ${btnHtml}
+          ${toolbar}
         </div>
         <div class="release-detail" id="reldet-${rel.id}"></div>
       `;
