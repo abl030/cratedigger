@@ -82,6 +82,24 @@ def should_clear_lossless_search_override(
     )
 
 
+def resolve_user_requeue_override(existing_override: str | None) -> str:
+    """Pick ``search_filetype_override`` for a user-initiated requeue.
+
+    Preserves a stricter existing override — e.g. ``"lossless"`` set by the
+    quality gate after a CBR 320 import — so user actions (Upgrade button,
+    status reset back to wanted, ban-source) don't re-open search tiers the
+    gate intentionally closed. Falls back to :data:`QUALITY_UPGRADE_TIERS`
+    only when no override is currently set.
+
+    Without this, clicking Upgrade on an imported album would overwrite a
+    gate-narrowed ``"lossless"`` with the full ``"lossless,mp3 v0,mp3 320"``
+    ladder, re-enqueuing MP3 320 sources that the pipeline has already
+    established can't produce an upgrade — each one gets rejected as a
+    downgrade and the user sees a loop.
+    """
+    return existing_override or QUALITY_UPGRADE_TIERS
+
+
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
 TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
