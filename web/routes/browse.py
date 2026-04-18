@@ -6,9 +6,11 @@ Both are enriched with library/pipeline status via check_beets_library() and che
 """
 from __future__ import annotations
 
+import copy
 import re
 from typing import TYPE_CHECKING
 
+from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
 
@@ -92,9 +94,17 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     h._json({"release_groups": rgs})  # type: ignore[attr-defined]
 
 
-def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
+def _build_disambiguate_skeleton(artist_id: str) -> dict:
+    """Pure-metadata skeleton of the disambiguate response (no overlay).
+
+    Runs the expensive `analyse_artist_releases` pass on cached MB
+    metadata and returns a JSON-serializable dict. Callers cache this
+    under `meta:` and then layer pipeline / library state on top per-
+    request. The analysis is a pure function of pure-metadata inputs,
+    so its output is semantically part of the metadata cache.
+    """
     srv = _server()
-    from lib.artist_releases import (
+    from lib.artist_releases import (  # local to avoid heavy import at route-load
         filter_non_live,
         analyse_artist_releases,
     )
@@ -103,102 +113,120 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
     filtered = filter_non_live(raw_releases)
     rg_infos = analyse_artist_releases(filtered)
 
-    # Cross-reference library and pipeline status using all release IDs
-    all_mbids: list[str] = []
+    rgs_skeleton: list[dict] = []
     for rg in rg_infos:
-        all_mbids.extend(rg.release_ids)
-    in_library = srv.check_beets_library(all_mbids) if all_mbids else set()
-    in_pipeline = srv.check_pipeline(all_mbids) if all_mbids else {}
-
-    rgs_json: list[dict] = []
-    for rg in rg_infos:
-        # A release group is "in library" if ANY pressing is
-        lib_status = "in_library" if any(rid in in_library for rid in rg.release_ids) else None
-        # Pipeline status: find the first pressing that's in the pipeline
-        pip_status: str | None = None
-        pip_id: int | None = None
-        for rid in rg.release_ids:
-            pip = in_pipeline.get(rid)
-            if pip:
-                pip_status = pip["status"]
-                pip_id = pip["id"]
-                break
-
-        # Look up beets album IDs + on-disk quality for in-library pressings
-        lib_mbids = [p.release_id for p in rg.pressings if p.release_id in in_library]
-        b = srv._beets_db()
-        beets_ids = b.get_album_ids_by_mbids(lib_mbids) if lib_mbids and b else {}
-        quality = b.check_mbids_detail(lib_mbids) if lib_mbids and b else {}
-
-        # RG-level quality: pick the first in-library pressing's quality
-        # so the disambiguate row badge shows on-disk format/rank too.
-        rg_quality = None
-        for rid in rg.release_ids:
-            if rid in quality:
-                rg_quality = quality[rid]
-                break
-
-        pressings_json = []
-        for p in rg.pressings:
-            p_lib = p.release_id in in_library
-            p_pip = in_pipeline.get(p.release_id)
-            pq = quality.get(p.release_id) or {}
-            entry = {
-                "release_id": p.release_id,
-                "title": p.title,
-                "date": p.date,
-                "format": p.format,
-                "track_count": p.track_count,
-                "country": p.country,
-                "recording_ids": p.recording_ids,
-                "in_library": p_lib,
-                "beets_album_id": beets_ids.get(p.release_id),
-                "pipeline_status": p_pip["status"] if p_pip else None,
-                "pipeline_id": p_pip["id"] if p_pip else None,
-            }
-            if pq:
-                entry["library_format"] = pq.get("beets_format") or ""
-                entry["library_min_bitrate"] = pq.get("beets_bitrate") or 0
-                entry["library_rank"] = srv.compute_library_rank(
-                    entry["library_format"], entry["library_min_bitrate"])
-            pressings_json.append(entry)
-
-        rg_dict = {
+        rgs_skeleton.append({
             "release_group_id": rg.release_group_id,
             "title": rg.title,
             "primary_type": rg.primary_type,
             "first_date": rg.first_date,
-            "release_ids": rg.release_ids,
-            "pressings": pressings_json,
+            "release_ids": list(rg.release_ids),
+            "pressings": [
+                {
+                    "release_id": p.release_id,
+                    "title": p.title,
+                    "date": p.date,
+                    "format": p.format,
+                    "track_count": p.track_count,
+                    "country": p.country,
+                    "recording_ids": list(p.recording_ids),
+                }
+                for p in rg.pressings
+            ],
             "track_count": rg.track_count,
             "unique_track_count": rg.unique_track_count,
             "covered_by": rg.covered_by,
-            "library_status": lib_status,
-            "pipeline_status": pip_status,
-            "pipeline_id": pip_id,
             "tracks": [
                 {
                     "recording_id": t.recording_id,
                     "title": t.title,
                     "unique": t.unique,
-                    "also_on": t.also_on,
+                    "also_on": list(t.also_on),
                 }
                 for t in rg.tracks
             ],
-        }
-        if rg_quality:
-            rg_dict["library_format"] = rg_quality.get("beets_format") or ""
-            rg_dict["library_min_bitrate"] = rg_quality.get("beets_bitrate") or 0
-            rg_dict["library_rank"] = srv.compute_library_rank(
-                rg_dict["library_format"], rg_dict["library_min_bitrate"])
-        rgs_json.append(rg_dict)
+        })
 
-    artist_name = srv.mb_api.get_artist_name(artist_id)
-    h._json({  # type: ignore[attr-defined]
+    return {
         "artist_id": artist_id,
-        "artist_name": artist_name,
-        "release_groups": rgs_json,
-    })
+        "artist_name": srv.mb_api.get_artist_name(artist_id),
+        "release_groups": rgs_skeleton,
+    }
+
+
+def _overlay_disambiguate(skeleton: dict) -> dict:
+    """Apply per-request pipeline / library overlay to the cached
+    skeleton. Returns a new dict — does NOT mutate the cached value."""
+    srv = _server()
+    response = copy.deepcopy(skeleton)
+    b = srv._beets_db()
+
+    all_mbids: list[str] = []
+    for rg in response["release_groups"]:
+        all_mbids.extend(rg["release_ids"])
+    in_library = srv.check_beets_library(all_mbids) if all_mbids else set()
+    in_pipeline = srv.check_pipeline(all_mbids) if all_mbids else {}
+
+    for rg in response["release_groups"]:
+        rg["library_status"] = (
+            "in_library"
+            if any(rid in in_library for rid in rg["release_ids"])
+            else None
+        )
+        rg_pip_status: str | None = None
+        rg_pip_id: int | None = None
+        for rid in rg["release_ids"]:
+            pip = in_pipeline.get(rid)
+            if pip:
+                rg_pip_status = pip["status"]
+                rg_pip_id = pip["id"]
+                break
+        rg["pipeline_status"] = rg_pip_status
+        rg["pipeline_id"] = rg_pip_id
+
+        lib_mbids = [p["release_id"] for p in rg["pressings"]
+                     if p["release_id"] in in_library]
+        beets_ids = b.get_album_ids_by_mbids(lib_mbids) if lib_mbids and b else {}
+        quality = b.check_mbids_detail(lib_mbids) if lib_mbids and b else {}
+
+        rg_quality = None
+        for rid in rg["release_ids"]:
+            if rid in quality:
+                rg_quality = quality[rid]
+                break
+
+        for p in rg["pressings"]:
+            rid = p["release_id"]
+            p["in_library"] = rid in in_library
+            p["beets_album_id"] = beets_ids.get(rid)
+            p_pip = in_pipeline.get(rid)
+            p["pipeline_status"] = p_pip["status"] if p_pip else None
+            p["pipeline_id"] = p_pip["id"] if p_pip else None
+            pq = quality.get(rid) or {}
+            if pq:
+                p["library_format"] = pq.get("beets_format") or ""
+                p["library_min_bitrate"] = pq.get("beets_bitrate") or 0
+                p["library_rank"] = srv.compute_library_rank(
+                    p["library_format"], p["library_min_bitrate"])
+
+        if rg_quality:
+            rg["library_format"] = rg_quality.get("beets_format") or ""
+            rg["library_min_bitrate"] = rg_quality.get("beets_bitrate") or 0
+            rg["library_rank"] = srv.compute_library_rank(
+                rg["library_format"], rg["library_min_bitrate"])
+
+    return response
+
+
+def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
+    # Cache the pure-metadata skeleton (analyse_artist_releases output
+    # serialized to JSON-safe dicts) under meta:. Overlay runs per
+    # request — see issue #101 Codex round 3 for why the split matters.
+    skeleton = _cache.memoize_meta(
+        f"mb:artist:{artist_id}:disambiguate",
+        lambda: _build_disambiguate_skeleton(artist_id),
+    )
+    h._json(_overlay_disambiguate(skeleton))  # type: ignore[attr-defined]
 
 
 def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], rg_id: str) -> None:
@@ -344,24 +372,12 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
     h._json(data)  # type: ignore[attr-defined]
 
 
-def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
-    """Side-by-side discography from both MB and Discogs for one artist.
-
-    Resolves both source artist IDs from the supplied name (and optional
-    explicit IDs to skip the lookup), fetches each source's discography,
-    and fuzzy-merges by title+year via lib.artist_compare.merge_discographies.
-
-    Returns three buckets so the UI can show what each source uniquely
-    contributes plus the matched-on-both core catalog.
-    """
+def _resolve_compare_artists(name: str, mbid: str, discogs_id: str) -> tuple[
+        str, str, dict | None, dict | None]:
+    """Resolve MB / Discogs artist IDs from the supplied name when not
+    passed explicitly. Returns the final (mbid, discogs_id, mb_artist,
+    discogs_artist) tuple. Pure-metadata: runs only memoized searches."""
     srv = _server()
-    name = params.get("name", [""])[0].strip()
-    if not name:
-        h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
-        return
-    mbid = params.get("mbid", [""])[0].strip()
-    discogs_id = params.get("discogs_id", [""])[0].strip()
-
     mb_artist: dict | None = None
     discogs_artist: dict | None = None
 
@@ -391,13 +407,23 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     else:
         discogs_artist = {"id": discogs_id, "name": name}
 
+    return mbid, discogs_id, mb_artist, discogs_artist
+
+
+def _build_compare_skeleton(mbid: str, discogs_id: str,
+                            mb_artist: dict | None,
+                            discogs_artist: dict | None) -> dict:
+    """Pure-metadata compare skeleton — no in_library overlay.
+
+    Resolves both discographies from the cached API helpers, stamps
+    has_official bootleg flags, and runs merge_discographies (pure
+    fuzzy title+year join). Safe to cache under `meta:` — its output
+    depends only on (mbid, discogs_id) and pure-metadata inputs.
+    """
+    srv = _server()
     mb_groups: list[dict] = []
     if mbid:
         mb_groups = srv.mb_api.get_artist_release_groups(mbid)
-        # Mark bootleg status on MB rows so the frontend can split them
-        # into a Bootleg-only collapsible section like the Discography
-        # sub-tab. Discogs has no official/bootleg concept in the CC0
-        # dump, so Discogs-only rows are always treated as official.
         official_rg_ids = srv.mb_api.get_official_release_group_ids(mbid)
         for rg in mb_groups:
             rg["has_official"] = rg["id"] in official_rg_ids
@@ -406,21 +432,83 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if discogs_id:
         discogs_groups = discogs_api.get_artist_releases(int(discogs_id))
 
-    # Row-level in-library badge — same as Discography sub-tab. Beets
-    # query is keyed by name with mbid for the UUID-match fast path.
-    if name:
-        lib = srv.get_library_artist(name, mbid)
-        annotate_in_library(mb_groups, discogs_groups, lib, rank_fn=srv.compute_library_rank)
-
     merged = merge_discographies(mb_groups, discogs_groups)
-
-    h._json({  # type: ignore[attr-defined]
+    return {
         "mb_artist": mb_artist,
         "discogs_artist": discogs_artist,
         "both": merged.both,
         "mb_only": merged.mb_only,
         "discogs_only": merged.discogs_only,
-    })
+    }
+
+
+def _overlay_compare(skeleton: dict, name: str, mbid: str) -> dict:
+    """Apply per-request `in_library` overlay to a cached compare
+    skeleton. Returns a new dict — does not mutate the cached value.
+
+    annotate_in_library mutates row dicts in place. We deep-copy the
+    skeleton first so the cached dict stays clean for the next request.
+    """
+    srv = _server()
+    response = copy.deepcopy(skeleton)
+    if not name:
+        return response
+
+    lib = srv.get_library_artist(name, mbid)
+
+    # Reconstruct flat mb_groups / discogs_groups lists that reference
+    # the dict instances inside the three buckets, so annotate_in_library
+    # mutates them in place (the 'both' bucket holds pairs, not flat rows).
+    mb_groups: list[dict] = []
+    discogs_groups: list[dict] = []
+    for pair in response["both"]:
+        if isinstance(pair.get("mb"), dict):
+            mb_groups.append(pair["mb"])
+        if isinstance(pair.get("discogs"), dict):
+            discogs_groups.append(pair["discogs"])
+    mb_groups.extend(response["mb_only"])
+    discogs_groups.extend(response["discogs_only"])
+
+    annotate_in_library(mb_groups, discogs_groups, lib,
+                        rank_fn=srv.compute_library_rank)
+    return response
+
+
+def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+    """Side-by-side discography from both MB and Discogs for one artist.
+
+    Resolves both source artist IDs from the supplied name (and optional
+    explicit IDs to skip the lookup), fetches each source's discography,
+    and fuzzy-merges by title+year via lib.artist_compare.merge_discographies.
+
+    Returns three buckets so the UI can show what each source uniquely
+    contributes plus the matched-on-both core catalog.
+
+    Pure-metadata skeleton (both discographies + merge output) is cached
+    under `meta:` — the expensive merge doesn't re-run on warm loads.
+    The `in_library` overlay runs per-request on a deep-copied skeleton.
+    """
+    name = params.get("name", [""])[0].strip()
+    if not name:
+        h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
+        return
+    mbid = params.get("mbid", [""])[0].strip()
+    discogs_id = params.get("discogs_id", [""])[0].strip()
+
+    mbid, discogs_id, mb_artist, discogs_artist = _resolve_compare_artists(
+        name, mbid, discogs_id)
+
+    # Skeleton key is the resolved (mbid, discogs_id) pair — deterministic
+    # even when the user searches by a name variant. mb_artist /
+    # discogs_artist names are keyed into the skeleton so cached lookups
+    # carry their display name through.
+    cache_key = f"artist:compare:{mbid or 'none'}:{discogs_id or 'none'}"
+    skeleton = _cache.memoize_meta(
+        cache_key,
+        lambda: _build_compare_skeleton(
+            mbid, discogs_id, mb_artist, discogs_artist),
+    )
+    h._json(_overlay_compare(skeleton, name, mbid))  # type: ignore[attr-defined]
 
 
 # ── Route tables ─────────────────────────────────────────────────────
