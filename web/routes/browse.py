@@ -372,53 +372,47 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
     h._json(data)  # type: ignore[attr-defined]
 
 
-def _resolve_compare_artists(name: str, mbid: str, discogs_id: str) -> tuple[
-        str, str, dict | None, dict | None]:
-    """Resolve MB / Discogs artist IDs from the supplied name when not
-    passed explicitly. Returns the final (mbid, discogs_id, mb_artist,
-    discogs_artist) tuple. Pure-metadata: runs only memoized searches."""
+def _resolve_compare_artist_ids(name: str, mbid: str,
+                                discogs_id: str) -> tuple[str, str]:
+    """Resolve MB / Discogs artist IDs from `name` when not passed
+    explicitly. Returns the (mbid, discogs_id) pair. Display names
+    are resolved separately from the canonical APIs — keeping them
+    out of the cache key means a `?name=` typo doesn't produce a
+    different cache entry for the same underlying artist pair."""
     srv = _server()
-    mb_artist: dict | None = None
-    discogs_artist: dict | None = None
-
     if not mbid:
         hits = srv.mb_api.search_artists(name)
         for a in hits:
             if (a.get("name") or "").lower() == name.lower():
                 mbid = a["id"]
-                mb_artist = {"id": a["id"], "name": a["name"]}
                 break
         if not mbid and hits:
             mbid = hits[0]["id"]
-            mb_artist = {"id": hits[0]["id"], "name": hits[0]["name"]}
-    else:
-        mb_artist = {"id": mbid, "name": name}
 
     if not discogs_id:
         hits = discogs_api.search_artists(name)
         for a in hits:
             if (a.get("name") or "").lower() == name.lower():
                 discogs_id = a["id"]
-                discogs_artist = {"id": a["id"], "name": a["name"]}
                 break
         if not discogs_id and hits:
             discogs_id = hits[0]["id"]
-            discogs_artist = {"id": hits[0]["id"], "name": hits[0]["name"]}
-    else:
-        discogs_artist = {"id": discogs_id, "name": name}
 
-    return mbid, discogs_id, mb_artist, discogs_artist
+    return mbid, discogs_id
 
 
-def _build_compare_skeleton(mbid: str, discogs_id: str,
-                            mb_artist: dict | None,
-                            discogs_artist: dict | None) -> dict:
-    """Pure-metadata compare skeleton — no in_library overlay.
+def _build_compare_skeleton(mbid: str, discogs_id: str) -> dict:
+    """Pure-metadata compare skeleton — no in_library overlay and
+    deliberately no artist labels either.
 
-    Resolves both discographies from the cached API helpers, stamps
-    has_official bootleg flags, and runs merge_discographies (pure
-    fuzzy title+year join). Safe to cache under `meta:` — its output
-    depends only on (mbid, discogs_id) and pure-metadata inputs.
+    Display names (`mb_artist`, `discogs_artist`) are resolved from the
+    canonical MB / Discogs helpers in `_canonical_artist_labels()`,
+    outside this cached value. Codex round 4 on PR #104 flagged that
+    baking the request's `?name=` into the cache meant a typo on the
+    first request served for the next 24h.
+
+    Safe to cache under `meta:` — the output depends only on the
+    resolved `(mbid, discogs_id)` pair and pure-metadata inputs.
     """
     srv = _server()
     mb_groups: list[dict] = []
@@ -434,12 +428,32 @@ def _build_compare_skeleton(mbid: str, discogs_id: str,
 
     merged = merge_discographies(mb_groups, discogs_groups)
     return {
-        "mb_artist": mb_artist,
-        "discogs_artist": discogs_artist,
         "both": merged.both,
         "mb_only": merged.mb_only,
         "discogs_only": merged.discogs_only,
     }
+
+
+def _canonical_artist_labels(mbid: str, discogs_id: str) -> tuple[
+        dict | None, dict | None]:
+    """Resolve `{id, name}` for each source from the canonical API
+    helpers. Names come back from `mb_api.get_artist_name` /
+    `discogs_api.get_artist_name`, which are themselves memoized in
+    `meta:`, so this is cheap — and it guarantees the display name is
+    the same across requests regardless of whatever `?name=` spelling
+    a given client happened to use.
+    """
+    srv = _server()
+    mb_artist: dict | None = None
+    if mbid:
+        mb_artist = {"id": mbid, "name": srv.mb_api.get_artist_name(mbid) or ""}
+    discogs_artist: dict | None = None
+    if discogs_id:
+        discogs_artist = {
+            "id": discogs_id,
+            "name": discogs_api.get_artist_name(int(discogs_id)) or "",
+        }
+    return mb_artist, discogs_artist
 
 
 def _overlay_compare(skeleton: dict, name: str, mbid: str) -> dict:
@@ -495,20 +509,20 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     mbid = params.get("mbid", [""])[0].strip()
     discogs_id = params.get("discogs_id", [""])[0].strip()
 
-    mbid, discogs_id, mb_artist, discogs_artist = _resolve_compare_artists(
-        name, mbid, discogs_id)
+    mbid, discogs_id = _resolve_compare_artist_ids(name, mbid, discogs_id)
 
-    # Skeleton key is the resolved (mbid, discogs_id) pair — deterministic
-    # even when the user searches by a name variant. mb_artist /
-    # discogs_artist names are keyed into the skeleton so cached lookups
-    # carry their display name through.
+    # Skeleton key is the resolved (mbid, discogs_id) pair — display
+    # names are stamped on outside the cache from the canonical APIs.
     cache_key = f"artist:compare:{mbid or 'none'}:{discogs_id or 'none'}"
     skeleton = _cache.memoize_meta(
         cache_key,
-        lambda: _build_compare_skeleton(
-            mbid, discogs_id, mb_artist, discogs_artist),
+        lambda: _build_compare_skeleton(mbid, discogs_id),
     )
-    h._json(_overlay_compare(skeleton, name, mbid))  # type: ignore[attr-defined]
+    response = _overlay_compare(skeleton, name, mbid)
+    mb_artist, discogs_artist = _canonical_artist_labels(mbid, discogs_id)
+    response["mb_artist"] = mb_artist
+    response["discogs_artist"] = discogs_artist
+    h._json(response)  # type: ignore[attr-defined]
 
 
 # ── Route tables ─────────────────────────────────────────────────────

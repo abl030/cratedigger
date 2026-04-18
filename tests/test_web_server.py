@@ -1559,8 +1559,10 @@ class TestBrowseRouteContracts(_WebServerCase):
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [{"id": "3840", "name": "Radiohead"}]
             mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_name.return_value = "Radiohead"
             status, data = self._get("/api/artist/compare?name=Radiohead")
 
         self.assertEqual(status, 200)
@@ -1598,8 +1600,10 @@ class TestBrowseRouteContracts(_WebServerCase):
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Artist"}]
             mock_mb.get_artist_release_groups.return_value = [official_rg, bootleg_rg]
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_mb.get_artist_name.return_value = "Artist"
             mock_dg.search_artists.return_value = []
             mock_dg.get_artist_releases.return_value = []
+            mock_dg.get_artist_name.return_value = ""
             status, data = self._get("/api/artist/compare?name=Artist")
 
         self.assertEqual(status, 200)
@@ -2617,9 +2621,11 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [
                 {"id": "3840", "name": "Radiohead"}]
             mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_name.return_value = "Radiohead"
 
             s1, _ = self._get("/api/artist/compare?name=Radiohead")
             s2, _ = self._get("/api/artist/compare?name=Radiohead")
@@ -2636,6 +2642,72 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             meta_keys,
             "expected a compare skeleton under meta:, got: "
             f"{sorted(fake._store.keys())}")
+
+    def test_compare_artist_names_are_canonical_not_user_supplied(self) -> None:
+        """Codex round 4: previously the compare skeleton cached
+        user-supplied artist names inside the response body, so the
+        first request's `name=` query param won for 24h. Canonical
+        names from the MB/Discogs API must be used instead.
+        """
+        mb_rg = {
+            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
+        }
+        discogs_rg = {
+            "id": "21491", "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": "3840",
+        }
+
+        # First request — misspelled name. Skeleton gets cached.
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_mb.search_artists.return_value = [
+                {"id": self.ARTIST_ID, "name": "Radiohead"}]
+            mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_mb.get_artist_name.return_value = "Radiohead"
+            mock_dg.search_artists.return_value = [
+                {"id": "3840", "name": "Radiohead"}]
+            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_name.return_value = "Radiohead"
+            _s, first = self._get(
+                "/api/artist/compare?name=Radiohea&"
+                f"mbid={self.ARTIST_ID}&discogs_id=3840")
+
+        # mb_artist name must be canonical from MB, not the typo.
+        self.assertEqual(
+            (first["mb_artist"] or {}).get("name"), "Radiohead",
+            "mb_artist.name must be the canonical name from MB, not "
+            "the user-supplied ?name= query param — otherwise a typo "
+            "on the first request poisons the 24h skeleton cache.")
+
+        # Second request — different (correct) name. Must STILL return
+        # the canonical Radiohead, and the skeleton cache must have been
+        # reused (no re-fetch of the release-group metadata).
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_mb.search_artists.return_value = [
+                {"id": self.ARTIST_ID, "name": "Radiohead"}]
+            mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_mb.get_artist_name.return_value = "Radiohead"
+            mock_dg.search_artists.return_value = [
+                {"id": "3840", "name": "Radiohead"}]
+            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_name.return_value = "Radiohead"
+            _s, second = self._get(
+                "/api/artist/compare?name=Radiohead&"
+                f"mbid={self.ARTIST_ID}&discogs_id=3840")
+            # Expensive metadata fetch was served from cache (skeleton
+            # still reusable despite different ?name=).
+            self.assertEqual(mock_mb.get_artist_release_groups.call_count, 0)
+
+        self.assertEqual(
+            (second["mb_artist"] or {}).get("name"), "Radiohead")
 
     def test_compare_overlay_reflects_library_flip(self) -> None:
         """Even with the compare skeleton cached, annotate_in_library
@@ -2660,9 +2732,11 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                     {"id": self.ARTIST_ID, "name": "Radiohead"}]
                 mock_mb.get_artist_release_groups.return_value = [mb_rg]
                 mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+                mock_mb.get_artist_name.return_value = "Radiohead"
                 mock_dg.search_artists.return_value = [
                     {"id": "3840", "name": "Radiohead"}]
                 mock_dg.get_artist_releases.return_value = [discogs_rg]
+                mock_dg.get_artist_name.return_value = "Radiohead"
                 _s, data = self._get("/api/artist/compare?name=Radiohead")
                 return data
 
