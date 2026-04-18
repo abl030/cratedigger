@@ -303,7 +303,11 @@ def post_pipeline_add(h, body: dict) -> None:
             })
             return
 
-        release = discogs_api.get_release(int(discogs_id))
+        # Bypass the 24h meta cache — this write path persists artist /
+        # title / tracks into `album_requests`. A stale cached snapshot
+        # would silently bake yesterday's pre-correction metadata into
+        # the pipeline DB (Codex review, issue #101).
+        release = discogs_api.get_release(int(discogs_id), fresh=True)
 
         req_id = s._db().add_request(
             mb_release_id=discogs_id,
@@ -338,7 +342,10 @@ def post_pipeline_add(h, body: dict) -> None:
         })
         return
 
-    release = mb_api.get_release(mbid)
+    # Bypass the 24h meta cache — same reason as the Discogs branch
+    # above. Writing stale metadata into the pipeline DB is worse than
+    # an extra MB mirror round trip on add.
+    release = mb_api.get_release(mbid, fresh=True)
 
     req_id = s._db().add_request(
         mb_release_id=mbid,
@@ -445,8 +452,12 @@ def post_pipeline_upgrade(h, body: dict) -> None:
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
+        # Bypass the 24h meta cache — both branches persist metadata
+        # into the pipeline DB (artist / title / tracks). Stale cache
+        # reads would silently bake pre-correction data from an earlier
+        # browse. Cheap extra mirror hit on a write path.
         if source == "discogs":
-            release = discogs_api.get_release(int(mbid))
+            release = discogs_api.get_release(int(mbid), fresh=True)
             req_id = s._db().add_request(
                 mb_release_id=mbid,
                 discogs_release_id=mbid,
@@ -458,7 +469,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
                 source="request",
             )
         else:
-            release = mb_api.get_release(mbid)
+            release = mb_api.get_release(mbid, fresh=True)
             req_id = s._db().add_request(
                 mb_release_id=mbid,
                 mb_artist_id=release.get("artist_id"),

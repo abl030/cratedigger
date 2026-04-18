@@ -128,15 +128,23 @@ def meta_set(key: str, value: Any, ttl: int = TTL_MB) -> None:
         pass
 
 
-def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB) -> Any:
+def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB,
+                 *, fresh: bool = False) -> Any:
     """Return cached `meta:<key>` or call `fetch_fn()` and cache the result.
 
     With Redis absent (CLI context, tests), degrades to pass-through —
     every call runs `fetch_fn()` and nothing is cached.
+
+    `fresh=True` skips the cache read and re-fetches live, then repopulates
+    the cache with the fresh result. Use this on write paths (e.g. POST
+    handlers that persist metadata into Postgres) where a 24h-old snapshot
+    would silently bake stale artist/title/track data into the pipeline
+    DB. Every `fresh=True` call still warms the cache for subsequent GETs.
     """
-    cached = meta_get(key)
-    if cached is not None:
-        return cached
+    if not fresh:
+        cached = meta_get(key)
+        if cached is not None:
+            return cached
     result = fetch_fn()
     meta_set(key, result, ttl)
     return result
