@@ -379,6 +379,20 @@ class TestCmdQueryIntegration(unittest.TestCase):
         self.assertIsNone(rc)
         self.assertIn("n", stdout.getvalue())
 
+    def test_query_accepts_like_patterns_with_percent(self):
+        """Issue #97: SQL containing % (e.g. ILIKE '%foo%') must not be
+        interpreted as psycopg2 printf-style placeholders."""
+        args = MagicMock(
+            sql="SELECT id FROM album_requests WHERE artist_name ILIKE '%nonexistent%'",
+            json=False,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(self.db, args)
+        self.assertIsNone(rc, f"expected success, got stderr={stderr.getvalue()!r}")
+        self.assertNotIn("IndexError", stderr.getvalue())
+
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdStatusShowsDownloading(unittest.TestCase):

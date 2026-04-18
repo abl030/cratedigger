@@ -86,7 +86,10 @@ class PipelineDB:
     def _execute(self, sql, params=()):
         self._ensure_conn()
         cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params)
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
         return cur
 
     # --- album_requests CRUD ---
