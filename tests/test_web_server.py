@@ -1387,6 +1387,7 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
 
     DISCOGS_SEARCH_REQUIRED_FIELDS = {
         "id", "title", "artist_name", "artist_id",
+        "primary_type", "first_release_date",
     }
     DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS = {
         "id", "title", "country", "format",
@@ -1408,10 +1409,10 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
                     "title": "OK Computer",
                     "artist_id": "3840",
                     "artist_name": "Radiohead",
-                    "primary_type": "",
+                    "primary_type": "Album",
                     "first_release_date": "1997",
                     "artist_disambiguation": "",
-                    "score": 100,
+                    "score": 9,
                     "is_master": True,
                     "discogs_release_id": "83182",
                 },
@@ -1441,7 +1442,7 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
                 {
                     "id": "21491",
                     "title": "OK Computer",
-                    "type": "",
+                    "type": "Album",
                     "secondary_types": [],
                     "first_release_date": "1997",
                     "artist_credit": "Radiohead",
@@ -1460,7 +1461,10 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
                 patch("web.server.check_pipeline", return_value={}):
             mock_dg.get_master_releases.return_value = {
                 "title": "OK Computer",
-                "type": "",
+                "type": "Album",
+                "first_release_date": "1997",
+                "artist_credit": "Radiohead",
+                "primary_artist_id": "3840",
                 "releases": [
                     {
                         "id": "83182",

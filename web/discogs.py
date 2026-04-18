@@ -86,7 +86,9 @@ def _parse_position(position: str) -> tuple[int, int]:
 def search_releases(query: str) -> list[dict]:
     """Search releases by query string. Returns list of release summaries grouped by master.
 
-    Deduplicates by master_id (like MB's release-group dedup).
+    Deduplicates by master_id (like MB's release-group dedup) and surfaces
+    master-level metadata (master_title, master_first_released, primary_type, score)
+    that the mirror provides on each search hit.
     """
     q = urllib.parse.quote(query)
     data = _get(f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25")
@@ -99,15 +101,17 @@ def search_releases(query: str) -> list[dict]:
             continue
         if master_id:
             seen_master.add(master_id)
+        title = r.get("master_title") or r.get("title", "") if master_id else r.get("title", "")
+        first_released = r.get("master_first_released") or r.get("released", "") if master_id else r.get("released", "")
         results.append({
             "id": str(master_id) if master_id else str(r["id"]),
-            "title": r.get("title", ""),
-            "primary_type": "",
-            "first_release_date": r.get("released", ""),
+            "title": title,
+            "primary_type": r.get("primary_type", ""),
+            "first_release_date": first_released,
             "artist_id": str(_primary_artist_id(artists) or ""),
             "artist_name": _primary_artist_name(artists),
             "artist_disambiguation": "",
-            "score": 100,
+            "score": int(r.get("score", 0) * 100),
             "is_master": bool(master_id),
             "discogs_release_id": str(r["id"]),
         })
@@ -115,80 +119,74 @@ def search_releases(query: str) -> list[dict]:
 
 
 def search_artists(query: str) -> list[dict]:
-    """Search for artists by name via release search.
+    """Search for artists by name via the mirror's artist-name index.
 
-    The Discogs mirror doesn't have a dedicated artist search endpoint,
-    so we search releases and extract unique artists.
+    Uses /api/artists?name=, which is a real ts_rank artist-name search —
+    parity with MB's /ws/2/artist?query=.
     """
     q = urllib.parse.quote(query)
-    data = _get(f"{DISCOGS_API_BASE}/api/search?artist={q}&per_page=25")
-    seen: set[int] = set()
-    results = []
-    for r in data.get("results", []):
-        for artist in r.get("artists", []):
-            aid = artist.get("id")
-            if not aid or aid in seen:
-                continue
-            seen.add(aid)
-            results.append({
-                "id": str(aid),
-                "name": artist.get("name", ""),
-                "disambiguation": "",
-                "score": 100,
-            })
-    return results
+    data = _get(f"{DISCOGS_API_BASE}/api/artists?name={q}&per_page=20")
+    return [
+        {
+            "id": str(r["id"]),
+            "name": r.get("name", ""),
+            "disambiguation": "",
+            "score": int(r.get("score", 0) * 100),
+        }
+        for r in data.get("results", [])
+    ]
 
 
 def get_artist_releases(artist_id: int) -> list[dict]:
-    """Get all releases for an artist by Discogs artist ID.
+    """Get an artist's discography grouped by master. Mirrors mb.get_artist_release_groups().
 
-    Groups results by master_id to produce a list similar to MB release groups.
-    Masterless releases are included as standalone entries.
+    Uses /api/artists/{id}/masters which returns master-level entries with
+    inferred type (Album/Single/EP/Other). Masterless releases come back with
+    id "release-<n>" and is_masterless=True; we strip the prefix so the bare
+    release ID is usable for downstream lookups.
     """
-    all_results: list[dict] = []
+    entries: list[dict] = []
     page = 1
     while True:
-        data = _get(f"{DISCOGS_API_BASE}/api/artists/{artist_id}/releases?per_page=100&page={page}")
+        data = _get(
+            f"{DISCOGS_API_BASE}/api/artists/{artist_id}/masters?per_page=100&page={page}"
+        )
         results = data.get("results", [])
         if not results:
             break
-        all_results.extend(results)
-        if len(all_results) >= 500:
+        for r in results:
+            raw_id = r.get("id")
+            is_masterless = bool(r.get("is_masterless"))
+            if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
+                bare_id = raw_id[len("release-"):]
+                entry = {
+                    "id": bare_id,
+                    "title": r.get("title", ""),
+                    "type": r.get("type", ""),
+                    "secondary_types": [],
+                    "first_release_date": r.get("first_release_date", ""),
+                    "artist_credit": r.get("artist_credit", ""),
+                    "primary_artist_id": str(r.get("primary_artist_id") or ""),
+                    "is_masterless": True,
+                    "discogs_release_id": bare_id,
+                }
+            else:
+                entry = {
+                    "id": str(raw_id),
+                    "title": r.get("title", ""),
+                    "type": r.get("type", ""),
+                    "secondary_types": [],
+                    "first_release_date": r.get("first_release_date", ""),
+                    "artist_credit": r.get("artist_credit", ""),
+                    "primary_artist_id": str(r.get("primary_artist_id") or ""),
+                }
+            entries.append(entry)
+        total = data.get("total", 0)
+        if page * data.get("per_page", 100) >= total:
+            break
+        if len(entries) >= 500:
             break
         page += 1
-
-    seen_master: set[int] = set()
-    entries: list[dict] = []
-    for r in all_results:
-        master_id = r.get("master_id")
-        artists = r.get("artists", [])
-        credit_name = " / ".join(a.get("name", "?") for a in artists) if artists else ""
-
-        if master_id and master_id > 0:
-            if master_id in seen_master:
-                continue
-            seen_master.add(master_id)
-            entries.append({
-                "id": str(master_id),
-                "title": r.get("title", ""),
-                "type": "",
-                "secondary_types": [],
-                "first_release_date": r.get("released", ""),
-                "artist_credit": credit_name,
-                "primary_artist_id": str(_primary_artist_id(artists) or ""),
-            })
-        else:
-            # Masterless release — show as standalone entry
-            entries.append({
-                "id": str(r["id"]),
-                "title": r.get("title", ""),
-                "type": "",
-                "secondary_types": [],
-                "first_release_date": r.get("released", ""),
-                "artist_credit": credit_name,
-                "primary_artist_id": str(_primary_artist_id(artists) or ""),
-                "is_masterless": True,
-            })
     return entries
 
 
@@ -213,7 +211,10 @@ def get_master_releases(master_id: int) -> dict:
         })
     return {
         "title": data.get("title", ""),
-        "type": "",
+        "type": data.get("primary_type", ""),
+        "first_release_date": data.get("first_release_date", ""),
+        "artist_credit": data.get("artist_credit", ""),
+        "primary_artist_id": str(data.get("primary_artist_id") or ""),
         "releases": releases,
     }
 

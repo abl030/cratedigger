@@ -13,6 +13,7 @@ from web.discogs import (
     _parse_position,
     _parse_year,
     _primary_artist_name,
+    get_artist_releases,
     get_release,
     get_master_releases,
     search_releases,
@@ -125,6 +126,12 @@ class TestGetMasterReleases(unittest.TestCase):
         "id": 21491,
         "title": "OK Computer",
         "year": 1997,
+        "main_release_id": 4950798,
+        "primary_type": "Album",
+        "first_release_date": "1997",
+        "artist_credit": "Radiohead",
+        "primary_artist_id": 3840,
+        "artists": [{"id": 3840, "name": "Radiohead"}],
         "releases": [
             {
                 "id": 83182,
@@ -148,6 +155,10 @@ class TestGetMasterReleases(unittest.TestCase):
             result = get_master_releases(21491)
 
         self.assertEqual(result["title"], "OK Computer")
+        self.assertEqual(result["type"], "Album")
+        self.assertEqual(result["first_release_date"], "1997")
+        self.assertEqual(result["artist_credit"], "Radiohead")
+        self.assertEqual(result["primary_artist_id"], "3840")
         self.assertEqual(len(result["releases"]), 2)
         self.assertEqual(result["releases"][0]["id"], "83182")
         self.assertEqual(result["releases"][0]["country"], "Europe")
@@ -161,52 +172,159 @@ class TestSearchReleases(unittest.TestCase):
                 "id": 83182,
                 "title": "OK Computer",
                 "master_id": 21491,
+                "master_title": "OK Computer",
+                "master_first_released": "1997",
+                "primary_type": "Album",
+                "score": 0.099,
                 "released": "1997-06-16",
                 "artists": [{"id": 3840, "name": "Radiohead"}],
             },
             {
                 "id": 105704,
-                "title": "OK Computer",
+                "title": "OK Computer (US)",
                 "master_id": 21491,
+                "master_title": "OK Computer",
+                "master_first_released": "1997",
+                "primary_type": "Album",
+                "score": 0.05,
                 "released": "1997-07-01",
                 "artists": [{"id": 3840, "name": "Radiohead"}],
             },
+            {
+                "id": 999,
+                "title": "OK Computer Demos",
+                "master_id": None,
+                "primary_type": "Other",
+                "score": 0.02,
+                "released": "1996",
+                "artists": [{"id": 3840, "name": "Radiohead"}],
+            },
         ],
     }
 
-    def test_deduplicates_by_master(self):
+    def test_deduplicates_by_master_with_master_metadata(self):
         with _mock_urlopen(self.SEARCH_DATA):
             results = search_releases("OK Computer")
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["id"], "21491")
-        self.assertEqual(results[0]["artist_name"], "Radiohead")
-        self.assertTrue(results[0]["is_master"])
+        # 1 master (deduped) + 1 masterless = 2 entries
+        self.assertEqual(len(results), 2)
+        first = results[0]
+        self.assertEqual(first["id"], "21491")
+        self.assertEqual(first["title"], "OK Computer")  # master_title, not per-release title
+        self.assertEqual(first["primary_type"], "Album")
+        self.assertEqual(first["first_release_date"], "1997")  # master_first_released
+        self.assertEqual(first["artist_name"], "Radiohead")
+        self.assertTrue(first["is_master"])
+        self.assertEqual(first["score"], 9)  # int(0.099 * 100)
+        self.assertEqual(first["discogs_release_id"], "83182")
+
+        masterless = results[1]
+        self.assertEqual(masterless["id"], "999")
+        self.assertEqual(masterless["title"], "OK Computer Demos")
+        self.assertFalse(masterless["is_master"])
+        self.assertEqual(masterless["first_release_date"], "1996")  # falls back to released
 
 
 class TestSearchArtists(unittest.TestCase):
-    SEARCH_DATA = {
+    """search_artists() now hits /api/artists?name= (real artist-name index)."""
+
+    ARTIST_SEARCH_DATA = {
         "results": [
             {
-                "id": 1,
-                "title": "Album A",
-                "artists": [{"id": 3840, "name": "Radiohead"}],
+                "id": 3840,
+                "name": "Radiohead",
+                "profile": "British alternative rock band...",
+                "score": 0.06079271,
             },
             {
-                "id": 2,
-                "title": "Album B",
-                "artists": [{"id": 3840, "name": "Radiohead"}],
+                "id": 104129,
+                "name": "Radioheads",
+                "profile": "",
+                "score": 0.06079271,
             },
         ],
+        "total": 6,
+        "page": 1,
+        "per_page": 25,
     }
 
-    def test_deduplicates_artists(self):
-        with _mock_urlopen(self.SEARCH_DATA):
+    def test_returns_name_matched_artists(self):
+        with _mock_urlopen(self.ARTIST_SEARCH_DATA) as mock:
             results = search_artists("Radiohead")
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["name"], "Radiohead")
+        # Verify the new endpoint was hit (not the old release-search hack)
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("/api/artists?name=", called_url)
+        self.assertNotIn("/api/search?artist=", called_url)
+
+        self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["id"], "3840")
+        self.assertEqual(results[0]["name"], "Radiohead")
+        self.assertEqual(results[0]["disambiguation"], "")  # left empty intentionally
+        self.assertEqual(results[0]["score"], 6)  # int(0.06 * 100)
+        self.assertEqual(results[1]["name"], "Radioheads")
+
+
+class TestGetArtistReleases(unittest.TestCase):
+    """get_artist_releases() now hits /api/artists/{id}/masters (master-grouped)."""
+
+    MASTERS_DATA = {
+        "results": [
+            {
+                "id": 21481,
+                "title": "Creep",
+                "type": "EP",
+                "first_release_date": "1992",
+                "artist_credit": "Radiohead",
+                "primary_artist_id": 3840,
+                "is_masterless": False,
+            },
+            {
+                "id": 13344,
+                "title": "Pablo Honey",
+                "type": "Album",
+                "first_release_date": "1993",
+                "artist_credit": "Radiohead",
+                "primary_artist_id": 3840,
+                "is_masterless": False,
+            },
+            {
+                "id": "release-83182",
+                "title": "Stupid Car (demo)",
+                "type": "Other",
+                "first_release_date": "1993",
+                "artist_credit": "Radiohead",
+                "primary_artist_id": 3840,
+                "is_masterless": True,
+            },
+        ],
+        "total": 3,
+        "page": 1,
+        "per_page": 100,
+    }
+
+    def test_normalizes_master_discography(self):
+        with _mock_urlopen(self.MASTERS_DATA) as mock:
+            results = get_artist_releases(3840)
+
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("/api/artists/3840/masters", called_url)
+
+        self.assertEqual(len(results), 3)
+
+        album = next(r for r in results if r["title"] == "Pablo Honey")
+        self.assertEqual(album["id"], "13344")
+        self.assertEqual(album["type"], "Album")
+        self.assertEqual(album["first_release_date"], "1993")
+        self.assertEqual(album["artist_credit"], "Radiohead")
+        self.assertEqual(album["primary_artist_id"], "3840")
+        self.assertEqual(album["secondary_types"], [])
+        self.assertNotIn("is_masterless", album)  # only set when True
+
+        masterless = next(r for r in results if r["title"] == "Stupid Car (demo)")
+        self.assertEqual(masterless["id"], "83182")  # "release-" prefix stripped
+        self.assertEqual(masterless["discogs_release_id"], "83182")
+        self.assertTrue(masterless["is_masterless"])
 
 
 class TestGetArtistName(unittest.TestCase):
