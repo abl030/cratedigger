@@ -50,7 +50,7 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
             result["upgrade_queued"] = (
                 req["status"] == "wanted" and bool(req.get("search_filetype_override") or req.get("target_format"))
             )
-            from classify import classify_log_entry as _clf, LogEntry as _LE
+            from web.classify import classify_log_entry as _clf, LogEntry as _LE
             dh = []
             for h_entry in history:
                 he = _LE.from_row(h_entry)

@@ -204,7 +204,7 @@ def _cmd_add_discogs(db, discogs_id, source):
 
     print(f"  Fetching Discogs release {discogs_id}...")
     try:
-        import discogs as discogs_api  # type: ignore[import-not-found]
+        from web import discogs as discogs_api
         release = discogs_api.get_release(int(discogs_id))
     except Exception as e:
         print(f"  Failed to fetch release from Discogs API: {e}")

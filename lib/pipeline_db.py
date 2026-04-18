@@ -5,7 +5,7 @@ Connects to PostgreSQL via a DSN (connection string). Both doc1 and doc2
 connect over the network — no more SQLite file locking issues on virtiofs.
 
 Usage:
-    from pipeline_db import PipelineDB
+    from lib.pipeline_db import PipelineDB
     db = PipelineDB("postgresql://soularr@192.168.1.35/soularr")
     db.add_request(mb_release_id="...", artist_name="...", album_title="...", source="redownload")
 """
