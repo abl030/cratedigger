@@ -280,6 +280,10 @@ Supported formats:
 
 The V0 verification step always runs first regardless of target format. Genuineness is judged by `transcode_detection()`: spectral cliff analysis is authoritative when available (suspect grade → transcode, genuine/marginal → not), and the post-conversion V0 bitrate is a fallback only when spectral is unavailable. The fallback threshold defaults to `cfg.mp3_vbr.excellent` (210 kbps) and tracks retuning of `[Quality Ranks]` automatically. Only after verification does the target conversion run from the original FLAC. If the FLAC is a transcode, the target conversion is skipped and V0 is kept.
 
+## Notifiers (Meelo / Plex / Jellyfin)
+
+After a successful auto-import, Cratedigger fires a best-effort library-refresh POST to each configured downstream media server so newly-imported albums appear without a manual rescan. Each notifier is independent and disabled by default — omit the section (or leave `url` blank) to skip it. Failures are logged and non-fatal: a broken Plex will never block a successful beets import. The three sections live in `config.ini` at the repo root with every supported key commented out, and the typed fields + `from_config` wiring live in [`lib/config.py`](lib/config.py); the HTTP calls themselves are `trigger_meelo_scan()` / `trigger_plex_scan()` / `trigger_jellyfin_scan()` in [`lib/util.py`](lib/util.py), dispatched from `lib/import_dispatch.py` under the `trigger_notifiers` flag on `DispatchAction`. Jellyfin's `library_id` is optional — leave it unset to trigger a full refresh, or set it to an `ItemId` from `/Library/VirtualFolders` to scope the refresh to one library.
+
 ## Running tests
 
 ```bash
