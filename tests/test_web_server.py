@@ -2190,5 +2190,159 @@ class TestLibraryArtistContract(unittest.TestCase):
                 f"Album '{album.get('album')}' missing fields: {missing}")
 
 
+class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
+    """Issue #101: endpoints that enrich MB/Discogs metadata with per-user
+    pipeline/library overlay state MUST NOT be cached at the routing level.
+
+    Pre-fix, /api/release/<id> and friends were cached under web:<url> at
+    TTL_LIBRARY=300s. A pipeline-side UPDATE (e.g. status wanted→downloading)
+    bypasses the web UI's POST-invalidation paths, so a second GET in the
+    300s window returned a stale pipeline_status baked into the cached
+    payload.
+
+    Fix: drop every overlay-baking endpoint from Handler._CACHE_TTLS and
+    move pure MB/Discogs metadata into a separate meta: namespace at the
+    API helper layer (web/mb.py, web/discogs.py). Local DB lookups
+    (check_pipeline, check_beets_library) run on every request — cheap.
+    """
+
+    # The exact endpoint prefixes proven to bake overlay state — every
+    # single one of these was confirmed by the Explore audit to mutate
+    # the response with at least one of: pipeline_status, pipeline_id,
+    # in_library, library_rank, library_format, library_min_bitrate,
+    # beets_album_id, beets_tracks, upgrade_queued, in_beets, library_status.
+    FORBIDDEN_ROUTING_CACHE_PREFIXES = (
+        "/api/release-group",
+        "/api/release",
+        "/api/discogs/master",
+        "/api/discogs/release",
+        "/api/discogs/artist",
+        "/api/artist",              # /api/artist/<id> + /api/artist/<id>/disambiguate + /api/artist/compare
+        "/api/library",             # /api/library/artist
+        "/api/beets",               # /api/beets/search + /api/beets/album + /api/beets/recent
+        "/api/pipeline/recent",
+        "/api/pipeline/all",
+        "/api/pipeline/log",
+        "/api/pipeline/status",
+    )
+
+    def test_forbidden_prefixes_are_not_in_routing_cache_ttls(self) -> None:
+        """Handler._CACHE_TTLS must not contain any overlay-baking prefix."""
+        import web.server as srv
+        ttls: dict[str, int] = getattr(srv.Handler, "_CACHE_TTLS", {})
+        leaked = set(ttls) & set(self.FORBIDDEN_ROUTING_CACHE_PREFIXES)
+        self.assertFalse(
+            leaked,
+            f"Overlay-baking prefixes must not be in _CACHE_TTLS — "
+            f"they would bake per-user pipeline/library state into Redis "
+            f"and leak stale badges when the pipeline writes to Postgres "
+            f"outside the web UI's POST paths. Offenders: {sorted(leaked)}")
+
+
+class _CachedServerCase(_WebServerCase):
+    """Shared harness: _WebServerCase but with a FakeRedis wired up so we
+    can observe routing-cache behaviour in isolation. Pre-fix this would
+    exhibit the stale-badge bug; post-fix it proves the overlay recomputes."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        import web.cache as cache
+        from tests.test_web_cache import FakeRedis
+        cls._cache = cache
+        cls._saved_redis = cache._redis
+        cache._redis = FakeRedis()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._cache._redis = cls._saved_redis
+        super().tearDownClass()
+
+
+class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
+    """Regression test for issue #101.
+
+    The bug: /api/release/<id> cached the full response including
+    pipeline_status. When the pipeline wrote status='downloading'
+    directly to Postgres (outside the web UI's POST invalidation
+    paths), a second GET within 300s returned the stale 'wanted'
+    status. Badges lagged by up to 5 minutes.
+
+    Post-fix: the overlay is recomputed on every request, so external
+    DB writes show up immediately.
+    """
+
+    RELEASE_ID = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+
+    def setUp(self) -> None:
+        # Clear any state left behind by a previous test that shares the
+        # FakeRedis instance, so each scenario starts cold. `_redis` is
+        # typed `object | None` on the module; narrow to FakeRedis here.
+        from tests.test_web_cache import FakeRedis
+        fake = self._cache._redis
+        assert isinstance(fake, FakeRedis)
+        fake._store.clear()
+
+    def _call_release_detail(self) -> dict:
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()):
+            mock_mb.get_release.return_value = {
+                "id": self.RELEASE_ID,
+                "title": "Test Album",
+                "tracks": [],
+            }
+            _status, data = self._get(f"/api/release/{self.RELEASE_ID}")
+            return data
+
+    def test_release_reflects_external_status_write(self) -> None:
+        """Pipeline writes status='downloading' directly to Postgres
+        between two GETs. The second GET must see 'downloading'."""
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=42, status="wanted", mb_release_id=self.RELEASE_ID,
+        )
+        first = self._call_release_detail()
+        self.assertEqual(first["pipeline_status"], "wanted")
+
+        # Simulate soularr pipeline flipping status outside the web UI.
+        # No POST to /api/cache/invalidate, no web-UI cache-group flush —
+        # this is the exact sequence that produced the stale-badge bug.
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=42, status="downloading", mb_release_id=self.RELEASE_ID,
+        )
+        second = self._call_release_detail()
+        self.assertEqual(
+            second["pipeline_status"], "downloading",
+            "Second GET must see the fresh DB state, not a baked-in "
+            "pipeline_status from a cached response. If this fails, the "
+            "routing-level cache is still capturing the overlay.")
+
+    def test_release_reflects_external_library_state_flip(self) -> None:
+        """Same bug for the in_library flag. After an album is imported
+        the 'in_library' flag flips true in beets; a second GET within
+        the cache window must reflect that without an explicit flush."""
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=42, status="imported", mb_release_id=self.RELEASE_ID,
+        )
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()):
+            mock_mb.get_release.return_value = {
+                "id": self.RELEASE_ID, "title": "T", "tracks": [],
+            }
+            _s, first = self._get(f"/api/release/{self.RELEASE_ID}")
+        self.assertFalse(first["in_library"])
+
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library",
+                      return_value={self.RELEASE_ID}):
+            mock_mb.get_release.return_value = {
+                "id": self.RELEASE_ID, "title": "T", "tracks": [],
+            }
+            _s, second = self._get(f"/api/release/{self.RELEASE_ID}")
+        self.assertTrue(
+            second["in_library"],
+            "Second GET must recompute the overlay against current beets "
+            "state instead of returning a cached in_library=False.")
+
+
 if __name__ == "__main__":
     unittest.main()

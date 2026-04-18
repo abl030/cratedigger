@@ -246,11 +246,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
-        # Capture for routing-level cache (set by do_GET)
-        key = getattr(self, "_cache_capture_key", None)
-        ttl = getattr(self, "_cache_capture_ttl", None)
-        if status == 200 and key is not None and ttl is not None:
-            cache.cache_set(key, data, ttl)
 
     def _html(self, path):
         html_path = os.path.join(os.path.dirname(__file__), path)
@@ -280,72 +275,27 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, msg, status=400):
         self._json({"error": msg}, status)
 
-    # Routes that should be cached, mapped to their TTL.
-    # Prefix-matched: "/api/artist" matches "/api/artist/<id>" etc.
-    # Order matters: first matching prefix wins (see _cache_ttl_for_path).
-    # Specific paths that bake pipeline_status + in_library into the payload
-    # MUST come before their broader prefix so they get the short TTL.
-    # Soularr's pipeline-side status transitions (downloading -> imported,
-    # quality-gate re-queue -> wanted) happen outside the web UI's POST
-    # invalidation paths, so a long TTL leaves stale badges in the UI for
-    # hours. TTL_LIBRARY caps the staleness at 5min. See issue tracker for
-    # the architectural fix (split MB metadata cache from pipeline overlay).
-    _CACHE_TTLS: dict[str, int] = {
-        "/api/search": cache.TTL_MB,
-        "/api/artist": cache.TTL_MB,
-        "/api/release-group": cache.TTL_LIBRARY,
-        "/api/release": cache.TTL_LIBRARY,
-        "/api/discogs/master": cache.TTL_LIBRARY,
-        "/api/discogs/release": cache.TTL_LIBRARY,
-        "/api/discogs": cache.TTL_MB,
-        "/api/library": cache.TTL_LIBRARY,
-        "/api/beets": cache.TTL_LIBRARY,
-        "/api/pipeline/status": cache.TTL_LIBRARY,
-        "/api/pipeline/all": cache.TTL_LIBRARY,
-        "/api/pipeline/recent": cache.TTL_LIBRARY,
-        "/api/pipeline/log": cache.TTL_LIBRARY,
-    }
-
-    # POST routes and which cache groups they invalidate.
-    _POST_INVALIDATIONS: dict[str, tuple[str, ...]] = {
-        "/api/pipeline/add": ("pipeline", "mb", "discogs"),
-        "/api/pipeline/update": ("pipeline", "mb", "discogs"),
-        "/api/pipeline/upgrade": ("pipeline", "library", "mb", "discogs"),
-        "/api/pipeline/set-quality": ("pipeline",),
-        "/api/pipeline/set-intent": ("pipeline",),
-        "/api/pipeline/ban-source": ("pipeline", "library", "mb", "discogs"),
-        "/api/pipeline/force-import": ("pipeline", "library", "mb", "discogs"),
-        "/api/pipeline/delete": ("pipeline", "mb", "discogs"),
-        "/api/beets/delete": ("library", "mb", "discogs"),
-        "/api/manual-import/import": ("pipeline", "library", "mb", "discogs"),
-        "/api/wrong-matches/delete": ("pipeline",),
-    }
-
-    def _cache_ttl_for_path(self, path: str) -> int | None:
-        """Return TTL if this path should be cached, None otherwise."""
-        for prefix, ttl in self._CACHE_TTLS.items():
-            if path == prefix or path.startswith(prefix + "/"):
-                return ttl
-        return None
+    # Routing-level response cache was removed by issue #101 — it used to
+    # cache the full HTTP response under `web:<url>`, which baked in
+    # per-request overlay state (pipeline_status, in_library, …) and
+    # leaked stale badges for up to 5 min after soularr-the-pipeline
+    # wrote to Postgres outside the web UI's POST paths.
+    #
+    # The pure MB/Discogs metadata that this cache used to cover is now
+    # memoized one layer down, inside web/mb.py and web/discogs.py, at
+    # the `meta:` namespace (24h TTL). Local-DB overlays (check_pipeline,
+    # check_beets_library) run on every request — cheap single-SQL
+    # lookups that no longer need caching.
+    #
+    # `cache.invalidate_groups()` is still callable for backwards
+    # compatibility with soularr's main loop POSTing to
+    # /api/cache/invalidate, but it's a no-op for any fresh deploy
+    # (no `web:` keys exist).
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
-
-        # Cache check: use full URL (path + query) as key
-        cache_key = f"web:{path}"
-        if parsed.query:
-            cache_key += f"?{parsed.query}"
-        ttl = self._cache_ttl_for_path(path)
-        if ttl is not None:
-            cached = cache.cache_get(cache_key)
-            if cached is not None:
-                self._json(cached)
-                return
-            # Set up capture so _json() stores the response
-            self._cache_capture_key = cache_key
-            self._cache_capture_ttl = ttl
 
         try:
             # Serve static JS modules
@@ -373,16 +323,16 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("GET %s failed", path)
             _try_reconnect_db()
             self._error(str(e), 500)
-        finally:
-            self._cache_capture_key = None
-            self._cache_capture_ttl = None
 
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
         try:
-            # Cache invalidation endpoint (for soularr main loop)
+            # Cache invalidation endpoint — kept for backwards compat with
+            # soularr's main-loop POST at end of every cycle. Post-#101
+            # there's nothing to invalidate at the `web:` namespace, so
+            # this is a best-effort no-op.
             if path == "/api/cache/invalidate":
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
@@ -396,10 +346,6 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
                 fn(self, body)  # type: ignore[operator]
-                # Invalidate cache groups after successful mutation
-                groups = self._POST_INVALIDATIONS.get(path)
-                if groups:
-                    cache.invalidate_groups(*groups)
                 return
             self._error("Not found", 404)
         except Exception as e:
@@ -434,10 +380,14 @@ def main():
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
-        # Flush stale web:* keys so backend changes (e.g. updated discogs.py
-        # normalizer) take effect immediately on restart instead of being
-        # masked by 24h-TTL MB/discogs entries.
+        # Flush any lingering keys from previous cache generations so backend
+        # changes (e.g. an updated discogs.py normalizer) take effect
+        # immediately on restart instead of being masked by stale entries.
+        # Covers both the legacy `web:*` routing namespace (removed in #101
+        # but may still exist on in-place upgrades) and the `meta:*`
+        # pure-metadata namespace that wraps mb/discogs helper outputs.
         cache.invalidate_pattern("web:*")
+        cache.invalidate_pattern("meta:*")
 
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api

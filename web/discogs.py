@@ -3,12 +3,20 @@
 All queries hit the local Discogs mirror at DISCOGS_API_BASE.
 Response shapes are normalized to match what the frontend expects,
 mirroring web/mb.py where possible.
+
+Pure-metadata responses are memoized via `cache.memoize_meta()` at
+24h TTL. See web/mb.py and web/cache.py for rationale — the cache
+layer sits at the API helper level, not at the HTTP routing level,
+so that per-user pipeline / library overlay state is never baked
+into Redis (issue #101).
 """
 
 import json
 import re
 import urllib.parse
 import urllib.request
+
+from web import cache as _cache  # type: ignore[import-not-found]
 
 DISCOGS_API_BASE = "https://discogs.ablz.au"
 USER_AGENT = "soularr-web/1.0"
@@ -94,32 +102,35 @@ def search_releases(query: str) -> list[dict]:
     master-level metadata (master_title, master_first_released, primary_type, score)
     that the mirror provides on each search hit.
     """
-    q = urllib.parse.quote(query)
-    data = _get(f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25")
-    seen_master: set[int] = set()
-    results = []
-    for r in data.get("results", []):
-        master_id = r.get("master_id")
-        artists = r.get("artists", [])
-        if master_id and master_id in seen_master:
-            continue
-        if master_id:
-            seen_master.add(master_id)
-        title = r.get("master_title") or r.get("title", "") if master_id else r.get("title", "")
-        first_released = r.get("master_first_released") or r.get("released", "") if master_id else r.get("released", "")
-        results.append({
-            "id": str(master_id) if master_id else str(r["id"]),
-            "title": title,
-            "primary_type": r.get("primary_type", ""),
-            "first_release_date": first_released,
-            "artist_id": str(_primary_artist_id(artists) or ""),
-            "artist_name": _primary_artist_name(artists),
-            "artist_disambiguation": "",
-            "score": int(r.get("score", 0) * 100),
-            "is_master": bool(master_id),
-            "discogs_release_id": str(r["id"]),
-        })
-    return results
+    def _fetch() -> list[dict]:
+        q = urllib.parse.quote(query)
+        data = _get(f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25")
+        seen_master: set[int] = set()
+        results = []
+        for r in data.get("results", []):
+            master_id = r.get("master_id")
+            artists = r.get("artists", [])
+            if master_id and master_id in seen_master:
+                continue
+            if master_id:
+                seen_master.add(master_id)
+            title = r.get("master_title") or r.get("title", "") if master_id else r.get("title", "")
+            first_released = r.get("master_first_released") or r.get("released", "") if master_id else r.get("released", "")
+            results.append({
+                "id": str(master_id) if master_id else str(r["id"]),
+                "title": title,
+                "primary_type": r.get("primary_type", ""),
+                "first_release_date": first_released,
+                "artist_id": str(_primary_artist_id(artists) or ""),
+                "artist_name": _primary_artist_name(artists),
+                "artist_disambiguation": "",
+                "score": int(r.get("score", 0) * 100),
+                "is_master": bool(master_id),
+                "discogs_release_id": str(r["id"]),
+            })
+        return results
+
+    return _cache.memoize_meta(f"discogs:search:releases:{query}", _fetch)
 
 
 def search_artists(query: str) -> list[dict]:
@@ -128,17 +139,20 @@ def search_artists(query: str) -> list[dict]:
     Uses /api/artists?name=, which is a real ts_rank artist-name search —
     parity with MB's /ws/2/artist?query=.
     """
-    q = urllib.parse.quote(query)
-    data = _get(f"{DISCOGS_API_BASE}/api/artists?name={q}&per_page=20")
-    return [
-        {
-            "id": str(r["id"]),
-            "name": r.get("name", ""),
-            "disambiguation": "",
-            "score": int(r.get("score", 0) * 100),
-        }
-        for r in data.get("results", [])
-    ]
+    def _fetch() -> list[dict]:
+        q = urllib.parse.quote(query)
+        data = _get(f"{DISCOGS_API_BASE}/api/artists?name={q}&per_page=20")
+        return [
+            {
+                "id": str(r["id"]),
+                "name": r.get("name", ""),
+                "disambiguation": "",
+                "score": int(r.get("score", 0) * 100),
+            }
+            for r in data.get("results", [])
+        ]
+
+    return _cache.memoize_meta(f"discogs:search:artists:{query}", _fetch)
 
 
 def get_artist_releases(artist_id: int) -> list[dict]:
@@ -149,115 +163,127 @@ def get_artist_releases(artist_id: int) -> list[dict]:
     id "release-<n>" and is_masterless=True; we strip the prefix so the bare
     release ID is usable for downstream lookups.
     """
-    entries: list[dict] = []
-    page = 1
-    while True:
-        data = _get(
-            f"{DISCOGS_API_BASE}/api/artists/{artist_id}/masters?per_page=100&page={page}"
-        )
-        results = data.get("results", [])
-        if not results:
-            break
-        for r in results:
-            raw_id = r.get("id")
-            is_masterless = bool(r.get("is_masterless"))
-            if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
-                bare_id = raw_id[len("release-"):]
-                entry = {
-                    "id": bare_id,
-                    "title": r.get("title", ""),
-                    "type": r.get("type", ""),
-                    "secondary_types": [],
-                    "first_release_date": r.get("first_release_date", ""),
-                    "artist_credit": r.get("artist_credit", ""),
-                    "primary_artist_id": str(r.get("primary_artist_id") or ""),
-                    "is_masterless": True,
-                    "discogs_release_id": bare_id,
-                }
-            else:
-                entry = {
-                    "id": str(raw_id),
-                    "title": r.get("title", ""),
-                    "type": r.get("type", ""),
-                    "secondary_types": [],
-                    "first_release_date": r.get("first_release_date", ""),
-                    "artist_credit": r.get("artist_credit", ""),
-                    "primary_artist_id": str(r.get("primary_artist_id") or ""),
-                }
-            entries.append(entry)
-        total = data.get("total", 0)
-        if page * data.get("per_page", 100) >= total:
-            break
-        if len(entries) >= 500:
-            break
-        page += 1
-    return entries
+    def _fetch() -> list[dict]:
+        entries: list[dict] = []
+        page = 1
+        while True:
+            data = _get(
+                f"{DISCOGS_API_BASE}/api/artists/{artist_id}/masters?per_page=100&page={page}"
+            )
+            results = data.get("results", [])
+            if not results:
+                break
+            for r in results:
+                raw_id = r.get("id")
+                is_masterless = bool(r.get("is_masterless"))
+                if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
+                    bare_id = raw_id[len("release-"):]
+                    entry = {
+                        "id": bare_id,
+                        "title": r.get("title", ""),
+                        "type": r.get("type", ""),
+                        "secondary_types": [],
+                        "first_release_date": r.get("first_release_date", ""),
+                        "artist_credit": r.get("artist_credit", ""),
+                        "primary_artist_id": str(r.get("primary_artist_id") or ""),
+                        "is_masterless": True,
+                        "discogs_release_id": bare_id,
+                    }
+                else:
+                    entry = {
+                        "id": str(raw_id),
+                        "title": r.get("title", ""),
+                        "type": r.get("type", ""),
+                        "secondary_types": [],
+                        "first_release_date": r.get("first_release_date", ""),
+                        "artist_credit": r.get("artist_credit", ""),
+                        "primary_artist_id": str(r.get("primary_artist_id") or ""),
+                    }
+                entries.append(entry)
+            total = data.get("total", 0)
+            if page * data.get("per_page", 100) >= total:
+                break
+            if len(entries) >= 500:
+                break
+            page += 1
+        return entries
+
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases", _fetch)
 
 
 def get_master_releases(master_id: int) -> dict:
     """Get all releases (pressings) for a master. Mirrors mb.get_release_group_releases()."""
-    data = _get(f"{DISCOGS_API_BASE}/api/masters/{master_id}")
-    releases = []
-    for r in data.get("releases", []):
-        formats = r.get("formats", [])
-        format_names = [f.get("name", "?") for f in formats]
-        releases.append({
-            "id": str(r["id"]),
-            "title": r.get("title", data.get("title", "")),
-            "date": r.get("released", ""),
-            "country": r.get("country", ""),
-            "status": "Official",
-            "track_count": r.get("track_count", 0),
-            "format": ", ".join(format_names) if format_names else "?",
-            "media_count": len(formats),
-            "labels": r.get("labels", []),
-        })
-    return {
-        "title": data.get("title", ""),
-        "type": data.get("primary_type", ""),
-        "first_release_date": data.get("first_release_date", ""),
-        "artist_credit": data.get("artist_credit", ""),
-        "primary_artist_id": str(data.get("primary_artist_id") or ""),
-        "releases": releases,
-    }
+    def _fetch() -> dict:
+        data = _get(f"{DISCOGS_API_BASE}/api/masters/{master_id}")
+        releases = []
+        for r in data.get("releases", []):
+            formats = r.get("formats", [])
+            format_names = [f.get("name", "?") for f in formats]
+            releases.append({
+                "id": str(r["id"]),
+                "title": r.get("title", data.get("title", "")),
+                "date": r.get("released", ""),
+                "country": r.get("country", ""),
+                "status": "Official",
+                "track_count": r.get("track_count", 0),
+                "format": ", ".join(format_names) if format_names else "?",
+                "media_count": len(formats),
+                "labels": r.get("labels", []),
+            })
+        return {
+            "title": data.get("title", ""),
+            "type": data.get("primary_type", ""),
+            "first_release_date": data.get("first_release_date", ""),
+            "artist_credit": data.get("artist_credit", ""),
+            "primary_artist_id": str(data.get("primary_artist_id") or ""),
+            "releases": releases,
+        }
+
+    return _cache.memoize_meta(f"discogs:master:{master_id}", _fetch)
 
 
 def get_release(release_id: int) -> dict:
     """Get full release details with tracks. Mirrors mb.get_release()."""
-    data = _get(f"{DISCOGS_API_BASE}/api/releases/{release_id}")
-    artists = data.get("artists", [])
-    artist_name = _primary_artist_name(artists)
-    artist_id = _primary_artist_id(artists)
+    def _fetch() -> dict:
+        data = _get(f"{DISCOGS_API_BASE}/api/releases/{release_id}")
+        artists = data.get("artists", [])
+        artist_name = _primary_artist_name(artists)
+        artist_id = _primary_artist_id(artists)
 
-    tracks = []
-    for track in data.get("tracks", []):
-        disc, track_num = _parse_position(track.get("position", ""))
-        tracks.append({
-            "disc_number": disc,
-            "track_number": track_num,
-            "title": track.get("title", ""),
-            "length_seconds": _parse_duration(track.get("duration", "")),
-        })
+        tracks = []
+        for track in data.get("tracks", []):
+            disc, track_num = _parse_position(track.get("position", ""))
+            tracks.append({
+                "disc_number": disc,
+                "track_number": track_num,
+                "title": track.get("title", ""),
+                "length_seconds": _parse_duration(track.get("duration", "")),
+            })
 
-    year = _parse_year(data.get("released", ""))
+        year = _parse_year(data.get("released", ""))
 
-    return {
-        "id": str(data["id"]),
-        "title": data.get("title", ""),
-        "artist_name": artist_name,
-        "artist_id": str(artist_id) if artist_id else None,
-        "release_group_id": str(data.get("master_id", "")) if data.get("master_id") else None,
-        "date": data.get("released", ""),
-        "year": year,
-        "country": data.get("country", ""),
-        "status": "Official",
-        "tracks": tracks,
-        "labels": data.get("labels", []),
-        "formats": data.get("formats", []),
-    }
+        return {
+            "id": str(data["id"]),
+            "title": data.get("title", ""),
+            "artist_name": artist_name,
+            "artist_id": str(artist_id) if artist_id else None,
+            "release_group_id": str(data.get("master_id", "")) if data.get("master_id") else None,
+            "date": data.get("released", ""),
+            "year": year,
+            "country": data.get("country", ""),
+            "status": "Official",
+            "tracks": tracks,
+            "labels": data.get("labels", []),
+            "formats": data.get("formats", []),
+        }
+
+    return _cache.memoize_meta(f"discogs:release:{release_id}", _fetch)
 
 
 def get_artist_name(artist_id: int) -> str:
     """Look up an artist's name by Discogs ID."""
-    data = _get(f"{DISCOGS_API_BASE}/api/artists/{artist_id}")
-    return data.get("name", "")
+    def _fetch() -> str:
+        data = _get(f"{DISCOGS_API_BASE}/api/artists/{artist_id}")
+        return data.get("name", "")
+
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:name", _fetch)
