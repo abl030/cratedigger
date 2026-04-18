@@ -19,8 +19,11 @@ from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_LOSSLESS,
     QUALITY_UPGRADE_TIERS,
+    AudioQualityMeasurement,
+    ConversionInfo,
     DownloadInfo,
     ImportResult,
+    PostflightInfo,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
@@ -651,6 +654,234 @@ class TestForceImportSlice(unittest.TestCase):
             "/Beets/The Go! Team/2005 - Are You Ready for More_",
             "force-import must overwrite the stale source path with "
             "ir.postflight.imported_path (the actual beets destination)")
+
+
+class TestBayOfBiscayUpgradeChain(unittest.TestCase):
+    """Two real-world downloads chained against Velella Velella - The Bay of
+    Biscay (request 1055), documenting three counter-intuitive pipeline
+    behaviors as durable regression tests.
+
+    The live chain, in chronological order:
+
+      Step 1 (brandlos, download_log id=3628)
+        existing on disk: genuine  128k min / 172k avg (audited FLAC-less VBR)
+        new download:     l.trans. 119k min / 179k avg, spectral ~160k
+        outcome: IMPORT — even though spectral grade regressed
+                 (genuine → likely_transcode) and min dropped (128 → 119),
+                 avg ticked up 172 → 179 under the default AVG metric.
+
+      Step 2 (Ceezles, download_log id=3631)
+        existing on disk: l.trans. 119k min / 179k avg (what brandlos left)
+        new download:     l.trans. 162k min / 225k avg, spectral ~192k
+        outcome: IMPORT + quality gate DONE — avg=225 ≥ EXCELLENT threshold
+                 (210) so the gate satisfies EXCELLENT rank despite
+                 spectral=likely_transcode on the file.
+
+    What this slice protects (and what it teaches by reading it):
+
+      1. MIN on VBR lies; gate/comparisons use AVG. A lo-fi VBR indie
+         album with quiet intros can sit at min=119k while avg is 179k
+         — any logic that prefers MIN would have flagged step 1 as a
+         downgrade and rejected it. This slice fails if anyone swaps
+         the default metric away from AVG without updating the rank config.
+      2. Spectral grade is provenance, not quality. A `genuine` 128k VBR
+         file holds less information than a `likely_transcode` derived
+         from a 160k source. A naive rule ("spectral regression = block
+         import") would have rejected step 1. Keep the rule structural,
+         not cosmetic.
+      3. Two transcoded files can chain to a gate pass. Gate accepts at
+         rank EXCELLENT via avg — it doesn't require verified lossless
+         provenance. That's a feature for releases with no lossless
+         source on Soulseek, and it's what the user's UI showed as "DONE"
+         on request 1055. This slice pins that behavior.
+
+    See also: `pipeline-cli show 1055`, download_log rows 3628 + 3631.
+    """
+
+    def _run_dispatch(self, ir, beets_info, request_overrides=None):
+        """Inline copy of TestDispatchThroughQualityGate._run_dispatch so
+        this class is self-contained and doesn't inherit unrelated tests."""
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            **(request_overrides or {}),
+        ))
+        cfg = SoularrConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        dl_info = DownloadInfo(username="user1", filetype="mp3")
+        stdout = _make_stdout(ir)
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-biscay",
+                    request_id=42,
+                    label="Velella Velella - The Bay of Biscay",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.08,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Do Not Fold.mp3")],
+                    cfg=cfg,
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        return db
+
+    @staticmethod
+    def _ir_import(new: AudioQualityMeasurement,
+                   existing: AudioQualityMeasurement) -> ImportResult:
+        """Build an `import` ImportResult with independent avg/min/median.
+
+        ``make_import_result`` collapses avg/min/median onto a single scalar,
+        which would hide the exact thing this slice exists to document —
+        VBR albums where avg ≠ min drives both the import decision and the
+        quality gate verdict.
+        """
+        return ImportResult(
+            decision="import",
+            new_measurement=new,
+            existing_measurement=existing,
+            conversion=ConversionInfo(),
+            postflight=PostflightInfo(),
+        )
+
+    def test_step1_brandlos_imports_transcode_over_genuine_on_avg_gain(self):
+        """Step 1 of the chain. Spectral grade regresses genuine → likely_transcode
+        and min drops 128 → 119, yet avg rises 172 → 179 so ``import_quality_decision``
+        returns ``import``. This is the call that surprised the operator in
+        the live UI — documenting it as a test means it stays a deliberate
+        design choice, not an accident.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
+            format="MP3", is_cbr=False, verified_lossless=False,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=128, avg_bitrate_kbps=172, median_bitrate_kbps=192,
+            format="MP3", is_cbr=False, verified_lossless=False,
+            spectral_grade="genuine", spectral_bitrate_kbps=128,
+        )
+        ir = self._ir_import(new, existing)
+        # Post-import, beets reflects the newly-imported files (brandlos's).
+        beets_info = AlbumInfo(
+            album_id=1, track_count=16,
+            min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
+            format="MP3", is_cbr=False, album_path="/Beets/Velella Velella")
+
+        db = self._run_dispatch(
+            ir, beets_info,
+            # Pre-import request state — genuine 128k on disk.
+            request_overrides={
+                "min_bitrate": 128,
+                "verified_lossless": False,
+                "current_spectral_grade": "genuine",
+                "current_spectral_bitrate": 128,
+                "final_format": "mp3",
+            })
+
+        row = db.request(42)
+        # The import itself succeeded — this is what the assertion on
+        # import_quality_decision's behavior actually checks. min_bitrate
+        # landed at 119 = brandlos's file (was 128 pre-dispatch).
+        # Note: prev_min_bitrate is not pinned here — two transitions
+        # fire in a single dispatch (imported, then wanted for the gate
+        # requeue), and the second transition overwrites prev with the
+        # post-import value. That's a known quirk of the double
+        # transition, unrelated to the decision this test pins.
+        self.assertEqual(
+            row["min_bitrate"], 119,
+            "avg gain (172 → 179) must overrule the spectral grade "
+            "regression (genuine → likely_transcode). If min_bitrate is "
+            "still 128, import_quality_decision rejected the download — "
+            "check whether someone added a 'spectral regression blocks "
+            "import' rule.")
+        db.assert_log(self, 0, outcome="success")
+        # The gate THEN runs on the new on-disk state (avg=179 < 210) and
+        # requeues. Status transitions imported → wanted in a single
+        # dispatch — the two-hop chain in production is built out of these
+        # single-dispatch cycles back to back.
+        self.assertEqual(
+            row["status"], "wanted",
+            "After the successful import, the gate must requeue for an "
+            "upgrade (avg=179 < EXCELLENT=210). This requeue is what "
+            "chained Ceezles in step 2.")
+        self.assertEqual(
+            row["search_filetype_override"], QUALITY_UPGRADE_TIERS,
+            "Requeue must set the upgrade override so the next search "
+            "prefers higher-quality tiers.")
+
+    def test_step2_ceezles_crosses_excellent_threshold_on_avg(self):
+        """Step 2 of the chain. Previous state is what step 1 left on disk
+        (likely_transcode 119k / 179k avg). New download is a higher-bitrate
+        transcode (likely_transcode 162k / 225k avg, spectral ~192k).
+
+        Despite the file being a confirmed transcode, avg=225 crosses
+        EXCELLENT (≥210) so the quality gate accepts. This pins two things:
+         - AVG is what determines rank, not MIN (162 < 210 would requeue).
+         - Verified-lossless provenance is not required for DONE — the rank
+           itself is the gate.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=162, avg_bitrate_kbps=225, median_bitrate_kbps=226,
+            format="MP3", is_cbr=False, verified_lossless=False,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
+            format="MP3", is_cbr=False, verified_lossless=False,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+        )
+        ir = self._ir_import(new, existing)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=16,
+            min_bitrate_kbps=162, avg_bitrate_kbps=225, median_bitrate_kbps=226,
+            format="MP3", is_cbr=False, album_path="/Beets/Velella Velella")
+
+        db = self._run_dispatch(
+            ir, beets_info,
+            request_overrides={
+                "min_bitrate": 119,
+                "verified_lossless": False,
+                "current_spectral_grade": "likely_transcode",
+                "current_spectral_bitrate": 160,
+                "last_download_spectral_grade": "likely_transcode",
+                "last_download_spectral_bitrate": 160,
+                "final_format": "mp3",
+                "search_filetype_override": QUALITY_UPGRADE_TIERS,
+            })
+
+        row = db.request(42)
+        self.assertEqual(
+            row["status"], "imported",
+            "avg=225 reaches EXCELLENT rank (≥210). If this flips to "
+            "'wanted', someone probably tightened the gate threshold or "
+            "switched the default metric to MIN — min=162 would requeue.")
+        self.assertEqual(row["min_bitrate"], 162)
+        self.assertEqual(row["prev_min_bitrate"], 119)
+        self.assertIsNone(
+            row["search_filetype_override"],
+            "gate accept clears the upgrade override. If this is still "
+            "QUALITY_UPGRADE_TIERS the gate requeued despite reaching "
+            "EXCELLENT — check rank_cfg.gate_min_rank and the avg/min "
+            "metric policy.")
+        # verified_lossless stays False — we reached DONE via bitrate rank,
+        # not via a FLAC → V0 verification path.
+        self.assertFalse(row["verified_lossless"])
 
 
 if __name__ == "__main__":
