@@ -232,7 +232,7 @@ class TestFakePipelineDBDiscogs(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, mb_release_id="abc-uuid"))
         result = db.get_request_by_mb_release_id("abc-uuid")
-        self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result["id"], 1)
 
     def test_get_request_by_mb_release_id_not_found(self):
@@ -244,7 +244,7 @@ class TestFakePipelineDBDiscogs(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, discogs_release_id="12345"))
         result = db.get_request_by_discogs_release_id("12345")
-        self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result["id"], 1)
 
     def test_get_request_by_discogs_release_id_not_found(self):

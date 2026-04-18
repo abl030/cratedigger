@@ -69,9 +69,11 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
             a["pipeline_status"] = None
             a["pipeline_id"] = None
         # Codec-aware rank for the in-library badge.
-        fmt = a.get("formats") or ""
-        br_bps = a.get("min_bitrate") or 0
-        kbps = (br_bps // 1000) if br_bps else 0
+        fmt_raw = a.get("formats")
+        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
+        br_raw = a.get("min_bitrate")
+        br_bps = br_raw if isinstance(br_raw, int) else 0
+        kbps = br_bps // 1000
         a["library_rank"] = srv.compute_library_rank(fmt, kbps)
     h._json({"albums": albums})  # type: ignore[attr-defined]
 
@@ -271,10 +273,13 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
         beets_ids = b.get_album_ids_by_mbids([release_id])
         data["beets_album_id"] = beets_ids.get(release_id)
         quality = b.check_mbids_detail([release_id]).get(release_id) or {}
-        data["library_format"] = quality.get("beets_format") or ""
-        data["library_min_bitrate"] = quality.get("beets_bitrate") or 0
-        data["library_rank"] = srv.compute_library_rank(
-            data["library_format"], data["library_min_bitrate"])
+        fmt_raw = quality.get("beets_format")
+        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
+        br_raw = quality.get("beets_bitrate")
+        br = br_raw if isinstance(br_raw, int) else 0
+        data["library_format"] = fmt
+        data["library_min_bitrate"] = br
+        data["library_rank"] = srv.compute_library_rank(fmt, br)
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
@@ -360,10 +365,13 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
         beets_ids = b.get_album_ids_by_mbids([release_id])
         data["beets_album_id"] = beets_ids.get(release_id)
         quality = b.check_mbids_detail([release_id]).get(release_id) or {}
-        data["library_format"] = quality.get("beets_format") or ""
-        data["library_min_bitrate"] = quality.get("beets_bitrate") or 0
-        data["library_rank"] = srv.compute_library_rank(
-            data["library_format"], data["library_min_bitrate"])
+        fmt_raw = quality.get("beets_format")
+        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
+        br_raw = quality.get("beets_bitrate")
+        br = br_raw if isinstance(br_raw, int) else 0
+        data["library_format"] = fmt
+        data["library_min_bitrate"] = br
+        data["library_rank"] = srv.compute_library_rank(fmt, br)
         tracks = b.get_tracks_by_mb_release_id(release_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
