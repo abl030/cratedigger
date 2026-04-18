@@ -284,6 +284,14 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     (beets' own field name); this Struct exposes it as `.mbid` for
     continuity with existing Python callers. msgspec handles both the
     rename and the strict `str` validation.
+
+    JSONB format note: rows written by `ValidationResult.to_json()`
+    AFTER commit 48914ca (PR #100) use the key `album_id`; earlier rows
+    use `mbid`. No production code round-trips old rows back through
+    `ValidationResult.from_dict` (web routes parse the raw dict), so
+    this is a forward-only format change. If you ever need to decode
+    pre-48914ca rows via msgspec, either pre-rename the key or add
+    `"mbid"` as a secondary key on the Struct.
     """
     # Core identity
     mbid: str = ""
