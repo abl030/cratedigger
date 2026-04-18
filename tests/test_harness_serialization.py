@@ -42,8 +42,8 @@ for name, mock in _beets_mocks.items():
 setattr(sys.modules["beets.importer.session"], "ImportSession",
         type("ImportSession", (object,), {}))
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "harness"))
-import beets_harness  # noqa: E402
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from harness import beets_harness  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

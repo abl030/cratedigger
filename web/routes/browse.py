@@ -6,17 +6,11 @@ Both are enriched with library/pipeline status via check_beets_library() and che
 """
 from __future__ import annotations
 
-import os
 import re
-import sys
 from typing import TYPE_CHECKING
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "lib"))
-
-import mb as mb_api  # noqa: E402
-import discogs as discogs_api  # noqa: E402
-from lib.artist_compare import annotate_in_library, merge_discographies  # noqa: E402
+from web import discogs as discogs_api
+from lib.artist_compare import annotate_in_library, merge_discographies
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -29,7 +23,7 @@ def _server():
     check_beets_library(), check_pipeline() goes through this so that
     test mocks on web.server.* are respected.
     """
-    from web import server  # type: ignore[import-not-found]
+    from web import server
     return server
 
 

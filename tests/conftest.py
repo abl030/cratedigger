@@ -10,9 +10,10 @@ import os
 import shutil
 import sys
 
-# Make this available to all test modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+# Put repo root on sys.path so `from lib.X import Y` and `from scripts.X import Y`
+# resolve. Do NOT add lib/ or scripts/ directly — that would reintroduce the
+# issue #95 dual-load footgun (module reachable as both `quality` and `lib.quality`).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Try to start ephemeral PostgreSQL if tools are available
 _pg = None

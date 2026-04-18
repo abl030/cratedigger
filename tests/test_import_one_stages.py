@@ -12,7 +12,6 @@ import sys
 import unittest
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LIB_DIR = os.path.join(ROOT_DIR, "lib")
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 
 sys.path.insert(0, ROOT_DIR)
@@ -20,32 +19,36 @@ sys.path.insert(0, HARNESS_DIR)
 
 
 class TestImportBootstrap(unittest.TestCase):
-    """Standalone harness imports should bootstrap the repo root."""
+    """Standalone harness imports should bootstrap the repo root so lib.* resolves.
 
-    def test_harness_only_import_bootstraps_lib_package(self):
-        module_names = ["import_one", "lib", "lib.beets_db", "lib.quality", "lib.spectral_check"]
-        saved_modules = {name: sys.modules.get(name) for name in module_names}
-        saved_path = list(sys.path)
-        try:
-            for name in module_names:
-                sys.modules.pop(name, None)
-            sys.path[:] = [p for p in sys.path if p not in (ROOT_DIR, LIB_DIR, HARNESS_DIR)]
-            sys.path.insert(0, HARNESS_DIR)
+    The bootstrap deliberately does NOT add ``lib/`` to sys.path — doing so
+    would reintroduce the issue #95 dual-load footgun where a module is
+    reachable under both ``quality`` and ``lib.quality``.
+    """
 
-            import_one = importlib.import_module("import_one")
+    def test_standalone_invocation_resolves_lib_imports(self):
+        """Running `python harness/import_one.py` directly must resolve lib.*.
 
-            self.assertEqual(import_one.ROOT_DIR, ROOT_DIR)
-            self.assertIn(ROOT_DIR, sys.path)
-            self.assertIn(LIB_DIR, sys.path)
-            spectral_check = importlib.import_module("lib.spectral_check")
-            self.assertTrue(callable(spectral_check.analyze_album))
-        finally:
-            sys.path[:] = saved_path
-            for name in module_names:
-                sys.modules.pop(name, None)
-            for name, module in saved_modules.items():
-                if module is not None:
-                    sys.modules[name] = module
+        Python puts the script's directory (``harness/``) first on sys.path,
+        not the repo root. ``_bootstrap_import_paths()`` inserts the repo
+        root so ``from lib.X import Y`` resolves even without PYTHONPATH.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, os\n"
+             f"sys.path.insert(0, {HARNESS_DIR!r})\n"
+             "import import_one\n"
+             "assert 'lib.quality' in sys.modules\n"
+             "assert 'lib.beets_db' in sys.modules\n"
+             f"assert {ROOT_DIR!r} in sys.path\n"
+             "print('OK')\n"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"Standalone import_one import failed:\nstdout:{proc.stdout}\nstderr:{proc.stderr}"
+        )
+        self.assertIn("OK", proc.stdout)
 
 
 # ============================================================================
@@ -56,17 +59,17 @@ class TestStageResult(unittest.TestCase):
     """Test the StageResult dataclass."""
 
     def test_terminal_when_set(self):
-        from import_one import StageResult
+        from harness.import_one import StageResult
         r = StageResult(decision="path_missing", exit_code=3, terminal=True)
         self.assertTrue(r.is_terminal)
 
     def test_not_terminal_when_continue(self):
-        from import_one import StageResult
+        from harness.import_one import StageResult
         r = StageResult()
         self.assertFalse(r.is_terminal)
 
     def test_default_values(self):
-        from import_one import StageResult
+        from harness.import_one import StageResult
         r = StageResult()
         self.assertEqual(r.decision, "continue")
         self.assertEqual(r.exit_code, 0)
@@ -82,25 +85,25 @@ class TestPreflightDecision(unittest.TestCase):
     """Test the preflight stage decision logic (pure)."""
 
     def test_already_in_beets_no_path(self):
-        from import_one import preflight_decision
+        from harness.import_one import preflight_decision
         r = preflight_decision(already_in_beets=True, path_exists=False)
         self.assertEqual(r.decision, "preflight_existing")
         self.assertEqual(r.exit_code, 0)
 
     def test_not_in_beets_no_path(self):
-        from import_one import preflight_decision
+        from harness.import_one import preflight_decision
         r = preflight_decision(already_in_beets=False, path_exists=False)
         self.assertEqual(r.decision, "path_missing")
         self.assertEqual(r.exit_code, 3)
 
     def test_path_exists_continue(self):
-        from import_one import preflight_decision
+        from harness.import_one import preflight_decision
         r = preflight_decision(already_in_beets=True, path_exists=True)
         self.assertEqual(r.decision, "continue")
         self.assertFalse(r.is_terminal)
 
     def test_not_in_beets_path_exists(self):
-        from import_one import preflight_decision
+        from harness.import_one import preflight_decision
         r = preflight_decision(already_in_beets=False, path_exists=True)
         self.assertEqual(r.decision, "continue")
         self.assertFalse(r.is_terminal)
@@ -114,20 +117,20 @@ class TestConversionDecision(unittest.TestCase):
     """Test post-conversion decision (pure)."""
 
     def test_failed_conversion(self):
-        from import_one import conversion_decision
+        from harness.import_one import conversion_decision
         r = conversion_decision(converted=3, failed=1)
         self.assertEqual(r.decision, "conversion_failed")
         self.assertEqual(r.exit_code, 1)
         self.assertTrue(r.is_terminal)
 
     def test_successful_conversion(self):
-        from import_one import conversion_decision
+        from harness.import_one import conversion_decision
         r = conversion_decision(converted=3, failed=0)
         self.assertEqual(r.decision, "continue")
         self.assertFalse(r.is_terminal)
 
     def test_no_flacs(self):
-        from import_one import conversion_decision
+        from harness.import_one import conversion_decision
         r = conversion_decision(converted=0, failed=0)
         self.assertEqual(r.decision, "continue")
         self.assertFalse(r.is_terminal)
@@ -144,8 +147,8 @@ class TestQualityDecisionStage(unittest.TestCase):
     """
 
     def test_downgrade_exit_5(self):
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         new = AudioQualityMeasurement(min_bitrate_kbps=192)
         existing = AudioQualityMeasurement(min_bitrate_kbps=320)
         r = quality_decision_stage(new, existing, is_transcode=False)
@@ -154,8 +157,8 @@ class TestQualityDecisionStage(unittest.TestCase):
         self.assertTrue(r.is_terminal)
 
     def test_transcode_downgrade_exit_6(self):
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         new = AudioQualityMeasurement(min_bitrate_kbps=128)
         existing = AudioQualityMeasurement(min_bitrate_kbps=192)
         r = quality_decision_stage(new, existing, is_transcode=True)
@@ -164,8 +167,8 @@ class TestQualityDecisionStage(unittest.TestCase):
         self.assertTrue(r.is_terminal)
 
     def test_import_continues(self):
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
         existing = AudioQualityMeasurement(min_bitrate_kbps=192)
         r = quality_decision_stage(new, existing, is_transcode=False)
@@ -174,8 +177,8 @@ class TestQualityDecisionStage(unittest.TestCase):
         self.assertFalse(r.is_terminal)
 
     def test_transcode_upgrade_continues(self):
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         new = AudioQualityMeasurement(min_bitrate_kbps=245)
         existing = AudioQualityMeasurement(min_bitrate_kbps=128)
         r = quality_decision_stage(new, existing, is_transcode=True)
@@ -184,8 +187,8 @@ class TestQualityDecisionStage(unittest.TestCase):
         self.assertFalse(r.is_terminal)
 
     def test_first_import_no_existing(self):
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
         r = quality_decision_stage(new, None, is_transcode=False)
         self.assertEqual(r.decision, "import")
@@ -194,8 +197,8 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_override_used_for_comparison(self):
         """Override bitrate should be used instead of existing when provided.
         Caller constructs existing with override bitrate already resolved."""
-        from import_one import quality_decision_stage
-        from quality import AudioQualityMeasurement
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
         # existing beets=320 but override=128 (spectral detected fake 320)
         # Caller resolves: existing gets 128. new=245 > 128, so upgrade.
         new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
@@ -215,7 +218,7 @@ class TestExistingMeasurementBuilder(unittest.TestCase):
         drive median too, otherwise a future MEDIAN-policy deployment would
         silently outvote the override and compare against the original median.
         """
-        from import_one import build_existing_measurement
+        from harness.import_one import build_existing_measurement
         from lib.beets_db import AlbumInfo
 
         info = AlbumInfo(
@@ -253,11 +256,11 @@ class TestFinalExitDecision(unittest.TestCase):
     """Test the final exit code after successful import."""
 
     def test_transcode_exit_6(self):
-        from import_one import final_exit_decision
+        from harness.import_one import final_exit_decision
         self.assertEqual(final_exit_decision(is_transcode=True), 6)
 
     def test_normal_exit_0(self):
-        from import_one import final_exit_decision
+        from harness.import_one import final_exit_decision
         self.assertEqual(final_exit_decision(is_transcode=False), 0)
 
 
@@ -273,7 +276,7 @@ class TestConversionTarget(unittest.TestCase):
     """Test conversion_target: what should lossless files become on disk?"""
 
     def _target(self, target_format=None, verified=False, vl_target=None):
-        from import_one import conversion_target
+        from harness.import_one import conversion_target
         return conversion_target(target_format, verified, vl_target)
 
     def test_default_is_none(self):
@@ -305,15 +308,15 @@ class TestShouldRunTargetConversion(unittest.TestCase):
     """Second conversion pass should skip the keep-lossless sentinel."""
 
     def test_none_skips_target_conversion(self):
-        from import_one import should_run_target_conversion
+        from harness.import_one import should_run_target_conversion
         self.assertFalse(should_run_target_conversion(None))
 
     def test_lossless_sentinel_skips_target_conversion(self):
-        from import_one import should_run_target_conversion
+        from harness.import_one import should_run_target_conversion
         self.assertFalse(should_run_target_conversion("lossless"))
 
     def test_real_target_runs_second_pass(self):
-        from import_one import should_run_target_conversion
+        from harness.import_one import should_run_target_conversion
         self.assertTrue(should_run_target_conversion("opus 128"))
 
 
@@ -325,22 +328,22 @@ class TestTargetCleanupDecision(unittest.TestCase):
     """When a target was configured but skipped (transcode), source files must be cleaned up."""
 
     def test_target_skipped_needs_cleanup(self):
-        from import_one import target_cleanup_decision
+        from harness.import_one import target_cleanup_decision
         self.assertTrue(target_cleanup_decision(
             target_achieved=False, target_was_configured=True, sources_kept=5))
 
     def test_no_target_configured_no_cleanup(self):
-        from import_one import target_cleanup_decision
+        from harness.import_one import target_cleanup_decision
         self.assertFalse(target_cleanup_decision(
             target_achieved=False, target_was_configured=False, sources_kept=5))
 
     def test_target_achieved_no_cleanup(self):
-        from import_one import target_cleanup_decision
+        from harness.import_one import target_cleanup_decision
         self.assertFalse(target_cleanup_decision(
             target_achieved=True, target_was_configured=True, sources_kept=5))
 
     def test_no_sources_no_cleanup(self):
-        from import_one import target_cleanup_decision
+        from harness.import_one import target_cleanup_decision
         self.assertFalse(target_cleanup_decision(
             target_achieved=False, target_was_configured=True, sources_kept=0))
 
@@ -353,7 +356,7 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
     def test_keep_source_preserves_flac(self):
         """With keep_source=True, FLAC files should remain after V0 conversion."""
         import tempfile
-        from import_one import convert_lossless, V0_SPEC
+        from harness.import_one import convert_lossless, V0_SPEC
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = os.path.join(tmpdir, "track01.flac")
             subprocess.run(
@@ -372,7 +375,7 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
     def test_default_removes_flac(self):
         """Default behavior (keep_source=False) removes FLAC after conversion."""
         import tempfile
-        from import_one import convert_lossless, V0_SPEC
+        from harness.import_one import convert_lossless, V0_SPEC
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = os.path.join(tmpdir, "track01.flac")
             subprocess.run(
@@ -399,25 +402,25 @@ class TestFindTargetCandidate(unittest.TestCase):
 
     def test_int_album_id_matches_str_target(self):
         """Discogs candidate with int album_id matches str DB mb_release_id."""
-        from import_one import _find_target_candidate
+        from harness.import_one import _find_target_candidate
         cands = [{"album_id": 2085134, "distance": 0.05}]
         self.assertEqual(_find_target_candidate(cands, "2085134"), 0)
 
     def test_str_album_id_matches_str_target(self):
         """MusicBrainz UUID path still works."""
-        from import_one import _find_target_candidate
+        from harness.import_one import _find_target_candidate
         uuid = "f100b6b0-6daa-4c9b-b33a-3e14c564cf58"
         cands = [{"album_id": uuid, "distance": 0.02}]
         self.assertEqual(_find_target_candidate(cands, uuid), 0)
 
     def test_no_match_returns_none(self):
-        from import_one import _find_target_candidate
+        from harness.import_one import _find_target_candidate
         cands = [{"album_id": 999999}, {"album_id": "other-uuid"}]
         self.assertIsNone(_find_target_candidate(cands, "2085134"))
 
     def test_picks_first_match_when_multiple(self):
         """Stable ordering: first match wins."""
-        from import_one import _find_target_candidate
+        from harness.import_one import _find_target_candidate
         cands = [
             {"album_id": "wrong"},
             {"album_id": 2085134},      # int, target match
@@ -426,7 +429,7 @@ class TestFindTargetCandidate(unittest.TestCase):
         self.assertEqual(_find_target_candidate(cands, "2085134"), 1)
 
     def test_empty_candidates_returns_none(self):
-        from import_one import _find_target_candidate
+        from harness.import_one import _find_target_candidate
         self.assertIsNone(_find_target_candidate([], "2085134"))
 
 

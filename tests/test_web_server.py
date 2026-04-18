@@ -348,7 +348,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["intent"], "lossless")
 
-    @patch("routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
     @patch("lib.import_dispatch.dispatch_import_from_db")
     def test_post_force_import_passes_source_username(self, mock_dispatch, _mock_resolve):
         self.mock_db.get_download_log_entry.return_value = {
@@ -734,7 +734,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
                                 "pipeline simulate response")
 
-    @patch("routes.pipeline.full_pipeline_decision")
+    @patch("web.routes.pipeline.full_pipeline_decision")
     def test_pipeline_simulate_threads_target_format(self, mock_simulate):
         mock_simulate.return_value = {
             "stage0_spectral_gate": "skipped_flac",
@@ -971,7 +971,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.mock_db.add_request.return_value = 501
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
 
-    @patch("routes.pipeline.mb_api.get_release")
+    @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_add_contract(self, mock_get_release):
         mock_get_release.return_value = {
             "release_group_id": "rg-1",
@@ -1001,7 +1001,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
 
-    @patch("routes.pipeline.discogs_api.get_release")
+    @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_contract(self, mock_get_release):
         self.mock_db.get_request_by_discogs_release_id.return_value = None
         mock_get_release.return_value = {
@@ -1035,7 +1035,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add discogs exists response")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_pipeline_update_contract(self, _mock_transition):
         status, data = self._post("/api/pipeline/update", {"id": 100, "status": "manual"})
 
@@ -1043,7 +1043,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_pipeline_upgrade_contract(self, _mock_transition):
         self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
 
@@ -1053,9 +1053,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
                                 "pipeline upgrade response")
 
-    @patch("routes.pipeline.apply_transition")
-    @patch("routes.pipeline.discogs_api.get_release")
-    @patch("routes.pipeline.mb_api.get_release")
+    @patch("web.routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.discogs_api.get_release")
+    @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_upgrade_discogs_new_request_uses_discogs_api(
         self, mock_mb_get, mock_dg_get, _mock_transition,
     ):
@@ -1087,7 +1087,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
                                 "pipeline upgrade response (discogs)")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_pipeline_set_quality_contract(self, _mock_transition):
         self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
 
@@ -1110,7 +1110,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_pipeline_ban_source_contract(self, _mock_transition):
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1121,7 +1121,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
                                 "pipeline ban-source response")
 
-    @patch("routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
     @patch("lib.import_dispatch.dispatch_import_from_db")
     def test_pipeline_force_import_contract(self, mock_dispatch, _mock_resolve):
         mock_dispatch.return_value = MagicMock(success=True, message="Import successful")
@@ -1177,7 +1177,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Upgrade --------------------------------------------------------
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_upgrade_preserves_stricter_override(self, mock_transition):
         """Upgrade on an imported album with override='lossless' must keep it."""
         self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
@@ -1191,7 +1191,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_upgrade_preserves_narrowed_override(self, mock_transition):
         """Upgrade must preserve a post-downgrade-narrow like 'lossless,mp3 v0'."""
         self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
@@ -1205,7 +1205,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless,mp3 v0")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_upgrade_falls_back_to_full_tiers_when_no_override(self, mock_transition):
         """Upgrade on an imported album with no override falls back to the full ladder."""
         from lib.quality import QUALITY_UPGRADE_TIERS
@@ -1224,7 +1224,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Update (status → wanted) ---------------------------------------
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_update_to_wanted_preserves_stricter_override(self, mock_transition):
         """Flipping an imported album back to wanted must preserve 'lossless'."""
         self.mock_db.get_request.return_value = make_request_row(
@@ -1239,7 +1239,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_update_to_wanted_falls_back_to_full_tiers_when_no_override(
             self, mock_transition):
         """Flipping imported→wanted with no override uses the full upgrade ladder."""
@@ -1260,7 +1260,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Ban source (regression pin) ------------------------------------
 
-    @patch("routes.pipeline.apply_transition")
+    @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_preserves_stricter_override(self, mock_transition):
         """Pin: ban_source already preserves override. Guard against future regression."""
         self.mock_db.get_request.return_value = make_request_row(
@@ -1289,8 +1289,8 @@ class TestManualImportRouteContracts(_WebServerCase):
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
         self.mock_db.get_by_status.side_effect = None
 
-    @patch("routes.imports.match_folders_to_requests")
-    @patch("routes.imports.scan_complete_folder")
+    @patch("web.routes.imports.match_folders_to_requests")
+    @patch("web.routes.imports.scan_complete_folder")
     def test_manual_import_scan_contract(self, mock_scan, mock_match):
         folder = FolderInfo(
             name="Test Artist - Test Album",
@@ -1465,7 +1465,7 @@ class TestBrowseRouteContracts(_WebServerCase):
         # server.py loads routes via `from routes import browse` (sys.path hack),
         # so the canonical module is `routes.browse`, not `web.routes.browse`.
         with patch("web.server.mb_api") as mock_mb, \
-                patch("routes.browse.discogs_api") as mock_dg:
+                patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
@@ -1504,7 +1504,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             "artist_credit": "Artist", "primary_artist_id": self.ARTIST_ID,
         }
         with patch("web.server.mb_api") as mock_mb, \
-                patch("routes.browse.discogs_api") as mock_dg:
+                patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Artist"}]
             mock_mb.get_artist_release_groups.return_value = [official_rg, bootleg_rg]
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
@@ -1899,9 +1899,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["tracks"][0], self.TRACK_REQUIRED_FIELDS,
                                 "beets album track")
 
-    @patch("routes.library.os.path.isdir", return_value=False)
-    @patch("routes.library.os.path.isfile", return_value=False)
-    @patch("routes.library.os.path.exists", return_value=True)
+    @patch("web.routes.library.os.path.isdir", return_value=False)
+    @patch("web.routes.library.os.path.isfile", return_value=False)
+    @patch("web.routes.library.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB.delete_album")
     def test_beets_delete_contract(
         self,
@@ -2040,7 +2040,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
 
-    @patch("routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
+    @patch("web.routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
     def test_relative_failed_path_uses_resolved_path(self, _mock_resolve):
         row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
         row["validation_result"]["failed_path"] = "failed_imports/Test"
@@ -2053,8 +2053,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertTrue(entry["files_exist"])
         self.assertEqual(entry["failed_path"], "/mnt/virtio/music/slskd/failed_imports/Test")
 
-    @patch("routes.imports.shutil.rmtree")
-    @patch("routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
+    @patch("web.routes.imports.shutil.rmtree")
+    @patch("web.routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
     def test_delete_relative_failed_path_removes_resolved_directory(self, _mock_resolve, mock_rmtree):
         entry = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         entry["validation_result"]["failed_path"] = "failed_imports/Test"

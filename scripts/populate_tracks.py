@@ -11,10 +11,11 @@ import sys
 import os
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-sys.path.insert(0, os.path.dirname(__file__))
-from pipeline_db import PipelineDB
-from pipeline_cli import fetch_mb_release, tracks_from_mb_release
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from lib.pipeline_db import PipelineDB
+from scripts.pipeline_cli import fetch_mb_release, tracks_from_mb_release
 
 DB_PATH = "/mnt/virtio/Music/pipeline.db"
 RATE_LIMIT_SECONDS = 0.1  # 100ms between requests
