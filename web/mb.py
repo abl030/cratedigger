@@ -17,11 +17,9 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-# Disambiguate from lib/cache.py (per-user folder cache). Use the
-# `web.` package-qualified path so pyright resolves to web/cache.py,
-# and so there's no ambiguity with `lib/cache.py` (which pyright sees
-# via `extraPaths: ["lib", ...]` in pyrightconfig.json).
-from web import cache as _cache  # type: ignore[import-not-found]
+# Use the `web.` package-qualified path to avoid any collision with
+# lib/cache.py (a different module — the per-user folder cache).
+from web import cache as _cache
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 USER_AGENT = "soularr-web/1.0"

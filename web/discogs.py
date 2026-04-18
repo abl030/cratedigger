@@ -16,7 +16,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from web import cache as _cache  # type: ignore[import-not-found]
+from web import cache as _cache
 
 DISCOGS_API_BASE = "https://discogs.ablz.au"
 USER_AGENT = "soularr-web/1.0"
