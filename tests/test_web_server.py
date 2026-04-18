@@ -1078,7 +1078,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         )
 
         self.assertEqual(status, 200)
-        mock_dg_get.assert_called_once_with(12856590)
+        mock_dg_get.assert_called_once_with(12856590, fresh=True)
         mock_mb_get.assert_not_called()
         # Confirm Discogs ID is mirrored into both columns for pipeline-compat
         add_kwargs = self.mock_db.add_request.call_args.kwargs
@@ -1138,6 +1138,96 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "pipeline delete response")
+
+    # -- fresh=True seam (Codex review on issue #101) ----------------
+
+    @patch("routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_fetches_release_fresh(self, mock_get_release):
+        """POST /api/pipeline/add (MusicBrainz) MUST bypass the 24h meta
+        cache — the fetched metadata is persisted into `album_requests`
+        and `request_tracks`. A stale cached payload from an earlier
+        browse would silently bake pre-correction artist / title / tracks
+        into the pipeline DB.
+        """
+        mock_get_release.return_value = {
+            "release_group_id": "rg-1",
+            "artist_id": "artist-1",
+            "artist_name": "Test Artist",
+            "title": "Test Album",
+            "year": 2024,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+
+        status, _data = self._post("/api/pipeline/add",
+                                   {"mb_release_id": "abc-123"})
+
+        self.assertEqual(status, 200)
+        mock_get_release.assert_called_once_with("abc-123", fresh=True)
+
+    @patch("routes.pipeline.discogs_api.get_release")
+    def test_pipeline_add_discogs_fetches_release_fresh(self, mock_get_release):
+        """POST /api/pipeline/add (Discogs) MUST bypass the 24h meta cache."""
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        mock_get_release.return_value = {
+            "artist_id": "3840",
+            "artist_name": "Radiohead",
+            "title": "OK Computer",
+            "year": 1997,
+            "country": "Europe",
+            "tracks": [{"title": "Airbag"}],
+        }
+
+        status, _data = self._post("/api/pipeline/add",
+                                   {"discogs_release_id": "83182"})
+
+        self.assertEqual(status, 200)
+        mock_get_release.assert_called_once_with(83182, fresh=True)
+
+    @patch("routes.pipeline.apply_transition")
+    @patch("routes.pipeline.mb_api.get_release")
+    def test_pipeline_upgrade_new_mb_fetches_release_fresh(
+            self, mock_get_release, _mock_transition):
+        """POST /api/pipeline/upgrade creating a brand-new MB request
+        MUST bypass the meta cache — same rationale as add."""
+        self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        self.mock_db.add_request.return_value = 999
+        mock_get_release.return_value = {
+            "artist_id": "a-1", "artist_name": "A", "title": "T",
+            "year": 2024, "country": "US", "tracks": [],
+        }
+
+        status, _data = self._post(
+            "/api/pipeline/upgrade",
+            {"mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+        )
+
+        self.assertEqual(status, 200)
+        mock_get_release.assert_called_once_with(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", fresh=True)
+
+    @patch("routes.pipeline.apply_transition")
+    @patch("routes.pipeline.discogs_api.get_release")
+    def test_pipeline_upgrade_new_discogs_fetches_release_fresh(
+            self, mock_get_release, _mock_transition):
+        """POST /api/pipeline/upgrade creating a brand-new Discogs request
+        MUST bypass the meta cache — same rationale as add."""
+        self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
+        self.mock_db.add_request.return_value = 999
+        mock_get_release.return_value = {
+            "id": "12856590", "title": "New.Old.Rare",
+            "artist_name": "Blueline Medic", "artist_id": "3640",
+            "year": 2010, "country": "Australia", "tracks": [],
+        }
+
+        status, _data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "12856590"},
+        )
+
+        self.assertEqual(status, 200)
+        mock_get_release.assert_called_once_with(12856590, fresh=True)
 
 
 class TestUserRequeueOverridePreservation(_WebServerCase):

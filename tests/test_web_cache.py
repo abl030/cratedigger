@@ -153,6 +153,44 @@ class TestMetaNamespace(_CacheTestBase):
             "no-op cache must call fetch every time (never cache-hit)")
 
 
+class TestMemoizeMetaFresh(_CacheTestBase):
+    """`fresh=True` is the bypass used by POST handlers that persist
+    metadata into the pipeline DB. A 24h stale cache read on an add /
+    upgrade path would silently bake yesterday's title / tracks into
+    `album_requests`. Flagged by Codex review on issue #101.
+    """
+
+    def test_fresh_skips_cache_read_and_repopulates(self) -> None:
+        calls: list[int] = []
+
+        def _fetch_v1() -> dict:
+            calls.append(1)
+            return {"title": "Old Title"}
+
+        def _fetch_v2() -> dict:
+            calls.append(2)
+            return {"title": "Corrected Title"}
+
+        # Warm the cache via a normal GET-style call.
+        first = self.cache.memoize_meta("mb:release:abc", _fetch_v1)
+        self.assertEqual(first, {"title": "Old Title"})
+        self.assertEqual(calls, [1])
+
+        # fresh=True MUST bypass the read and re-fetch.
+        second = self.cache.memoize_meta("mb:release:abc", _fetch_v2,
+                                         fresh=True)
+        self.assertEqual(second, {"title": "Corrected Title"},
+                         "fresh=True must ignore the cached value")
+        self.assertEqual(calls, [1, 2])
+
+        # And it must have repopulated the cache — a subsequent GET
+        # without fresh= sees the fresh value. Warms the cache on writes.
+        third = self.cache.memoize_meta("mb:release:abc", _fetch_v2)
+        self.assertEqual(third, {"title": "Corrected Title"})
+        self.assertEqual(calls, [1, 2],
+                         "cache must have been repopulated by fresh=True")
+
+
 class TestMetaIsolatedFromGroupInvalidation(_CacheTestBase):
     """Core guarantee for issue #101: MB/Discogs metadata cache must
     survive pipeline-state / library-state invalidation events.

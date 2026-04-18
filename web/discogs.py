@@ -242,8 +242,14 @@ def get_master_releases(master_id: int) -> dict:
     return _cache.memoize_meta(f"discogs:master:{master_id}", _fetch)
 
 
-def get_release(release_id: int) -> dict:
-    """Get full release details with tracks. Mirrors mb.get_release()."""
+def get_release(release_id: int, *, fresh: bool = False) -> dict:
+    """Get full release details with tracks. Mirrors mb.get_release().
+
+    `fresh=True` bypasses the cache. Used by POST handlers in
+    `web/routes/pipeline.py` that persist this metadata into the
+    pipeline DB — a 24h cache hit would silently write stale
+    artist/title/track data into `album_requests` / `request_tracks`.
+    """
     def _fetch() -> dict:
         data = _get(f"{DISCOGS_API_BASE}/api/releases/{release_id}")
         artists = data.get("artists", [])
@@ -277,7 +283,8 @@ def get_release(release_id: int) -> dict:
             "formats": data.get("formats", []),
         }
 
-    return _cache.memoize_meta(f"discogs:release:{release_id}", _fetch)
+    return _cache.memoize_meta(
+        f"discogs:release:{release_id}", _fetch, fresh=fresh)
 
 
 def get_artist_name(artist_id: int) -> str:

@@ -197,8 +197,14 @@ def get_release_group_releases(rg_mbid):
     return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:releases", _fetch)
 
 
-def get_release(release_mbid):
-    """Get full release details with tracks."""
+def get_release(release_mbid, *, fresh: bool = False):
+    """Get full release details with tracks.
+
+    `fresh=True` bypasses the cache. Used by POST handlers in
+    `web/routes/pipeline.py` that persist this metadata into the
+    pipeline DB — a 24h cache hit would silently write stale
+    artist/title/track data into `album_requests` / `request_tracks`.
+    """
     def _fetch() -> dict:
         data = _get(
             f"{MB_API_BASE}/release/{release_mbid}"
@@ -250,7 +256,8 @@ def get_release(release_mbid):
             "tracks": tracks,
         }
 
-    return _cache.memoize_meta(f"mb:release:{release_mbid}", _fetch)
+    return _cache.memoize_meta(
+        f"mb:release:{release_mbid}", _fetch, fresh=fresh)
 
 
 def get_artist_name(artist_mbid):
