@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "lib"))
 
 import mb as mb_api  # noqa: E402
 import discogs as discogs_api  # noqa: E402
-from lib.artist_compare import merge_discographies  # noqa: E402
+from lib.artist_compare import annotate_in_library, merge_discographies  # noqa: E402
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -65,6 +65,15 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     official_rg_ids = srv.mb_api.get_official_release_group_ids(artist_id)
     for rg in rgs:
         rg["has_official"] = rg["id"] in official_rg_ids
+    # Row-level in-library badge: requires the artist's library albums.
+    # Frontend passes ?name= to avoid an extra MB lookup; without it the
+    # name-fallback in get_albums_by_artist won't catch Discogs-tagged
+    # rows but UUID-tagged ones still match. Backwards-compatible: name
+    # is optional.
+    name = params.get("name", [""])[0].strip()
+    if name:
+        lib = srv.get_library_artist(name, artist_id)
+        annotate_in_library(rgs, [], lib)
     h._json({"release_groups": rgs})  # type: ignore[attr-defined]
 
 
@@ -210,6 +219,12 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     # Discogs has no bootleg/official distinction — mark all as official
     for m in masters:
         m["has_official"] = True
+    # Row-level in-library badge: same pattern as MB. Frontend passes
+    # ?name=; without it we still get the canonical name from Discogs API.
+    name = params.get("name", [""])[0].strip() or artist_name
+    if name:
+        lib = srv.get_library_artist(name, "")
+        annotate_in_library([], masters, lib)
     h._json({  # type: ignore[attr-defined]
         "artist_id": artist_id,
         "artist_name": artist_name,
@@ -310,6 +325,12 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     discogs_groups: list[dict] = []
     if discogs_id:
         discogs_groups = discogs_api.get_artist_releases(int(discogs_id))
+
+    # Row-level in-library badge — same as Discography sub-tab. Beets
+    # query is keyed by name with mbid for the UUID-match fast path.
+    if name:
+        lib = srv.get_library_artist(name, mbid)
+        annotate_in_library(mb_groups, discogs_groups, lib)
 
     merged = merge_discographies(mb_groups, discogs_groups)
 

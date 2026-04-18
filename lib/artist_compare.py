@@ -45,6 +45,56 @@ class CompareBuckets:
     discogs_only: list[dict]
 
 
+def annotate_in_library(
+    mb_groups: list[dict],
+    discogs_groups: list[dict],
+    library_albums: list[dict],
+) -> None:
+    """Mutate each row in mb_groups + discogs_groups to add `in_library: bool`.
+
+    A row is considered in-library if any beets album from this artist
+    matches it via:
+      - mb_releasegroupid (MB rows)
+      - mb_albumid (Discogs rows — beets stores numeric Discogs IDs there)
+      - normalized title (catches Discogs imports tagged with MB IDs and
+        cross-source matches the explicit ID lookup misses)
+
+    Mutates in place. Intended to be called once per request after the
+    discography + library albums are fetched, so the front end gets the
+    same in-library badge at the row level that the expanded pressings
+    view shows per pressing.
+    """
+    lib_rgids: set[str] = set()
+    lib_mbids: set[str] = set()
+    lib_titles: set[str] = set()
+    for a in library_albums:
+        rgid = a.get("mb_releasegroupid")
+        if rgid:
+            lib_rgids.add(str(rgid))
+        mbid = a.get("mb_albumid")
+        if mbid:
+            lib_mbids.add(str(mbid))
+        title = a.get("album", "")
+        if title:
+            lib_titles.add(normalize_title(title))
+
+    for rg in mb_groups:
+        rid = str(rg.get("id", ""))
+        title_norm = normalize_title(rg.get("title", ""))
+        rg["in_library"] = (
+            (rid and rid in lib_rgids)
+            or (title_norm and title_norm in lib_titles)
+        )
+
+    for master in discogs_groups:
+        mid = str(master.get("id", ""))
+        title_norm = normalize_title(master.get("title", ""))
+        master["in_library"] = (
+            (mid and mid in lib_mbids)
+            or (title_norm and title_norm in lib_titles)
+        )
+
+
 def merge_discographies(
     mb_groups: list[dict],
     discogs_groups: list[dict],

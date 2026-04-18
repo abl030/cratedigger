@@ -1402,6 +1402,31 @@ class TestBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["release_groups"][0], self.ARTIST_RG_REQUIRED_FIELDS,
                                 "artist release group")
 
+    def test_artist_release_groups_in_library_when_name_passed(self):
+        """When the frontend passes ?name=, each RG gets in_library: bool
+        based on a beets lookup. Without name, the field stays absent
+        (backwards-compatible)."""
+        release_group = {
+            "id": self.RG_ID, "title": "Owned Album", "type": "Album",
+            "secondary_types": [], "first_release_date": "2024",
+            "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
+        }
+        owned_album = {
+            "mb_albumid": "00000000-0000-0000-0000-000000000001",
+            "mb_releasegroupid": self.RG_ID,
+            "album": "Owned Album",
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.get_library_artist", return_value=[owned_album]):
+            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["release_groups"][0]["in_library"])
+
     def test_release_group_contract(self):
         release = {
             "id": self.RELEASE_ID,

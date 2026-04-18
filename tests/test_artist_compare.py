@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.artist_compare import (
     CompareBuckets,
+    annotate_in_library,
     extract_year,
     merge_discographies,
     normalize_title,
@@ -149,6 +150,63 @@ class TestMergeDiscographies(unittest.TestCase):
     def test_returns_dataclass(self):
         result = merge_discographies([], [])
         self.assertIsInstance(result, CompareBuckets)
+
+
+class TestAnnotateInLibrary(unittest.TestCase):
+    def test_mb_row_matched_by_release_group_id(self):
+        rg = {"id": "rg-uuid", "title": "OK Computer"}
+        lib = [{"mb_releasegroupid": "rg-uuid", "album": "Different Title"}]
+        annotate_in_library([rg], [], lib)
+        self.assertTrue(rg["in_library"])
+
+    def test_mb_row_matched_by_title_when_no_rgid(self):
+        rg = {"id": "rg-uuid", "title": "OK Computer"}
+        lib = [{"mb_releasegroupid": None, "album": "OK Computer"}]
+        annotate_in_library([rg], [], lib)
+        self.assertTrue(rg["in_library"])
+
+    def test_mb_row_unmatched(self):
+        rg = {"id": "rg-uuid", "title": "Unowned"}
+        lib = [{"mb_releasegroupid": "other", "album": "Other Album"}]
+        annotate_in_library([rg], [], lib)
+        self.assertFalse(rg["in_library"])
+
+    def test_discogs_row_matched_by_mb_albumid(self):
+        # Beets stores numeric Discogs release IDs in mb_albumid for
+        # Discogs-imported albums.
+        master = {"id": "12345", "title": "OK Computer"}
+        lib = [{"mb_albumid": "12345", "album": "Different Title"}]
+        annotate_in_library([], [master], lib)
+        self.assertTrue(master["in_library"])
+
+    def test_discogs_row_matched_by_title(self):
+        master = {"id": "99999", "title": "OK Computer"}
+        lib = [{"mb_albumid": "different-uuid", "album": "OK Computer"}]
+        annotate_in_library([], [master], lib)
+        self.assertTrue(master["in_library"])
+
+    def test_title_normalization(self):
+        # "Text_Bomb" library title matches "Text Bomb" RG title
+        rg = {"id": "rg", "title": "Text Bomb"}
+        lib = [{"mb_releasegroupid": None, "album": "Text_Bomb"}]
+        annotate_in_library([rg], [], lib)
+        self.assertTrue(rg["in_library"])
+
+    def test_empty_library(self):
+        rg = {"id": "rg", "title": "X"}
+        master = {"id": "1", "title": "X"}
+        annotate_in_library([rg], [master], [])
+        self.assertFalse(rg["in_library"])
+        self.assertFalse(master["in_library"])
+
+    def test_handles_missing_fields(self):
+        # Library album with no mb_releasegroupid / mb_albumid / album —
+        # should not crash.
+        annotate_in_library(
+            [{"id": "rg", "title": "X"}],
+            [{"id": "1", "title": "X"}],
+            [{}],
+        )
 
 
 if __name__ == "__main__":

@@ -162,7 +162,13 @@ export async function loadBrowseDiscography(aid, name) {
   el.innerHTML = '<div class="loading">Loading discography...</div>';
   try {
     const isDiscogs = state.browseSource === 'discogs';
-    const artistUrl = isDiscogs ? `${API}/api/discogs/artist/${aid}` : `${API}/api/artist/${aid}`;
+    // Pass ?name= to the discography endpoint so the backend can mark
+    // each row with in_library (otherwise the row-level "in library"
+    // badge stays off — the backend won't make the extra MB lookup).
+    const nameParam = `?name=${encodeURIComponent(name)}`;
+    const artistUrl = isDiscogs
+      ? `${API}/api/discogs/artist/${aid}${nameParam}`
+      : `${API}/api/artist/${aid}${nameParam}`;
     // Beets only stores MB UUIDs in mb_albumartistid; sending the numeric
     // Discogs ID would skip the UUID match and only return Discogs-tagged
     // albums, hiding the rest of the user's catalog. Pass empty mbid on the
@@ -268,6 +274,10 @@ function compareRow(mb, discogs) {
   const badges = [];
   if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`);
   if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`);
+  // Row-level in-library badge — true if EITHER side is in library
+  // (same logical album, owned via either source).
+  const inLibrary = (mb && mb.in_library) || (discogs && discogs.in_library);
+  const libBadge = inLibrary ? '<span class="badge badge-library">in library</span>' : '';
   const mbId = mb ? mb.id : '';
   const dgId = discogs ? discogs.id : '';
   return `
@@ -278,6 +288,7 @@ function compareRow(mb, discogs) {
         <span class="rg-year">${year}</span>
         <span class="rg-title">${esc(title)}</span>
         ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
+        ${libBadge}
         <span style="margin-left:auto;display:flex;gap:4px;">${badges.join('')}</span>
       </div>
       <div id="cmp-pressings-${slot}" style="display:none;padding:4px 0 8px 16px;">

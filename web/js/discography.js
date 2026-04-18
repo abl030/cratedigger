@@ -38,10 +38,11 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
       const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
         ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
+      const libBadge = rg.in_library ? '<span class="badge badge-library">in library</span>' : '';
       return `
         <div class="rg">
           <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
-            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}
+            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${libBadge}
           </div>
           <div class="releases" id="rel-${rg.id}"></div>
         </div>
