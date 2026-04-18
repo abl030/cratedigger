@@ -119,17 +119,18 @@ def annotate_in_library(
             master["in_library"] = False
 
 
-def _dedupe_within_source(rows: list[dict], year_tolerance: int) -> list[dict]:
-    """Collapse same-normalized-title + year-within-tolerance duplicates.
+def _dedupe_within_source(rows: list[dict]) -> list[dict]:
+    """Collapse same-normalized-title + same-year + same-type duplicates.
 
-    Within a single source, multiple entries with effectively the same
-    title (e.g. "Twist And Shout" and "Twist and Shout" — different
-    Discogs masters from data-entry inconsistency) read as duplicates
-    once normalised. Keep the first (input order) as canonical, drop
-    the rest. Matches the merge function's same-title+year-tolerance
-    rule so a row that survives dedup also survives cross-source merge.
+    Only case-only or punctuation-only title variants of the SAME
+    release (same year, same type) collapse — "Twist And Shout" Album
+    1964 and "Twist and Shout" Album 1964 become one. Legitimately
+    different release groups (EP 1963 vs Album 1964 of the same name,
+    or re-releases in different years) stay separate.
+
+    Keep first (input order) as canonical. Missing title: passthrough.
     """
-    seen: list[tuple[str, int | None]] = []
+    seen: set[tuple[str, int | None, str]] = set()
     result: list[dict] = []
     for r in rows:
         norm = normalize_title(r.get("title", ""))
@@ -137,43 +138,40 @@ def _dedupe_within_source(rows: list[dict], year_tolerance: int) -> list[dict]:
             result.append(r)
             continue
         year = extract_year(r.get("first_release_date", ""))
-        is_dup = False
-        for s_norm, s_year in seen:
-            if s_norm != norm:
-                continue
-            if year is None or s_year is None:
-                is_dup = True
-                break
-            if abs(year - s_year) <= year_tolerance:
-                is_dup = True
-                break
-        if not is_dup:
-            seen.append((norm, year))
-            result.append(r)
+        type_ = (r.get("type") or "").lower()
+        key = (norm, year, type_)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(r)
     return result
 
 
 def merge_discographies(
     mb_groups: list[dict],
     discogs_groups: list[dict],
-    year_tolerance: int = 2,
 ) -> CompareBuckets:
-    """Bucket MB + Discogs release groups by fuzzy title+year match.
+    """Bucket MB + Discogs release groups by exact title+year match.
 
-    Pre-pass: collapse within-source duplicates (e.g. two Discogs
-    masters that only differ in title casing) so the cross-source
-    merge sees one logical row per album per source.
+    Pre-pass: collapse within-source same-title+year+type duplicates
+    via _dedupe_within_source so the cross-source merge sees one row
+    per logical album per source.
 
-    Match rule, in order:
+    Match rule:
       1. Normalized title equality is required.
-      2. If both years are known: |mb_year - discogs_year| <= year_tolerance.
-      3. If both years are unknown: title alone is enough.
-      4. If exactly one year is known: skip — too ambiguous to merge safely.
+      2. Years must match exactly (or both be unknown for a weak
+         title-only fallback). Any year mismatch, even by 1 year, splits
+         into two rows — the alternative (tolerance) produced false
+         positives like MB "Twist and Shout" Album 1964 matching
+         Discogs "Twist And Shout" EP 1963.
+      3. Among exact-year candidates, prefer the one with matching type
+         (Album↔Album beats Album↔EP) so MB Album 1964 picks Discogs
+         Album 1964 over Discogs EP 1964 when both exist.
 
     Each Discogs entry can match at most one MB entry.
     """
-    mb_groups = _dedupe_within_source(mb_groups, year_tolerance)
-    discogs_groups = _dedupe_within_source(discogs_groups, year_tolerance)
+    mb_groups = _dedupe_within_source(mb_groups)
+    discogs_groups = _dedupe_within_source(discogs_groups)
 
     by_norm: dict[str, list[int]] = defaultdict(list)
     for i, d in enumerate(discogs_groups):
@@ -188,22 +186,39 @@ def merge_discographies(
     for m in mb_groups:
         norm = normalize_title(m.get("title", ""))
         m_year = extract_year(m.get("first_release_date", ""))
-        match_idx: int | None = None
+        m_type = (m.get("type") or "").lower()
+
+        # Score each available candidate; highest wins. A negative score
+        # disqualifies. Exact year required (or both unknown).
+        best_idx: int | None = None
+        best_score = -1
         for di in by_norm.get(norm, []):
             if di in matched:
                 continue
-            d_year = extract_year(discogs_groups[di].get("first_release_date", ""))
-            if m_year is not None and d_year is not None:
-                if abs(m_year - d_year) <= year_tolerance:
-                    match_idx = di
-                    break
-            elif m_year is None and d_year is None:
-                match_idx = di
-                break
-            # Mixed (one known, one unknown) — skip; ambiguous.
-        if match_idx is not None:
-            matched.add(match_idx)
-            both.append({"mb": m, "discogs": discogs_groups[match_idx]})
+            d = discogs_groups[di]
+            d_year = extract_year(d.get("first_release_date", ""))
+            d_type = (d.get("type") or "").lower()
+
+            if m_year is None and d_year is None:
+                score = 1  # weakest — title-only match, years unknown
+            elif m_year is not None and d_year is not None and m_year == d_year:
+                score = 10  # exact year match
+            else:
+                # Year mismatch (including partial-unknown). Reject.
+                continue
+
+            # Type match bonus — only affects tie-breaking among
+            # otherwise-equal candidates.
+            if m_type and d_type and m_type == d_type:
+                score += 5
+
+            if score > best_score:
+                best_score = score
+                best_idx = di
+
+        if best_idx is not None:
+            matched.add(best_idx)
+            both.append({"mb": m, "discogs": discogs_groups[best_idx]})
         else:
             mb_only.append(m)
 

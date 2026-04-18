@@ -64,13 +64,16 @@ class TestMergeDiscographies(unittest.TestCase):
         self.assertEqual(result.mb_only, [])
         self.assertEqual(result.discogs_only, [])
 
-    def test_year_within_tolerance(self):
-        # 2000 vs 2002 — agent observed this exact case for Blueline Medic
+    def test_any_year_mismatch_splits(self):
+        """Exact year required. Year-tolerance produced false positives
+        like MB Album 1964 matching Discogs EP 1963 for 'Twist and Shout'."""
         result = merge_discographies(
             [_mb("A Working Title in Green", "2002")],
             [_dg("A Working Title In Green", "2000")],
         )
-        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both, [])
+        self.assertEqual(len(result.mb_only), 1)
+        self.assertEqual(len(result.discogs_only), 1)
 
     def test_year_outside_tolerance(self):
         result = merge_discographies(
@@ -181,6 +184,41 @@ class TestMergeDiscographies(unittest.TestCase):
             [_dg("Self Titled", "1990"), _dg("Self Titled", "2010")],
         )
         self.assertEqual(len(result.discogs_only), 2)
+
+    def test_within_source_dedup_keeps_different_types(self):
+        """EP 1963 and Album 1963 of the same name are legitimately
+        different release groups even when the title normalises to the
+        same thing. Dedup must NOT collapse them."""
+        ep = {**_dg("Twist And Shout", "1963", id="dg-ep"), "type": "EP"}
+        album = {**_dg("Twist And Shout", "1963", id="dg-album"), "type": "Album"}
+        result = merge_discographies([], [ep, album])
+        self.assertEqual(len(result.discogs_only), 2)
+
+    def test_beatles_mb_album_picks_discogs_album_over_ep(self):
+        """The root user bug: MB 'Twist and Shout' Album 1964 was
+        matching Discogs 'Twist And Shout' EP 1963 (within year
+        tolerance, first in input order) instead of Discogs Album 1964.
+        Exact-year requirement + same-type scoring fixes it."""
+        mb = {**_mb("Twist and Shout", "1964", id="mb-album"), "type": "Album"}
+        dg_ep_63 = {**_dg("Twist And Shout", "1963", id="dg-ep"), "type": "EP"}
+        dg_single_64 = {**_dg("Twist And Shout", "1964", id="dg-single"), "type": "Single"}
+        dg_album_64 = {**_dg("Twist And Shout", "1964", id="dg-album"), "type": "Album"}
+        # EP comes first in input order — previously would have matched.
+        result = merge_discographies([mb], [dg_ep_63, dg_single_64, dg_album_64])
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0]["discogs"]["id"], "dg-album")
+        # EP and Single stay as discogs-only rows
+        self.assertEqual({r["id"] for r in result.discogs_only},
+                         {"dg-ep", "dg-single"})
+
+    def test_exact_year_without_same_type_still_matches(self):
+        """When only one exact-year candidate exists, it matches even
+        if types don't match — type is a preference, not a requirement."""
+        mb = {**_mb("Side Project", "2020", id="mb-1"), "type": "Album"}
+        dg = {**_dg("Side Project", "2020", id="dg-1"), "type": "EP"}
+        result = merge_discographies([mb], [dg])
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0]["discogs"]["id"], "dg-1")
 
 
 class TestAnnotateInLibrary(unittest.TestCase):
