@@ -165,6 +165,8 @@ export function renderSimulatorForm() {
       <span class="ds-preset" onclick="window.dsPreset('cbr320')">CBR 320 (no spectral)</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_v0')">VBR V0 MP3</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_transcode')">VBR Transcode (#93)</span>
+      <span class="ds-preset" onclick="window.dsPreset('audio_corrupt')">Audio corrupt (#91)</span>
+      <span class="ds-preset" onclick="window.dsPreset('nested_force')">Nested force-import (#91)</span>
     </div>
     <div class="ds-form" id="ds-form">
       <div class="ds-field">
@@ -245,6 +247,35 @@ export function renderSimulatorForm() {
         <label>Verified lossless target</label>
         <input type="text" id="ds-verified_lossless_target" placeholder="e.g. opus 128">
       </div>
+      <div class="ds-field">
+        <label>Audio check mode</label>
+        <select id="ds-audio_check_mode">
+          <option value="normal">normal</option>
+          <option value="off">off (skipped)</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Audio corrupt? (ffmpeg fails)</label>
+        <select id="ds-audio_corrupt">
+          <option value="false">No</option>
+          <option value="true">Yes</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Import mode</label>
+        <select id="ds-import_mode">
+          <option value="auto">auto</option>
+          <option value="force">force</option>
+          <option value="manual">manual</option>
+        </select>
+      </div>
+      <div class="ds-field">
+        <label>Nested audio folders?</label>
+        <select id="ds-has_nested_audio">
+          <option value="false">No (flat)</option>
+          <option value="true">Yes (subdirs)</option>
+        </select>
+      </div>
       <div class="ds-run"><button onclick="window.runSimulator()">Run Pipeline</button></div>
     </div>
     <div id="ds-results"></div>
@@ -256,6 +287,16 @@ export function renderSimulatorForm() {
 // the field — a stale value from a prior run would otherwise produce the
 // wrong stage0_spectral_gate decision (issue #93 codex round 3).
 // FLAC presets set avg_bitrate='' since the gate skips FLAC unconditionally.
+//
+// Preimport fields (audio_check_mode / audio_corrupt / import_mode /
+// has_nested_audio, issue #91) are set explicitly for the same reason —
+// switching from the audio_corrupt preset back to a normal scenario must
+// reset the corruption flag so downstream stages run again.
+/** @type {Object<string, string>} */
+const _preimport_defaults = {
+  audio_check_mode: 'normal', audio_corrupt: 'false',
+  import_mode: 'auto', has_nested_audio: 'false',
+};
 export const DS_PRESETS = {
   virginia: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
@@ -265,6 +306,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults,
   },
   mtngoats: {
     is_flac: 'false', min_bitrate: '138', is_cbr: 'false', avg_bitrate: '138',
@@ -274,6 +316,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults,
   },
   genuine_flac: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
@@ -283,6 +326,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
+    ..._preimport_defaults,
   },
   cbr320: {
     is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
@@ -292,6 +336,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults,
   },
   vbr_v0: {
     // Genuine V0: avg 245 >= threshold → stage 0 = skipped_vbr_high_avg.
@@ -302,6 +347,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults,
   },
   vbr_transcode: {
     // Go! Team shape (issue #93): avg 182 < threshold → stage 0 = would_run,
@@ -313,6 +359,30 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults,
+  },
+  audio_corrupt: {
+    // Issue #91: audio integrity fails before any format branching runs.
+    is_flac: 'false', min_bitrate: '256', is_cbr: 'false', avg_bitrate: '256',
+    spectral_grade: '', spectral_bitrate: '',
+    existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults, audio_corrupt: 'true',
+  },
+  nested_force: {
+    // Issue #91: force-import of a multi-disc layout — rejected early so the
+    // user flattens the folder rather than getting a misclassified import.
+    is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
+    spectral_grade: '', spectral_bitrate: '',
+    existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '',
+    converted_count: '0', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: '',
+    ..._preimport_defaults, import_mode: 'force', has_nested_audio: 'true',
   },
 };
 
@@ -339,7 +409,10 @@ export async function runSimulator() {
     'existing_min_bitrate','existing_avg_bitrate',
     'existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
-    'target_format','verified_lossless_target'];
+    'target_format','verified_lossless_target',
+    // Preimport gate inputs (issue #91) — audio integrity + nested layout.
+    'audio_check_mode','audio_corrupt',
+    'import_mode','has_nested_audio'];
   const params = new URLSearchParams();
   for (const f of fields) {
     const v = /** @type {HTMLInputElement|null} */ (document.getElementById('ds-' + f))?.value;
@@ -365,9 +438,10 @@ export function renderSimulatorResults(r) {
   function stageColor(val) {
     if (!val) return 'ds-skip';
     if (['import', 'import_upgrade', 'import_no_exist', 'accept',
-         'preflight_existing',
-         'skipped_vbr_high_avg', 'skipped_flac'].includes(val)) return 'ds-green';
-    if (['reject', 'downgrade', 'transcode_downgrade'].includes(val)) return 'ds-red';
+         'preflight_existing', 'pass',
+         'skipped_vbr_high_avg', 'skipped_flac', 'skipped_auto'].includes(val)) return 'ds-green';
+    if (['reject', 'downgrade', 'transcode_downgrade',
+         'reject_corrupt', 'reject_nested'].includes(val)) return 'ds-red';
     return 'ds-amber';
   }
   function stageHtml(title, val) {
@@ -382,6 +456,8 @@ export function renderSimulatorResults(r) {
   }
 
   let html = '<div class="ds-results">';
+  html += stageHtml('Preimport: Audio Integrity', r.preimport_audio);
+  html += stageHtml('Preimport: Nested Layout', r.preimport_nested);
   html += stageHtml('Stage 0: Spectral Gate Trigger', r.stage0_spectral_gate);
   html += stageHtml('Stage 1: Pre-import Spectral', r.stage1_spectral);
   html += stageHtml('Stage 2: Import Decision', r.stage2_import);

@@ -754,6 +754,17 @@ def cmd_quality(db, args):
         ("CBR 192 genuine", dict(
             is_flac=False, min_bitrate=192, is_cbr=True,
             spectral_grade="genuine")),
+        # --- Preimport gate scenarios (issue #91) ---
+        # Audio and nested-layout gates short-circuit before any FLAC/MP3
+        # stage runs. These let operators see the rejection paths that
+        # live in lib.preimport.run_preimport_gates and
+        # lib.import_dispatch.dispatch_import_from_db.
+        ("PREIMPORT: Audio corrupt (ffmpeg fail)", dict(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_check_mode="normal", audio_corrupt=True)),
+        ("PREIMPORT: Force-import with nested folders", dict(
+            is_flac=False, min_bitrate=320, is_cbr=True,
+            import_mode="force", has_nested_audio=True)),
     ]
 
     print(f"\n  What would happen if we downloaded:")
@@ -784,7 +795,8 @@ def cmd_quality(db, args):
         final = result["final_status"] or "?"
         decision_chain = " → ".join(
             f"{s}={result[s]}"
-            for s in ["stage0_spectral_gate", "stage1_spectral",
+            for s in ["preimport_audio", "preimport_nested",
+                      "stage0_spectral_gate", "stage1_spectral",
                       "stage2_import", "stage3_quality_gate"]
             if result[s] is not None)
 

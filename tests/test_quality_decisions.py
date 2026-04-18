@@ -607,6 +607,8 @@ import inspect
 
 # The exact keys the simulator reads from the result dict
 EXPECTED_RESULT_KEYS = {
+    # Preimport gates (shared, run before the FLAC/MP3 branches) — issue #91
+    "preimport_audio", "preimport_nested",
     "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
@@ -614,6 +616,8 @@ EXPECTED_RESULT_KEYS = {
 }
 
 # Valid values for each stage (None means stage was skipped)
+VALID_PREIMPORT_AUDIO = {None, "pass", "reject_corrupt", "skipped_off"}
+VALID_PREIMPORT_NESTED = {None, "pass", "reject_nested", "skipped_auto"}
 VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
@@ -635,7 +639,188 @@ EXPECTED_PARAMS = {
     "verified_lossless", "verified_lossless_target",
     "target_format",
     "new_format", "cfg",
+    # Preimport gate inputs (issue #91) — keep the simulator's picture of the
+    # pipeline in sync with lib.preimport.run_preimport_gates.
+    "audio_check_mode", "audio_corrupt",
+    "import_mode", "has_nested_audio",
 }
+
+
+class TestPreimportAudioGate(unittest.TestCase):
+    """Pure decision tests for the preimport audio-integrity gate (issue #91).
+
+    Models ``lib.preimport.run_preimport_gates``'s first gate (validate_audio).
+    The simulator must treat ``audio_check_mode=off`` as a distinct outcome
+    from a passing check so operators can see when the gate is disabled in
+    config.
+    """
+
+    # (desc, audio_check_mode, audio_corrupt, expected)
+    CASES = [
+        ("off short-circuits regardless of corrupt flag", "off", False, "skipped_off"),
+        ("off skipped even when corrupt signalled",       "off", True,  "skipped_off"),
+        ("normal + clean passes",                         "normal", False, "pass"),
+        ("normal + corrupt rejects",                      "normal", True,  "reject_corrupt"),
+        ("strict + corrupt rejects",                      "strict", True,  "reject_corrupt"),
+    ]
+
+    def test_preimport_audio_gate_cases(self):
+        from lib.quality import preimport_audio_gate
+        for desc, mode, corrupt, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    preimport_audio_gate(mode, corrupt),
+                    expected)
+
+
+class TestPreimportNestedGate(unittest.TestCase):
+    """Pure decision tests for the preimport nested-layout gate (issue #91).
+
+    Only the force/manual path rejects nested-audio layouts — the auto path
+    always flattens before import_dispatch runs. This matches
+    ``lib.import_dispatch.dispatch_import_from_db``.
+    """
+
+    # (desc, import_mode, has_nested_audio, expected)
+    CASES = [
+        ("auto never applies",                  "auto",   True,  "skipped_auto"),
+        ("auto passes when flat",               "auto",   False, "skipped_auto"),
+        ("force + flat passes",                 "force",  False, "pass"),
+        ("force + nested rejects",              "force",  True,  "reject_nested"),
+        ("manual + flat passes",                "manual", False, "pass"),
+        ("manual + nested rejects",             "manual", True,  "reject_nested"),
+    ]
+
+    def test_preimport_nested_gate_cases(self):
+        from lib.quality import preimport_nested_gate
+        for desc, mode, nested, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    preimport_nested_gate(mode, nested),
+                    expected)
+
+
+class TestFullPipelinePreimportGates(unittest.TestCase):
+    """``full_pipeline_decision`` must model preimport gates end-to-end (#91).
+
+    Audio or nested rejects must short-circuit before stage 0/1/2/3 run, set
+    ``imported=False`` and leave ``final_status='wanted'`` so the simulator
+    tells the same story as the live pipeline.
+    """
+
+    def test_audio_corrupt_rejects_before_stages(self):
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_check_mode="normal", audio_corrupt=True)
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["imported"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        # Later stages must not have run.
+        self.assertIsNone(r["stage0_spectral_gate"])
+        self.assertIsNone(r["stage1_spectral"])
+        self.assertIsNone(r["stage2_import"])
+        self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_audio_check_off_skips_gate(self):
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_check_mode="off", audio_corrupt=True)
+        self.assertEqual(r["preimport_audio"], "skipped_off")
+        # With audio check off, downstream still runs.
+        self.assertTrue(r["imported"])
+
+    def test_audio_pass_default(self):
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False)
+        self.assertEqual(r["preimport_audio"], "pass")
+        self.assertTrue(r["imported"])
+
+    def test_nested_layout_rejects_force_path(self):
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            import_mode="force", has_nested_audio=True)
+        self.assertEqual(r["preimport_nested"], "reject_nested")
+        self.assertFalse(r["imported"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertIsNone(r["stage2_import"])
+
+    def test_nested_layout_rejects_manual_path(self):
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            import_mode="manual", has_nested_audio=True)
+        self.assertEqual(r["preimport_nested"], "reject_nested")
+        self.assertFalse(r["imported"])
+
+    def test_nested_layout_irrelevant_on_auto_path(self):
+        # Nested audio on auto path is impossible in production (flattened
+        # upstream) — simulator must report "skipped_auto" so the Decisions
+        # tab can't mislead operators into thinking auto rejects on nesting.
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            import_mode="auto", has_nested_audio=True)
+        self.assertEqual(r["preimport_nested"], "skipped_auto")
+        self.assertTrue(r["imported"])
+
+    def test_audio_reject_wins_over_nested(self):
+        # Both gates fail — audio is first, so its outcome is the short-circuit.
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_check_mode="normal", audio_corrupt=True,
+            import_mode="force", has_nested_audio=True)
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["imported"])
+        # Nested gate never ran.
+        self.assertIsNone(r["preimport_nested"])
+
+
+class TestDecisionTreePreimportStages(unittest.TestCase):
+    """``get_decision_tree`` must surface preimport_audio + preimport_nested
+    stages so the Decisions tab documents the full gate pipeline (issue #91)."""
+
+    def test_preimport_stages_present_and_ordered_first(self):
+        tree = get_decision_tree()
+        ids = [s["id"] for s in tree["stages"]]
+        self.assertIn("preimport_audio", ids)
+        self.assertIn("preimport_nested", ids)
+        # Must appear before every FLAC/MP3/import stage — they gate
+        # everything else in production.
+        audio_idx = ids.index("preimport_audio")
+        nested_idx = ids.index("preimport_nested")
+        for later_stage in ("flac_spectral", "mp3_spectral_gate",
+                            "mp3_spectral", "import_decision",
+                            "quality_gate"):
+            self.assertLess(audio_idx, ids.index(later_stage),
+                            f"preimport_audio must precede {later_stage}")
+            self.assertLess(nested_idx, ids.index(later_stage),
+                            f"preimport_nested must precede {later_stage}")
+
+    def test_preimport_audio_stage_contract(self):
+        tree = get_decision_tree()
+        stage_map = {s["id"]: s for s in tree["stages"]}
+        audio = stage_map["preimport_audio"]
+        self.assertEqual(audio["function"], "preimport_audio_gate")
+        self.assertTrue(len(audio["rules"]) > 0)
+        outcomes = set(audio["outcomes"])
+        # Must be a subset of the pure function's value domain.
+        self.assertTrue(outcomes <= (VALID_PREIMPORT_AUDIO - {None}),
+                        f"Audio outcomes {outcomes} not a subset of "
+                        f"{VALID_PREIMPORT_AUDIO - {None}}")
+
+    def test_preimport_nested_stage_contract(self):
+        tree = get_decision_tree()
+        stage_map = {s["id"]: s for s in tree["stages"]}
+        nested = stage_map["preimport_nested"]
+        self.assertEqual(nested["function"], "preimport_nested_gate")
+        self.assertTrue(len(nested["rules"]) > 0)
+        outcomes = set(nested["outcomes"])
+        self.assertTrue(outcomes <= (VALID_PREIMPORT_NESTED - {None}),
+                        f"Nested outcomes {outcomes} not a subset of "
+                        f"{VALID_PREIMPORT_NESTED - {None}}")
+        # Note must make clear this is force/manual-only so operators don't
+        # think the auto path flattens nested layouts.
+        note = nested.get("note", "")
+        self.assertIn("force", note.lower() + " " + str(nested.get("when", "")).lower())
 
 
 class TestFullPipelineContract(unittest.TestCase):
@@ -913,7 +1098,8 @@ class TestFullPipelineContract(unittest.TestCase):
         """Decision tree must have the expected stages in order."""
         tree = get_decision_tree()
         ids = [s["id"] for s in tree["stages"]]
-        self.assertEqual(ids, ["flac_spectral", "flac_convert", "transcode",
+        self.assertEqual(ids, ["preimport_audio", "preimport_nested",
+                               "flac_spectral", "flac_convert", "transcode",
                                "verified_lossless", "target_conversion",
                                "mp3_spectral_gate", "mp3_spectral",
                                "import_decision", "quality_gate", "dispatch"])

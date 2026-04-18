@@ -604,6 +604,10 @@ class TestCmdQuality(unittest.TestCase):
         def fake_full_pipeline_decision(**kwargs):
             captured_kwargs.append(kwargs)
             return {
+                # Preimport gate keys (issue #91). The CLI chain reader
+                # iterates these unconditionally, so fakes must provide them.
+                "preimport_audio": "pass",
+                "preimport_nested": "skipped_auto",
                 "stage0_spectral_gate": "would_run",
                 "stage1_spectral": None,
                 "stage2_import": "import",
@@ -704,6 +708,10 @@ class TestCmdQuality(unittest.TestCase):
 
         def fake_full_pipeline_decision(**kwargs):
             return {
+                # Preimport gate keys (issue #91). The CLI chain reader
+                # iterates these unconditionally, so fakes must provide them.
+                "preimport_audio": "pass",
+                "preimport_nested": "skipped_auto",
                 "stage0_spectral_gate": "would_run",
                 "stage1_spectral": None,
                 "stage2_import": "import",
