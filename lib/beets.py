@@ -22,9 +22,15 @@ logger = logging.getLogger("soularr")
 
 
 def _candidate_from_harness(cand: dict, target_mbid: str) -> CandidateSummary:
-    """Build a CandidateSummary from a beets harness candidate dict."""
-    # Mark the target MBID before delegating to from_dict
-    d = {**cand, "is_target": cand.get("album_id", "") == target_mbid}
+    """Build a CandidateSummary from a beets harness candidate dict.
+
+    Defensive str-coercion on `album_id` for the `is_target` flag — the
+    harness already coerces (post-fix) but Discogs candidates can carry
+    int IDs from older logs or alternate code paths. Belt-and-braces so
+    str/int drift can never re-introduce the "mbid_not_found" bug.
+    """
+    is_target = str(cand.get("album_id", "")) == str(target_mbid)
+    d = {**cand, "is_target": is_target}
     return CandidateSummary.from_dict(d)
 
 
@@ -103,9 +109,11 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
                     cand_album = cand.get("album", "?")
                     logger.info(f"BEETS_VALIDATE:   candidate[{i}]: "
                                 f"mbid={cand_mbid}, dist={cand_dist}, album={cand_album}")
-                # Check if target MBID was found and distance is acceptable
+                # Check if target MBID was found and distance is acceptable.
+                # str() on both sides — Discogs candidates can carry int
+                # album_ids and DB-stored mb_release_ids are always str.
                 for cand in raw_candidates:
-                    if cand.get("album_id") == mb_release_id:
+                    if str(cand.get("album_id", "")) == str(mb_release_id):
                         result.mbid_found = True
                         result.distance = cand["distance"]
                         extra_tracks_raw = cand.get("extra_tracks", [])

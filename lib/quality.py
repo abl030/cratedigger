@@ -199,6 +199,32 @@ def decide_download_action(
     return DownloadVerdict(DownloadDecision.in_progress)
 
 
+def _coerce_id(value) -> str:
+    """Defensive ID coercion for harness consumers.
+
+    The harness already coerces ID-like values to str at the wire
+    boundary (`harness/beets_harness.py::_id_str`). This is a safety net
+    in case any future caller bypasses the harness — beets' Discogs
+    plugin emits integer IDs and our typed dataclasses say `str`.
+    """
+    return str(value) if value else ""
+
+
+def _coerce_track_ids(track: dict) -> dict:
+    """Return a copy of a track dict with `track_id` and
+    `release_track_id` coerced to str. Used inside CandidateSummary
+    deserialization so HarnessTrackInfo's typed `str` contract holds
+    even when callers feed raw dicts from sources other than the
+    harness.
+    """
+    out = dict(track)
+    if "track_id" in out:
+        out["track_id"] = _coerce_id(out["track_id"])
+    if "release_track_id" in out:
+        out["release_track_id"] = _coerce_id(out["release_track_id"])
+    return out
+
+
 @dataclass
 class HarnessItem:
     """Local file as seen by the beets harness during matching."""
@@ -242,7 +268,8 @@ class TrackMapping:
     def from_dict(cls, d: dict) -> "TrackMapping":
         return cls(
             item=HarnessItem(**d["item"]) if "item" in d else HarnessItem(),
-            track=HarnessTrackInfo(**d["track"]) if "track" in d else HarnessTrackInfo(),
+            track=HarnessTrackInfo(**_coerce_track_ids(d["track"]))
+                  if "track" in d else HarnessTrackInfo(),
         )
 
 
@@ -290,13 +317,21 @@ class CandidateSummary:
 
     @classmethod
     def from_dict(cls, d: dict) -> "CandidateSummary":
-        """Deserialize from a dict, constructing typed inner objects."""
-        tracks = [HarnessTrackInfo(**t) for t in d.get("tracks", [])]
+        """Deserialize from a dict, constructing typed inner objects.
+
+        ID-like fields (mbid/album_id, releasegroup_id, plus track_id and
+        release_track_id inside each track) are coerced to str via
+        _coerce_id() — beets' Discogs plugin emits integers and the
+        typed contract is str. Defensive in case a future caller bypasses
+        the harness boundary.
+        """
+        tracks = [HarnessTrackInfo(**_coerce_track_ids(t)) for t in d.get("tracks", [])]
         mapping = [TrackMapping.from_dict(m) for m in d.get("mapping", [])]
         extra_items = [HarnessItem(**i) for i in d.get("extra_items", [])]
-        extra_tracks = [HarnessTrackInfo(**t) for t in d.get("extra_tracks", [])]
+        extra_tracks = [HarnessTrackInfo(**_coerce_track_ids(t))
+                        for t in d.get("extra_tracks", [])]
         return cls(
-            mbid=d.get("mbid", d.get("album_id", "")),
+            mbid=_coerce_id(d.get("mbid", d.get("album_id", ""))),
             artist=d.get("artist", ""),
             album=d.get("album", ""),
             distance=d.get("distance", 0.0),
@@ -313,7 +348,7 @@ class CandidateSummary:
             albumtype=d.get("albumtype"),
             albumtypes=d.get("albumtypes", []),
             albumstatus=d.get("albumstatus"),
-            releasegroup_id=d.get("releasegroup_id", ""),
+            releasegroup_id=_coerce_id(d.get("releasegroup_id", "")),
             release_group_title=d.get("release_group_title", ""),
             va=d.get("va", False),
             language=d.get("language"),
