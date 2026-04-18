@@ -229,10 +229,11 @@ class TestDisambiguateBeetMove(unittest.TestCase):
         kept_duplicate = True
 
         if kept_duplicate:
+            from lib.util import beets_subprocess_env
             move_result = import_one.subprocess.run(
                 ["beet", "move", f"mb_albumid:{mbid}"],
                 capture_output=True, text=True, timeout=120,
-                env={**os.environ, "HOME": "/home/abl030"},
+                env=beets_subprocess_env(),
             )
             if move_result.returncode == 0:
                 pf_info_after = mock_beets.get_album_info(mbid)
