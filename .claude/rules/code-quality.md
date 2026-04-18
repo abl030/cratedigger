@@ -8,6 +8,17 @@
 - Inner data structures must also be typed — no `list[dict]` when a dataclass exists
 - Verify with: `pyright <files>` on every touched file before committing
 
+## Wire-boundary types — use `msgspec.Struct`, not `@dataclass`
+Any type whose **input comes from outside our Python code** (harness stdout, an HTTP response, a JSONB blob coming back from the DB, a subprocess's stdout) must be a `msgspec.Struct` so the deserializer validates the typed contract at the boundary. Pyright does not see inside `dict.get()` — only runtime validation catches int-vs-str drift, mis-typed fields, or missing required data. This is the lesson of issue #99 / PR #98 (every Discogs validation silently logged `mbid_not_found` because a dataclass said `str` but the wire carried `int`).
+
+- **Use `msgspec.Struct`** for: harness/subprocess JSON messages, external API responses, DB JSONB rows we read back and type-check, any other "decode this blob into a typed object" site.
+- **Keep `@dataclass`** for: types we construct entirely from our own typed Python code (`ImportResult`, `QualityRankConfig`, `SoularrConfig`, `ActiveDownloadState` when we're the only writer). Their inputs are already typed — the strict boundary buys nothing.
+- **Decode at exactly one site.** The wire boundary is the one place the untyped blob becomes a typed object. After that, every downstream consumer works with the Struct directly — no defensive coercion, no `dict.get()`, no re-validation. If you find yourself writing a `_coerce_x` helper on the consumer side, the boundary is in the wrong place.
+- **Strict ≠ coerce.** Declare fields as the type you want (`str`, not `str | int`). `msgspec.ValidationError` at the boundary is the detector. Do not use `strict=False` to silently coerce away real type drift.
+- **Normalise early if the external source is untidy.** Harness-side `_id_str` in `harness/beets_harness.py` coerces int IDs to str *before* emitting — so the wire is always clean, and the downstream Struct validation never trips in the happy path. Keep normalisation at the source, not at the consumer.
+- Reference implementation: `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `CandidateSummary`, `ChooseMatchMessage` in `lib/quality.py`; decoded at `lib/beets.py::beets_validate` via `msgspec.convert(msg, type=ChooseMatchMessage)`.
+- Tests owe: at least one RED test that feeds the wrong type at the boundary and asserts `msgspec.ValidationError`. This is the regression guard that makes the boundary worth having.
+
 ## Testing — Red/Green TDD
 - Write tests FIRST (RED), then implement (GREEN)
 - Every new function, dataclass, and decision branch needs test coverage

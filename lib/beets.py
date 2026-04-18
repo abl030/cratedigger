@@ -11,27 +11,16 @@ import subprocess as sp
 import os
 import sys
 
+import msgspec
+
 # Ensure lib/ is importable whether called from project root or lib/
 _lib_dir = os.path.dirname(os.path.abspath(__file__))
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from quality import ValidationResult, CandidateSummary
+from quality import ValidationResult, ChooseMatchMessage
 
 logger = logging.getLogger("soularr")
-
-
-def _candidate_from_harness(cand: dict, target_mbid: str) -> CandidateSummary:
-    """Build a CandidateSummary from a beets harness candidate dict.
-
-    Defensive str-coercion on `album_id` for the `is_target` flag — the
-    harness already coerces (post-fix) but Discogs candidates can carry
-    int IDs from older logs or alternate code paths. Belt-and-braces so
-    str/int drift can never re-introduce the "mbid_not_found" bug.
-    """
-    is_target = str(cand.get("album_id", "")) == str(target_mbid)
-    d = {**cand, "is_target": is_target}
-    return CandidateSummary.from_dict(d)
 
 
 def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0.15):
@@ -90,45 +79,57 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
 
             if msg_type == "choose_match":
                 got_choose_match = True
-                raw_candidates = msg.get("candidates", [])
-                result.candidate_count = len(raw_candidates)
-                result.candidates = [
-                    _candidate_from_harness(c, mb_release_id)
-                    for c in raw_candidates
-                ]
-                # Store local file info and beets recommendation
-                result.items = msg.get("items", [])
-                result.local_track_count = msg.get("item_count")
-                result.recommendation = msg.get("recommendation")
-                result.path = msg.get("path")
-                logger.info(f"BEETS_VALIDATE: {len(raw_candidates)} candidates, "
+                # Strict-typed decode at the wire boundary. The harness
+                # has already normalised IDs to str via `_id_str`; any
+                # int/null/type-mismatch here means the harness regressed
+                # and we surface it loud instead of silently mismatching
+                # downstream (the PR #98 bug).
+                try:
+                    cm = msgspec.convert(msg, type=ChooseMatchMessage)
+                except msgspec.ValidationError as e:
+                    result.error = f"harness schema violation: {e}"
+                    logger.error(f"BEETS_VALIDATE: {result.error}")
+                    proc.stdin.write('{"action":"skip"}\n')
+                    proc.stdin.flush()
+                    continue
+
+                result.candidate_count = cm.candidate_count or len(cm.candidates)
+                result.candidates = list(cm.candidates)
+                # items is stored as list[dict] on ValidationResult
+                # (out-of-scope wire type for #99); round-trip through
+                # msgspec to get plain dicts from the typed HarnessItem
+                # structs.
+                result.items = [msgspec.to_builtins(i) for i in cm.items]
+                result.local_track_count = cm.item_count
+                result.recommendation = cm.recommendation
+                result.path = cm.path
+
+                logger.info(f"BEETS_VALIDATE: {len(cm.candidates)} candidates, "
                             f"looking for mbid={mb_release_id}")
-                for i, cand in enumerate(raw_candidates):
-                    cand_mbid = cand.get("album_id", "")
-                    cand_dist = cand.get("distance", "?")
-                    cand_album = cand.get("album", "?")
+                for i, cand in enumerate(cm.candidates):
                     logger.info(f"BEETS_VALIDATE:   candidate[{i}]: "
-                                f"mbid={cand_mbid}, dist={cand_dist}, album={cand_album}")
-                # Check if target MBID was found and distance is acceptable.
-                # str() on both sides — Discogs candidates can carry int
-                # album_ids and DB-stored mb_release_ids are always str.
-                for cand in raw_candidates:
-                    if str(cand.get("album_id", "")) == str(mb_release_id):
+                                f"mbid={cand.mbid}, dist={cand.distance}, "
+                                f"album={cand.album}")
+
+                # Find the target MBID. Both sides are str (msgspec has
+                # validated `cand.mbid` as str; `mb_release_id` comes
+                # from the DB TEXT column).
+                for cand in cm.candidates:
+                    if cand.mbid == mb_release_id:
+                        cand.is_target = True
                         result.mbid_found = True
-                        result.distance = cand["distance"]
-                        extra_tracks_raw = cand.get("extra_tracks", [])
-                        # Handle both old (int) and new (list) format
-                        n_extra = len(extra_tracks_raw) if isinstance(extra_tracks_raw, list) else extra_tracks_raw
+                        result.distance = cand.distance
+                        n_extra = len(cand.extra_tracks)
                         if n_extra > 0:
                             result.scenario = "extra_tracks"
                             result.detail = f"MB has {n_extra} more tracks than local files"
-                        elif cand["distance"] <= distance_threshold:
+                        elif cand.distance <= distance_threshold:
                             result.valid = True
                             result.scenario = "strong_match"
-                            result.detail = f"distance={cand['distance']}"
+                            result.detail = f"distance={cand.distance}"
                         else:
                             result.scenario = "high_distance"
-                            result.detail = f"distance={cand['distance']}"
+                            result.detail = f"distance={cand.distance}"
                         break
                 if not result.mbid_found:
                     result.scenario = "mbid_not_found"

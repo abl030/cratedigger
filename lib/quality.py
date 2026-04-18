@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, asdict
 from enum import IntEnum, StrEnum
 from typing import Any, Literal, Optional
 
+import msgspec
+
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
 QUALITY_LOSSLESS = "lossless"
 
@@ -199,34 +201,37 @@ def decide_download_action(
     return DownloadVerdict(DownloadDecision.in_progress)
 
 
-def _coerce_id(value) -> str:
-    """Defensive ID coercion for harness consumers.
+# ---------------------------------------------------------------------------
+# Harness wire-boundary types — msgspec.Struct with strict `str` validation.
+#
+# Beets' Discogs plugin returns integer album_id / track_id values; beets'
+# MusicBrainz plugin returns UUID strings. Every downstream consumer in the
+# pipeline compares these against DB-stored TEXT release IDs with `==`, so a
+# mixed-type wire format silently fails (that was the "mbid_not_found" bug
+# for every Discogs validation — fixed in PR #98, guarded here).
+#
+# The harness normalises IDs to str via `_id_str` in beets_harness.py before
+# emitting. These Structs declare `str` and msgspec validates at decode time
+# — an int on the wire raises `msgspec.ValidationError` inside
+# `lib/beets.py::beets_validate`, which surfaces it as `result.error`. Loud
+# failure instead of a silent miss.
+#
+# Why msgspec.Struct (not @dataclass):
+#   1. msgspec.json.decode(blob, type=Foo) validates types at the boundary.
+#      @dataclass has no runtime schema enforcement; you'd have to hand-roll
+#      a from_dict that coerces every field, and that coercion becomes
+#      defensive cruft downstream.
+#   2. Wire-shape changes are detected by tests, not by production bugs.
+#   3. Near-zero overhead.
+#
+# Only types whose inputs come from outside our Python code (harness stdout,
+# in this case) belong here. Types we construct entirely in-process (e.g.
+# ImportResult, QualityRankConfig) stay as dataclasses — their inputs are
+# our own typed data, not a wire protocol.
+# ---------------------------------------------------------------------------
 
-    The harness already coerces ID-like values to str at the wire
-    boundary (`harness/beets_harness.py::_id_str`). This is a safety net
-    in case any future caller bypasses the harness — beets' Discogs
-    plugin emits integer IDs and our typed dataclasses say `str`.
-    """
-    return str(value) if value else ""
 
-
-def _coerce_track_ids(track: dict) -> dict:
-    """Return a copy of a track dict with `track_id` and
-    `release_track_id` coerced to str. Used inside CandidateSummary
-    deserialization so HarnessTrackInfo's typed `str` contract holds
-    even when callers feed raw dicts from sources other than the
-    harness.
-    """
-    out = dict(track)
-    if "track_id" in out:
-        out["track_id"] = _coerce_id(out["track_id"])
-    if "release_track_id" in out:
-        out["release_track_id"] = _coerce_id(out["release_track_id"])
-    return out
-
-
-@dataclass
-class HarnessItem:
+class HarnessItem(msgspec.Struct):
     """Local file as seen by the beets harness during matching."""
     path: str = ""
     title: str = ""
@@ -241,9 +246,13 @@ class HarnessItem:
     data_source: str = ""
 
 
-@dataclass
-class HarnessTrackInfo:
-    """MusicBrainz track info as seen by the beets harness."""
+class HarnessTrackInfo(msgspec.Struct):
+    """MusicBrainz / Discogs track info as seen by the beets harness.
+
+    `track_id` and `release_track_id` are declared `str`; msgspec raises
+    ValidationError if beets leaks an int through (regression guard for
+    the PR #98 bug).
+    """
     title: str = ""
     artist: str = ""
     index: Optional[int] = None
@@ -258,35 +267,30 @@ class HarnessTrackInfo:
     data_source: str = ""
 
 
-@dataclass
-class TrackMapping:
-    """Which local item matched which MB track."""
-    item: HarnessItem = field(default_factory=HarnessItem)
-    track: HarnessTrackInfo = field(default_factory=HarnessTrackInfo)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "TrackMapping":
-        return cls(
-            item=HarnessItem(**d["item"]) if "item" in d else HarnessItem(),
-            track=HarnessTrackInfo(**_coerce_track_ids(d["track"]))
-                  if "track" in d else HarnessTrackInfo(),
-        )
+class TrackMapping(msgspec.Struct):
+    """Which local item matched which MB/Discogs track."""
+    item: HarnessItem = msgspec.field(default_factory=HarnessItem)
+    track: HarnessTrackInfo = msgspec.field(default_factory=HarnessTrackInfo)
 
 
-@dataclass
-class CandidateSummary:
+class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     """Full beets candidate match data for audit logging.
 
     Stores everything the harness sends — every field from AlbumInfo,
-    the distance breakdown, track mapping, and extra items/tracks
-    with full detail.
+    the distance breakdown, track mapping, and extra items/tracks with
+    full detail.
+
+    Wire ↔ attribute mapping: the harness emits the JSON key `album_id`
+    (beets' own field name); this Struct exposes it as `.mbid` for
+    continuity with existing Python callers. msgspec handles both the
+    rename and the strict `str` validation.
     """
     # Core identity
     mbid: str = ""
     artist: str = ""
     album: str = ""
     distance: float = 0.0
-    distance_breakdown: dict[str, float] = field(default_factory=dict)
+    distance_breakdown: dict[str, float] = {}
     is_target: bool = False
     # AlbumInfo metadata
     albumdisambig: str = ""
@@ -298,7 +302,7 @@ class CandidateSummary:
     media: Optional[str] = None
     mediums: Optional[int] = None
     albumtype: Optional[str] = None
-    albumtypes: list[str] = field(default_factory=list)
+    albumtypes: list[str] = []
     albumstatus: Optional[str] = None
     releasegroup_id: str = ""
     release_group_title: str = ""
@@ -310,58 +314,27 @@ class CandidateSummary:
     asin: str = ""
     # Tracks and mapping
     track_count: int = 0
-    tracks: list[HarnessTrackInfo] = field(default_factory=list)
-    mapping: list[TrackMapping] = field(default_factory=list)
-    extra_items: list[HarnessItem] = field(default_factory=list)
-    extra_tracks: list[HarnessTrackInfo] = field(default_factory=list)
+    tracks: list[HarnessTrackInfo] = []
+    mapping: list[TrackMapping] = []
+    extra_items: list[HarnessItem] = []
+    extra_tracks: list[HarnessTrackInfo] = []
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "CandidateSummary":
-        """Deserialize from a dict, constructing typed inner objects.
 
-        ID-like fields (mbid/album_id, releasegroup_id, plus track_id and
-        release_track_id inside each track) are coerced to str via
-        _coerce_id() — beets' Discogs plugin emits integers and the
-        typed contract is str. Defensive in case a future caller bypasses
-        the harness boundary.
-        """
-        tracks = [HarnessTrackInfo(**_coerce_track_ids(t)) for t in d.get("tracks", [])]
-        mapping = [TrackMapping.from_dict(m) for m in d.get("mapping", [])]
-        extra_items = [HarnessItem(**i) for i in d.get("extra_items", [])]
-        extra_tracks = [HarnessTrackInfo(**_coerce_track_ids(t))
-                        for t in d.get("extra_tracks", [])]
-        return cls(
-            mbid=_coerce_id(d.get("mbid", d.get("album_id", ""))),
-            artist=d.get("artist", ""),
-            album=d.get("album", ""),
-            distance=d.get("distance", 0.0),
-            distance_breakdown=d.get("distance_breakdown", {}),
-            is_target=d.get("is_target", False),
-            albumdisambig=d.get("albumdisambig", ""),
-            year=d.get("year"),
-            original_year=d.get("original_year"),
-            country=d.get("country"),
-            label=d.get("label"),
-            catalognum=d.get("catalognum"),
-            media=d.get("media"),
-            mediums=d.get("mediums"),
-            albumtype=d.get("albumtype"),
-            albumtypes=d.get("albumtypes", []),
-            albumstatus=d.get("albumstatus"),
-            releasegroup_id=_coerce_id(d.get("releasegroup_id", "")),
-            release_group_title=d.get("release_group_title", ""),
-            va=d.get("va", False),
-            language=d.get("language"),
-            script=d.get("script"),
-            data_source=d.get("data_source", ""),
-            barcode=d.get("barcode", ""),
-            asin=d.get("asin", ""),
-            track_count=d.get("track_count", 0),
-            tracks=tracks,
-            mapping=mapping,
-            extra_items=extra_items,
-            extra_tracks=extra_tracks,
-        )
+class ChooseMatchMessage(msgspec.Struct):
+    """Full schema of the harness `choose_match` JSON message. Decoded in
+    one shot at the wire boundary (`lib/beets.py::beets_validate`) via
+    `msgspec.convert(msg, type=ChooseMatchMessage)` — any type drift in
+    any nested field raises `msgspec.ValidationError` immediately.
+    """
+    task_id: int = 0
+    path: str = ""
+    cur_artist: str = ""
+    cur_album: str = ""
+    item_count: int = 0
+    items: list[HarnessItem] = []
+    recommendation: str = "none"
+    candidate_count: int = 0
+    candidates: list[CandidateSummary] = []
 
 
 @dataclass
@@ -398,40 +371,22 @@ class ValidationResult:
     error: Optional[str] = None
 
     def to_json(self) -> str:
-        """Serialize to JSON string."""
-        return json.dumps(asdict(self))
+        """Serialize to JSON string. Uses msgspec because the
+        `candidates` field holds msgspec.Struct instances which
+        dataclasses.asdict does not know how to recurse into."""
+        return msgspec.json.encode(self).decode()
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationResult":
-        """Construct from a dict (e.g. parsed JSON)."""
-        candidates = [
-            CandidateSummary.from_dict(c) for c in d.get("candidates", [])
-        ]
-        return cls(
-            valid=d.get("valid", False),
-            distance=d.get("distance"),
-            scenario=d.get("scenario"),
-            detail=d.get("detail"),
-            mbid_found=d.get("mbid_found", False),
-            target_mbid=d.get("target_mbid"),
-            candidate_count=d.get("candidate_count", 0),
-            candidates=candidates,
-            items=d.get("items", []),
-            local_track_count=d.get("local_track_count"),
-            recommendation=d.get("recommendation"),
-            path=d.get("path"),
-            soulseek_username=d.get("soulseek_username"),
-            download_folder=d.get("download_folder"),
-            failed_path=d.get("failed_path"),
-            denylisted_users=d.get("denylisted_users", []),
-            corrupt_files=d.get("corrupt_files", []),
-            error=d.get("error"),
-        )
+        """Construct from a dict. Uses msgspec.convert so the nested
+        CandidateSummary / TrackMapping / HarnessItem / HarnessTrackInfo
+        structs are validated at their typed `str` contract."""
+        return msgspec.convert(d, type=cls)
 
     @classmethod
     def from_json(cls, s: str) -> "ValidationResult":
         """Deserialize from JSON string."""
-        return cls.from_dict(json.loads(s))
+        return msgspec.json.decode(s.encode(), type=cls)
 
 
 @dataclass
