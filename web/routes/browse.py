@@ -299,6 +299,13 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     mb_groups: list[dict] = []
     if mbid:
         mb_groups = srv.mb_api.get_artist_release_groups(mbid)
+        # Mark bootleg status on MB rows so the frontend can split them
+        # into a Bootleg-only collapsible section like the Discography
+        # sub-tab. Discogs has no official/bootleg concept in the CC0
+        # dump, so Discogs-only rows are always treated as official.
+        official_rg_ids = srv.mb_api.get_official_release_group_ids(mbid)
+        for rg in mb_groups:
+            rg["has_official"] = rg["id"] in official_rg_ids
 
     discogs_groups: list[dict] = []
     if discogs_id:

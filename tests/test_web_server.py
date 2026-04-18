@@ -1330,6 +1330,7 @@ class TestBrowseRouteContracts(_WebServerCase):
                 patch("routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_dg.search_artists.return_value = [{"id": "3840", "name": "Radiohead"}]
             mock_dg.get_artist_releases.return_value = [discogs_rg]
             status, data = self._get("/api/artist/compare?name=Radiohead")
@@ -1346,6 +1347,40 @@ class TestBrowseRouteContracts(_WebServerCase):
         self.assertEqual(data["discogs_only"], [])
         self.assertEqual(data["both"][0]["mb"]["id"], self.RG_ID)
         self.assertEqual(data["both"][0]["discogs"]["id"], "21491")
+        # Bootleg classification flows through to frontend.
+        self.assertTrue(data["both"][0]["mb"]["has_official"])
+
+    def test_artist_compare_marks_bootleg_only_rgs(self):
+        """Release groups absent from get_official_release_group_ids land
+        with has_official=False so the frontend can route them into the
+        Bootleg-only collapsible section."""
+        official_rg = {
+            "id": self.RG_ID, "title": "Real Album", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Artist", "primary_artist_id": self.ARTIST_ID,
+        }
+        bootleg_rg = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "title": "Live Bootleg 99", "type": "Album",
+            "secondary_types": [], "first_release_date": "1999",
+            "artist_credit": "Artist", "primary_artist_id": self.ARTIST_ID,
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("routes.browse.discogs_api") as mock_dg:
+            mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Artist"}]
+            mock_mb.get_artist_release_groups.return_value = [official_rg, bootleg_rg]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_dg.search_artists.return_value = []
+            mock_dg.get_artist_releases.return_value = []
+            status, data = self._get("/api/artist/compare?name=Artist")
+
+        self.assertEqual(status, 200)
+        # Both RGs land in mb_only (no Discogs counterpart). Both carry
+        # has_official so the frontend can split them.
+        self.assertEqual(len(data["mb_only"]), 2)
+        by_id = {r["id"]: r for r in data["mb_only"]}
+        self.assertTrue(by_id[self.RG_ID]["has_official"])
+        self.assertFalse(by_id["00000000-0000-0000-0000-000000000099"]["has_official"])
 
     def test_artist_release_groups_contract(self):
         release_group = {

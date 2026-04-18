@@ -263,12 +263,11 @@ function compareRow(mb, discogs) {
   // each side has its own render target (avoids ID collisions when the same
   // album appears as both 'both' and 'only' rows for different artists).
   const slot = `${mb ? mb.id : 'x'}__${discogs ? discogs.id : 'x'}`;
-  const mbBadge = mb
-    ? `<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`
-    : '<span class="library-src library-src-muted">MB —</span>';
-  const dgBadge = discogs
-    ? `<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`
-    : '<span class="library-src library-src-muted">Discogs —</span>';
+  // Show only the badges for sources that have this row. No muted
+  // placeholders — single-source rows just show one badge.
+  const badges = [];
+  if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`);
+  if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`);
   const mbId = mb ? mb.id : '';
   const dgId = discogs ? discogs.id : '';
   return `
@@ -279,7 +278,7 @@ function compareRow(mb, discogs) {
         <span class="rg-year">${year}</span>
         <span class="rg-title">${esc(title)}</span>
         ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
-        <span style="margin-left:auto;display:flex;gap:4px;">${mbBadge}${dgBadge}</span>
+        <span style="margin-left:auto;display:flex;gap:4px;">${badges.join('')}</span>
       </div>
       <div id="cmp-pressings-${slot}" style="display:none;padding:4px 0 8px 16px;">
         ${mb ? `<div style="font-size:0.75em;color:#6d6;margin-top:6px;">MusicBrainz pressings</div>
@@ -326,61 +325,53 @@ export async function toggleCompareRow(slot, mbId, dgId) {
  * @param {Object} data
  */
 function renderCompare(el, data) {
-  const both = data.both || [];
-  const mbOnly = data.mb_only || [];
-  const dgOnly = data.discogs_only || [];
   const mbName = data.mb_artist?.name || '—';
   const dgName = data.discogs_artist?.name || '—';
 
-  // Each bucket gets the same Albums/EPs/Singles sectioning the
-  // Discography sub-tab uses. For "both" pairs we classify off the MB
-  // side (it has primary_type + secondary_types reliably); fall back to
-  // Discogs when MB is missing.
+  // Combine all three buckets into one unified list. Each entry is a
+  // {mb, discogs} pair; either side may be null. Single-source rows
+  // just show the present source's badge (compareRow handles that).
+  const all = [
+    ...(data.both || []),
+    ...(data.mb_only || []).map((r) => ({ mb: r, discogs: null })),
+    ...(data.discogs_only || []).map((r) => ({ mb: null, discogs: r })),
+  ];
+
+  // Bootleg = MB row exists and is not has_official. Discogs CC0 has
+  // no official/bootleg distinction, so Discogs-only rows are always
+  // treated as official.
+  const bootleg = all.filter((p) => p.mb && p.mb.has_official === false);
+  const main = all.filter((p) => !(p.mb && p.mb.has_official === false));
+
   const pairClassify = (p) => p.mb || p.discogs;
-  const renderBothBucket = (rows) => renderTypedSections(
+  const renderRows = (rows, defaultOpen) => renderTypedSections(
     rows, (p) => compareRow(p.mb, p.discogs),
     {
       classify: (p) => groupingClassify(pairClassify(p)),
       dateOf: (p) => String(pairClassify(p).first_release_date || ''),
+      defaultOpen,
     },
   );
-  const renderMbOnly = (rows) => renderTypedSections(
-    rows, (r) => compareRow(r, null));
-  const renderDgOnly = (rows) => renderTypedSections(
-    rows, (r) => compareRow(null, r));
 
-  const bothHtml = both.length
-    ? renderBothBucket(both)
+  const mainHtml = main.length
+    ? renderRows(main, 'Albums')
     : '<div style="padding:6px;color:#777;">none</div>';
-  const mbHtml = mbOnly.length
-    ? renderMbOnly(mbOnly)
-    : '<div style="padding:6px;color:#777;">none</div>';
-  const dgHtml = dgOnly.length
-    ? renderDgOnly(dgOnly)
-    : '<div style="padding:6px;color:#777;">none</div>';
+
+  const bootlegHtml = bootleg.length
+    ? `<div class="type-section">
+         <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#555;">
+           Bootleg-only releases <span class="type-count">${bootleg.length}</span>
+         </div>
+         <div class="type-body">${renderRows(bootleg, null)}</div>
+       </div>`
+    : '';
 
   el.innerHTML = `
     <div style="font-size:13px;color:#888;margin-bottom:10px;">
       MB artist: <b>${esc(mbName)}</b> · Discogs artist: <b>${esc(dgName)}</b>
     </div>
-    <div class="type-section">
-      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
-        On both sources <span class="type-count">${both.length}</span>
-      </div>
-      <div class="type-body open">${bothHtml}</div>
-    </div>
-    <div class="type-section">
-      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#9cf;">
-        Only on MusicBrainz <span class="type-count">${mbOnly.length}</span>
-      </div>
-      <div class="type-body">${mbHtml}</div>
-    </div>
-    <div class="type-section">
-      <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#fc9;">
-        Only on Discogs <span class="type-count">${dgOnly.length}</span>
-      </div>
-      <div class="type-body">${dgHtml}</div>
-    </div>`;
+    ${mainHtml}
+    ${bootlegHtml}`;
 }
 
 /**
