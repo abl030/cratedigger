@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -42,6 +42,23 @@ assertEqual(qualityLabel('MP3', null), 'MP3', 'MP3 null bitrate = just format');
 assertEqual(qualityLabel(null, 320), '?', 'null format = ?');
 assertEqual(qualityLabel('', 320), '?', 'empty format = ?');
 assertEqual(qualityLabel('MP3,FLAC', 250), 'MP3 V0', 'comma-separated uses first');
+
+// --- qualityLabelShort tests ---
+console.log('qualityLabelShort()');
+assertEqual(qualityLabelShort('MP3', 245), 'M V0', 'MP3 245 -> M V0');
+assertEqual(qualityLabelShort('MP3', 190), 'M V2', 'MP3 190 -> M V2');
+assertEqual(qualityLabelShort('MP3', 320), 'M 320', 'MP3 320 -> M 320');
+assertEqual(qualityLabelShort('MP3', 128), 'M 128', 'MP3 128 -> M 128');
+assertEqual(qualityLabelShort('FLAC', 1000), 'F', 'FLAC -> F (no bitrate suffix)');
+assertEqual(qualityLabelShort('ALAC', 800), 'AL', 'ALAC -> AL');
+assertEqual(qualityLabelShort('WAV', 1411), 'W', 'WAV -> W');
+assertEqual(qualityLabelShort('Opus', 128), 'O 128', 'Opus 128 -> O 128');
+assertEqual(qualityLabelShort('AAC', 192), 'A 192', 'AAC 192 -> A 192');
+assertEqual(qualityLabelShort('OGG', 192), 'OG 192', 'OGG -> OG');
+assertEqual(qualityLabelShort('', 320), '?', 'empty format');
+assertEqual(qualityLabelShort(null, 320), '?', 'null format');
+assertEqual(qualityLabelShort('MP3', 0), 'M', 'zero bitrate shows format only');
+assertEqual(qualityLabelShort('MP3', null), 'M', 'null bitrate shows format only');
 
 // --- toAWST tests ---
 console.log('toAWST()');

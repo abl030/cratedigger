@@ -48,9 +48,12 @@ export function qualityLabelShort(formats, kbps) {
   const fmt = codeMap[raw] || raw;
   if (raw === 'FLAC' || raw === 'ALAC' || raw === 'WAV') return fmt;
   if (!kbps || kbps <= 0) return fmt;
-  if (kbps >= 295) return fmt + ' 320';
-  if (kbps >= 220) return fmt + ' V0';
-  if (kbps >= 170) return fmt + ' V2';
+  // V0/V2 are MP3-specific tier names; for AAC/Opus/OGG show raw kbps.
+  if (raw === 'MP3') {
+    if (kbps >= 295) return fmt + ' 320';
+    if (kbps >= 220) return fmt + ' V0';
+    if (kbps >= 170) return fmt + ' V2';
+  }
   return fmt + ' ' + kbps;
 }
 
