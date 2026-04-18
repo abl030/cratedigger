@@ -288,21 +288,21 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertTrue(result.valid)
 
     @patch("lib.beets.sp.Popen")
-    def test_discogs_int_album_id_matches_str_target(self, mock_popen):
-        """Discogs plugin returns album_id as int; target_mbid is str
-        from the DB (column type TEXT). Int-vs-str equality must succeed
-        so mbid_found=True and the candidate is matched.
+    def test_discogs_numeric_str_album_id_matches(self, mock_popen):
+        """Harness-emitted numeric-str album_id matches str target_mbid.
 
-        This was the live bug: every Discogs validation logged
-        scenario='mbid_not_found' because `2085134 != "2085134"` in Python.
+        This is the happy path for Discogs: beets' plugin returns
+        album_id as int, the harness normalises it to str via
+        `_id_str`, and msgspec decodes it straight into .mbid. The
+        strict-typed boundary does not need to coerce — the harness
+        has already done its job.
         """
         target_mbid = "2085134"  # numeric Discogs ID stored as str in DB
         proc = MagicMock()
-        # candidate from beets' discogs plugin — album_id is an INT
         candidates = [{
             "index": 0, "distance": 0.05, "artist": "Blueline Medic",
             "album": "The Apology Wars",
-            "album_id": 2085134,  # ← int, not str
+            "album_id": "2085134",  # harness-emitted str
             "year": 2001, "country": "AU", "track_count": 11,
             "albumstatus": "Official", "data_source": "Discogs",
         }]
@@ -318,16 +318,53 @@ class TestBeetsValidate(unittest.TestCase):
 
         result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
 
-        self.assertTrue(result.mbid_found,
-                        "int album_id from Discogs plugin must match "
-                        "str target_mbid from DB")
+        self.assertTrue(result.mbid_found)
         self.assertTrue(result.valid)
         self.assertAlmostEqual(result.distance, 0.05)
         self.assertEqual(result.scenario, "strong_match")
-        # The CandidateSummary.is_target flag must also be True
         self.assertTrue(result.candidates[0].is_target)
-        # And mbid is normalised to str on the typed dataclass
         self.assertEqual(result.candidates[0].mbid, "2085134")
+        self.assertIsNone(result.error)
+
+    @patch("lib.beets.sp.Popen")
+    def test_int_album_id_trips_msgspec_boundary(self, mock_popen):
+        """Regression guard for PR #98: an int album_id on the wire
+        should never reach downstream consumers. msgspec.convert raises
+        ValidationError, beets_validate surfaces it as result.error,
+        and returns an empty (invalid) result — loud failure instead of
+        the silent `mbid_not_found` miss that was the original bug.
+
+        In production the harness-side `_id_str` normalises all IDs to
+        str so this path is unreachable; if it ever trips, the harness
+        has regressed and we want to know immediately.
+        """
+        target_mbid = "2085134"
+        proc = MagicMock()
+        # int album_id — the shape of the live bug
+        candidates = [{
+            "index": 0, "distance": 0.05, "artist": "X",
+            "album": "Y", "album_id": 2085134,
+            "track_count": 11, "albumstatus": "Official",
+        }]
+        msg = json.dumps({
+            "type": "choose_match", "task_id": 0, "path": "/test/path",
+            "cur_artist": "X", "cur_album": "Y",
+            "item_count": 11, "candidates": candidates,
+        })
+        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
+
+        self.assertFalse(result.valid)
+        self.assertFalse(result.mbid_found)
+        self.assertIsNotNone(result.error)
+        # Error message should name the offending field so operators
+        # can see exactly what broke.
+        assert result.error is not None  # for pyright
+        self.assertIn("album_id", result.error)
 
     @patch("lib.beets.sp.Popen")
     def test_artist_collab_match(self, mock_popen):

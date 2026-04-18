@@ -25,6 +25,7 @@ pkgs.mkShell {
       ps.psycopg2
       ps.music-tag
       ps.beets
+      ps.msgspec
       slskd-api
     ]))
     pkgs.sox                 # spectral analysis tests

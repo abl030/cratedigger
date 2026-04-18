@@ -9,6 +9,8 @@ import os
 import sys
 import unittest
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (ValidationResult, CandidateSummary,
@@ -155,8 +157,8 @@ class TestCandidateSummary(unittest.TestCase):
                 {"title": "Rock Me Baby", "length": 244.1, "track_id": "t2"},
             ],
         }
-        # Use from_dict — same path as real code (JSON → dict → typed)
-        c = CandidateSummary.from_dict(harness_cand)
+        # Use msgspec.convert — same path as real code (JSON → dict → typed Struct)
+        c = msgspec.convert(harness_cand, type=CandidateSummary)
         self.assertEqual(c.mbid, "abc-123")
         self.assertEqual(c.distance, 0.02)
         self.assertEqual(c.label, "Philips")
@@ -218,64 +220,98 @@ class TestCandidateSummary(unittest.TestCase):
 
 
 # ============================================================================
-# Discogs int-ID coercion (the typed contract says str, harness can emit int)
+# Strict-typed wire boundary — msgspec validates ID fields as `str`
 # ============================================================================
 
-class TestCandidateSummaryIdCoercion(unittest.TestCase):
-    """CandidateSummary.mbid is typed as str. Beets' Discogs plugin emits
-    integer album_ids; if the harness ever leaks an int through, from_dict
-    must normalise it so downstream `==` comparisons against the str
-    target_mbid (DB column type TEXT) don't silently fail.
+class TestCandidateSummaryIdContract(unittest.TestCase):
+    """CandidateSummary is a msgspec.Struct. Every ID field is typed `str`.
+    The int-vs-str bug (every Discogs validation logging `mbid_not_found`)
+    is now caught at decode time by msgspec.ValidationError rather than
+    silently producing wrong `==` comparisons downstream.
 
-    This is the int-vs-str bug that caused every Discogs validation to log
-    `scenario: "mbid_not_found"`.
-    """
+    The harness emits `album_id` as JSON wire key; msgspec renames it to the
+    struct attribute `.mbid`. All other ID fields are validated as `str` —
+    int at the boundary = ValidationError.
 
-    def test_int_album_id_coerced_to_str(self) -> None:
-        """int album_id → str on the typed dataclass."""
-        c = CandidateSummary.from_dict({"album_id": 2085134, "artist": "X"})
+    Harness-side `_id_str` in beets_harness.py still normalises every ID to
+    str before emitting, so in the happy path the strict boundary never
+    trips; it exists to catch regressions."""
+
+    def test_str_album_id_accepted(self) -> None:
+        """UUID album_id decodes into .mbid."""
+        c = msgspec.convert(
+            {"album_id": "f100b6b0-6daa-4c9b-b33a-3e14c564cf58"},
+            type=CandidateSummary,
+        )
+        self.assertEqual(c.mbid, "f100b6b0-6daa-4c9b-b33a-3e14c564cf58")
+
+    def test_numeric_str_album_id_accepted(self) -> None:
+        """Discogs numeric ID-as-string decodes fine (harness emits this)."""
+        c = msgspec.convert({"album_id": "2085134"}, type=CandidateSummary)
         self.assertEqual(c.mbid, "2085134")
         self.assertIsInstance(c.mbid, str)
 
-    def test_str_album_id_unchanged(self) -> None:
-        """UUID album_id stays str (no double-quoting)."""
-        c = CandidateSummary.from_dict({
-            "album_id": "f100b6b0-6daa-4c9b-b33a-3e14c564cf58",
-        })
-        self.assertEqual(c.mbid, "f100b6b0-6daa-4c9b-b33a-3e14c564cf58")
+    def test_int_album_id_rejected(self) -> None:
+        """int album_id raises ValidationError — the whole point of the
+        strict boundary. This is the exact shape of the bug PR #98 fixed."""
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert({"album_id": 2085134}, type=CandidateSummary)
 
-    def test_int_releasegroup_id_coerced_to_str(self) -> None:
-        c = CandidateSummary.from_dict({
-            "album_id": 2085134, "releasegroup_id": 339103,
-        })
-        self.assertEqual(c.releasegroup_id, "339103")
-        self.assertIsInstance(c.releasegroup_id, str)
+    def test_int_releasegroup_id_rejected(self) -> None:
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"album_id": "2085134", "releasegroup_id": 339103},
+                type=CandidateSummary,
+            )
 
-    def test_int_track_id_coerced_to_str(self) -> None:
-        """Discogs tracks have integer track_ids too."""
-        c = CandidateSummary.from_dict({
-            "album_id": 2085134,
-            "tracks": [{"title": "Cathedral", "track_id": 12345678}],
-        })
-        self.assertEqual(c.tracks[0].track_id, "12345678")
-        self.assertIsInstance(c.tracks[0].track_id, str)
+    def test_int_track_id_rejected(self) -> None:
+        """Discogs tracks with int track_ids trip at decode too."""
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"album_id": "2085134",
+                 "tracks": [{"title": "X", "track_id": 12345678}]},
+                type=CandidateSummary,
+            )
 
-    def test_int_release_track_id_coerced_to_str(self) -> None:
-        c = CandidateSummary.from_dict({
-            "album_id": 2085134,
-            "tracks": [{"title": "X", "release_track_id": 87654321}],
-        })
-        self.assertEqual(c.tracks[0].release_track_id, "87654321")
+    def test_int_release_track_id_rejected(self) -> None:
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"album_id": "2085134",
+                 "tracks": [{"title": "X", "release_track_id": 87654321}]},
+                type=CandidateSummary,
+            )
 
-    def test_none_ids_become_empty_string(self) -> None:
-        """None must become "" so the typed field stays str."""
-        c = CandidateSummary.from_dict({
-            "album_id": None, "releasegroup_id": None,
-            "tracks": [{"title": "X", "track_id": None}],
-        })
-        self.assertEqual(c.mbid, "")
-        self.assertEqual(c.releasegroup_id, "")
-        self.assertEqual(c.tracks[0].track_id, "")
+    def test_null_id_rejected(self) -> None:
+        """null on a required-str field is a contract violation — the
+        harness-side `_id_str` always emits `""` for falsy IDs, so null
+        at the wire means something bypassed the harness."""
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert({"album_id": None}, type=CandidateSummary)
+
+    def test_int_nested_item_path_rejected(self) -> None:
+        """HarnessItem.path is str too; int at wire = ValidationError."""
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"album_id": "abc",
+                 "mapping": [{"item": {"path": 12345}, "track": {}}]},
+                type=CandidateSummary,
+            )
+
+
+class TestStructIsMsgspec(unittest.TestCase):
+    """The four harness wire-boundary types are msgspec.Struct."""
+
+    def test_harness_item_is_struct(self) -> None:
+        self.assertTrue(issubclass(HarnessItem, msgspec.Struct))
+
+    def test_harness_track_info_is_struct(self) -> None:
+        self.assertTrue(issubclass(HarnessTrackInfo, msgspec.Struct))
+
+    def test_track_mapping_is_struct(self) -> None:
+        self.assertTrue(issubclass(TrackMapping, msgspec.Struct))
+
+    def test_candidate_summary_is_struct(self) -> None:
+        self.assertTrue(issubclass(CandidateSummary, msgspec.Struct))
 
 
 # ============================================================================
