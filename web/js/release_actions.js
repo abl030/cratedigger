@@ -1,26 +1,33 @@
 // @ts-check
 
 /**
- * Standardised 3-button action toolbar for any release/album row across
- * the browse sub-tabs (Discography, Library, Analysis, Compare). Every
- * button is always rendered; non-applicable ones are disabled (greyed)
- * so the row's available actions read at a glance.
+ * Standardised 2-button action toolbar for any release/album row across
+ * the browse sub-tabs (Discography, Library, Analysis, Compare).
  *
  * Buttons:
- *   [Acquire]           context-aware:
- *                         - "Add request" enabled when not in library
- *                           AND not in pipeline
- *                         - "Upgrade" enabled when in library OR
- *                           pipeline status is 'imported'
- *                         - "Queued" disabled when upgrade already queued
- *                         - "Add request" disabled otherwise (in flight)
- *   [Remove request]    enabled when pipeline status is 'wanted'
- *                       (the only cancellable state)
+ *   [Acquire]           one context-aware button. The three actionable
+ *                       states are mutually exclusive — at any moment a
+ *                       row is either "not yet wanted" (Add request),
+ *                       "owned and could be improved" (Upgrade), or
+ *                       "queued" (Remove request to cancel). Whichever
+ *                       fits the current state is the live label; the
+ *                       other states' affordances are unreachable so
+ *                       showing them as separate greyed buttons just
+ *                       added noise.
  *   [Remove from beets] enabled when in library and beets album id known
  *
- * Add request and Upgrade are mutually exclusive in their enabled
- * states (you either don't have it → add, or you have it → upgrade)
- * so one collapsing button reads clearer than two side-by-side.
+ * Acquire decision tree (highest priority first):
+ *   1. pipeline_status === 'wanted'  → "Remove request" enabled
+ *      (cancels both fresh add-requests and queued upgrades — the
+ *      user's mental model: "wanted means it's in the pipeline,
+ *      remove it")
+ *   2. pipeline_status === 'downloading' → "Remove request" disabled
+ *      (in flight; backend can't cancel mid-download cleanly)
+ *   3. in_library OR pipeline_status === 'imported' → "Upgrade" enabled
+ *      (own it / previously imported — re-queue for higher quality)
+ *   4. !in_library AND no pipeline_status → "Add request" enabled
+ *      (fresh request)
+ *   5. else (manual review, etc) → "Add request" disabled
  *
  * Action handlers are window-bound globals (addRelease, upgradeAlbum,
  * disambRemove, confirmDeleteBeets) — defined elsewhere; this module
@@ -59,11 +66,6 @@ export function renderActionToolbar(item, opts = {}) {
   const pId = stored ? stored.id : (item.pipeline_id || null);
   const inLibrary = !!item.in_library;
   const beetsId = item.beets_album_id || null;
-  const upgradeQueued = !!item.upgrade_queued;
-
-  const canAdd = !inLibrary && !pStatus;
-  const canUpgrade = (inLibrary || pStatus === 'imported') && !upgradeQueued;
-  const canRemoveReq = pStatus === 'wanted' && !!pId;
   const canRemoveBeets = inLibrary && !!beetsId;
 
   const sizeStyle = opts.size === 'small'
@@ -76,32 +78,31 @@ export function renderActionToolbar(item, opts = {}) {
   const album = esc(item.album || '');
   const trackCount = item.track_count || 0;
 
-  // Acquire — collapses Add request + Upgrade into one context-aware
-  // button. Their enabled states are mutually exclusive, so showing
-  // them side by side wastes space and produces redundant greyed-out
-  // buttons next to live ones.
+  // Acquire — single context-aware button. See module header for the
+  // full priority order. The key invariant: at most one of Add/Upgrade/
+  // Remove request is meaningful at any time, so we collapse them.
   let acquireBtn;
-  if (upgradeQueued) {
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}border-color:#6a9;color:#6a9;" disabled>Queued</button>`;
-  } else if (canUpgrade) {
+  if (pStatus === 'wanted' && pId) {
+    // Cancellable. Covers fresh add-requests AND queued upgrades —
+    // the user's framing: "if album is wanted (either path), Remove
+    // request".
+    acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;
+  } else if (pStatus === 'downloading') {
+    // In flight; can't cleanly cancel mid-download.
+    acquireBtn = `<button class="btn" style="${baseStyle}" disabled>Remove request</button>`;
+  } else if (inLibrary || pStatus === 'imported') {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum('${escId}', this)">Upgrade</button>`;
-  } else if (canAdd) {
+  } else if (!inLibrary && !pStatus) {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease('${escId}', this)">Add request</button>`;
   } else {
-    // In flight (wanted/downloading/manual) — neither add nor upgrade
-    // is meaningful; Remove request handles the cancel path.
+    // Manual review or other terminal/unknown state — no live action.
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
   }
-
-  // Remove request (cancel a wanted entry)
-  const removeReqBtn = canRemoveReq
-    ? `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`
-    : `<button class="btn" style="${baseStyle}" disabled>Remove request</button>`;
 
   // Remove from beets — greyed out when not in library
   const removeBeetsBtn = canRemoveBeets
     ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, '${artist}', '${album}', ${trackCount})">Remove from beets</button>`
     : `<button class="btn" style="${baseStyle}" disabled>Remove from beets</button>`;
 
-  return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeReqBtn}${removeBeetsBtn}</span>`;
+  return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeBeetsBtn}</span>`;
 }
