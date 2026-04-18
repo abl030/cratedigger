@@ -294,6 +294,7 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     if new_m:
         if new_m.min_bitrate_kbps is not None:
             dl_info.bitrate = new_m.min_bitrate_kbps * 1000
+            dl_info.actual_min_bitrate = new_m.min_bitrate_kbps
         dl_info.download_spectral = SpectralMeasurement.from_parts(
             new_m.spectral_grade, new_m.spectral_bitrate_kbps)
         dl_info.verified_lossless_override = new_m.verified_lossless

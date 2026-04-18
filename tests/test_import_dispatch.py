@@ -90,6 +90,40 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.slskd_filetype, "mp3")
         self.assertEqual(dl.actual_filetype, "mp3")
 
+    def test_populates_actual_min_bitrate_from_new_measurement(self):
+        """Point-in-time min bitrate must land in dl.actual_min_bitrate so the
+        download_log column is non-NULL. Recents UI relies on this column to
+        render per-row 'upgrade X to Y' verdicts — when NULL the UI silently
+        falls through to album_requests.min_bitrate (current state), painting
+        every historical row with the latest value.
+        Live reproducer: request 1055, rows 3628/3631 both have NULL column
+        despite JSONB carrying 119 and 162.
+        """
+        from lib.import_dispatch import _populate_dl_info_from_import_result
+        dl = DownloadInfo(filetype="mp3")
+        ir = make_import_result(was_converted=False, new_min_bitrate=119)
+        _populate_dl_info_from_import_result(dl, ir)
+        self.assertEqual(dl.actual_min_bitrate, 119)
+
+    def test_populates_actual_min_bitrate_for_flac_conversion(self):
+        """Same guarantee for the FLAC→V0 conversion path — the V0 min bitrate
+        is the point-in-time value and must land on the column."""
+        from lib.import_dispatch import _populate_dl_info_from_import_result
+        dl = DownloadInfo(filetype="flac")
+        ir = make_import_result(was_converted=True, original_filetype="flac",
+                                target_filetype="mp3", new_min_bitrate=245)
+        _populate_dl_info_from_import_result(dl, ir)
+        self.assertEqual(dl.actual_min_bitrate, 245)
+
+    def test_leaves_actual_min_bitrate_none_when_measurement_missing(self):
+        """If there's no new_measurement in the ImportResult, we don't
+        fabricate a value — NULL is the honest signal for consumers."""
+        from lib.import_dispatch import _populate_dl_info_from_import_result
+        dl = DownloadInfo(filetype="mp3")
+        ir = ImportResult(decision="import_failed", new_measurement=None)
+        _populate_dl_info_from_import_result(dl, ir)
+        self.assertIsNone(dl.actual_min_bitrate)
+
 
 class TestCleanupStagedDir(unittest.TestCase):
 
