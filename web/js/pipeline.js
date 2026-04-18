@@ -40,6 +40,10 @@ export function renderPipeline() {
   let items = [];
   if (state.pipelineFilter === 'all') {
     items = [...(data.wanted || []), ...(data.downloading || []), ...(data.imported || []), ...(data.manual || [])];
+  } else if (state.pipelineFilter === 'wanted') {
+    // Downloading is a sub-state of wanted — same album, mid-acquisition.
+    // The status badge on each row still distinguishes them visually.
+    items = [...(data.wanted || []), ...(data.downloading || [])];
   } else {
     items = data[state.pipelineFilter] || [];
   }
@@ -57,11 +61,14 @@ export function renderPipeline() {
     byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
   }
 
+  // Wanted bucket includes downloading — mid-acquisition is a sub-state
+  // of wanted. The status badge on each row keeps them visually distinct.
+  const wantedTotal = (counts.wanted || 0) + (counts.downloading || 0);
   el.innerHTML = `
     <div class="status-card">
       <div class="status-counts">
         <div class="count ${state.pipelineFilter === 'wanted' ? 'active' : ''}" onclick="window.setFilter('wanted')">
-          <div class="count-num">${counts.wanted || 0}</div><div class="count-label">Wanted</div>
+          <div class="count-num">${wantedTotal}</div><div class="count-label">Wanted</div>
         </div>
         <div class="count ${state.pipelineFilter === 'manual' ? 'active' : ''}" onclick="window.setFilter('manual')">
           <div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div>

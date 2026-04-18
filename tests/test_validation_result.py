@@ -218,6 +218,67 @@ class TestCandidateSummary(unittest.TestCase):
 
 
 # ============================================================================
+# Discogs int-ID coercion (the typed contract says str, harness can emit int)
+# ============================================================================
+
+class TestCandidateSummaryIdCoercion(unittest.TestCase):
+    """CandidateSummary.mbid is typed as str. Beets' Discogs plugin emits
+    integer album_ids; if the harness ever leaks an int through, from_dict
+    must normalise it so downstream `==` comparisons against the str
+    target_mbid (DB column type TEXT) don't silently fail.
+
+    This is the int-vs-str bug that caused every Discogs validation to log
+    `scenario: "mbid_not_found"`.
+    """
+
+    def test_int_album_id_coerced_to_str(self) -> None:
+        """int album_id → str on the typed dataclass."""
+        c = CandidateSummary.from_dict({"album_id": 2085134, "artist": "X"})
+        self.assertEqual(c.mbid, "2085134")
+        self.assertIsInstance(c.mbid, str)
+
+    def test_str_album_id_unchanged(self) -> None:
+        """UUID album_id stays str (no double-quoting)."""
+        c = CandidateSummary.from_dict({
+            "album_id": "f100b6b0-6daa-4c9b-b33a-3e14c564cf58",
+        })
+        self.assertEqual(c.mbid, "f100b6b0-6daa-4c9b-b33a-3e14c564cf58")
+
+    def test_int_releasegroup_id_coerced_to_str(self) -> None:
+        c = CandidateSummary.from_dict({
+            "album_id": 2085134, "releasegroup_id": 339103,
+        })
+        self.assertEqual(c.releasegroup_id, "339103")
+        self.assertIsInstance(c.releasegroup_id, str)
+
+    def test_int_track_id_coerced_to_str(self) -> None:
+        """Discogs tracks have integer track_ids too."""
+        c = CandidateSummary.from_dict({
+            "album_id": 2085134,
+            "tracks": [{"title": "Cathedral", "track_id": 12345678}],
+        })
+        self.assertEqual(c.tracks[0].track_id, "12345678")
+        self.assertIsInstance(c.tracks[0].track_id, str)
+
+    def test_int_release_track_id_coerced_to_str(self) -> None:
+        c = CandidateSummary.from_dict({
+            "album_id": 2085134,
+            "tracks": [{"title": "X", "release_track_id": 87654321}],
+        })
+        self.assertEqual(c.tracks[0].release_track_id, "87654321")
+
+    def test_none_ids_become_empty_string(self) -> None:
+        """None must become "" so the typed field stays str."""
+        c = CandidateSummary.from_dict({
+            "album_id": None, "releasegroup_id": None,
+            "tracks": [{"title": "X", "track_id": None}],
+        })
+        self.assertEqual(c.mbid, "")
+        self.assertEqual(c.releasegroup_id, "")
+        self.assertEqual(c.tracks[0].track_id, "")
+
+
+# ============================================================================
 # ValidationResult construction
 # ============================================================================
 

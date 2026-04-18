@@ -288,6 +288,48 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertTrue(result.valid)
 
     @patch("lib.beets.sp.Popen")
+    def test_discogs_int_album_id_matches_str_target(self, mock_popen):
+        """Discogs plugin returns album_id as int; target_mbid is str
+        from the DB (column type TEXT). Int-vs-str equality must succeed
+        so mbid_found=True and the candidate is matched.
+
+        This was the live bug: every Discogs validation logged
+        scenario='mbid_not_found' because `2085134 != "2085134"` in Python.
+        """
+        target_mbid = "2085134"  # numeric Discogs ID stored as str in DB
+        proc = MagicMock()
+        # candidate from beets' discogs plugin — album_id is an INT
+        candidates = [{
+            "index": 0, "distance": 0.05, "artist": "Blueline Medic",
+            "album": "The Apology Wars",
+            "album_id": 2085134,  # ← int, not str
+            "year": 2001, "country": "AU", "track_count": 11,
+            "albumstatus": "Official", "data_source": "Discogs",
+        }]
+        msg = json.dumps({
+            "type": "choose_match", "task_id": 0, "path": "/test/path",
+            "cur_artist": "Blueline Medic", "cur_album": "The Apology Wars",
+            "item_count": 11, "candidates": candidates,
+        })
+        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
+
+        self.assertTrue(result.mbid_found,
+                        "int album_id from Discogs plugin must match "
+                        "str target_mbid from DB")
+        self.assertTrue(result.valid)
+        self.assertAlmostEqual(result.distance, 0.05)
+        self.assertEqual(result.scenario, "strong_match")
+        # The CandidateSummary.is_target flag must also be True
+        self.assertTrue(result.candidates[0].is_target)
+        # And mbid is normalised to str on the typed dataclass
+        self.assertEqual(result.candidates[0].mbid, "2085134")
+
+    @patch("lib.beets.sp.Popen")
     def test_artist_collab_match(self, mock_popen):
         """Collab credit — MBID matches and distance is good → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"

@@ -60,6 +60,18 @@ def _serialize_item(item) -> dict:
     }
 
 
+def _id_str(value) -> str:
+    """Coerce an ID-like value to str at the wire boundary.
+
+    Beets' MusicBrainz plugin returns IDs as UUID strings; the Discogs
+    plugin returns integers (because the Discogs API returns numbers).
+    Consumers in lib/ compare these against DB-stored str mb_release_ids
+    with `==`, so a mixed-type wire format silently fails — that was the
+    "mbid_not_found" bug for every Discogs validation.
+    """
+    return str(value) if value else ""
+
+
 def _serialize_track_info(ti) -> dict:
     """Serialize a TrackInfo to a JSON-safe dict. Full detail for
     debugging track matching and distance calculations."""
@@ -71,8 +83,8 @@ def _serialize_track_info(ti) -> dict:
         "medium_index": getattr(ti, "medium_index", None),
         "medium_total": getattr(ti, "medium_total", None),
         "length": round(getattr(ti, "length", 0) or 0, 1),
-        "track_id": getattr(ti, "track_id", None) or "",
-        "release_track_id": getattr(ti, "release_track_id", None) or "",
+        "track_id": _id_str(getattr(ti, "track_id", None)),
+        "release_track_id": _id_str(getattr(ti, "release_track_id", None)),
         "track_alt": getattr(ti, "track_alt", None),
         "disctitle": getattr(ti, "disctitle", None),
         "data_source": getattr(ti, "data_source", None) or "",
@@ -101,7 +113,7 @@ def _serialize_album_candidate(idx: int, candidate) -> dict:
         # AlbumInfo — full metadata
         "artist": getattr(info, "artist", None) or "",
         "album": getattr(info, "album", None) or "",
-        "album_id": getattr(info, "album_id", None) or "",
+        "album_id": _id_str(getattr(info, "album_id", None)),
         "albumdisambig": getattr(info, "albumdisambig", None) or "",
         "year": getattr(info, "year", None),
         "original_year": getattr(info, "original_year", None),
@@ -113,7 +125,7 @@ def _serialize_album_candidate(idx: int, candidate) -> dict:
         "albumtype": getattr(info, "albumtype", None) or "",
         "albumtypes": getattr(info, "albumtypes", None) or [],
         "albumstatus": getattr(info, "albumstatus", None) or "",
-        "releasegroup_id": getattr(info, "releasegroup_id", None) or "",
+        "releasegroup_id": _id_str(getattr(info, "releasegroup_id", None)),
         "release_group_title": getattr(info, "release_group_title", None) or "",
         "va": getattr(info, "va", False),
         "language": getattr(info, "language", None),
@@ -142,7 +154,7 @@ def _serialize_track_candidate(idx: int, candidate) -> dict:
         "distance": round(float(candidate.distance), 4),
         "title": getattr(info, "title", None) or "",
         "artist": getattr(info, "artist", None) or "",
-        "track_id": getattr(info, "track_id", None) or "",
+        "track_id": _id_str(getattr(info, "track_id", None)),
         "length": round(getattr(info, "length", 0) or 0, 1),
     }
 
