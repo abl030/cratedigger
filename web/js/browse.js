@@ -2,6 +2,7 @@
 import { state, API, toast } from './state.js';
 import { esc } from './util.js';
 import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
+import { renderTypedSections, classify as groupingClassify } from './grouping.js';
 import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
 
@@ -331,12 +332,32 @@ function renderCompare(el, data) {
   const mbName = data.mb_artist?.name || '—';
   const dgName = data.discogs_artist?.name || '—';
 
-  const sortBy = (rows, getter) => {
-    return [...rows].sort((a, b) => (getter(a) || '').localeCompare(getter(b) || ''));
-  };
-  const bothSorted = sortBy(both, p => (p.mb || p.discogs).first_release_date || '');
-  const mbOnlySorted = sortBy(mbOnly, r => r.first_release_date || '');
-  const dgOnlySorted = sortBy(dgOnly, r => r.first_release_date || '');
+  // Each bucket gets the same Albums/EPs/Singles sectioning the
+  // Discography sub-tab uses. For "both" pairs we classify off the MB
+  // side (it has primary_type + secondary_types reliably); fall back to
+  // Discogs when MB is missing.
+  const pairClassify = (p) => p.mb || p.discogs;
+  const renderBothBucket = (rows) => renderTypedSections(
+    rows, (p) => compareRow(p.mb, p.discogs),
+    {
+      classify: (p) => groupingClassify(pairClassify(p)),
+      dateOf: (p) => String(pairClassify(p).first_release_date || ''),
+    },
+  );
+  const renderMbOnly = (rows) => renderTypedSections(
+    rows, (r) => compareRow(r, null));
+  const renderDgOnly = (rows) => renderTypedSections(
+    rows, (r) => compareRow(null, r));
+
+  const bothHtml = both.length
+    ? renderBothBucket(both)
+    : '<div style="padding:6px;color:#777;">none</div>';
+  const mbHtml = mbOnly.length
+    ? renderMbOnly(mbOnly)
+    : '<div style="padding:6px;color:#777;">none</div>';
+  const dgHtml = dgOnly.length
+    ? renderDgOnly(dgOnly)
+    : '<div style="padding:6px;color:#777;">none</div>';
 
   el.innerHTML = `
     <div style="font-size:13px;color:#888;margin-bottom:10px;">
@@ -346,19 +367,19 @@ function renderCompare(el, data) {
       <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
         On both sources <span class="type-count">${both.length}</span>
       </div>
-      <div class="type-body open">${bothSorted.map(p => compareRow(p.mb, p.discogs)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+      <div class="type-body open">${bothHtml}</div>
     </div>
     <div class="type-section">
       <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#9cf;">
         Only on MusicBrainz <span class="type-count">${mbOnly.length}</span>
       </div>
-      <div class="type-body">${mbOnlySorted.map(r => compareRow(r, null)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+      <div class="type-body">${mbHtml}</div>
     </div>
     <div class="type-section">
       <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#fc9;">
         Only on Discogs <span class="type-count">${dgOnly.length}</span>
       </div>
-      <div class="type-body">${dgOnlySorted.map(r => compareRow(null, r)).join('') || '<div style="padding:6px;color:#777;">none</div>'}</div>
+      <div class="type-body">${dgHtml}</div>
     </div>`;
 }
 

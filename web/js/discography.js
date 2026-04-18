@@ -1,6 +1,7 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus, pipelineStore } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource } from './util.js';
+import { renderTypedSections } from './grouping.js';
 import { invalidateBrowseArtist } from './browse.js';
 
 /**
@@ -33,59 +34,23 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       }
     }
 
-    function classify(rg) {
-      const st = rg.secondary_types || [];
-      if (st.includes('Compilation')) return 'Compilations';
-      if (st.includes('Live')) return 'Live';
-      if (st.includes('Remix')) return 'Remixes';
-      if (st.includes('DJ-mix')) return 'DJ Mixes';
-      if (st.includes('Demo')) return 'Demos';
-      if (st.length > 0) return 'Other';
-      if (rg.type === 'Album') return 'Albums';
-      if (rg.type === 'EP') return 'EPs';
-      if (rg.type === 'Single') return 'Singles';
-      return 'Other';
+    function renderRgRow(rg) {
+      const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
+      const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
+        ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
+      return `
+        <div class="rg">
+          <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
+            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}
+          </div>
+          <div class="releases" id="rel-${rg.id}"></div>
+        </div>
+      `;
     }
 
     function renderSection(rgs, defaultOpen) {
-      const sectionOrder = ['Albums', 'EPs', 'Singles', 'Compilations', 'Live', 'Remixes', 'DJ Mixes', 'Demos', 'Other'];
-      const sections = {};
-      for (const rg of rgs) {
-        const sec = classify(rg);
-        if (!sections[sec]) sections[sec] = [];
-        sections[sec].push(rg);
-      }
-      for (const sec of Object.values(sections)) {
-        sec.sort((a, b) => (a.first_release_date || '').localeCompare(b.first_release_date || ''));
-      }
-      return sectionOrder
-        .filter(s => sections[s])
-        .map(s => {
-          const items = sections[s];
-          const isOpen = defaultOpen && s === 'Albums';
-          return `
-            <div class="type-section">
-              <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">
-                ${s} <span class="type-count">${items.length}</span>
-              </div>
-              <div class="type-body${isOpen ? ' open' : ''}">
-                ${items.map(rg => {
-                  const year = rg.first_release_date ? rg.first_release_date.slice(0,4) : '';
-                  const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
-                    ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-                  return `
-                    <div class="rg">
-                      <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
-                        <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}
-                      </div>
-                      <div class="releases" id="rel-${rg.id}"></div>
-                    </div>
-                  `;
-                }).join('')}
-              </div>
-            </div>
-          `;
-        }).join('');
+      return renderTypedSections(rgs, renderRgRow,
+        { defaultOpen: defaultOpen ? 'Albums' : null });
     }
 
     // Library section — what you already own

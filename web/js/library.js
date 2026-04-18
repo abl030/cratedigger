@@ -1,6 +1,7 @@
 // @ts-check
 import { API, toast, updatePipelineStatus } from './state.js';
 import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
+import { renderTypedSections } from './grouping.js';
 import { renderDownloadHistoryItem } from './history.js';
 
 /**
@@ -84,25 +85,33 @@ export function renderLibraryResults(albums, targetEl) {
       `;
     }
 
-    const albumsHtml = rgOrder.map(rgKey => {
+    // Build per-RG display rows, then group them by Album/EP/Single/etc.
+    // so an artist with mixed types renders the same sectioning the
+    // Discography sub-tab uses. Within a section, sort by year.
+    const rgRows = rgOrder.map(rgKey => {
       const rg = byRG[rgKey];
-      if (rg.albums.length === 1) {
-        return renderAlbum(rg.albums[0]);
-      }
-      // Multiple releases in same release group
-      const yr = rg.year || '?';
-      return `
-        <div class="lib-rg">
-          <div class="lib-rg-header" onclick="this.nextElementSibling.classList.toggle('open')">
-            <span>${yr} ${esc(rg.title)}</span>
-            <span class="lib-artist-count">${rg.albums.length} versions</span>
-          </div>
-          <div class="lib-rg-body">
-            ${rg.albums.map(renderAlbum).join('')}
-          </div>
-        </div>
-      `;
-    }).join('');
+      const sample = rg.albums[0];
+      const html = rg.albums.length === 1
+        ? renderAlbum(sample)
+        : `<div class="lib-rg">
+             <div class="lib-rg-header" onclick="this.nextElementSibling.classList.toggle('open')">
+               <span>${rg.year || '?'} ${esc(rg.title)}</span>
+               <span class="lib-artist-count">${rg.albums.length} versions</span>
+             </div>
+             <div class="lib-rg-body">
+               ${rg.albums.map(renderAlbum).join('')}
+             </div>
+           </div>`;
+      return {
+        // Fields classify() reads
+        type: sample.type || '',
+        secondary_types: [],
+        // Sort key
+        first_release_date: String(rg.year || ''),
+        _html: html,
+      };
+    });
+    const albumsHtml = renderTypedSections(rgRows, (r) => r._html);
 
     return `
       <div class="lib-artist">
