@@ -2434,5 +2434,255 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
             "state instead of returning a cached in_library=False.")
 
 
+class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
+    """Issue #101 Codex round 3 — the `/api/artist/<id>/disambiguate`
+    and `/api/artist/compare` endpoints run expensive pure analysis on
+    top of MB metadata (`filter_non_live` + `analyse_artist_releases`,
+    `merge_discographies`). After the response-cache removal, naïvely
+    running that analysis on every request regresses warm-load latency
+    from ~5ms (full response cached) to ~50-300ms (analysis re-runs).
+
+    Fix: cache the pre-overlay skeleton separately under `meta:`. It's
+    a pure function of pure-metadata inputs — safe. Overlay (live DB
+    state) still runs on every request.
+
+    These tests pin the split: skeleton is cached across calls, and
+    the overlay reflects live DB state even when the skeleton is warm.
+    """
+
+    ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+    RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    RG_ID = "11111111-1111-1111-1111-111111111111"
+
+    _RAW_RELEASES = [
+        {
+            "id": RELEASE_ID,
+            "title": "Album",
+            "date": "2020-01-01",
+            "country": "US",
+            "status": "Official",
+            "release-group": {
+                "id": RG_ID,
+                "title": "Album",
+                "primary-type": "Album",
+                "secondary-types": [],
+            },
+            "media": [{
+                "position": 1, "format": "CD", "track-count": 1,
+                "tracks": [{
+                    "position": 1, "number": "1", "title": "Track",
+                    "recording": {"id": "rec-1", "title": "Track"},
+                }],
+            }],
+        },
+    ]
+
+    def setUp(self) -> None:
+        from tests.test_web_cache import FakeRedis
+        fake = self._cache._redis
+        assert isinstance(fake, FakeRedis)
+        fake._store.clear()
+
+    # -- Disambiguate ------------------------------------------------
+
+    def test_disambiguate_skeleton_cached_in_meta_namespace(self) -> None:
+        """First GET computes the skeleton; second GET reuses it. We
+        assert the skeleton ended up under `meta:` and the pure-
+        analysis fetch is only issued once across both requests."""
+        from tests.test_web_cache import FakeRedis
+        fake = self._cache._redis
+        assert isinstance(fake, FakeRedis)
+
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}):
+            mock_mb.get_artist_releases_with_recordings.return_value = \
+                self._RAW_RELEASES
+            mock_mb.get_artist_name.return_value = "Test Artist"
+
+            s1, _ = self._get(f"/api/artist/{self.ARTIST_ID}/disambiguate")
+            s2, _ = self._get(f"/api/artist/{self.ARTIST_ID}/disambiguate")
+
+            self.assertEqual(s1, 200)
+            self.assertEqual(s2, 200)
+            # The pure MB fetch helper was called once — either this is
+            # the first call (skeleton miss) or the route's own meta-
+            # cached skeleton short-circuited to avoid re-calling it.
+            self.assertEqual(
+                mock_mb.get_artist_releases_with_recordings.call_count, 1,
+                "skeleton caching must reuse the analysis across calls "
+                "— the expensive pure-python analysis should NOT re-run "
+                "on warm loads")
+
+        # Skeleton key is in the meta: namespace — not web:, so it
+        # survives pipeline/library group invalidations.
+        meta_keys = [k for k in fake._store
+                     if k.startswith("meta:") and self.ARTIST_ID in k]
+        self.assertTrue(
+            meta_keys,
+            f"expected a meta: key for artist {self.ARTIST_ID}, got: "
+            f"{sorted(fake._store.keys())}")
+
+    def test_disambiguate_overlay_reflects_live_state_across_skeleton_cache(
+            self) -> None:
+        """Skeleton cache is warm; change live DB state; next GET must
+        still reflect the new pipeline_status via overlay."""
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline",
+                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted"}}):
+            mock_mb.get_artist_releases_with_recordings.return_value = \
+                self._RAW_RELEASES
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            _s, first = self._get(
+                f"/api/artist/{self.ARTIST_ID}/disambiguate")
+
+        self.assertEqual(
+            first["release_groups"][0]["pressings"][0]["pipeline_status"],
+            "wanted")
+
+        # External DB write — status flips to 'downloading'. No POST
+        # invalidation (same bug class as the release-detail test).
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline",
+                      return_value={self.RELEASE_ID: {"id": 42, "status": "downloading"}}):
+            mock_mb.get_artist_releases_with_recordings.return_value = \
+                self._RAW_RELEASES
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            _s, second = self._get(
+                f"/api/artist/{self.ARTIST_ID}/disambiguate")
+
+        self.assertEqual(
+            second["release_groups"][0]["pressings"][0]["pipeline_status"],
+            "downloading",
+            "Even with the skeleton cached in meta:, the overlay must "
+            "recompute against current DB state — otherwise the skeleton "
+            "cache reintroduces the stale-badge bug.")
+        # RG-level pipeline_status must also flip.
+        self.assertEqual(
+            second["release_groups"][0]["pipeline_status"], "downloading")
+
+    def test_disambiguate_overlay_reflects_library_flip(self) -> None:
+        """Same guarantee for in_library — beets state flips, overlay must
+        see it without invalidating the skeleton cache."""
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}):
+            mock_mb.get_artist_releases_with_recordings.return_value = \
+                self._RAW_RELEASES
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            _s, first = self._get(
+                f"/api/artist/{self.ARTIST_ID}/disambiguate")
+        self.assertFalse(
+            first["release_groups"][0]["pressings"][0]["in_library"])
+
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library",
+                      return_value={self.RELEASE_ID}), \
+                patch("web.server.check_pipeline", return_value={}):
+            mock_mb.get_artist_releases_with_recordings.return_value = \
+                self._RAW_RELEASES
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            _s, second = self._get(
+                f"/api/artist/{self.ARTIST_ID}/disambiguate")
+        self.assertTrue(
+            second["release_groups"][0]["pressings"][0]["in_library"])
+        self.assertEqual(
+            second["release_groups"][0]["library_status"], "in_library")
+
+    # -- Compare -----------------------------------------------------
+
+    def test_compare_skeleton_cached_in_meta_namespace(self) -> None:
+        """merge_discographies is pure — its output is cacheable."""
+        from tests.test_web_cache import FakeRedis
+        fake = self._cache._redis
+        assert isinstance(fake, FakeRedis)
+
+        mb_rg = {
+            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
+        }
+        discogs_rg = {
+            "id": "21491", "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": "3840",
+        }
+
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_mb.search_artists.return_value = [
+                {"id": self.ARTIST_ID, "name": "Radiohead"}]
+            mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            mock_dg.search_artists.return_value = [
+                {"id": "3840", "name": "Radiohead"}]
+            mock_dg.get_artist_releases.return_value = [discogs_rg]
+
+            s1, _ = self._get("/api/artist/compare?name=Radiohead")
+            s2, _ = self._get("/api/artist/compare?name=Radiohead")
+            self.assertEqual(s1, 200)
+            self.assertEqual(s2, 200)
+            # Pure MB/Discogs discography fetches are called once across
+            # both requests — their outputs went into the skeleton cache.
+            self.assertEqual(mock_mb.get_artist_release_groups.call_count, 1)
+            self.assertEqual(mock_dg.get_artist_releases.call_count, 1)
+
+        meta_keys = [k for k in fake._store if k.startswith("meta:")
+                     and "compare" in k]
+        self.assertTrue(
+            meta_keys,
+            "expected a compare skeleton under meta:, got: "
+            f"{sorted(fake._store.keys())}")
+
+    def test_compare_overlay_reflects_library_flip(self) -> None:
+        """Even with the compare skeleton cached, annotate_in_library
+        must run on every request so badges flip with beets state."""
+        mb_rg = {
+            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
+        }
+        discogs_rg = {
+            "id": "21491", "title": "OK Computer", "type": "Album",
+            "secondary_types": [], "first_release_date": "1997",
+            "artist_credit": "Radiohead", "primary_artist_id": "3840",
+        }
+
+        def _run(lib_albums: list[dict]) -> dict:
+            with patch("web.server.mb_api") as mock_mb, \
+                    patch("routes.browse.discogs_api") as mock_dg, \
+                    patch("web.server.get_library_artist",
+                          return_value=lib_albums):
+                mock_mb.search_artists.return_value = [
+                    {"id": self.ARTIST_ID, "name": "Radiohead"}]
+                mock_mb.get_artist_release_groups.return_value = [mb_rg]
+                mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+                mock_dg.search_artists.return_value = [
+                    {"id": "3840", "name": "Radiohead"}]
+                mock_dg.get_artist_releases.return_value = [discogs_rg]
+                _s, data = self._get("/api/artist/compare?name=Radiohead")
+                return data
+
+        first = _run([])
+        self.assertFalse(first["both"][0]["mb"].get("in_library"))
+
+        # Library flips — beets now holds this album.
+        lib_album = {
+            "mb_albumid": self.RELEASE_ID,
+            "mb_releasegroupid": self.RG_ID,
+            "album": "OK Computer",
+            "formats": "MP3",
+            "min_bitrate": 320000,
+        }
+        second = _run([lib_album])
+        self.assertTrue(
+            second["both"][0]["mb"].get("in_library"),
+            "Compare overlay must run per-request — a warm skeleton "
+            "cache must not mask a library-state change.")
+
+
 if __name__ == "__main__":
     unittest.main()
