@@ -22,7 +22,8 @@ from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
                          extract_usernames, narrow_override_on_downgrade,
                          rejection_backfill_override)
 from lib.transitions import apply_transition
-from lib.util import cleanup_disambiguation_orphans, repair_mp3_headers, trigger_meelo_clean
+from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
+                      repair_mp3_headers, trigger_meelo_clean)
 from lib.preimport import inspect_local_files, run_preimport_gates
 
 if TYPE_CHECKING:
@@ -500,9 +501,8 @@ def dispatch_import_core(
         # path) → harness falls back to QualityRankConfig.defaults().
         if cfg is not None:
             cmd.extend(["--quality-rank-config", cfg.quality_ranks.to_json()])
-        import_env = {**os.environ, "HOME": "/home/abl030"}
         result = sp.run(cmd, capture_output=True, text=True,
-                        timeout=1800, env=import_env)
+                        timeout=1800, env=beets_subprocess_env())
         for line in (result.stderr or "").strip().split("\n"):
             if line.strip():
                 logger.info(f"  [import] {line}")

@@ -15,7 +15,7 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,  # type: ignor
                          get_decision_tree, full_pipeline_decision,
                          detect_release_source)
 from lib.transitions import apply_transition  # type: ignore[import-not-found]
-from lib.util import resolve_failed_path  # type: ignore[import-not-found]
+from lib.util import beets_subprocess_env, resolve_failed_path  # type: ignore[import-not-found]
 from spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,  # type: ignore[import-not-found]
                              ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                              CLIFF_THRESHOLD_DB_PER_KHZ)
@@ -630,7 +630,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
             result = _sp.run(
                 ["beet", "remove", "-d", f"mb_albumid:{mb_release_id}"],
                 capture_output=True, text=True, timeout=30,
-                env={**os.environ, "HOME": "/home/abl030"},
+                env=beets_subprocess_env(),
             )
             beets_removed = result.returncode == 0
 

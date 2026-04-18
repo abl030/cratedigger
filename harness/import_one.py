@@ -47,6 +47,7 @@ _bootstrap_import_paths()
 
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
+from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, ImportResult,
                          PostflightInfo, QualityRankConfig,
@@ -565,10 +566,10 @@ def run_import(path, mb_release_id):
     cmd = [HARNESS, "--noincremental", "--search-id", mb_release_id, path]
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
-    env = {**os.environ, "HOME": "/home/abl030"}
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid, env=env,
+        stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid,
+        env=beets_subprocess_env(),
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
@@ -1125,7 +1126,7 @@ def main():
         move_result = subprocess.run(
             [BEET_BIN, "move", f"mb_albumid:{mbid}"],
             capture_output=True, text=True, timeout=120,
-            env={**os.environ, "HOME": "/home/abl030"},
+            env=beets_subprocess_env(),
         )
         if move_result.returncode == 0:
             # Re-read path from beets DB — it may have changed

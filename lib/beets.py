@@ -19,6 +19,7 @@ if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
 from quality import ValidationResult, ChooseMatchMessage
+from util import beets_subprocess_env
 
 logger = logging.getLogger("soularr")
 
@@ -43,7 +44,8 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
     logger.info(f"BEETS_VALIDATE: cmd={' '.join(cmd)}")
 
     try:
-        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True,
+                        env=beets_subprocess_env())
     except Exception as e:
         result.error = f"Failed to start harness: {e}"
         logger.error(f"BEETS_VALIDATE: {result.error}")

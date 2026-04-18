@@ -163,6 +163,45 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertIn("Failed to start harness", result.error)
 
     @patch("lib.beets.sp.Popen")
+    def test_launches_harness_with_beets_subprocess_env(self, mock_popen):
+        """Regression guard: the harness subprocess MUST receive the beets
+        env (HOME override). When soularr runs as the systemd service (root,
+        HOME=/root) without this, beets' Discogs plugin can't find its
+        config at `~/.config/beets/` and returns 0 candidates for every
+        --search-id — scenario=mbid_not_found on every Discogs validation.
+
+        Live failures: download_log ids 3604, 3607, 3610, 3611, 3613, 3615,
+        3616 for request ids 1710, 1711 (Blueline Medic - The Apology Wars).
+        """
+        from lib.util import beets_subprocess_env
+        mbid = "12345678-1234-1234-1234-123456789abc"
+        proc = MagicMock()
+        proc.stdout = iter([
+            make_choose_match_msg(mbid, 0.05) + "\n",
+            make_session_end() + "\n",
+        ])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
+
+        # Inspect the kwargs passed to sp.Popen
+        self.assertTrue(mock_popen.called, "sp.Popen was never called")
+        _, kwargs = mock_popen.call_args
+        self.assertIn("env", kwargs,
+                      "Popen called without env=; Discogs plugin will fail "
+                      "under the systemd service (HOME=/root)")
+        env = kwargs["env"]
+        self.assertEqual(
+            env.get("HOME"), "/home/abl030",
+            "HOME must point to the Home Manager profile where beets config "
+            "lives; see lib.util.beets_subprocess_env()")
+        # Should be the exact env shape used elsewhere — single source of
+        # truth lives in lib.util.beets_subprocess_env().
+        self.assertEqual(env.get("HOME"), beets_subprocess_env()["HOME"])
+
+    @patch("lib.beets.sp.Popen")
     def test_handles_should_resume_then_choose_match(self, mock_popen):
         """should_resume followed by choose_match → handles both correctly."""
         mbid = "12345678-1234-1234-1234-123456789abc"
