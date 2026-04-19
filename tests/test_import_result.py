@@ -75,7 +75,7 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertIsNone(p.track_count)
         self.assertIsNone(p.imported_path)
         self.assertFalse(p.disambiguated)
-        self.assertIsNone(p.disambiguation_error)
+        self.assertIsNone(p.disambiguation_failure)
 
     def test_postflight_disambiguated_roundtrip(self):
         """disambiguated field survives JSON round-trip."""
@@ -87,28 +87,58 @@ class TestImportResultConstruction(unittest.TestCase):
         j = r.to_json()
         r2 = ImportResult.from_json(j)
         self.assertTrue(r2.postflight.disambiguated)
-        self.assertIsNone(r2.postflight.disambiguation_error)
+        self.assertIsNone(r2.postflight.disambiguation_failure)
         self.assertEqual(r2.postflight.imported_path, "/Beets/Artist/Album [CAD 3X03]")
 
-    def test_postflight_disambiguation_error_roundtrip(self):
-        """disambiguation_error survives JSON round-trip (issue #127).
+    def test_postflight_disambiguation_failure_roundtrip(self):
+        """disambiguation_failure survives JSON round-trip (issue #127).
 
         When the post-import ``beet move`` fails (timeout, missing
         binary, non-zero rc), the album is still imported but the path
-        wasn't fixed. The error string lives on PostflightInfo so the
-        audit trail in download_log.import_result can show *why* the
-        move didn't run.
+        wasn't fixed. The typed failure record lives on PostflightInfo
+        so the audit trail in download_log.import_result preserves
+        both the coarse reason tag and the human-readable detail.
         """
+        from lib.quality import DisambiguationFailure
+
         r = ImportResult(
             postflight=PostflightInfo(
                 beets_id=42, track_count=11,
                 imported_path="/Beets/Artist/Album",
                 disambiguated=False,
-                disambiguation_error="timeout after 120s"))
+                disambiguation_failure=DisambiguationFailure(
+                    reason="timeout", detail="timeout after 120s")))
         j = r.to_json()
         r2 = ImportResult.from_json(j)
         self.assertFalse(r2.postflight.disambiguated)
-        self.assertEqual(r2.postflight.disambiguation_error, "timeout after 120s")
+        assert r2.postflight.disambiguation_failure is not None
+        self.assertEqual(
+            r2.postflight.disambiguation_failure.reason, "timeout")
+        self.assertEqual(
+            r2.postflight.disambiguation_failure.detail,
+            "timeout after 120s")
+
+    def test_postflight_legacy_v2_row_without_failure_field(self):
+        """Old v2 download_log rows serialized BEFORE issue #127 lack
+        the disambiguation_failure key. Deserialization must default
+        it to None — never raise."""
+        # Hand-rolled dict mimicking a pre-#127 v2 row: postflight has
+        # disambiguated but no disambiguation_failure key at all.
+        d = {
+            "version": 2,
+            "exit_code": 0,
+            "decision": "import",
+            "postflight": {
+                "beets_id": 42,
+                "track_count": 11,
+                "imported_path": "/Beets/Artist/Album",
+                "disambiguated": True,
+                # NO disambiguation_failure / disambiguation_error key
+            },
+        }
+        r = ImportResult.from_dict(d)
+        self.assertTrue(r.postflight.disambiguated)
+        self.assertIsNone(r.postflight.disambiguation_failure)
 
     def test_full_construction(self):
         r = ImportResult(

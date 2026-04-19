@@ -1306,6 +1306,23 @@ class SpectralDetail:
     existing_suspect_pct: float = 0.0
 
 
+DisambiguationFailureReason = Literal["timeout", "nonzero_rc", "exception"]
+
+
+@dataclass(frozen=True)
+class DisambiguationFailure:
+    """Why the post-import ``beet move`` did not exit cleanly (issue #127).
+
+    Mirrors ``lib/release_cleanup.py::SelectorFailure`` shape:
+    ``reason`` is a coarse Literal tag so callers (and the future web
+    UI Recents tab) can classify failures at a glance without parsing
+    ``detail`` strings; ``detail`` is a short human-readable string for
+    logs and the JSONB audit trail (do not parse it).
+    """
+    reason: DisambiguationFailureReason
+    detail: str
+
+
 @dataclass
 class PostflightInfo:
     """Beets post-import verification data."""
@@ -1315,12 +1332,26 @@ class PostflightInfo:
     bad_extensions: list[str] = field(default_factory=list)  # files with non-audio extensions
     disambiguated: bool = False  # True if beet move ran cleanly to fix %aunique paths
     # Issue #127: when ``beet move`` was attempted but did not exit cleanly
-    # (TimeoutExpired, OSError, or non-zero rc), this carries a short
-    # human-readable reason. The album was still imported to beets — only
-    # the post-import path-disambiguation move failed. ``None`` means
-    # either ``disambiguated=True`` (clean success) or that no move was
+    # (TimeoutExpired, OSError, or non-zero rc), this carries a typed
+    # failure record. The album was still imported to beets — only the
+    # post-import path-disambiguation move failed. ``None`` means either
+    # ``disambiguated=True`` (clean success) or that no move was
     # attempted (no duplicate kept).
-    disambiguation_error: Optional[str] = None
+    disambiguation_failure: Optional[DisambiguationFailure] = None
+
+
+def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
+    """Construct PostflightInfo from a dict, handling the nested
+    ``disambiguation_failure`` (issue #127) and any other future nested
+    fields. Old rows missing the field default to ``None``.
+    """
+    if not d:
+        return PostflightInfo()
+    pf_d = dict(d)
+    df_d = pf_d.pop("disambiguation_failure", None)
+    if isinstance(df_d, dict):
+        pf_d["disambiguation_failure"] = DisambiguationFailure(**df_d)
+    return PostflightInfo(**pf_d)
 
 
 @dataclass
@@ -1404,8 +1435,7 @@ class ImportResult:
                 per_track=spectral.get("per_track", []),
                 existing_suspect_pct=spectral.get("existing_suspect_pct", 0.0),
             ),
-            postflight=(PostflightInfo(**d["postflight"])
-                        if "postflight" in d else PostflightInfo()),
+            postflight=_postflight_from_dict(d.get("postflight")),
             beets_log=d.get("beets_log", []),
             error=d.get("error"),
         )
@@ -1438,8 +1468,7 @@ class ImportResult:
                         if "conversion" in d else ConversionInfo()),
             spectral=(SpectralDetail(**d["spectral"])
                       if "spectral" in d else SpectralDetail()),
-            postflight=(PostflightInfo(**d["postflight"])
-                        if "postflight" in d else PostflightInfo()),
+            postflight=_postflight_from_dict(d.get("postflight")),
             beets_log=d.get("beets_log", []),
             error=d.get("error"),
             v0_verification_bitrate=d.get("v0_verification_bitrate"),
