@@ -943,6 +943,43 @@ class TestPreserveSourceSlice(unittest.TestCase):
                             "beets is supposed to import")
             del preserve_source  # unused, kept for scenario clarity
 
+    def test_terminal_exit_removes_v0_artifacts_for_next_retry(self):
+        """PR #112 Codex round 2 P1: when a force/manual import rejects
+        on downgrade/transcode_downgrade, the harness must remove the
+        temporary V0 MP3s before exiting so the next retry sees a clean
+        FLAC-only folder. Leaving mixed FLAC+MP3 in place would cause the
+        next pass to measure across mixed bitrates, skip the
+        verified_lossless_target pass, and potentially import the stale
+        V0 MP3s instead of the configured target format.
+
+        This slice simulates the terminal-exit branch of main() at
+        ``if qd.is_terminal:`` — we do not drive the full main() (that
+        needs beets) but we exercise the same ``_remove_files_by_ext``
+        call on the same folder layout, and assert the contract: FLAC
+        remains, V0 MP3s removed.
+        """
+        import tempfile
+        from harness.import_one import (convert_lossless, V0_SPEC,
+                                        _remove_files_by_ext)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flac_path = self._make_flac(tmpdir, "01.flac")
+            converted, _, _ = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+            self.assertEqual(converted, 1)
+            mp3_path = os.path.join(tmpdir, "01.mp3")
+            self.assertTrue(os.path.exists(mp3_path))
+            self.assertTrue(os.path.exists(flac_path))
+
+            # Simulate the terminal-exit branch (preserve_source=True).
+            _remove_files_by_ext(tmpdir, "." + V0_SPEC.extension)
+
+            self.assertTrue(os.path.exists(flac_path),
+                            "Original FLAC must survive terminal exit "
+                            "under --preserve-source")
+            self.assertFalse(os.path.exists(mp3_path),
+                             "Temporary V0 MP3 must be removed so next "
+                             "retry sees a clean FLAC-only folder")
+
     def test_retry_flow_without_conversion_still_cleans_leftover_flac(self):
         """PR #112 Codex round 1 P2: on a second force/manual attempt the
         V0 MP3s from the first attempt already exist, so
