@@ -232,8 +232,19 @@ def read_runtime_config(config_path: str | None = None) -> SoularrConfig:
     """Read the active runtime config.ini into a full SoularrConfig.
 
     Manual-import, force-import, the CLI, and web simulator all need the same
-    runtime config the main soularr process reads. Missing or unreadable config
-    returns a default SoularrConfig so callers degrade safely.
+    runtime config the main soularr process reads.
+
+    Missing config (file does not exist) is a soft failure — return a default
+    SoularrConfig so callers degrade safely. This covers test environments and
+    the very first deploy before the prestart has rendered the file.
+
+    Unreadable config (file exists but PermissionError) raises loudly. This
+    is a deployment bug — usually config.ini's mode is too restrictive for
+    the calling user. Silently returning empty config previously masked
+    issue #117 (force-import via pipeline-cli failed with cryptic
+    "/home/abl030/import_one.py not found" because beets_harness_path was
+    empty). Surfacing the real cause beats the silent path-resolution
+    fallout downstream.
     """
     path = _runtime_config_path(config_path)
     if not path or not os.path.exists(path):
@@ -242,8 +253,15 @@ def read_runtime_config(config_path: str | None = None) -> SoularrConfig:
     parser = configparser.RawConfigParser()
     try:
         parser.read(path)
-    except (configparser.Error, OSError):
+    except configparser.Error:
         return SoularrConfig()
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot read {path} — check file mode / group ownership. "
+            "On the upstream NixOS module, set services.soularr.configMode "
+            "(default 0600) and services.soularr.configGroup so the calling "
+            "user can read it. See issue #117."
+        ) from exc
 
     runtime_dir = os.path.dirname(path)
     return SoularrConfig.from_ini(

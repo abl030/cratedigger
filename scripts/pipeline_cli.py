@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -30,6 +31,16 @@ import urllib.request
 import urllib.error
 from datetime import date, datetime, time
 from decimal import Decimal
+
+# Surface INFO-level log lines (e.g. the [import] stderr passthrough from
+# dispatch_import) so force-import / manual-import failures are visible to
+# the user instead of silently swallowed by Python's default WARNING-only
+# logger configuration.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    stream=sys.stderr,
+)
 
 import psycopg2
 

@@ -207,7 +207,10 @@
       -e "s|JELLYFIN_TOKEN_PLACEHOLDER|$jellyfin_token|" \
       ${configTemplate} > "$config_dir/config.ini"
 
-    chmod 600 "$config_dir/config.ini"
+    chmod ${cfg.configMode} "$config_dir/config.ini"
+    ${optionalString (cfg.configGroup != null) ''
+      ${pkgs.coreutils}/bin/chgrp ${cfg.configGroup} "$config_dir/config.ini"
+    ''}
     rm -f "$config_dir/.soularr.lock"
   '';
 
@@ -296,6 +299,35 @@ in {
       type = types.str;
       default = "/var/lib/soularr";
       description = "Runtime state directory (config.ini, lock file).";
+    };
+
+    configMode = mkOption {
+      type = types.str;
+      default = "0600";
+      example = "0640";
+      description = ''
+        File mode for the rendered ${"\${stateDir}/config.ini"}. Defaults to
+        0600 because the file embeds secrets (slskd API key, notifier
+        credentials) — see issue #117 for the planned cleanup.
+
+        Override to 0640 (with `configGroup` set to a group the operator
+        belongs to) so non-root tooling like `pipeline-cli` can read the
+        config when invoked from a user shell. Without group-readable
+        access, force-import / manual-import / quality simulator commands
+        all fail with cryptic "no JSON, rc=2" errors.
+      '';
+    };
+
+    configGroup = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "wheel";
+      description = ''
+        Group ownership for the rendered config.ini. `null` keeps the file
+        in `services.soularr.group` (the default). Set this when raising
+        `configMode` to 0640 so the operator user (which must be in this
+        group) can read the file.
+      '';
     };
 
     timer = {
