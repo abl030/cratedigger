@@ -642,10 +642,11 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     s._db().add_denylist(int(req_id), username, "manually banned via web UI")
 
     beets_removed = False
+    album_was_in_beets = False
     b = s._beets_db()
     if mb_release_id and b:
-        album_in_beets = b.album_exists(mb_release_id)
-        if album_in_beets:
+        album_was_in_beets = b.album_exists(mb_release_id)
+        if album_was_in_beets:
             import subprocess as _sp
             result = _sp.run(
                 ["beet", "remove", "-d", f"mb_albumid:{mb_release_id}"],
@@ -666,6 +667,18 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         if min_br is not None:
             ban_kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)
+
+        # Once the files have left beets, the pipeline DB's on-disk
+        # quality fields (verified_lossless, current_spectral_*) are no
+        # longer accurate. Clear them so wrong-matches / library views /
+        # the quality gate don't reason about phantom state. Only clear
+        # when we have positive evidence: either we just removed the
+        # album, or beets confirmed it was never there and any lingering
+        # fields are already ghosts. Skip when the remove attempt failed
+        # — the album may still be on disk and the existing state is
+        # still correct.
+        if beets_removed or (b is not None and not album_was_in_beets):
+            s._db().clear_on_disk_quality_fields(int(req_id))
 
     h._json({
         "status": "ok",

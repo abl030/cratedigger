@@ -1378,6 +1378,65 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
+    @patch("subprocess.run")
+    @patch("web.routes.pipeline.apply_transition")
+    def test_ban_source_clears_on_disk_quality_fields(
+            self, _mock_transition, mock_subprocess):
+        """After ``beet remove -d``, pipeline DB must forget on-disk quality.
+
+        ``current_spectral_*`` and ``verified_lossless`` describe files that
+        live in beets. Once the ban flow wipes those files, leaving the
+        fields populated misleads every downstream consumer (wrong-matches
+        UI shows ghost quality, library views, quality gate uses stale
+        baselines). The write-side invariant: remove-from-beets implies
+        clear-on-disk-quality.
+        """
+        self.mock_db.clear_on_disk_quality_fields.reset_mock()
+        mock_subprocess.return_value = MagicMock(
+            returncode=0, stdout="", stderr="")
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+            verified_lossless=False,
+        )
+        self._beets.album_exists.return_value = True
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            "mb_release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
+
+    @patch("subprocess.run")
+    @patch("web.routes.pipeline.apply_transition")
+    def test_ban_source_skips_clear_when_beet_remove_failed(
+            self, _mock_transition, mock_subprocess):
+        """Conservative: if beets still holds the album (remove failed),
+        the on-disk quality state is still accurate, so don't clear it.
+        """
+        self.mock_db.clear_on_disk_quality_fields.reset_mock()
+        mock_subprocess.return_value = MagicMock(
+            returncode=1, stdout="", stderr="beet failed")
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+            current_spectral_grade="genuine",
+            verified_lossless=True,
+        )
+        self._beets.album_exists.return_value = True
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            "mb_release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+
 
 class TestManualImportRouteContracts(_WebServerCase):
     """Contract tests for manual import routes."""
@@ -2285,6 +2344,39 @@ class TestWrongMatchesContract(unittest.TestCase):
         # No on-disk state → label and rank may be None; the frontend can render
         # a 'not on disk' badge from `status` and absent label.
         self.assertTrue(group["quality_label"] is None or isinstance(group["quality_label"], str))
+
+    def test_group_hides_stale_quality_when_not_in_beets(self):
+        """Pipeline DB can hold stale on-disk fields after beet remove.
+
+        After a ban-source path, ``album_requests`` rows can keep the
+        ``min_bitrate`` / ``current_spectral_*`` values from a prior import
+        even though ``beet remove -d`` has wiped the files. The wrong-matches
+        card must not surface those ghost fields — otherwise the user sees
+        "320k likely_transcode" for a release with nothing on disk and
+        force-imports based on false quality data.
+        """
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        row["request_status"] = "wanted"
+        row["request_min_bitrate"] = 320                  # stale
+        row["request_verified_lossless"] = False
+        row["request_current_spectral_grade"] = "likely_transcode"  # stale
+        row["request_current_spectral_bitrate"] = 160                # stale
+        self.mock_db.get_wrong_matches.return_value = [row]
+        # No beets mock — _is_in_beets returns False, so every on-disk
+        # field in the response should reflect "nothing on disk".
+        status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        group = data["groups"][0]
+        self.assertFalse(group["in_library"],
+                         "Precondition: test requires album absent from beets.")
+        self.assertIsNone(group["min_bitrate"],
+                          "min_bitrate must not leak from stale DB when not in beets.")
+        self.assertIsNone(group["current_spectral_grade"],
+                          "current_spectral_grade must not leak from stale DB.")
+        self.assertIsNone(group["current_spectral_bitrate"],
+                          "current_spectral_bitrate must not leak from stale DB.")
+        self.assertFalse(group["verified_lossless"],
+                         "verified_lossless must read False when nothing is on disk.")
 
     def test_group_latest_import_picks_most_recent_success(self):
         """latest_import shows the last successful import, not the newest attempt.

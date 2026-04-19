@@ -221,6 +221,33 @@ class PipelineDB:
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
 
+    def clear_on_disk_quality_fields(self, request_id: int) -> None:
+        """Zero fields that describe files currently on disk in beets.
+
+        Call this whenever an album leaves the beets library — ban-source
+        followed by ``beet remove -d``, a manual ``beet rm``, etc. The
+        fields cleared describe on-disk state: ``verified_lossless`` (set
+        only after a genuine FLAC→V0 chain) and ``current_spectral_*``
+        (spectral grade of files currently in beets).
+
+        ``min_bitrate`` and ``prev_min_bitrate`` are preserved deliberately
+        — they still act as a conservative baseline for the next quality-
+        gate comparison. ``last_download_spectral_*`` is also preserved:
+        that's an audit field describing the most recent download attempt,
+        independent of whether the result made it onto disk.
+        """
+        now = datetime.now(timezone.utc)
+        self._execute(
+            """UPDATE album_requests SET
+                   verified_lossless = FALSE,
+                   current_spectral_grade = NULL,
+                   current_spectral_bitrate = NULL,
+                   updated_at = %s
+               WHERE id = %s""",
+            (now, request_id),
+        )
+        self.conn.commit()
+
     def reset_to_wanted(self, request_id: int, **fields: Any) -> None:
         """Reset to wanted, clearing retry counters.
 

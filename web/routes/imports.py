@@ -136,7 +136,8 @@ def post_manual_import(h, body: dict) -> None:
 
 
 def _quality_summary(row: dict[str, object],
-                     beets_info: dict[str, dict[str, object]]
+                     beets_info: dict[str, dict[str, object]],
+                     in_beets: bool,
                      ) -> dict[str, object]:
     """Describe the album's current on-disk quality for a group header.
 
@@ -144,7 +145,28 @@ def _quality_summary(row: dict[str, object],
     imported; the pipeline DB carries the spectral + verified-lossless signal
     (those never live in beets). We combine them so the user can see at a
     glance whether force-importing is worthwhile.
+
+    When the album is NOT in beets (``in_beets=False``), every on-disk field
+    is zeroed out regardless of what the pipeline DB still holds — a prior
+    import that was later removed via ban-source or a manual ``beet rm``
+    leaves stale values behind that the write-side now clears, but old rows
+    may still carry them. Surfacing those ghosts would mislabel an empty
+    slot as "320k likely_transcode" and invite force-importing against
+    false quality data.
     """
+    status = str(row.get("request_status") or "wanted")
+    if not in_beets:
+        return {
+            "status": status,
+            "min_bitrate": None,
+            "format": None,
+            "verified_lossless": False,
+            "current_spectral_grade": None,
+            "current_spectral_bitrate": None,
+            "quality_label": None,
+            "quality_rank": None,
+        }
+
     srv = _server()
     mbid = row.get("mb_release_id")
     detail = beets_info.get(mbid) if isinstance(mbid, str) and mbid else None
@@ -173,7 +195,7 @@ def _quality_summary(row: dict[str, object],
         rank = srv.compute_library_rank(fmt, beets_kbps)
 
     return {
-        "status": str(row.get("request_status") or "wanted"),
+        "status": status,
         "min_bitrate": db_kbps if db_kbps is not None else beets_kbps,
         "format": fmt,
         "verified_lossless": bool(row.get("request_verified_lossless") or False),
@@ -266,16 +288,17 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         assert isinstance(request_id, int)
         group = groups.get(request_id)
         if group is None:
+            in_beets = _is_in_beets(row, beets_info)
             group = {
                 "request_id": request_id,
                 "artist": row["artist_name"],
                 "album": row["album_title"],
                 "mb_release_id": row.get("mb_release_id"),
-                "in_library": _is_in_beets(row, beets_info),
+                "in_library": in_beets,
                 "pending_count": 0,
                 "entries": [],
                 "latest_import": None,  # filled in after the loop
-                **_quality_summary(row, beets_info),
+                **_quality_summary(row, beets_info, in_beets),
             }
             groups[request_id] = group
             order.append(request_id)
