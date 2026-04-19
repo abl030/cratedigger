@@ -1002,7 +1002,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     SET_INTENT_REQUIRED_FIELDS = {
         "status", "id", "intent", "target_format", "requeued",
     }
-    BAN_SOURCE_REQUIRED_FIELDS = {"status", "username", "beets_removed"}
+    BAN_SOURCE_REQUIRED_FIELDS = {
+        "status", "username", "beets_removed", "cleanup_errors",
+    }
     FORCE_IMPORT_REQUIRED_FIELDS = {
         "status", "request_id", "artist", "album", "message",
     }
@@ -1499,7 +1501,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         attempts (e.g. permissions error, wrong column and no legacy
         fallback matched), the on-disk quality state is still accurate,
         so don't clear it. Modelled by ``locate`` returning 'exact'
-        both before and after the subprocess calls.
+        both before and after the subprocess calls. The non-zero rc
+        also surfaces in ``cleanup_errors`` so the UI can tell the
+        user the ban committed but the on-disk remove was incomplete
+        (issue #123 PR B).
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
@@ -1510,19 +1515,26 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             current_spectral_grade="genuine",
             verified_lossless=True,
         )
-        # Album is still there after the remove attempt (both calls exact).
+        # Album is still there after the remove attempt. Seed the
+        # selector tuple so the remove loop has something to iterate.
         self._set_locate_sequence([
-            ("exact", 1, ()),
-            ("exact", 1, ()),
+            ("exact", 1, (f"mb_albumid:{self.RELEASE_ID}",)),
+            ("exact", 1, (f"mb_albumid:{self.RELEASE_ID}",)),
         ])
 
-        status, _data = self._post("/api/pipeline/ban-source", {
+        status, data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
         })
 
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+        # #123 PR B: the non-zero rc surfaces as a cleanup error so the
+        # UI can distinguish "banned cleanly" from "banned but album
+        # still on disk".
+        self.assertEqual(len(data["cleanup_errors"]), 1)
+        self.assertEqual(data["cleanup_errors"][0]["reason"], "nonzero_rc")
+        self.assertFalse(data["beets_removed"])
 
     @patch("lib.release_cleanup.sp.run")
     @patch("web.routes.pipeline.apply_transition")

@@ -23,12 +23,24 @@ The function below is the only way to couple the two sides. Given a
    did), clears the pipeline DB's on-disk quality fields so stale
    ``current_spectral_*`` / ``imported_path`` / ``verified_lossless``
    can't mislead downstream consumers.
+
+Issue #123 PR B: each ``sp.run`` is now wrapped in a try/except that
+catches ``TimeoutExpired``, non-zero exit codes, and any ``OSError``
+(e.g. ``beet`` missing from PATH). The loop always attempts every
+selector, and per-selector failures are surfaced via
+``ReleaseCleanupResult.selector_failures`` so the caller can tell
+partial failure from a clean run. Before this change, a
+``TimeoutExpired`` on selector 1 escaped the loop and left selector 2
+untried — *after* the ban-source caller had already committed the
+denylist row, leaving the banned copy on disk with no recovery path.
 """
 
 from __future__ import annotations
 
+import logging
 import subprocess as sp
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Literal, TYPE_CHECKING
 
 from lib.util import beets_subprocess_env
 
@@ -37,21 +49,99 @@ if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
 
 
+log = logging.getLogger("soularr")
+
+
+SelectorFailureReason = Literal["timeout", "nonzero_rc", "exception"]
+
+
+@dataclass(frozen=True)
+class SelectorFailure:
+    """One ``beet remove -d`` attempt that didn't cleanly exit.
+
+    ``reason`` is a coarse tag so callers (including the web UI) can
+    classify at a glance without parsing ``detail`` strings. Keep the
+    set closed — see ``SelectorFailureReason``. ``detail`` is a short
+    human-readable string for logs and debugging; do not parse it.
+    """
+    selector: str
+    reason: SelectorFailureReason
+    detail: str
+
+
+@dataclass(frozen=True)
+class ReleaseCleanupResult:
+    """Outcome of a ``remove_and_reset_release`` call.
+
+    - ``beets_removed``: the album was present before the call AND is
+      absent afterward — i.e. this call is responsible for its removal.
+      A prior out-of-band ``beet rm`` returns False here; the pipeline
+      DB is still cleared if the album is absent.
+    - ``absent_after``: beets no longer holds the album. Pipeline DB
+      clearing fires iff this is True.
+    - ``selector_failures``: one entry per selector whose ``sp.run``
+      raised or exited non-zero. An empty tuple means every selector
+      ran clean. Non-empty does NOT automatically mean the overall
+      operation failed — a Discogs-layout album can live under two
+      selectors, so failing one while the other removes the album
+      still leaves ``absent_after == True``.
+    """
+    beets_removed: bool
+    absent_after: bool
+    selector_failures: tuple[SelectorFailure, ...]
+
+
+def _run_remove_selector(selector: str) -> SelectorFailure | None:
+    """Run ``beet remove -d <selector>`` once, never raise.
+
+    Returns ``None`` on clean exit (rc=0), otherwise a
+    ``SelectorFailure``. This is the one place that touches the beets
+    subprocess; isolating it means the loop in
+    ``remove_and_reset_release`` can be trivially correct ("always
+    iterate every selector, collect any failures").
+    """
+    try:
+        proc = sp.run(
+            ["beet", "remove", "-d", selector],
+            capture_output=True, text=True, timeout=30,
+            env=beets_subprocess_env(),
+        )
+    except sp.TimeoutExpired as exc:
+        msg = f"timed out after {exc.timeout}s"
+        log.warning(
+            "release_cleanup: beet remove -d %s %s", selector, msg)
+        return SelectorFailure(
+            selector=selector, reason="timeout", detail=msg)
+    except OSError as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "release_cleanup: beet remove -d %s raised %s",
+            selector, msg)
+        return SelectorFailure(
+            selector=selector, reason="exception", detail=msg)
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip().splitlines()
+        msg = stderr[-1] if stderr else f"rc={proc.returncode}"
+        log.warning(
+            "release_cleanup: beet remove -d %s exited %d: %s",
+            selector, proc.returncode, msg)
+        return SelectorFailure(
+            selector=selector, reason="nonzero_rc",
+            detail=f"rc={proc.returncode}: {msg}")
+
+    return None
+
+
 def remove_and_reset_release(
     beets_db: "BeetsDB",
     pipeline_db: "PipelineDB",
     release_id: str,
     request_id: int,
-) -> tuple[bool, bool]:
+) -> ReleaseCleanupResult:
     """Atomically remove a release from beets and clear pipeline ghost state.
 
-    Returns ``(beets_removed, absent_after)``:
-    - ``beets_removed``: True iff the album was present before this
-      call AND is absent afterward — i.e. THIS call removed it.
-      (An out-of-band prior removal returns False here; it still
-      clears the pipeline DB.)
-    - ``absent_after``: True iff beets no longer holds the album
-      after this call. Clearing fires iff this is True.
+    See ``ReleaseCleanupResult`` for the return contract.
 
     Preconditions: ``release_id`` is non-empty. Callers that may pass
     an empty ID must guard before invoking.
@@ -62,16 +152,19 @@ def remove_and_reset_release(
     before = beets_db.locate(release_id)
     album_was_in_beets = before.kind == "exact"
 
+    failures: list[SelectorFailure] = []
     if album_was_in_beets:
         # ``before.selectors`` is every selector the ID could live
-        # under (one for UUIDs, two for Discogs numerics). Running
-        # all of them makes the remove idempotent across layouts.
+        # under (one for UUIDs, two for Discogs numerics). We iterate
+        # EVERY selector unconditionally — catching per-selector
+        # failures in ``_run_remove_selector`` — so a timeout on one
+        # never leaves the others untried. That's the PR #123B bug:
+        # the raw loop raised out on the first ``TimeoutExpired``,
+        # after the ban-source caller had committed the denylist row.
         for selector in before.selectors:
-            sp.run(
-                ["beet", "remove", "-d", selector],
-                capture_output=True, text=True, timeout=30,
-                env=beets_subprocess_env(),
-            )
+            failure = _run_remove_selector(selector)
+            if failure is not None:
+                failures.append(failure)
 
     after = beets_db.locate(release_id)
     absent_after = after.kind != "exact"
@@ -80,4 +173,8 @@ def remove_and_reset_release(
     if absent_after:
         pipeline_db.clear_on_disk_quality_fields(request_id)
 
-    return beets_removed, absent_after
+    return ReleaseCleanupResult(
+        beets_removed=beets_removed,
+        absent_after=absent_after,
+        selector_failures=tuple(failures),
+    )
