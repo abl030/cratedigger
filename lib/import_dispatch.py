@@ -14,9 +14,8 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING
 
-from lib.quality import (parse_import_result, DownloadInfo, ImportResult,
-                         SpectralMeasurement,
-                         ValidationResult,
+from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
+                         ImportResult, SpectralMeasurement, ValidationResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, narrow_override_on_downgrade,
@@ -44,6 +43,31 @@ logger = logging.getLogger("soularr")
 # ``auto_import``, none of which appear here — their staging dir under
 # ``/Incoming`` is always safe to remove (see issue #89).
 FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_import"})
+
+
+def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
+    """Whether ``_cleanup_staged_dir`` is safe for this dispatch outcome.
+
+    Issue #89 rules:
+
+    * Auto-import (scenario not in ``FORCE_MANUAL_SCENARIOS``) always
+      cleans its disposable ``/Incoming`` staging dir.
+    * Force/manual-import paths pass the user's ``failed_imports/…``
+      folder — cleanup is only safe on a successful import
+      (``action.mark_done=True``, meaning beets has moved the files out
+      and the source directory is now empty). On a ``downgrade`` /
+      ``transcode_downgrade`` decision (mark_done=False) the files are
+      still in the source folder, so cleanup would delete the user's
+      data.
+    * Successful force/manual import MUST clean so the wrong-matches tab
+      (``lib.pipeline_db.get_wrong_matches``) stops treating the
+      still-existing folder as an active pending entry — otherwise the
+      album would show up as re-importable even though beets already
+      has it.
+    """
+    if scenario not in FORCE_MANUAL_SCENARIOS:
+        return True
+    return action.mark_done
 
 
 @dataclass(frozen=True)
@@ -684,17 +708,19 @@ def dispatch_import_core(
                 _trigger_meelo(cfg)
                 _trigger_plex(cfg, ir.postflight.imported_path)
                 _trigger_jellyfin(cfg)
-            if action.cleanup and scenario not in FORCE_MANUAL_SCENARIOS:
-                # Issue #89: cleanup is only safe for auto-import. The auto
-                # path passes a disposable ``/Incoming`` staging directory;
-                # force/manual paths pass the user's ``failed_imports/…``
-                # folder, which is the only copy of the source. A
-                # ``downgrade`` / ``transcode_downgrade`` decision there
-                # would delete the user's data. On successful force/manual
-                # imports the beets subprocess has already moved files out,
-                # leaving an empty folder — skip that too, predictable
-                # never-delete behavior beats a clever "delete if empty"
-                # rule that still surprises on partial imports.
+            if action.cleanup and _should_cleanup_path(scenario, action):
+                # Issue #89: force/manual paths pass the user's
+                # ``failed_imports/…`` folder as ``path`` — cleanup is
+                # data loss on a ``downgrade`` / ``transcode_downgrade``
+                # decision where beets never moved the files.
+                # ``_should_cleanup_path`` only allows cleanup on force/
+                # manual when the decision actually imported (mark_done=
+                # True, i.e. beets has moved the files and the source
+                # directory is now empty), which keeps the wrong-matches
+                # tab honest and prevents duplicate re-imports of an
+                # already-imported album. Auto-import scenarios always
+                # clean — their staging dir under ``/Incoming`` is
+                # disposable by design.
                 _cleanup_staged_dir(path)
             if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
                 removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
