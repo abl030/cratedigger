@@ -215,15 +215,31 @@ def should_run_target_conversion(conv_target: str | None) -> bool:
 
 def target_cleanup_decision(target_achieved: bool,
                             target_was_configured: bool,
-                            sources_kept: int) -> bool:
-    """Should we clean up kept source files after target conversion? (pure)
+                            sources_kept: int,
+                            preserve_source: bool = False) -> bool:
+    """Should we clean up kept source files before beets import? (pure)
 
-    When a target format was configured, convert_lossless(V0_SPEC)
-    kept source files for the second conversion pass. If that second
-    conversion was skipped (transcode detected → not verified lossless),
-    we must remove the source files so beets only sees V0 MP3s.
+    V0 conversion may have preserved lossless originals for two reasons:
+
+    1. A ``verified_lossless_target`` was configured — the second conversion
+       pass planned to consume them. If that pass was skipped (transcode
+       detected → not verified lossless), originals must be removed so beets
+       only sees V0 MP3s.
+    2. ``--preserve-source`` was set (force/manual import, issue #111) — we
+       held originals back in case the quality decision rejected the import,
+       so the user's source FLACs in ``failed_imports/`` would not be
+       destroyed on downgrade/transcode_downgrade. If we reach this call
+       site, the quality decision was non-terminal and beets is about to
+       run — originals must be removed so beets only sees V0 MP3s.
+
+    Returns False when the target path already cleaned sources itself
+    (``target_achieved=True``) or when nothing was kept to begin with.
     """
-    return not target_achieved and target_was_configured and sources_kept > 0
+    if sources_kept <= 0:
+        return False
+    if target_was_configured:
+        return not target_achieved
+    return preserve_source
 
 
 def final_exit_decision(is_transcode: bool) -> int:
@@ -738,6 +754,12 @@ def main():
                              "lib.import_dispatch.dispatch_import_core so the "
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
+    parser.add_argument("--preserve-source", action="store_true",
+                        help="Preserve lossless source files (FLAC/ALAC/WAV) "
+                             "during V0 conversion until the quality decision "
+                             "has approved the import. Used by force/manual "
+                             "import so a downgrade verdict does not destroy "
+                             "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -851,11 +873,15 @@ def main():
     is_transcode = False
 
     has_target = bool(args.verified_lossless_target)
+    # V0 must keep the lossless source when either a second conversion pass
+    # is planned (``verified_lossless_target``) OR the caller asked us to
+    # hold it until the quality decision (``--preserve-source``, issue #111).
+    keep_v0_source = has_target or args.preserve_source
     if not keep_lossless:
         _log(f"[CONVERT] {args.path}")
         converted, failed, original_ext = convert_lossless(
             args.path, V0_SPEC, dry_run=args.dry_run,
-            keep_source=has_target)
+            keep_source=keep_v0_source)
         r.conversion.converted = converted
         r.conversion.failed = failed
         if converted > 0:
@@ -872,8 +898,8 @@ def main():
             _emit_and_exit(r)
 
         # --- Transcode detection ---
-        # When keep_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
-        v0_ext_filter = {".mp3"} if has_target and converted > 0 else None
+        # When keep_v0_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
+        v0_ext_filter = {".mp3"} if keep_v0_source and converted > 0 else None
         post_conv_br = _get_folder_min_bitrate(args.path, ext_filter=v0_ext_filter) if converted > 0 else None
         r.conversion.post_conversion_min_bitrate = post_conv_br
         is_transcode = transcode_detection(
@@ -1079,10 +1105,17 @@ def main():
              f"min_bitrate={target_min_br}kbps, avg_bitrate={target_avg_br}kbps")
         _log(f"  V0 verification bitrate: {post_conv_br}kbps")
 
-    # --- Clean up kept source files if target was skipped (transcode path) ---
-    if target_cleanup_decision(target_achieved, has_target, converted):
+    # --- Clean up kept source files if target was skipped OR preserve-source
+    # is active (force/manual import, issue #111). The quality decision has
+    # already returned non-terminal at this point — beets is about to run,
+    # so remaining lossless originals must be removed so only V0 MP3s are
+    # cataloged. On terminal verdicts we exit at line 997 above and the
+    # originals stay intact for the user. ---
+    if target_cleanup_decision(target_achieved, has_target, converted,
+                               preserve_source=args.preserve_source):
         _remove_lossless_files(args.path)
-        _log(f"  [CLEANUP] Removed lossless originals (target skipped, not verified lossless)")
+        _log(f"  [CLEANUP] Removed lossless originals "
+             f"(target skipped or preserve-source approved)")
 
     # --- Import ---
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
