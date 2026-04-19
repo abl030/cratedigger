@@ -42,73 +42,107 @@ export function invalidateWrongMatches() {
 }
 
 /**
- * Render wrong match entries.
+ * Render grouped wrong-match entries (issue #113).
+ * Top level = one collapsed card per release; expand reveals every rejected
+ * candidate that still has files on disk.
  * @param {Object} data
  * @param {HTMLElement} el
  */
 function renderWrongMatches(data, el) {
-  const entries = (data.entries || []).filter(e => e.files_exist);
-  if (entries.length === 0) {
+  /** @type {any[]} */
+  const groups = (data.groups || []).filter((/** @type {any} */ g) => (g.pending_count || 0) > 0);
+  if (groups.length === 0) {
     el.innerHTML = '<div style="color:#888;padding:12px;">No wrong matches in failed_imports.</div>';
     return;
   }
 
-  let html = `<div style="margin:8px 0;color:#888;">${entries.length} wrong match${entries.length !== 1 ? 'es' : ''} pending review</div>`;
+  const totalEntries = groups.reduce((/** @type {number} */ n, /** @type {any} */ g) => n + (g.pending_count || 0), 0);
+  let html = `<div style="margin:8px 0;color:#888;">${groups.length} release${groups.length !== 1 ? 's' : ''} · ${totalEntries} candidate${totalEntries !== 1 ? 's' : ''} pending review</div>`;
 
-  html += entries.map(e => {
-    const dist = e.distance != null ? e.distance.toFixed(3) : '?';
-    const filesBadge = e.files_exist
-      ? '<span class="badge badge-library">files on disk</span>'
-      : '<span class="badge badge-failed">files missing</span>';
-    const upgradeBadge = e.in_library
-      ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">upgrade</span>'
-      : '';
-
-    return `
-    <div class="p-item" onclick="window.toggleWrongMatchDetail('wm-${e.download_log_id}')">
-      <div class="p-top">
-        <div>
-          <span class="p-title">${esc(e.artist)} — ${esc(e.album)}</span>
-          ${filesBadge}${upgradeBadge}
-        </div>
-      </div>
-      <div class="p-meta">
-        <span>dist: ${dist}</span>
-        <span>user: ${esc(e.soulseek_username || '?')}</span>
-        <span>${esc(e.scenario || '')}</span>
-      </div>
-    </div>
-    <div class="p-detail" id="wm-${e.download_log_id}">
-      ${renderWrongMatchDetail(e)}
-    </div>`;
-  }).join('');
-
+  html += groups.map(renderGroup).join('');
   el.innerHTML = html;
 }
 
 /**
- * Render detail panel for a wrong match entry.
- * @param {Object} e - Wrong match entry
+ * Render one release group (collapsed by default).
+ * @param {any} g - group payload
  * @returns {string}
  */
-function renderWrongMatchDetail(e) {
-  let html = '';
+function renderGroup(g) {
+  const groupId = `wm-group-${g.request_id}`;
+  const count = g.pending_count || (g.entries ? g.entries.length : 0);
+  const upgradeBadge = g.in_library
+    ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">upgrade</span>'
+    : '';
 
+  const header = `
+    <div class="p-item" onclick="window.toggleWrongMatchGroup('${groupId}')">
+      <div class="p-top">
+        <div>
+          <span class="p-title">${esc(g.artist)} — ${esc(g.album)}</span>
+          <span class="badge badge-library">${count} candidate${count !== 1 ? 's' : ''}</span>
+          ${upgradeBadge}
+        </div>
+      </div>
+      <div class="p-meta">
+        ${g.mb_release_id ? `<span>${sourceLabel(g.mb_release_id)}: <a href="${externalReleaseUrl(g.mb_release_id)}" target="_blank" style="color:#6af;" onclick="event.stopPropagation();">${esc(g.mb_release_id)}</a></span>` : ''}
+      </div>
+    </div>`;
+
+  const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e)).join('');
+
+  return `${header}
+    <div class="p-detail" id="${groupId}">
+      <div style="padding:6px 0 0 0;">${entries}</div>
+    </div>`;
+}
+
+/**
+ * Render one rejected candidate inside a group.
+ * @param {any} e - entry payload
+ * @returns {string}
+ */
+function renderEntry(e) {
+  const detailId = `wm-entry-${e.download_log_id}`;
+  const dist = e.distance != null ? e.distance.toFixed(3) : '?';
+
+  const header = `
+    <div class="p-item" style="background:#1a1a1a;margin:4px 0;" onclick="window.toggleWrongMatchEntry('${detailId}')">
+      <div class="p-top">
+        <div>
+          <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
+          <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
+        </div>
+      </div>
+      <div class="p-meta">
+        <span>dist: ${dist}</span>
+        <span>${esc(e.scenario || '')}</span>
+      </div>
+    </div>
+    <div class="p-detail" id="${detailId}">
+      ${renderEntryDetail(e)}
+    </div>`;
+
+  return header;
+}
+
+/**
+ * Render expanded detail panel for one rejected candidate.
+ * @param {Object} e - entry payload
+ * @returns {string}
+ */
+function renderEntryDetail(e) {
+  let html = '';
   const c = e.candidate;
 
-  // Candidate match info
   if (c) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${c.year})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
     if (c.label) html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(c.label)}${c.catalognum ? ` / ${esc(c.catalognum)}` : ''}</span></div>`;
-  }
-  if (e.mb_release_id) {
-    html += `<div class="p-detail-row"><span class="p-detail-label">Target (${sourceLabel(e.mb_release_id)})</span><span class="p-detail-value"><a href="${externalReleaseUrl(e.mb_release_id)}" target="_blank" style="color:#6af;font-family:monospace;font-size:0.85em;">${esc(e.mb_release_id)}</a></span></div>`;
   }
   if (e.failed_path) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.failed_path)}</span></div>`;
   }
 
-  // Distance breakdown — non-zero fields + summary of matched fields
   if (c) {
     const ALL_FIELDS = ['tracks', 'album', 'artist', 'album_id', 'year', 'country', 'label', 'catalognum', 'media', 'mediums', 'albumdisambig', 'missing_tracks', 'unmatched_tracks'];
     const bd = c.distance_breakdown || {};
@@ -128,7 +162,6 @@ function renderWrongMatchDetail(e) {
     }
   }
 
-  // Track mapping — two-column: MB target (left) ↔ On disk (right)
   if (c && c.mapping && c.mapping.length > 0) {
     html += `<div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:0.78em;">`;
     html += `<div style="color:#6a9;font-weight:600;font-size:0.9em;padding-bottom:4px;">MB target</div>`;
@@ -141,7 +174,6 @@ function renderWrongMatchDetail(e) {
       const localLen = m.item?.length ? fmtLen(m.item.length) : '';
       const localFmt = m.item?.format ? ` ${m.item.format}` : '';
       const localBr = m.item?.bitrate ? ` ${Math.round(m.item.bitrate / 1000)}k` : '';
-      // Highlight title mismatches
       const titleMatch = mbTitle.toLowerCase().replace(/\s*\(demo\)\s*/g, '').trim() === (localTitle || '').toLowerCase().trim();
       const mismatchStyle = titleMatch ? '' : 'color:#f88;';
       html += `<div style="padding:1px 0;color:#aaa;">${mbNum}. ${esc(mbTitle)} <span style="color:#555;">${mbLen}</span></div>`;
@@ -150,7 +182,6 @@ function renderWrongMatchDetail(e) {
     html += '</div>';
   }
 
-  // Extra items (local files with no MB match)
   if (c && c.extra_items && c.extra_items.length > 0) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#da6;">Extra local files (${c.extra_items.length}):</div>`;
     html += '<div style="font-size:0.75em;padding-left:8px;color:#888;">';
@@ -160,7 +191,6 @@ function renderWrongMatchDetail(e) {
     html += '</div>';
   }
 
-  // Extra tracks (MB tracks with no local match)
   if (c && c.extra_tracks && c.extra_tracks.length > 0) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#f88;">Missing MB tracks (${c.extra_tracks.length}):</div>`;
     html += '<div style="font-size:0.75em;padding-left:8px;color:#888;">';
@@ -171,11 +201,8 @@ function renderWrongMatchDetail(e) {
     html += '</div>';
   }
 
-  // Actions
   html += '<div class="p-actions" style="margin-top:10px;">';
-  if (e.files_exist) {
-    html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">Force Import</button>`;
-  }
+  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">Force Import</button>`;
   html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
 
@@ -183,10 +210,19 @@ function renderWrongMatchDetail(e) {
 }
 
 /**
- * Toggle detail visibility for a wrong match entry.
+ * Toggle a release group's expanded view.
  * @param {string} id
  */
-export function toggleWrongMatchDetail(id) {
+export function toggleWrongMatchGroup(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+/**
+ * Toggle a single entry's expanded view.
+ * @param {string} id
+ */
+export function toggleWrongMatchEntry(id) {
   const el = document.getElementById(id);
   if (el) el.classList.toggle('open');
 }
@@ -241,13 +277,16 @@ export async function deleteWrongMatch(logId, btn) {
     });
     const data = await r.json();
     if (data.status === 'ok') {
-      // Remove the entry from the DOM
-      const detail = document.getElementById(`wm-${logId}`);
-      const item = detail?.previousElementSibling;
-      if (detail) detail.remove();
-      if (item) item.remove();
       toast('Wrong match deleted');
       invalidateWrongMatches();
+      // Re-fetch to reflect group/entry removal (and possibly the whole group disappearing).
+      const el = document.getElementById('wrong-matches-content');
+      if (el) {
+        const fetchRes = await fetch(`${API}/api/wrong-matches`);
+        const fresh = await fetchRes.json();
+        renderWrongMatches(fresh, el);
+        _loaded = true;
+      }
     } else {
       btn.textContent = 'Failed';
       toast('Delete failed', true);

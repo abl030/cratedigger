@@ -2060,7 +2060,13 @@ class TestApplyPipelineBitrateOverride(unittest.TestCase):
 
 
 class TestWrongMatchesContract(unittest.TestCase):
-    """Contract tests: /api/wrong-matches returns all fields the frontend needs."""
+    """Contract tests: /api/wrong-matches returns grouped-by-release shape.
+
+    Issue #113: every rejection with a failed_path must be reachable. The
+    route returns ``{groups: [{request_id, artist, album, mb_release_id,
+    in_library, pending_count, entries: [...]}]}`` so the frontend can
+    collapse by release and expand to per-candidate actions.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -2093,36 +2099,161 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         self.mock_db.clear_wrong_match_path.reset_mock()
+        # Default: treat every failed_path as existing so the group survives
+        # filtering. Individual tests override this to exercise missing-file
+        # and mixed-existence cases. Also stub rmtree so delete tests don't
+        # touch the real filesystem.
+        resolve_patch = patch("web.routes.imports.resolve_failed_path",
+                              side_effect=lambda p: p if p else None)
+        rmtree_patch = patch("web.routes.imports.shutil.rmtree")
+        resolve_patch.start()
+        rmtree_patch.start()
+        self.addCleanup(resolve_patch.stop)
+        self.addCleanup(rmtree_patch.stop)
 
-    REQUIRED_FIELDS = {
-        "download_log_id", "request_id", "artist", "album", "mb_release_id",
-        "failed_path", "files_exist", "distance", "scenario", "detail",
-        "soulseek_username", "candidate", "local_items", "in_library",
+    GROUP_REQUIRED_FIELDS = {
+        "request_id", "artist", "album", "mb_release_id",
+        "in_library", "pending_count", "entries",
+    }
+    ENTRY_REQUIRED_FIELDS = {
+        "download_log_id", "soulseek_username", "failed_path", "files_exist",
+        "distance", "scenario", "detail", "candidate", "local_items",
     }
 
-    FIELD_TYPES = {
-        "download_log_id": int, "request_id": int, "artist": str,
-        "album": str, "failed_path": str, "files_exist": bool,
-        "distance": (int, float, type(None)), "in_library": bool,
+    GROUP_FIELD_TYPES = {
+        "request_id": int,
+        "artist": str,
+        "album": str,
+        "in_library": bool,
+        "pending_count": int,
+        "entries": list,
+    }
+    ENTRY_FIELD_TYPES = {
+        "download_log_id": int,
+        "failed_path": str,
+        "files_exist": bool,
+        "distance": (int, float, type(None)),
     }
 
-    def test_response_has_entries_with_required_fields(self):
+    def _row(self, download_log_id: int, request_id: int, username: str,
+             failed_path: str, artist: str = "Test Artist",
+             album: str = "Test Album",
+             mb_release_id: str = "abc-123",
+             scenario: str = "high_distance") -> dict:
+        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
+        row["download_log_id"] = download_log_id
+        row["request_id"] = request_id
+        row["artist_name"] = artist
+        row["album_title"] = album
+        row["mb_release_id"] = mb_release_id
+        row["soulseek_username"] = username
+        row["validation_result"]["failed_path"] = failed_path
+        row["validation_result"]["scenario"] = scenario
+        return row
+
+    def test_response_has_groups(self):
+        """RED for issue #113: payload must be {groups: [...]}, not {entries: [...]}."""
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
-        self.assertIn("entries", data)
-        entries = data["entries"]
-        self.assertGreater(len(entries), 0)
-        for entry in entries:
-            missing = self.REQUIRED_FIELDS - set(entry.keys())
-            self.assertFalse(missing, f"Missing fields: {missing}")
-            # Verify types for fields with known expected types
-            for field, expected_type in self.FIELD_TYPES.items():
-                self.assertIsInstance(entry[field], expected_type,
-                    f"{field}={entry[field]!r} should be {expected_type}")
+        self.assertIn("groups", data,
+                      "Response must expose a `groups` array keyed by release.")
+
+    def test_group_has_required_fields_and_types(self):
+        status, data = self._get("/api/wrong-matches")
+        self.assertGreater(len(data["groups"]), 0)
+        for group in data["groups"]:
+            _assert_required_fields(
+                self, group, self.GROUP_REQUIRED_FIELDS,
+                f"group request={group.get('request_id')}")
+            for field, expected_type in self.GROUP_FIELD_TYPES.items():
+                self.assertIsInstance(
+                    group[field], expected_type,
+                    f"group.{field}={group[field]!r} should be {expected_type}")
+
+    def test_entry_has_required_fields_and_types(self):
+        status, data = self._get("/api/wrong-matches")
+        for group in data["groups"]:
+            self.assertGreater(len(group["entries"]), 0)
+            for entry in group["entries"]:
+                _assert_required_fields(
+                    self, entry, self.ENTRY_REQUIRED_FIELDS,
+                    f"entry dl_id={entry.get('download_log_id')}")
+                for field, expected_type in self.ENTRY_FIELD_TYPES.items():
+                    self.assertIsInstance(
+                        entry[field], expected_type,
+                        f"entry.{field}={entry[field]!r} should be {expected_type}")
+
+    def test_multiple_rejections_for_same_request_collapse_to_single_group(self):
+        """RED for issue #113: 3 rejections on one request → 1 group with 3 entries."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(3584, 515, "ascalaphid", "/fi/path_9"),
+            self._row(3565, 515, "gatybfb",    "/fi/path_8"),
+            self._row(3559, 515, "jazzush",    "/fi/path_7"),
+        ]
+        with patch("web.routes.imports.resolve_failed_path",
+                   side_effect=lambda p: p):
+            status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        groups = data["groups"]
+        self.assertEqual(len(groups), 1,
+                         "3 rejections on one request must collapse to 1 group.")
+        group = groups[0]
+        self.assertEqual(group["request_id"], 515)
+        self.assertEqual(len(group["entries"]), 3)
+        self.assertEqual(group["pending_count"], 3)
+        ids = [e["download_log_id"] for e in group["entries"]]
+        self.assertEqual(ids, [3584, 3565, 3559],
+                         "Entries must be ordered newest download_log_id first.")
+
+    def test_multiple_releases_return_separate_groups(self):
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(200, 1, "u1", "/fi/a", artist="A1", album="B1",
+                      mb_release_id="mb-1"),
+            self._row(201, 1, "u2", "/fi/b", artist="A1", album="B1",
+                      mb_release_id="mb-1"),
+            self._row(300, 2, "u3", "/fi/c", artist="A2", album="B2",
+                      mb_release_id="mb-2"),
+        ]
+        with patch("web.routes.imports.resolve_failed_path",
+                   side_effect=lambda p: p):
+            status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        groups = data["groups"]
+        self.assertEqual(len(groups), 2)
+        by_req = {g["request_id"]: g for g in groups}
+        self.assertEqual(len(by_req[1]["entries"]), 2)
+        self.assertEqual(len(by_req[2]["entries"]), 1)
+
+    def test_group_dropped_when_no_entries_have_existing_files(self):
+        """If every entry's files are gone, the group is excluded from the UI."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(10, 5, "u1", "/gone/a"),
+            self._row(11, 5, "u2", "/gone/b"),
+        ]
+        with patch("web.routes.imports.resolve_failed_path", return_value=None):
+            status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["groups"], [])
+
+    def test_group_pending_count_reflects_existing_entries_only(self):
+        """pending_count counts entries with files still on disk."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(20, 7, "present", "/on-disk/a"),
+            self._row(21, 7, "missing", "/gone/b"),
+        ]
+        with patch("web.routes.imports.resolve_failed_path",
+                   side_effect=lambda p: p if p.startswith("/on-disk") else None):
+            status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        groups = data["groups"]
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(group["pending_count"], 1)
+        self.assertEqual([e["download_log_id"] for e in group["entries"]], [20])
 
     def test_candidate_has_distance_breakdown(self):
         status, data = self._get("/api/wrong-matches")
-        entry = data["entries"][0]
+        entry = data["groups"][0]["entries"][0]
         candidate = entry["candidate"]
         self.assertIsNotNone(candidate)
         self.assertIn("distance_breakdown", candidate)
@@ -2137,7 +2268,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
 
-    @patch("web.routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
+    @patch("web.routes.imports.resolve_failed_path",
+           return_value="/mnt/virtio/music/slskd/failed_imports/Test")
     def test_relative_failed_path_uses_resolved_path(self, _mock_resolve):
         row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
         row["validation_result"]["failed_path"] = "failed_imports/Test"
@@ -2146,13 +2278,16 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
 
         self.assertEqual(status, 200)
-        entry = data["entries"][0]
+        entry = data["groups"][0]["entries"][0]
         self.assertTrue(entry["files_exist"])
-        self.assertEqual(entry["failed_path"], "/mnt/virtio/music/slskd/failed_imports/Test")
+        self.assertEqual(entry["failed_path"],
+                         "/mnt/virtio/music/slskd/failed_imports/Test")
 
     @patch("web.routes.imports.shutil.rmtree")
-    @patch("web.routes.imports.resolve_failed_path", return_value="/mnt/virtio/music/slskd/failed_imports/Test")
-    def test_delete_relative_failed_path_removes_resolved_directory(self, _mock_resolve, mock_rmtree):
+    @patch("web.routes.imports.resolve_failed_path",
+           return_value="/mnt/virtio/music/slskd/failed_imports/Test")
+    def test_delete_relative_failed_path_removes_resolved_directory(
+            self, _mock_resolve, mock_rmtree):
         entry = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         entry["validation_result"]["failed_path"] = "failed_imports/Test"
         self.mock_db.get_download_log_entry.return_value = entry
@@ -2163,12 +2298,11 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         mock_rmtree.assert_called_once_with("/mnt/virtio/music/slskd/failed_imports/Test")
 
-    def test_entries_in_beets_still_shown(self):
-        """Wrong matches should appear even if the album is already in beets."""
+    def test_groups_in_beets_still_shown(self):
+        """Wrong matches still appear when the release is already in the library."""
         status, data = self._get("/api/wrong-matches")
-
         self.assertEqual(status, 200)
-        self.assertGreater(len(data["entries"]), 0)
+        self.assertGreater(len(data["groups"]), 0)
 
 
 class TestLibraryArtistContract(unittest.TestCase):

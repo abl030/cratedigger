@@ -1243,5 +1243,136 @@ class TestAdvisoryLock(unittest.TestCase):
             self.assertTrue(a2)
 
 
+@requires_postgres
+class TestGetWrongMatches(unittest.TestCase):
+    """Issue #113: every rejected row with a failed_path must be reachable.
+
+    The previous ``DISTINCT ON (request_id)`` collapsed every rejection for a
+    request to the newest row, hiding older failed_imports dirs on disk.
+    ``get_wrong_matches`` now returns one row per eligible ``download_log``
+    entry so the web UI can group and expand them for per-candidate actions.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req1 = self.db.add_request(
+            mb_release_id="wm-uuid-1", artist_name="Artist 1",
+            album_title="Album 1", source="request")
+        self.req2 = self.db.add_request(
+            mb_release_id="wm-uuid-2", artist_name="Artist 2",
+            album_title="Album 2", source="request")
+
+    def tearDown(self):
+        self.db.close()
+
+    def _log_rejected(self, request_id: int, username: str,
+                      failed_path: str | None,
+                      scenario: str = "high_distance") -> None:
+        vr: dict[str, object] = {"scenario": scenario, "distance": 0.25}
+        if failed_path is not None:
+            vr["failed_path"] = failed_path
+        self.db.log_download(
+            request_id=request_id,
+            soulseek_username=username,
+            outcome="rejected",
+            beets_scenario=scenario,
+            validation_result=json.dumps(vr),
+        )
+
+    def test_returns_every_rejected_row_for_same_request(self):
+        """RED for issue #113: three rejected rows with failed_path → three returned."""
+        self._log_rejected(self.req1, "alice", "/fi/path_0")
+        self._log_rejected(self.req1, "bob",   "/fi/path_1")
+        self._log_rejected(self.req1, "carol", "/fi/path_2")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(
+            len(rows), 3,
+            f"Expected all 3 rejections for request {self.req1}, got {len(rows)}. "
+            f"DISTINCT ON is collapsing them.")
+        self.assertEqual({r["request_id"] for r in rows}, {self.req1})
+        self.assertEqual(
+            {r["soulseek_username"] for r in rows},
+            {"alice", "bob", "carol"})
+
+    def test_rows_ordered_newest_first_per_request(self):
+        """Within a request, rows must be ordered by download_log id DESC."""
+        self._log_rejected(self.req1, "oldest",  "/fi/a")
+        self._log_rejected(self.req1, "middle",  "/fi/b")
+        self._log_rejected(self.req1, "newest",  "/fi/c")
+
+        rows = self.db.get_wrong_matches()
+        usernames = [r["soulseek_username"] for r in rows]
+        self.assertEqual(usernames, ["newest", "middle", "oldest"])
+
+    def test_rows_across_multiple_requests(self):
+        """Every eligible row across multiple requests is returned."""
+        self._log_rejected(self.req1, "r1-a", "/fi/1a")
+        self._log_rejected(self.req1, "r1-b", "/fi/1b")
+        self._log_rejected(self.req2, "r2-a", "/fi/2a")
+        self._log_rejected(self.req2, "r2-b", "/fi/2b")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 4)
+        by_req: dict[int, list[str]] = {}
+        for r in rows:
+            rid = r["request_id"]
+            assert isinstance(rid, int)
+            user = r["soulseek_username"]
+            assert isinstance(user, str)
+            by_req.setdefault(rid, []).append(user)
+        self.assertEqual(sorted(by_req[self.req1]), ["r1-a", "r1-b"])
+        self.assertEqual(sorted(by_req[self.req2]), ["r2-a", "r2-b"])
+
+    def test_excludes_rows_with_null_failed_path(self):
+        self._log_rejected(self.req1, "has-path",  "/fi/ok")
+        self._log_rejected(self.req1, "no-path",   None)
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["soulseek_username"], "has-path")
+
+    def test_excludes_audio_corrupt_and_spectral_reject(self):
+        self._log_rejected(self.req1, "ok",      "/fi/keep",   scenario="high_distance")
+        self._log_rejected(self.req1, "corrupt", "/fi/drop-a", scenario="audio_corrupt")
+        self._log_rejected(self.req1, "transc",  "/fi/drop-b", scenario="spectral_reject")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["soulseek_username"], "ok")
+
+    def test_excludes_non_rejected_outcomes(self):
+        """success / force_import / timeout must never surface in wrong-matches."""
+        self._log_rejected(self.req1, "reject-me", "/fi/keep")
+        self.db.log_download(
+            request_id=self.req1, soulseek_username="success-u",
+            outcome="success",
+            validation_result=json.dumps({"failed_path": "/fi/no-1"}))
+        self.db.log_download(
+            request_id=self.req1, soulseek_username="force-u",
+            outcome="force_import",
+            validation_result=json.dumps({"failed_path": "/fi/no-2"}))
+        self.db.log_download(
+            request_id=self.req1, soulseek_username="timeout-u",
+            outcome="timeout",
+            validation_result=json.dumps({"failed_path": "/fi/no-3"}))
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["soulseek_username"], "reject-me")
+
+    def test_result_shape_has_required_fields(self):
+        """Each row must carry the fields the route layer reads."""
+        self._log_rejected(self.req1, "alice", "/fi/a")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        for field in ("download_log_id", "request_id", "artist_name",
+                      "album_title", "mb_release_id", "soulseek_username",
+                      "validation_result"):
+            self.assertIn(field, row)
+
+
 if __name__ == "__main__":
     unittest.main()
