@@ -651,6 +651,90 @@ class TestResetToWanted(unittest.TestCase):
 
 
 @requires_postgres
+class TestClearOnDiskQualityFields(unittest.TestCase):
+    """``clear_on_disk_quality_fields`` is the write-side half of the
+    "beets is the source of truth" invariant: once an album leaves beets
+    (ban-source, manual ``beet rm``), every ``album_requests`` field that
+    describes on-disk state must be cleared. Preserves ``min_bitrate`` as
+    a conservative baseline for the next quality-gate comparison, and
+    leaves ``last_download_spectral_*`` alone (that's a download-attempt
+    audit field, not on-disk state).
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _make_request(self, suffix: str = "") -> int:
+        req_id = self.db.add_request(
+            mb_release_id=f"clear-od-{suffix}-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.update_status(req_id, "imported")
+        return req_id
+
+    def test_clears_spectral_and_verified_lossless(self):
+        req_id = self._make_request("basic")
+        self.db.update_request_fields(
+            req_id,
+            verified_lossless=True,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+        )
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertFalse(req["verified_lossless"])
+        self.assertIsNone(req["current_spectral_grade"])
+        self.assertIsNone(req["current_spectral_bitrate"])
+
+    def test_preserves_min_bitrate(self):
+        """min_bitrate is a baseline for the NEXT gate, not on-disk state."""
+        req_id = self._make_request("preserve-min")
+        self.db.update_request_fields(req_id, min_bitrate=320)
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["min_bitrate"], 320)
+
+    def test_preserves_last_download_spectral(self):
+        """last_download_* tracks the latest download attempt, not on-disk state."""
+        req_id = self._make_request("preserve-ld")
+        self.db.update_request_fields(
+            req_id,
+            last_download_spectral_grade="suspect",
+            last_download_spectral_bitrate=192,
+        )
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["last_download_spectral_grade"], "suspect")
+        self.assertEqual(req["last_download_spectral_bitrate"], 192)
+
+    def test_idempotent_when_fields_already_clear(self):
+        req_id = self._make_request("idempotent")
+
+        self.db.clear_on_disk_quality_fields(req_id)
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertFalse(req["verified_lossless"])
+        self.assertIsNone(req["current_spectral_grade"])
+        self.assertIsNone(req["current_spectral_bitrate"])
+
+
+@requires_postgres
 class TestApplyTransitionDB(unittest.TestCase):
     """DB-backed contract tests for apply_transition preserve semantics."""
 

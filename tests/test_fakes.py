@@ -73,6 +73,34 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertIsNone(row["current_spectral_bitrate"])
 
+    def test_clear_on_disk_quality_fields_matches_real_db(self):
+        """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
+        zero the on-disk spectral + verified_lossless, preserve min_bitrate
+        and last_download_spectral_* (those aren't on-disk state).
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            min_bitrate=320,
+            verified_lossless=True,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+            last_download_spectral_grade="suspect",
+            last_download_spectral_bitrate=192,
+        ))
+
+        db.clear_on_disk_quality_fields(42)
+
+        row = db.request(42)
+        self.assertFalse(row["verified_lossless"])
+        self.assertIsNone(row["current_spectral_grade"])
+        self.assertIsNone(row["current_spectral_bitrate"])
+        # min_bitrate preserved as baseline for next gate.
+        self.assertEqual(row["min_bitrate"], 320)
+        # Recent download's spectral is an audit trail, not on-disk state.
+        self.assertEqual(row["last_download_spectral_grade"], "suspect")
+        self.assertEqual(row["last_download_spectral_bitrate"], 192)
+
     def test_get_downloading(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="downloading"))

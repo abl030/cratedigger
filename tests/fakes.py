@@ -422,6 +422,15 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    def clear_on_disk_quality_fields(self, request_id: int) -> None:
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        row["verified_lossless"] = False
+        row["current_spectral_grade"] = None
+        row["current_spectral_bitrate"] = None
+        row["updated_at"] = _utcnow()
+
     def get_downloading(self) -> list[dict[str, Any]]:
         return [copy.deepcopy(r) for r in self._requests.values()
                 if r.get("status") == "downloading"]
