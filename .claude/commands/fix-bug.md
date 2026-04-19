@@ -68,7 +68,31 @@ The review writes a concise verdict to `/tmp/codex-review.txt`; the streaming st
 Read `/tmp/codex-review.txt` and parse the findings:
 - If Codex found real issues: fix them, re-run tests, add a commit, push
 - If Codex found only style nits or false positives: note them but proceed
-- Re-run Codex if you made substantial changes (limit: 2 review rounds)
+- Re-run Codex if you made substantial changes
+
+**STOP-AND-REFACTOR RULE — after round 2, reflect before round 3.**
+
+If rounds 1 AND 2 both turn up *real structural issues adjacent to the same area* (not style nits — genuine correctness findings touching the same invariant, the same abstraction, or the same pair of collaborators), do NOT start round 3 patching. Stop and ask:
+
+> *Are we patching leaves of the same missing abstraction?*
+
+Concrete signals the answer is yes:
+- Round N reveals a case round N-1 didn't cover, and the fix is "apply the same pattern to one more call site"
+- Two sibling functions disagree on the same invariant (e.g. ID dispatch, presence check, cleanup contract) and each Codex round surfaces another disagreement
+- Your fix in round N contradicts your fix in round N-1 (you over-tightened, now you're relaxing) — strong signal the invariant isn't sharp because the seam is wrong
+- Different files read "the same question" through different lenses (exact vs fuzzy, one column vs another, one side clears state while the other doesn't)
+
+When you see any of these, pause Codex. Do this instead:
+
+1. **Write down the invariant Codex keeps circling.** One sentence. ("Is this release on disk?", "Is this album gone from beets?", "Is this request fully cleaned up?")
+2. **Grep for every site that asks that question.** There will be more than you expected.
+3. **Propose one seam** — a typed function/method that owns the invariant and that every site routes through. A short ADR-style note in the PR description is fine; don't over-engineer the proposal.
+4. **Extract the seam, migrate the call sites, write tests around the seam itself** — not around each call site individually.
+5. **Then resume Codex review.**
+
+The marathon symptom this rule prevents: Codex correctly finds leaf after leaf while you patch each one, seven rounds deep, because neither of you can see the missing abstraction from the vantage of a single diff. Codex reviews diffs; it doesn't redesign abstractions. That's your job once the pattern shows up twice.
+
+Hard cap: **6 review rounds.** If you hit round 6 without the stop-and-refactor producing convergence, stop, ship what you have with the remaining findings documented as follow-up issues, and raise the scope question with the user. Seven+ rounds is a scope failure, not a correctness failure — the PR has outgrown the bug report.
 
 ### 7. Present for approval
 
