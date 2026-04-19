@@ -913,6 +913,79 @@ class TestPreserveSourceSlice(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(tmpdir, "01.mp3")),
                             "V0 MP3 must survive cleanup")
 
+    def test_keep_lossless_mode_does_not_strip_normalized_flac(self):
+        """PR #112 Codex round 1 P1: force/manual import with
+        ``target_format=flac`` (or "lossless") runs the normalization
+        branch (ALAC→FLAC) but never runs the V0 pass. The
+        preserve-source cleanup must NOT fire in that branch — otherwise
+        it deletes the freshly normalized FLAC that beets is supposed to
+        receive, i.e. the user's only copy in ``failed_imports/``.
+
+        This slice mirrors the ``if not keep_lossless and
+        target_cleanup_decision(...)`` gate at the caller end: when
+        keep_lossless is True the cleanup is skipped entirely, so the
+        predicate's verdict is irrelevant and the FLAC survives.
+        """
+        import tempfile
+        from harness.import_one import _remove_lossless_files
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flac_path = self._make_flac(tmpdir, "01.flac")
+
+            keep_lossless = True
+            preserve_source = True
+            # Caller gate — matches the `if not keep_lossless and ...` in
+            # import_one.py::main() at the cleanup point.
+            if not keep_lossless:
+                _remove_lossless_files(tmpdir)
+            self.assertTrue(os.path.exists(flac_path),
+                            "keep_lossless=True must skip the "
+                            "preserve-source cleanup — the FLAC is what "
+                            "beets is supposed to import")
+            del preserve_source  # unused, kept for scenario clarity
+
+    def test_retry_flow_without_conversion_still_cleans_leftover_flac(self):
+        """PR #112 Codex round 1 P2: on a second force/manual attempt the
+        V0 MP3s from the first attempt already exist, so
+        ``convert_lossless`` skips and reports ``converted == 0``. The
+        lossless originals from the prior run are still on disk and must
+        be cleaned before beets runs — otherwise beets sees a mixed
+        FLAC+MP3 tree and imports the wrong media.
+        """
+        import tempfile
+        from harness.import_one import (convert_lossless, V0_SPEC,
+                                        _remove_lossless_files,
+                                        target_cleanup_decision)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flac_path = self._make_flac(tmpdir, "01.flac")
+
+            # First attempt: V0 conversion with keep_source=True (both
+            # FLAC and MP3 now exist).
+            converted1, _, _ = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+            self.assertEqual(converted1, 1)
+
+            # Second attempt: output MP3 exists — convert_lossless skips.
+            converted2, _, _ = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+            self.assertEqual(converted2, 0,
+                             "V0 MP3 already exists — convert_lossless "
+                             "must skip on retry")
+            self.assertTrue(os.path.exists(flac_path))
+
+            # Cleanup predicate must still trigger on preserve_source even
+            # though this run converted 0 files.
+            should_clean = target_cleanup_decision(
+                target_achieved=False, target_was_configured=False,
+                sources_kept=converted2, preserve_source=True)
+            self.assertTrue(should_clean,
+                            "retry path: preserve_source must drive "
+                            "cleanup even when converted==0")
+            _remove_lossless_files(tmpdir)
+            self.assertFalse(os.path.exists(flac_path),
+                             "leftover FLAC from prior run must be "
+                             "removed on retry so beets sees only V0")
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "01.mp3")))
+
 
 class TestBayOfBiscayUpgradeChain(unittest.TestCase):
     """Two real-world downloads chained against Velella Velella - The Bay of

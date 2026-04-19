@@ -363,17 +363,27 @@ class TestTargetCleanupDecision(unittest.TestCase):
             target_achieved=False, target_was_configured=False, sources_kept=5,
             preserve_source=True))
 
-    def test_preserve_source_without_kept_sources_no_cleanup(self):
-        """Nothing to clean if V0 converted 0 sources."""
+    def test_preserve_source_retry_without_converted_still_cleans(self):
+        """PR #112 Codex round 1 P2: on a retry of a previously-rejected
+        force/manual attempt the V0 MP3s already exist, so
+        ``convert_lossless`` skips and reports ``converted == 0``. The
+        lossless originals from the prior run are still on disk and must
+        still be cleaned before beets runs — otherwise beets sees a mixed
+        FLAC+MP3 tree and won't evaluate the intended V0-only media.
+        ``_remove_lossless_files`` is idempotent, so True with nothing to
+        remove is a safe no-op."""
         from harness.import_one import target_cleanup_decision
-        self.assertFalse(target_cleanup_decision(
+        self.assertTrue(target_cleanup_decision(
             target_achieved=False, target_was_configured=False, sources_kept=0,
             preserve_source=True))
 
-    def test_preserve_source_with_target_achieved_no_cleanup(self):
-        """Target path already cleaned sources — preserve_source is moot."""
+    def test_preserve_source_with_target_achieved_still_returns_true(self):
+        """Target path already removed lossless files at line ~1049, so
+        ``_remove_lossless_files`` is a no-op here. Returning True for the
+        preserve_source mode is safe (idempotent) and keeps the predicate
+        simple — the caller does not have to track which path cleaned."""
         from harness.import_one import target_cleanup_decision
-        self.assertFalse(target_cleanup_decision(
+        self.assertTrue(target_cleanup_decision(
             target_achieved=True, target_was_configured=True, sources_kept=5,
             preserve_source=True))
 
