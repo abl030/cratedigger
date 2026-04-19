@@ -25,19 +25,34 @@ def _parse_validation_result(vr_raw: object) -> dict[str, object]:
     return json.loads(str(vr_raw))
 
 
-def _is_in_beets(
+def _row_presence(
     row: dict[str, object],
     beets_info: dict[str, dict[str, object]],
-) -> bool:
-    """Check if the album exists in the beets library."""
+) -> str:
+    """Answer 'is this release on disk?' for a wrong-matches row.
+
+    Returns one of ``'exact'`` / ``'fuzzy'`` / ``'absent'`` — the same
+    vocabulary as ``BeetsDB.ReleaseLocation.kind`` (issue #121). The
+    ``beets_info`` dict is the batched exact-hit lookup the caller has
+    already performed (via ``check_beets_library_detail`` →
+    ``BeetsDB.check_mbids_detail``); presence there is proof of an
+    exact ID match. When the ID misses, we fall back to the fuzzy
+    artist+album check, which carries a weaker badge-only guarantee.
+
+    Two callers of the result:
+    - ``in_library`` badge: any non-absent value shows the badge.
+    - ``_quality_summary``: only ``'exact'`` unlocks on-disk fields,
+      because fuzzy can match the wrong pressing.
+    """
     mbid = row.get("mb_release_id")
     if isinstance(mbid, str) and mbid and mbid in beets_info:
-        return True
+        return "exact"
     artist = row.get("artist_name")
     album = row.get("album_title")
     if not isinstance(artist, str) or not isinstance(album, str):
-        return False
-    return _server().check_beets_by_artist_album(artist, album) is not None
+        return "absent"
+    fuzzy = _server().check_beets_by_artist_album(artist, album)
+    return "fuzzy" if fuzzy is not None else "absent"
 
 
 def _target_candidate(vr: dict[str, object]) -> dict[str, object] | None:
@@ -137,7 +152,7 @@ def post_manual_import(h, body: dict) -> None:
 
 def _quality_summary(row: dict[str, object],
                      beets_info: dict[str, dict[str, object]],
-                     album_on_disk: bool,
+                     presence: str,
                      ) -> dict[str, object]:
     """Describe the album's current on-disk quality for a group header.
 
@@ -146,17 +161,16 @@ def _quality_summary(row: dict[str, object],
     (those never live in beets). We combine them so the user can see at a
     glance whether force-importing is worthwhile.
 
-    When the album isn't on disk (``album_on_disk=False``), every on-disk
-    field is zeroed out regardless of what the pipeline DB still holds —
-    that's the belt-and-braces for any path that removed files without
-    clearing the quality fields (the ban-source path now clears them on
-    the write side, but older rows or out-of-band ``beet rm`` invocations
-    can still leave ghosts). The caller computes ``album_on_disk`` with
-    the same ``_is_in_beets`` fuzzy-or-exact logic that drives the
-    ``in_library`` badge, so the two are consistent.
+    On-disk quality is reported only when ``presence == "exact"`` — a
+    fuzzy artist/album hit does NOT identify a specific pressing
+    (multiple pressings share titles), so attributing the pipeline DB's
+    quality fields to 'whatever fuzzy happened to match' would mislabel
+    sibling pressings. Fuzzy and absent both blank the quality strip;
+    the ``in_library`` badge is rendered separately and still picks up
+    fuzzy hits. See issue #121.
     """
     status = str(row.get("request_status") or "wanted")
-    if not album_on_disk:
+    if presence != "exact":
         return {
             "status": status,
             "min_bitrate": None,
@@ -289,22 +303,16 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         assert isinstance(request_id, int)
         group = groups.get(request_id)
         if group is None:
-            # ``_is_in_beets`` is authoritative for "files on disk for
-            # this request": exact MBID match when beets has the tag,
-            # fuzzy artist/album fallback when it doesn't. That second
-            # path covers legacy entries (Discogs imports stored in
-            # ``mb_albumid``, manual imports with the tag unset) where
-            # the album really is on disk but the MBID lookup misses.
-            #
-            # The original multi-pressing concern that motivated a
-            # strict MBID-only check is now handled on the write side:
-            # ``post_pipeline_ban_source`` clears on-disk quality
-            # fields after a successful ``beet remove -d``, so a
-            # sibling pressing's presence can't surface ghost quality
-            # from the removed one. The invariant is now:
-            # on-disk fields are populated ⇔ files exist, maintained
-            # by the cleanup path on the writer side.
-            in_library = _is_in_beets(row, beets_info)
+            # Single seam for 'is this release on disk?' (issue #121).
+            # ``_row_presence`` returns the same vocabulary
+            # (exact / fuzzy / absent) as ``BeetsDB.locate``. The badge
+            # turns on for both exact and fuzzy — users still see
+            # 'something by this artist exists'. The quality strip
+            # blanks unless ``presence == "exact"`` so we never claim
+            # the quality of a specific pressing from a fuzzy hit
+            # (which can match sibling pressings with the same title).
+            presence = _row_presence(row, beets_info)
+            in_library = presence != "absent"
             group = {
                 "request_id": request_id,
                 "artist": row["artist_name"],
@@ -314,7 +322,7 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 "pending_count": 0,
                 "entries": [],
                 "latest_import": None,  # filled in after the loop
-                **_quality_summary(row, beets_info, in_library),
+                **_quality_summary(row, beets_info, presence),
             }
             groups[request_id] = group
             order.append(request_id)

@@ -9,8 +9,9 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          should_clear_lossless_search_override,
                          get_decision_tree, full_pipeline_decision,
                          detect_release_source)
+from lib.release_cleanup import remove_and_reset_release
 from lib.transitions import apply_transition
-from lib.util import beets_subprocess_env, resolve_failed_path
+from lib.util import resolve_failed_path
 from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                 ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                                 CLIFF_THRESHOLD_DB_PER_KHZ)
@@ -641,44 +642,23 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
     s._db().add_denylist(int(req_id), username, "manually banned via web UI")
 
+    # Atomic pair (issue #121): if the album is in beets, run
+    # ``beet remove -d`` across every selector the release ID could
+    # live under (UUID → ``mb_albumid`` only; Discogs numeric →
+    # ``discogs_albumid`` AND ``mb_albumid`` so both new-layout and
+    # legacy imports are covered). Once beets no longer holds it
+    # (whether this handler just removed it or a prior ``beet rm``
+    # did), clear the pipeline DB's on-disk quality fields in the
+    # same call so nothing downstream reasons about ghost state.
     beets_removed = False
-    album_absent_after = False
     b = s._beets_db()
     if mb_release_id and b:
-        album_was_in_beets = b.album_exists(mb_release_id)
-        if album_was_in_beets:
-            # Feed ``beet remove`` every selector this ID could live
-            # under. MusicBrainz releases are always in ``mb_albumid``.
-            # Discogs releases are in ``discogs_albumid`` on new-style
-            # libraries but can also be in ``mb_albumid`` on legacy
-            # libraries that predate the Discogs plugin populating
-            # ``discogs_albumid`` — ``BeetsDB.album_exists()`` confirms
-            # presence for either layout, so ban-source must match.
-            # Hitting a selector that doesn't hold the album is a
-            # harmless no-op, but skipping the selector that does would
-            # silently leave the banned copy on disk.
-            from lib.quality import detect_release_source
-            if detect_release_source(mb_release_id) == "discogs":
-                selectors = ["discogs_albumid", "mb_albumid"]
-            else:
-                selectors = ["mb_albumid"]
-            import subprocess as _sp
-            for selector in selectors:
-                _sp.run(
-                    ["beet", "remove", "-d", f"{selector}:{mb_release_id}"],
-                    capture_output=True, text=True, timeout=30,
-                    env=beets_subprocess_env(),
-                )
-        # Confirm the current state regardless of whether we ran a
-        # remove. ``album_absent_after=True`` means the album is not
-        # currently in beets — from any path, including a manual
-        # ``beet rm`` that ran long before this request arrived. That
-        # is the trigger for clearing stale on-disk quality fields;
-        # ``beets_removed`` is reserved for the narrower question of
-        # whether *this* handler was the one that removed it (it feeds
-        # the API response and the toast message).
-        album_absent_after = not b.album_exists(mb_release_id)
-        beets_removed = album_was_in_beets and album_absent_after
+        beets_removed, _ = remove_and_reset_release(
+            beets_db=b,
+            pipeline_db=s._db(),
+            release_id=mb_release_id,
+            request_id=int(req_id),
+        )
 
     req = s._db().get_request(int(req_id))
     if req:
@@ -692,18 +672,6 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         if min_br is not None:
             ban_kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)
-
-        # Once the files have left beets — whether just now or earlier
-        # via an out-of-band ``beet rm`` — the pipeline DB's on-disk
-        # quality fields (verified_lossless, current_spectral_*,
-        # imported_path) are stale. Clear them so wrong-matches /
-        # library views / quality gate don't reason about phantom state
-        # and so ``dispatch_import`` doesn't feed ``--override-min-bitrate``
-        # a ghost baseline on the next import attempt. The display-side
-        # guard in ``_quality_summary`` is the belt-and-braces for any
-        # path that skips this route entirely.
-        if album_absent_after:
-            s._db().clear_on_disk_quality_fields(int(req_id))
 
     h._json({
         "status": "ok",

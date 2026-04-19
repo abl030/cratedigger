@@ -1264,7 +1264,50 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self._beets = MagicMock()
         self._beets.album_exists.return_value = True
         self._beets.get_min_bitrate.return_value = 320
+        # Ban-source now routes through ``BeetsDB.locate`` (issue #121).
+        # Default the mock to 'album present before and removed after'
+        # so the legacy `album_exists.side_effect = [True, False]`
+        # tests read as "exact → absent" in the new vocabulary.
+        # Individual tests override this via ``_set_locate_sequence``.
+        self._set_locate_sequence([
+            ("exact", 1, ()),  # selectors filled per-test via helper
+            ("absent", None, ()),
+        ])
         srv._beets = self._beets
+
+    def _set_locate_sequence(
+            self, results: list[tuple[str, object, tuple]]) -> None:
+        """Program ``self._beets.locate`` to return a sequence of results.
+
+        Each tuple is ``(kind, album_id, selectors)``. Yields one
+        ReleaseLocation-shaped SimpleNamespace per call; extra calls
+        reuse the final entry. Kept local to this test class because
+        ban-source is the main caller that reasons about the before /
+        after pair.
+        """
+        from types import SimpleNamespace
+        results_copy = list(results)
+
+        def _side_effect(release_id, *_args, **_kwargs):
+            if not results_copy:
+                return SimpleNamespace(kind="absent", album_id=None, selectors=())
+            kind, album_id, selectors = (
+                results_copy[0] if len(results_copy) == 1
+                else results_copy.pop(0))
+            # Auto-fill selectors for 'exact' when the test left them blank
+            # — the locate seam's contract is that selectors are driven by
+            # the ID shape, so it's OK for tests to defer to it.
+            if kind == "exact" and not selectors:
+                from lib.quality import detect_release_source
+                if detect_release_source(str(release_id)) == "discogs":
+                    selectors = (f"discogs_albumid:{release_id}",
+                                 f"mb_albumid:{release_id}")
+                else:
+                    selectors = (f"mb_albumid:{release_id}",)
+            return SimpleNamespace(
+                kind=kind, album_id=album_id, selectors=selectors)
+
+        self._beets.locate.side_effect = _side_effect
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
@@ -1378,7 +1421,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("subprocess.run")
+    @patch("lib.release_cleanup.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_clears_on_disk_quality_fields(
             self, _mock_transition, mock_subprocess):
@@ -1389,7 +1432,8 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         fields populated misleads every downstream consumer (wrong-matches
         UI shows ghost quality, library views, quality gate uses stale
         baselines). The write-side invariant: remove-from-beets implies
-        clear-on-disk-quality.
+        clear-on-disk-quality. Issue #121 couples both sides via
+        ``lib.release_cleanup.remove_and_reset_release``.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
@@ -1401,8 +1445,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             current_spectral_bitrate=160,
             verified_lossless=False,
         )
-        # First call: was present. Second call (after remove): gone.
-        self._beets.album_exists.side_effect = [True, False]
+        # First locate: was present. Second (after remove): gone.
+        self._set_locate_sequence([
+            ("exact", 1, ()),
+            ("absent", None, ()),
+        ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1412,14 +1459,14 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
 
-    @patch("subprocess.run")
+    @patch("lib.release_cleanup.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_beet_remove_failed(
             self, _mock_transition, mock_subprocess):
         """Conservative: if beets still holds the album after the remove
         attempts (e.g. permissions error, wrong column and no legacy
         fallback matched), the on-disk quality state is still accurate,
-        so don't clear it. Modelled by ``album_exists`` returning True
+        so don't clear it. Modelled by ``locate`` returning 'exact'
         both before and after the subprocess calls.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
@@ -1431,8 +1478,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             current_spectral_grade="genuine",
             verified_lossless=True,
         )
-        # Album is still there after the remove attempt.
-        self._beets.album_exists.return_value = True
+        # Album is still there after the remove attempt (both calls exact).
+        self._set_locate_sequence([
+            ("exact", 1, ()),
+            ("exact", 1, ()),
+        ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1442,7 +1492,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("lib.release_cleanup.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_uses_discogs_selector_for_numeric_id(
             self, _mock_transition, mock_subprocess):
@@ -1451,6 +1501,9 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         ``mb_albumid:<id>`` (the legacy layout documented in
         artist_compare.py / webui-primer.md), otherwise one of the two
         layouts goes unremoved and the banned copy stays on disk.
+        After issue #121 the selectors come from ``BeetsDB.locate`` so
+        every caller that asks 'is this release on disk?' agrees on
+        the same selector set.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
@@ -1459,8 +1512,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             id=1704, status="imported", mb_release_id="12856590",
             min_bitrate=320,
         )
-        # Was there; after both removes, gone.
-        self._beets.album_exists.side_effect = [True, False]
+        # Was there (with BOTH Discogs selectors); after both removes, gone.
+        self._set_locate_sequence([
+            ("exact", 1, ("discogs_albumid:12856590", "mb_albumid:12856590")),
+            ("absent", None, ()),
+        ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1476,13 +1532,13 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
                       "Must also attempt the legacy mb_albumid selector "
                       "so older beets libraries don't regress.")
 
-    @patch("subprocess.run")
+    @patch("lib.release_cleanup.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_clears_stale_state_when_album_already_gone(
             self, _mock_transition, mock_subprocess):
         """Ghost state can pre-date the handler: a user runs
         ``beet rm mb_albumid:X`` manually, then days later bans the
-        source. ``album_exists`` returns False before ban-source even
+        source. ``locate`` returns 'absent' before ban-source even
         starts, so no ``beet remove`` runs — but the pipeline DB still
         carries the old ``current_spectral_*`` / ``imported_path``.
         The handler must still clear those fields so ``dispatch_import``
@@ -1500,7 +1556,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         )
         # Album was already gone when ban-source ran (earlier beet rm).
-        self._beets.album_exists.return_value = False
+        self._set_locate_sequence([
+            ("absent", None, ()),
+            ("absent", None, ()),
+        ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -2478,20 +2537,19 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     @patch("web.server.check_beets_by_artist_album", return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_shows_quality_when_fuzzy_match_only(
+    def test_group_shows_badge_but_blanks_quality_when_fuzzy_only(
             self, _mock_detail, _mock_fuzzy):
-        """Legacy / untagged beets entries still have their files on disk
-        — only the MBID tag is missing. ``_is_in_beets`` falls back to
-        a fuzzy artist/album lookup for that case, and the quality
-        summary must honour the same signal: blanking the pipeline DB's
-        real ``min_bitrate`` / ``verified_lossless`` would mislabel a
-        genuinely on-disk album as absent and push users toward
-        unnecessary force-imports.
+        """Fuzzy match → in-library badge, but on-disk quality stays blank.
 
-        The original multi-pressing concern is handled on the write
-        side — ``post_pipeline_ban_source`` clears on-disk quality
-        fields after a successful ``beet remove``, so a sibling
-        pressing can't leak ghost data through the fuzzy fallback.
+        Issue #121: a fuzzy artist+album hit does NOT identify a specific
+        pressing — multiple pressings of 'OK Computer' will all match
+        'Radiohead' + 'OK Computer'. Attributing the pipeline DB's
+        ``min_bitrate`` / ``verified_lossless`` / ``current_spectral_*``
+        to 'whatever fuzzy happened to match' mislabels sibling pressings.
+
+        The badge stays on (the UI still tells the user 'something by
+        this artist exists'), but the quality strip goes silent because
+        we can't honestly claim which pressing's quality we're reporting.
         """
         row = self._row(42, 100, "testuser", "/fi/Test",
                          mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -2505,20 +2563,26 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         group = data["groups"][0]
-        self.assertTrue(group["in_library"])
-        self.assertEqual(group["min_bitrate"], 245)
-        self.assertTrue(group["verified_lossless"])
-        self.assertEqual(group["current_spectral_grade"], "genuine")
+        self.assertTrue(group["in_library"],
+                        "Fuzzy match still drives the in-library badge.")
+        self.assertIsNone(group["min_bitrate"],
+                          "Fuzzy-only: must not claim a bitrate for an "
+                          "unknown pressing.")
+        self.assertFalse(group["verified_lossless"],
+                         "Fuzzy-only: verified_lossless must read False.")
+        self.assertIsNone(group["current_spectral_grade"])
+        self.assertIsNone(group["quality_label"])
+        self.assertIsNone(group["quality_rank"])
 
     @patch("web.server.check_beets_by_artist_album", return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_shows_quality_for_mbidless_request_via_fuzzy(
+    def test_group_blanks_quality_for_mbidless_request_via_fuzzy(
             self, _mock_detail, _mock_fuzzy):
-        """Requests with no MBID can't be pinpointed to a specific pressing,
-        so fuzzy presence IS the best on-disk signal we have. The quality
-        summary must fall back to the fuzzy result and keep reporting the
-        pipeline DB's quality fields — blanking them would mislabel a real
-        on-disk album as absent and invite duplicate force-imports.
+        """No MBID → locate cannot produce an exact hit, so quality blanks.
+
+        Same rule as the fuzzy-with-MBID case: the badge reflects the
+        fuzzy signal so the user still sees 'something exists', but the
+        quality strip stays honest about how much we actually know.
         """
         row = self._row(42, 100, "testuser", "/fi/Test", mb_release_id=None)
         row["request_status"] = "imported"
@@ -2531,10 +2595,9 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         group = data["groups"][0]
         self.assertTrue(group["in_library"])
-        # MBID absent + fuzzy present → trust the DB's on-disk quality.
-        self.assertEqual(group["min_bitrate"], 245)
-        self.assertTrue(group["verified_lossless"])
-        self.assertEqual(group["current_spectral_grade"], "genuine")
+        self.assertIsNone(group["min_bitrate"])
+        self.assertFalse(group["verified_lossless"])
+        self.assertIsNone(group["current_spectral_grade"])
 
     def test_group_latest_import_picks_most_recent_success(self):
         """latest_import shows the last successful import, not the newest attempt.

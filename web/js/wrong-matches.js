@@ -94,16 +94,17 @@ function renderQualityBadges(g) {
   // nothing on disk, so checking status alone would swallow the signal
   // and leave the badge strip empty.
   //
-  // The backend now uses the same fuzzy-or-exact `_is_in_beets`
-  // check to both populate `in_library` and to blank the quality
-  // fields, so they move together: fields populated ⇔ library hit.
-  // The remaining in_library=true + no-quality case is a fuzzy
-  // substring collision where beets has nothing actually indexed for
-  // this release — stay silent rather than speculating on a
-  // "different edition" claim the data doesn't support. `format`
-  // stays in the guard because it's the fallback badge text below
-  // when bitrate is null (e.g. FLAC with no bitrate metadata), so
-  // its presence means an on-disk badge will render.
+  // Issue #121: the backend splits the signal — `in_library`
+  // reflects both exact and fuzzy hits (for the badge), while the
+  // quality strip (`quality_label`, `min_bitrate`,
+  // `current_spectral_grade`, `format`) is populated ONLY on an
+  // exact ID match. A fuzzy substring hit can match the wrong
+  // pressing, so we can't honestly attribute quality to it; the
+  // in_library=true + no-quality case is normal for fuzzy hits
+  // (and still safe for the 'not on disk' badge guard below).
+  // `format` stays in the guard because it's the fallback badge
+  // text below when bitrate is null (e.g. FLAC with no bitrate
+  // metadata), so its presence means an on-disk badge will render.
   const hasOnDiskQuality = g.quality_label || g.min_bitrate
     || g.current_spectral_grade || g.format;
   if (!hasOnDiskQuality && !g.in_library) {
