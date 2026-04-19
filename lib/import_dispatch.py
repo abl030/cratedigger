@@ -525,6 +525,14 @@ def dispatch_import_core(
                "--request-id", str(request_id)]
         if force:
             cmd.append("--force")
+        # Force/manual import operates on the user's only copy of the source
+        # material (typically failed_imports/…). Tell the harness to keep
+        # lossless originals intact until the quality decision — on
+        # downgrade/transcode_downgrade verdicts we exit before deletion so
+        # the user's FLACs survive (#111). Auto-import stages to disposable
+        # /Incoming and does not need the flag.
+        if scenario in FORCE_MANUAL_SCENARIOS:
+            cmd.append("--preserve-source")
         if verified_lossless_target:
             cmd.extend(["--verified-lossless-target", verified_lossless_target])
         if target_format:

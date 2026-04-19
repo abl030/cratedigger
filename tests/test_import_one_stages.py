@@ -325,7 +325,13 @@ class TestShouldRunTargetConversion(unittest.TestCase):
 # ============================================================================
 
 class TestTargetCleanupDecision(unittest.TestCase):
-    """When a target was configured but skipped (transcode), source files must be cleaned up."""
+    """When a target was configured but skipped (transcode), source files must be cleaned up.
+
+    Extended for issue #111 with ``preserve_source`` — when force/manual import
+    asked the V0 pass to preserve originals until the quality decision, and the
+    decision was non-terminal (import going ahead), we must still clean up before
+    beets sees FLAC+MP3 and tries to catalog both.
+    """
 
     def test_target_skipped_needs_cleanup(self):
         from harness.import_one import target_cleanup_decision
@@ -346,6 +352,46 @@ class TestTargetCleanupDecision(unittest.TestCase):
         from harness.import_one import target_cleanup_decision
         self.assertFalse(target_cleanup_decision(
             target_achieved=False, target_was_configured=True, sources_kept=0))
+
+    # --- Issue #111: preserve_source case (force/manual import) ---
+
+    def test_preserve_source_no_target_needs_cleanup(self):
+        """Force/manual import held sources past V0; decision was non-terminal
+        so beets is about to run — clean FLACs so beets sees only V0 MP3s."""
+        from harness.import_one import target_cleanup_decision
+        self.assertTrue(target_cleanup_decision(
+            target_achieved=False, target_was_configured=False, sources_kept=5,
+            preserve_source=True))
+
+    def test_preserve_source_without_kept_sources_no_cleanup(self):
+        """Nothing to clean if V0 converted 0 sources."""
+        from harness.import_one import target_cleanup_decision
+        self.assertFalse(target_cleanup_decision(
+            target_achieved=False, target_was_configured=False, sources_kept=0,
+            preserve_source=True))
+
+    def test_preserve_source_with_target_achieved_no_cleanup(self):
+        """Target path already cleaned sources — preserve_source is moot."""
+        from harness.import_one import target_cleanup_decision
+        self.assertFalse(target_cleanup_decision(
+            target_achieved=True, target_was_configured=True, sources_kept=5,
+            preserve_source=True))
+
+    def test_preserve_source_with_target_skipped_needs_cleanup(self):
+        """Target was configured but skipped (transcode) — source cleanup needed
+        regardless of preserve_source flag."""
+        from harness.import_one import target_cleanup_decision
+        self.assertTrue(target_cleanup_decision(
+            target_achieved=False, target_was_configured=True, sources_kept=5,
+            preserve_source=True))
+
+    def test_no_preserve_source_no_target_no_cleanup(self):
+        """Default auto-import path without target: source was already deleted
+        in convert_lossless (keep_source=False), so no kept sources to clean."""
+        from harness.import_one import target_cleanup_decision
+        self.assertFalse(target_cleanup_decision(
+            target_achieved=False, target_was_configured=False, sources_kept=5,
+            preserve_source=False))
 
 
 
@@ -385,6 +431,30 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
             converted, failed, ext = convert_lossless(tmpdir, V0_SPEC)
             self.assertEqual(converted, 1)
             self.assertFalse(os.path.exists(flac_path))
+
+
+# ============================================================================
+# --preserve-source CLI flag — issue #111
+# ============================================================================
+
+class TestPreserveSourceFlag(unittest.TestCase):
+    """The --preserve-source flag tells the V0 conversion to keep FLACs on
+    disk until the quality decision. Force/manual-import sets this so a
+    downgrade verdict does not silently destroy the user's source FLACs in
+    failed_imports/.
+
+    Verified by invoking ``import_one.py --help`` via subprocess — this
+    exercises the *real* argparse construction inside ``main()`` rather than
+    duplicating it.
+    """
+
+    def test_flag_present_in_help(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [sys.executable, import_script, "--help"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--preserve-source", result.stdout)
 
 
 # ============================================================================

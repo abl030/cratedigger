@@ -8,6 +8,7 @@ The key difference from unit/orchestration tests is that parse_import_result
 and _check_quality_gate_core run for real, not patched.
 """
 
+import os
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -835,6 +836,82 @@ class TestForceImportSlice(unittest.TestCase):
             "/Beets/The Go! Team/2005 - Are You Ready for More_",
             "force-import must overwrite the stale source path with "
             "ir.postflight.imported_path (the actual beets destination)")
+
+
+class TestPreserveSourceSlice(unittest.TestCase):
+    """Integration slice for issue #111 — force/manual import holds lossless
+    originals across the V0 conversion until the quality decision has
+    returned a non-terminal verdict.
+
+    The real bug: with no ``verified_lossless_target`` configured,
+    ``convert_lossless(V0_SPEC, keep_source=False)`` deleted FLACs in the
+    user's ``failed_imports/`` directory *before* the quality decision ran.
+    A subsequent ``downgrade`` / ``transcode_downgrade`` verdict then left
+    the user's source material destroyed.
+
+    These slices exercise the real ``convert_lossless`` + the real
+    ``target_cleanup_decision`` end-to-end so we cannot regress the
+    invariant "on a terminal quality verdict, the staged FLACs remain
+    untouched" without a test failing.
+    """
+
+    def _make_flac(self, folder: str, name: str) -> str:
+        import subprocess
+        path = os.path.join(folder, name)
+        subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-y", path],
+            capture_output=True, timeout=30, check=True)
+        return path
+
+    def test_preserve_source_flac_survives_terminal_exit(self):
+        """``convert_lossless(V0_SPEC, keep_source=True)`` keeps the FLACs on
+        disk. If the caller would then exit (terminal quality verdict) we
+        never reach the ``target_cleanup_decision`` call, so the FLACs
+        remain — matching ``import_one.py``'s line-997 terminal branch."""
+        import tempfile
+        from harness.import_one import convert_lossless, V0_SPEC
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flac_path = self._make_flac(tmpdir, "01.flac")
+
+            converted, failed, _ = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+
+            self.assertEqual((converted, failed), (1, 0))
+            self.assertTrue(os.path.exists(flac_path),
+                            "FLAC must survive V0 conversion when "
+                            "keep_source=True (terminal verdict path)")
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "01.mp3")))
+
+    def test_preserve_source_flac_cleaned_after_non_terminal_decision(self):
+        """After a non-terminal quality decision, the preserve-source cleanup
+        path runs so beets sees only V0 MP3s. This slice drives the real
+        ``target_cleanup_decision`` + ``_remove_lossless_files`` path."""
+        import tempfile
+        from harness.import_one import (convert_lossless, V0_SPEC,
+                                        _remove_lossless_files,
+                                        target_cleanup_decision)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flac_path = self._make_flac(tmpdir, "01.flac")
+
+            converted, failed, _ = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+            self.assertEqual((converted, failed), (1, 0))
+            self.assertTrue(os.path.exists(flac_path))
+
+            # Simulate the main() post-decision branch: non-terminal verdict
+            # → target_cleanup_decision fires with preserve_source=True.
+            should_clean = target_cleanup_decision(
+                target_achieved=False, target_was_configured=False,
+                sources_kept=converted, preserve_source=True)
+            self.assertTrue(should_clean)
+            _remove_lossless_files(tmpdir)
+
+            self.assertFalse(os.path.exists(flac_path),
+                             "FLAC must be cleaned before beets import once "
+                             "quality decision approved")
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "01.mp3")),
+                            "V0 MP3 must survive cleanup")
 
 
 class TestBayOfBiscayUpgradeChain(unittest.TestCase):

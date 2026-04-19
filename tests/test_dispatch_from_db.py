@@ -154,6 +154,21 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         r = self._dispatch(force=False)
         self.assertNotIn("--force", r["cmd"])
 
+    # --- Seam: preserve-source flag (issue #111) ---
+
+    def test_preserve_source_flag_passed_on_force(self):
+        """Force-import must preserve user's source FLACs until the quality
+        decision — downgrade/transcode_downgrade verdicts must NOT destroy
+        originals in failed_imports/."""
+        r = self._dispatch(force=True)
+        self.assertIn("--preserve-source", r["cmd"])
+
+    def test_preserve_source_flag_passed_on_manual(self):
+        """Manual-import uses the same failed_imports/ source path as force —
+        both need source preservation."""
+        r = self._dispatch(force=False)
+        self.assertIn("--preserve-source", r["cmd"])
+
     # --- Typed result ---
 
     def test_returns_typed_result(self):
