@@ -512,6 +512,187 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         self.assertIn("spectral: 128kbps <= existing 320kbps",
                       db.denylist[0].reason or "")
 
+    def test_stale_album_path_does_not_self_compare(self):
+        """Issue #90: when BeetsDB returns an album whose on-disk path has
+        gone stale (``os.path.isdir`` returns False), propagation must not
+        mutate ``existing_spectral`` *before* ``spectral_import_decision``
+        runs — otherwise the download is compared against itself and
+        legitimate suspect-grade downloads get rejected by their own
+        spectral estimate.
+
+        Setup: beets says the album exists (min_bitrate=320) but
+        isdir(album_path) is False. Download is suspect at 128kbps.
+
+        With the bug: propagation writes download's 128kbps into
+        existing_spectral, then decision sees new=128 vs existing=128 →
+        reject (self-compare).
+
+        Correct behavior: decision compares download's 128 against the
+        container's 320 (fallback via existing_min_bitrate) → reject with a
+        legitimate comparison; OR if existing_min_bitrate also isn't
+        trustworthy (e.g. caller treats stale path as no-existing),
+        import_no_exist. The key invariant: the reject reason must NOT
+        read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
+        """
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        # Album metadata present in beets...
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Test",
+        )
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch(
+            "lib.preimport.spectral_analyze",
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=128,
+                suspect_pct=90.0,
+                tracks=[],
+            ),
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+             patch("os.path.isdir", return_value=False):
+            result = run_preimport_gates(
+                path="/tmp/download",
+                mb_release_id="mbid-123",
+                label="Test Artist - Test Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+                propagate_download_to_existing=True,
+            )
+
+        # The self-compare bug — if any reject fires, it must not read as
+        # "spectral X <= existing X" with equal numbers. A legitimate reject
+        # against the container bitrate (320) is allowed.
+        if not result.valid:
+            self.assertNotEqual(result.detail,
+                                "spectral 128kbps <= existing 128kbps",
+                                "self-compare bug: download compared against "
+                                "a propagated copy of its own spectral")
+
+    def test_stale_album_path_rejects_against_container_bitrate(self):
+        """Issue #90 regression guard: when beets path is stale, the spectral
+        decision must fall back to the container's min_bitrate (320), not
+        the download's own spectral. So a suspect 128kbps download rejects
+        against 320kbps (a real comparison) and the detail string reflects
+        that — not the self-compare "128 <= 128" the old code produced.
+        """
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Test",
+        )
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch(
+            "lib.preimport.spectral_analyze",
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=128,
+                suspect_pct=90.0,
+                tracks=[],
+            ),
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+             patch("os.path.isdir", return_value=False):
+            result = run_preimport_gates(
+                path="/tmp/download",
+                mb_release_id="mbid-123",
+                label="Test Artist - Test Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+                propagate_download_to_existing=True,
+            )
+
+        self.assertFalse(result.valid, "suspect 128 < container 320 should reject")
+        self.assertEqual(result.scenario, "spectral_reject")
+        self.assertEqual(result.detail, "spectral 128kbps <= existing 320kbps",
+                         "reject must compare against stale container's 320kbps, "
+                         "not a propagated copy of the download's 128kbps")
+
+    def test_stale_album_path_imports_when_download_beats_container(self):
+        """Issue #90 correctness: suspect download above the container
+        bitrate must import (import_upgrade) instead of self-rejecting.
+
+        Without the fix: propagation writes 280 into existing_spectral,
+        decision sees 280 <= 280 → reject. A legitimate upgrade blocked.
+
+        With the fix: decision sees 280 vs container 256 → import_upgrade.
+        """
+        from lib.config import SoularrConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=256,
+            avg_bitrate_kbps=256,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Test",
+        )
+        cfg = SoularrConfig(audio_check_mode="off")
+
+        with patch(
+            "lib.preimport.spectral_analyze",
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=280,
+                suspect_pct=90.0,
+                tracks=[],
+            ),
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+             patch("os.path.isdir", return_value=False):
+            result = run_preimport_gates(
+                path="/tmp/download",
+                mb_release_id="mbid-123",
+                label="Test Artist - Test Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=280_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+                propagate_download_to_existing=True,
+            )
+
+        self.assertTrue(result.valid,
+                        "suspect 280 > container 256 should import (upgrade)")
+        # Propagation still persisted the download's spectral for future runs.
+        row = db.request(42)
+        self.assertEqual(row["current_spectral_grade"], "suspect")
+        self.assertEqual(row["current_spectral_bitrate"], 280)
+
 
 class TestDispatchNoJsonResult(unittest.TestCase):
     """Integration slice: sp.run returns no sentinel -> record rejection."""

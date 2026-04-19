@@ -465,19 +465,22 @@ def run_preimport_gates(
             logger.debug("failed to read persisted spectral state",
                          exc_info=True)
 
-    # --- Persist spectral state to DB (if wired) ---
-    if db is not None and request_id is not None:
-        written = _persist_spectral_state(
-            db=db, request_id=request_id,
-            download_spectral=result.download_spectral,
-            existing_spectral=result.existing_spectral,
-            existing_min_bitrate=result.existing_min_bitrate,
-            label=label,
-            propagate_download_to_existing=propagate_download_to_existing,
-        )
-        result.existing_spectral = written
-
     # --- Spectral decision ---
+    #
+    # Issue #90: the decision MUST run BEFORE _persist_spectral_state
+    # propagates the download's spectral into ``result.existing_spectral``.
+    # When BeetsDB returns an album (``existing_min_bitrate`` populated) but
+    # the on-disk album_path is stale — so ``existing_spectral`` stayed None
+    # — the propagation helper adopts the download's spectral as "the
+    # current on-disk state". If we then read ``result.existing_spectral``
+    # for the decision, we compare the download against a copy of itself
+    # and every suspect-grade download rejects at ``new <= existing`` when
+    # new == existing by construction.
+    #
+    # Snapshot the value spectral_import_decision will see here, keep the
+    # propagation logic intact, and persist AFTER the decision so the DB
+    # still carries the download's spectral forward for the NEXT run's
+    # decision (which is what the propagation is actually for).
     existing_cliff_bitrate = (
         result.existing_spectral.bitrate_kbps
         if result.existing_spectral is not None else None
@@ -519,5 +522,21 @@ def run_preimport_gates(
         logger.info(
             f"SPECTRAL: {label} suspect at {dl_cliff_bitrate}kbps "
             f"but no existing album, importing")
+
+    # --- Persist spectral state to DB (if wired) ---
+    # Runs AFTER the decision so the propagation (download → existing) can't
+    # poison the comparison above. The written value still flows back into
+    # ``result.existing_spectral`` for downstream logging — callers read this
+    # field to populate DownloadInfo.current_spectral and validation logs.
+    if db is not None and request_id is not None:
+        written = _persist_spectral_state(
+            db=db, request_id=request_id,
+            download_spectral=result.download_spectral,
+            existing_spectral=result.existing_spectral,
+            existing_min_bitrate=result.existing_min_bitrate,
+            label=label,
+            propagate_download_to_existing=propagate_download_to_existing,
+        )
+        result.existing_spectral = written
 
     return result
