@@ -1401,7 +1401,8 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             current_spectral_bitrate=160,
             verified_lossless=False,
         )
-        self._beets.album_exists.return_value = True
+        # First call: was present. Second call (after remove): gone.
+        self._beets.album_exists.side_effect = [True, False]
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1415,8 +1416,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_beet_remove_failed(
             self, _mock_transition, mock_subprocess):
-        """Conservative: if beets still holds the album (remove failed),
-        the on-disk quality state is still accurate, so don't clear it.
+        """Conservative: if beets still holds the album after the remove
+        attempts (e.g. permissions error, wrong column and no legacy
+        fallback matched), the on-disk quality state is still accurate,
+        so don't clear it. Modelled by ``album_exists`` returning True
+        both before and after the subprocess calls.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
@@ -1427,6 +1431,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             current_spectral_grade="genuine",
             verified_lossless=True,
         )
+        # Album is still there after the remove attempt.
         self._beets.album_exists.return_value = True
 
         status, _data = self._post("/api/pipeline/ban-source", {
@@ -1442,10 +1447,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     def test_ban_source_uses_discogs_selector_for_numeric_id(
             self, _mock_transition, mock_subprocess):
         """Discogs-backed requests carry a numeric ID. ``beet remove -d``
-        must target ``discogs_albumid:`` for those, otherwise it runs a
-        no-op ``mb_albumid:12345`` query while the Discogs copy stays on
-        disk — the source gets denylisted but the library never loses
-        the album and the pipeline clean-up branch never fires.
+        must try ``discogs_albumid:<id>`` (the new layout) AND
+        ``mb_albumid:<id>`` (the legacy layout documented in
+        artist_compare.py / webui-primer.md), otherwise one of the two
+        layouts goes unremoved and the banned copy stays on disk.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
@@ -1454,7 +1459,8 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             id=1704, status="imported", mb_release_id="12856590",
             min_bitrate=320,
         )
-        self._beets.album_exists.return_value = True
+        # Was there; after both removes, gone.
+        self._beets.album_exists.side_effect = [True, False]
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1462,11 +1468,13 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         })
 
         self.assertEqual(status, 200)
-        called_argv = mock_subprocess.call_args.args[0]
-        self.assertIn("discogs_albumid:12856590", called_argv,
-                      "Discogs numeric ID must use the discogs_albumid "
-                      "beets selector, not mb_albumid.")
-        self.assertNotIn("mb_albumid:12856590", called_argv)
+        argvs = [call.args[0] for call in mock_subprocess.call_args_list]
+        flattened = [token for argv in argvs for token in argv]
+        self.assertIn("discogs_albumid:12856590", flattened,
+                      "Must attempt the new-layout selector.")
+        self.assertIn("mb_albumid:12856590", flattened,
+                      "Must also attempt the legacy mb_albumid selector "
+                      "so older beets libraries don't regress.")
 
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_mbid_missing(self, _mock_transition):

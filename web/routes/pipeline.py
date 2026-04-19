@@ -647,21 +647,32 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     if mb_release_id and b:
         album_was_in_beets = b.album_exists(mb_release_id)
         if album_was_in_beets:
-            # Discogs releases live under ``discogs_albumid`` in beets;
-            # MusicBrainz releases under ``mb_albumid``. Feed ``beet remove``
-            # the right selector so a Discogs ban-source actually targets
-            # the imported album instead of silently no-op-ing.
+            # Feed ``beet remove`` every selector this ID could live
+            # under. MusicBrainz releases are always in ``mb_albumid``.
+            # Discogs releases are in ``discogs_albumid`` on new-style
+            # libraries but can also be in ``mb_albumid`` on legacy
+            # libraries that predate the Discogs plugin populating
+            # ``discogs_albumid`` — ``BeetsDB.album_exists()`` confirms
+            # presence for either layout, so ban-source must match.
+            # Hitting a selector that doesn't hold the album is a
+            # harmless no-op, but skipping the selector that does would
+            # silently leave the banned copy on disk.
             from lib.quality import detect_release_source
-            selector = ("discogs_albumid"
-                        if detect_release_source(mb_release_id) == "discogs"
-                        else "mb_albumid")
+            if detect_release_source(mb_release_id) == "discogs":
+                selectors = ["discogs_albumid", "mb_albumid"]
+            else:
+                selectors = ["mb_albumid"]
             import subprocess as _sp
-            result = _sp.run(
-                ["beet", "remove", "-d", f"{selector}:{mb_release_id}"],
-                capture_output=True, text=True, timeout=30,
-                env=beets_subprocess_env(),
-            )
-            beets_removed = result.returncode == 0
+            for selector in selectors:
+                _sp.run(
+                    ["beet", "remove", "-d", f"{selector}:{mb_release_id}"],
+                    capture_output=True, text=True, timeout=30,
+                    env=beets_subprocess_env(),
+                )
+            # Confirm removal by re-querying — ``beet remove``'s return
+            # code is 0 even when nothing matched, so it can't tell us
+            # whether the right selector actually fired.
+            beets_removed = not b.album_exists(mb_release_id)
 
     req = s._db().get_request(int(req_id))
     if req:
