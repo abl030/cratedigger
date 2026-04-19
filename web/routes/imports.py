@@ -31,23 +31,21 @@ def _row_presence(
 ) -> str:
     """Answer 'is this release on disk?' for a wrong-matches row.
 
-    Returns ``'exact'`` / ``'fuzzy'`` / ``'absent'``. The vocabulary
-    lines up with ``BeetsDB.ReleaseLocation.kind`` (issue #121), but
-    there's one refinement vs. the pure seam — an MBID-less request
-    has NO ambiguity between pressings, so a fuzzy hit is as
-    authoritative as an exact one for quality purposes. We report it
-    as ``'exact'`` so ``_quality_summary`` keeps surfacing the
-    pipeline DB's ``min_bitrate`` / ``verified_lossless`` (raised by
-    Codex round 2 — preserving pre-#121 behaviour for
-    ``mb_release_id = NULL`` requests and legacy manual imports).
-
-    True-fuzzy (MBID present but misses; artist+album hits a sibling
-    pressing) still blanks quality — that's the multi-pressing
-    ambiguity issue #121 is guarding against.
+    Returns one of ``'exact'`` / ``'fuzzy'`` / ``'absent'`` — the same
+    vocabulary as ``BeetsDB.ReleaseLocation.kind`` (issue #121). The
+    ``beets_info`` dict is the batched exact-hit lookup the caller has
+    already performed (via ``check_beets_library_detail`` →
+    ``BeetsDB.check_mbids_detail``); presence there is proof of an
+    exact ID match. When the ID misses, we fall back to the fuzzy
+    artist+album check, which carries a weaker badge-only guarantee.
 
     Two callers of the result:
     - ``in_library`` badge: any non-absent value shows the badge.
-    - ``_quality_summary``: only ``'exact'`` unlocks on-disk fields.
+    - ``_quality_summary``: only ``'exact'`` unlocks on-disk fields,
+      because fuzzy can match the wrong pressing (artist+album
+      ``LIKE`` matches sibling pressings, manual imports with
+      different tags, or — unescaped ``_`` / ``%`` in the name —
+      completely unrelated rows).
     """
     mbid = row.get("mb_release_id")
     if isinstance(mbid, str) and mbid and mbid in beets_info:
@@ -57,14 +55,7 @@ def _row_presence(
     if not isinstance(artist, str) or not isinstance(album, str):
         return "absent"
     fuzzy = _server().check_beets_by_artist_album(artist, album)
-    if fuzzy is None:
-        return "absent"
-    # Fuzzy hit with no MBID → no pressing-disambiguation concern, so
-    # treat the pipeline DB's quality as authoritative for this row.
-    # Fuzzy hit WITH an MBID that didn't match → might be a sibling
-    # pressing; keep the quality strip blank.
-    has_mbid = isinstance(mbid, str) and bool(mbid)
-    return "fuzzy" if has_mbid else "exact"
+    return "fuzzy" if fuzzy is not None else "absent"
 
 
 def _target_candidate(vr: dict[str, object]) -> dict[str, object] | None:
