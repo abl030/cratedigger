@@ -228,6 +228,31 @@ export function toggleWrongMatchEntry(id) {
 }
 
 /**
+ * Re-fetch /api/wrong-matches and re-render in place. Used after any action
+ * that can remove an entry or empty a whole group (force-import and delete
+ * both move files off disk, which drops them from the list).
+ *
+ * Guarded against transient 5xx on the refresh: a failed refresh leaves the
+ * DOM untouched and the cache invalidated, so the next tab switch retries
+ * cleanly. Without this guard, an error payload would render as the empty
+ * state and cache `_loaded = true`, erasing legitimate remaining rows.
+ */
+async function _refreshWrongMatches() {
+  const el = document.getElementById('wrong-matches-content');
+  if (!el) return;
+  try {
+    const fetchRes = await fetch(`${API}/api/wrong-matches`);
+    if (fetchRes.ok) {
+      const fresh = await fetchRes.json();
+      renderWrongMatches(fresh, el);
+      _loaded = true;
+    }
+  } catch (_refreshErr) {
+    // Cache stays invalidated; next tab switch retries.
+  }
+}
+
+/**
  * Force-import a wrong match.
  * @param {number} logId
  * @param {HTMLButtonElement} btn
@@ -249,6 +274,10 @@ export async function forceImportWrongMatch(logId, btn) {
       btn.style.color = '#6d6';
       toast(`Force imported: ${data.artist} - ${data.album}`);
       invalidateWrongMatches();
+      // A successful force-import cleans the source folder, so the entry (and
+      // possibly the whole group) should disappear. Refresh the view so the
+      // count badge and sibling list reflect the new state.
+      await _refreshWrongMatches();
     } else {
       btn.textContent = 'Failed';
       btn.style.color = '#f88';
@@ -279,22 +308,7 @@ export async function deleteWrongMatch(logId, btn) {
     if (data.status === 'ok') {
       toast('Wrong match deleted');
       invalidateWrongMatches();
-      // Re-fetch to reflect group/entry removal (and possibly the whole group disappearing).
-      // Only cache the refreshed render if the refresh itself succeeded — a transient 5xx
-      // on the GET must not erase legitimate remaining rows from the tab.
-      const el = document.getElementById('wrong-matches-content');
-      if (el) {
-        try {
-          const fetchRes = await fetch(`${API}/api/wrong-matches`);
-          if (fetchRes.ok) {
-            const fresh = await fetchRes.json();
-            renderWrongMatches(fresh, el);
-            _loaded = true;
-          }
-        } catch (_refreshErr) {
-          // Leave the cache invalidated; next tab switch will retry the fetch.
-        }
-      }
+      await _refreshWrongMatches();
     } else {
       btn.textContent = 'Failed';
       toast('Delete failed', true);
