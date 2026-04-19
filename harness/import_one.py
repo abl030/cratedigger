@@ -1032,6 +1032,16 @@ def main():
              f"{existing_m.format if existing_m else 'none'} "
              f"min={effective_existing}kbps — skipping import"
              f"{' (transcode)' if decision == 'transcode_downgrade' else ''}")
+        # PR #112 Codex round 2: --preserve-source terminal exit must leave
+        # the user's original lossless files ALONE and remove our temporary
+        # V0 MP3s. Otherwise a retry of the same folder sees mixed FLAC+MP3,
+        # convert_lossless skips (output exists) and returns converted=0,
+        # the quality stage then measures across mixed files and the
+        # verified_lossless_target pass is wrongly skipped.
+        if args.preserve_source and not keep_lossless and converted > 0:
+            _remove_files_by_ext(args.path, "." + V0_SPEC.extension)
+            _log(f"  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
+                 f"lossless originals left intact for retry")
         _emit_and_exit(r)
 
     # Non-terminal quality decisions — log and proceed to import
