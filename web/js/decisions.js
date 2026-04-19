@@ -57,16 +57,30 @@ export function renderDiagram(tree) {
   const paths = tree.paths || [];
   const labels = tree.path_labels || {};
 
-  // Split stages by path
+  // Split stages by placement. "preimport" runs before the FLAC/MP3 branch
+  // (issue #91); "shared" runs after they merge.
   const byPath = {};
+  const preimport = [];
   const shared = [];
   for (const s of stages) {
+    if (s.path === 'preimport') { preimport.push(s); continue; }
     if (s.path === 'shared') { shared.push(s); continue; }
     if (!byPath[s.path]) byPath[s.path] = [];
     byPath[s.path].push(s);
   }
 
   let html = '';
+
+  // Render preimport stages above the branching row.
+  for (let i = 0; i < preimport.length; i++) {
+    if (i > 0) html += '<div class="dp-arrow">\u2502</div>';
+    html += renderStage(preimport[i], consts);
+  }
+
+  // Arrow into the branching row
+  if (preimport.length > 0 && paths.length > 0) {
+    html += '<div class="dp-arrow">\u2502</div>';
+  }
 
   // Render branching paths side by side
   if (paths.length > 0) {
