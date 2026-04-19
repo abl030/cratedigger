@@ -642,7 +642,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     s._db().add_denylist(int(req_id), username, "manually banned via web UI")
 
     beets_removed = False
-    album_was_in_beets = False
+    album_absent_after = False
     b = s._beets_db()
     if mb_release_id and b:
         album_was_in_beets = b.album_exists(mb_release_id)
@@ -669,10 +669,16 @@ def post_pipeline_ban_source(h, body: dict) -> None:
                     capture_output=True, text=True, timeout=30,
                     env=beets_subprocess_env(),
                 )
-            # Confirm removal by re-querying — ``beet remove``'s return
-            # code is 0 even when nothing matched, so it can't tell us
-            # whether the right selector actually fired.
-            beets_removed = not b.album_exists(mb_release_id)
+        # Confirm the current state regardless of whether we ran a
+        # remove. ``album_absent_after=True`` means the album is not
+        # currently in beets — from any path, including a manual
+        # ``beet rm`` that ran long before this request arrived. That
+        # is the trigger for clearing stale on-disk quality fields;
+        # ``beets_removed`` is reserved for the narrower question of
+        # whether *this* handler was the one that removed it (it feeds
+        # the API response and the toast message).
+        album_absent_after = not b.album_exists(mb_release_id)
+        beets_removed = album_was_in_beets and album_absent_after
 
     req = s._db().get_request(int(req_id))
     if req:
@@ -687,18 +693,16 @@ def post_pipeline_ban_source(h, body: dict) -> None:
             ban_kwargs["min_bitrate"] = min_br
         apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)
 
-        # Once the files have left beets, the pipeline DB's on-disk
-        # quality fields (verified_lossless, current_spectral_*) are no
-        # longer accurate. Clear them so wrong-matches / library views /
-        # the quality gate don't reason about phantom state. Trust only
-        # the ``beet remove -d`` exit code as positive evidence — an
-        # ``album_exists()`` miss alone isn't enough, because beets
-        # entries can legitimately be on disk with the ``mb_albumid``
-        # tag unset (manual imports, legacy entries). The display-side
-        # guard in ``_quality_summary`` is the belt-and-braces that keeps
-        # wrong-matches honest even if the DB still carries ghost values
-        # from some other code path.
-        if beets_removed:
+        # Once the files have left beets — whether just now or earlier
+        # via an out-of-band ``beet rm`` — the pipeline DB's on-disk
+        # quality fields (verified_lossless, current_spectral_*,
+        # imported_path) are stale. Clear them so wrong-matches /
+        # library views / quality gate don't reason about phantom state
+        # and so ``dispatch_import`` doesn't feed ``--override-min-bitrate``
+        # a ghost baseline on the next import attempt. The display-side
+        # guard in ``_quality_summary`` is the belt-and-braces for any
+        # path that skips this route entirely.
+        if album_absent_after:
             s._db().clear_on_disk_quality_fields(int(req_id))
 
     h._json({

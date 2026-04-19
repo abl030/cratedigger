@@ -1476,6 +1476,42 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
                       "Must also attempt the legacy mb_albumid selector "
                       "so older beets libraries don't regress.")
 
+    @patch("subprocess.run")
+    @patch("web.routes.pipeline.apply_transition")
+    def test_ban_source_clears_stale_state_when_album_already_gone(
+            self, _mock_transition, mock_subprocess):
+        """Ghost state can pre-date the handler: a user runs
+        ``beet rm mb_albumid:X`` manually, then days later bans the
+        source. ``album_exists`` returns False before ban-source even
+        starts, so no ``beet remove`` runs — but the pipeline DB still
+        carries the old ``current_spectral_*`` / ``imported_path``.
+        The handler must still clear those fields so ``dispatch_import``
+        doesn't keep deriving ``--override-min-bitrate`` from phantom
+        baselines on the next import attempt.
+        """
+        self.mock_db.clear_on_disk_quality_fields.reset_mock()
+        mock_subprocess.return_value = MagicMock(
+            returncode=0, stdout="", stderr="")
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
+        )
+        # Album was already gone when ban-source ran (earlier beet rm).
+        self._beets.album_exists.return_value = False
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            "mb_release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
+        # No remove ran — the handler had nothing to remove.
+        mock_subprocess.assert_not_called()
+
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_mbid_missing(self, _mock_transition):
         """Without ``mb_release_id`` we never query beets and never run

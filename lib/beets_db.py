@@ -103,11 +103,11 @@ class BeetsDB:
             return raw.decode("utf-8", errors="replace")
         return str(raw)
 
-    def album_exists(self, release_id: str) -> bool:
-        """Check if a release is already in the beets library.
+    def _lookup_album_id(self, release_id: str) -> Optional[int]:
+        """Resolve a pipeline ``mb_release_id`` back to ``albums.id``.
 
-        Dispatches by identifier shape so Discogs requests round-trip as
-        reliably as MusicBrainz ones. Two things complicate the lookup:
+        Centralises the shape-aware dispatch that every album lookup in
+        this class needs. Two things complicate the mapping:
 
         - MusicBrainz UUIDs live in ``albums.mb_albumid`` (TEXT).
         - Discogs releases live either in ``albums.discogs_albumid``
@@ -116,26 +116,39 @@ class BeetsDB:
           started populating ``discogs_albumid``. ``artist_compare.py``
           and the webui-primer both acknowledge this duality, so for a
           numeric ID we have to check both columns or legacy Discogs
-          albums read as "not in beets".
+          albums read as "not in beets" — and then postflight lookups
+          like ``get_album_info`` / ``get_album_path`` also miss them,
+          breaking the import quality pipeline for those releases.
+
+        Returns the resolved ``albums.id`` or ``None`` if no row matches.
         """
         from lib.quality import detect_release_source
         if detect_release_source(release_id) == "discogs":
             try:
                 numeric = int(release_id)
             except ValueError:
-                return False
+                return None
             row = self._conn.execute(
-                "SELECT 1 FROM albums "
+                "SELECT id FROM albums "
                 "WHERE discogs_albumid = ? OR mb_albumid = ? "
                 "LIMIT 1",
                 (numeric, release_id),
             ).fetchone()
         else:
             row = self._conn.execute(
-                "SELECT 1 FROM albums WHERE mb_albumid = ?",
+                "SELECT id FROM albums WHERE mb_albumid = ?",
                 (release_id,),
             ).fetchone()
-        return row is not None
+        return row[0] if row else None
+
+    def album_exists(self, release_id: str) -> bool:
+        """Check if a release is already in the beets library.
+
+        Thin wrapper over ``_lookup_album_id``. See that helper for the
+        full ID-shape contract (MusicBrainz UUID → ``mb_albumid``,
+        Discogs numeric → ``discogs_albumid`` OR legacy ``mb_albumid``).
+        """
+        return self._lookup_album_id(release_id) is not None
 
     def get_album_info(
         self,
@@ -144,19 +157,16 @@ class BeetsDB:
     ) -> Optional[AlbumInfo]:
         """Get full album info for quality gate / postflight verification.
 
-        Returns None if the MBID isn't in beets or has no tracks.
+        Returns None if the release isn't in beets or has no tracks.
 
         Mixed-format albums (rare: manually merged albums with tracks in
         multiple codecs) are reduced to a single canonical format using
         ``cfg.mixed_format_precedence`` — the worst codec in that tuple wins
         so the rank stays conservative.
         """
-        album_row = self._conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
-        if not album_row:
+        album_id = self._lookup_album_id(mb_release_id)
+        if album_id is None:
             return None
-        album_id: int = album_row[0]
 
         # Get bitrate + format stats (exclude 0-bitrate tracks)
         rows = self._conn.execute(
@@ -198,15 +208,13 @@ class BeetsDB:
         )
 
     def get_min_bitrate(self, mb_release_id: str) -> Optional[int]:
-        """Get min track bitrate (kbps) for an MBID. Returns None if not found."""
-        album_row = self._conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
-        if not album_row:
+        """Get min track bitrate (kbps) for a release. Returns None if not found."""
+        album_id = self._lookup_album_id(mb_release_id)
+        if album_id is None:
             return None
         br_row = self._conn.execute(
             "SELECT MIN(bitrate) FROM items WHERE album_id = ? AND bitrate > 0",
-            (album_row[0],)
+            (album_id,)
         ).fetchone()
         if not br_row or not br_row[0]:
             return None
@@ -214,21 +222,22 @@ class BeetsDB:
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         """Get all (item_id, path) pairs for an album. Returns empty list if not found."""
-        album_row = self._conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
-        if not album_row:
+        album_id = self._lookup_album_id(mb_release_id)
+        if album_id is None:
             return []
         rows = self._conn.execute(
-            "SELECT id, path FROM items WHERE album_id = ?", (album_row[0],)
+            "SELECT id, path FROM items WHERE album_id = ?", (album_id,)
         ).fetchall()
         return [(r[0], self._decode_path(r[1])) for r in rows]
 
     def get_album_path(self, mb_release_id: str) -> Optional[str]:
         """Get the directory path for an album's tracks. Returns None if not found."""
+        album_id = self._lookup_album_id(mb_release_id)
+        if album_id is None:
+            return None
         row = self._conn.execute(
-            "SELECT (SELECT path FROM items WHERE album_id = a.id LIMIT 1) "
-            "FROM albums a WHERE a.mb_albumid = ?", (mb_release_id,)
+            "SELECT path FROM items WHERE album_id = ? LIMIT 1",
+            (album_id,)
         ).fetchone()
         if not row or not row[0]:
             return None

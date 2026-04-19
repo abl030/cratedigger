@@ -192,6 +192,59 @@ class TestAlbumExists(unittest.TestCase):
                             "Legacy numeric mb_albumid must still resolve.")
 
 
+class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
+    """Regression guard: ``album_exists`` understands Discogs IDs, so the
+    postflight lookups called during import (``get_album_info``,
+    ``get_min_bitrate``, ``get_album_path``, ``get_item_paths``) must
+    agree — otherwise ``import_dispatch`` sees a preflight hit with an
+    empty postflight, marks the import successful against vanished
+    metadata, and persists a stale ``imported_path``.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        # New-layout Discogs entry (numeric in discogs_albumid).
+        _insert_album_full(self.db_path, 1, "", [
+            {"bitrate": 320000, "path": "/m/disc/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+            {"bitrate": 256000, "path": "/m/disc/02.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], discogs_albumid=12856590)
+        # Legacy-layout Discogs entry (numeric in mb_albumid).
+        _insert_album_full(self.db_path, 2, "5555555", [
+            {"bitrate": 1411000, "path": "/m/legacy/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ])
+
+    def test_get_min_bitrate_resolves_discogs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.get_min_bitrate("12856590"), 256)
+            self.assertEqual(db.get_min_bitrate("5555555"), 1411)
+
+    def test_get_album_path_resolves_discogs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.get_album_path("12856590"), "/m/disc")
+            self.assertEqual(db.get_album_path("5555555"), "/m/legacy")
+
+    def test_get_item_paths_resolves_discogs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            paths = db.get_item_paths("12856590")
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(p.startswith("/m/disc/") for _, p in paths))
+
+    def test_get_album_info_resolves_discogs(self) -> None:
+        from lib.quality import QualityRankConfig
+        cfg = QualityRankConfig.defaults()
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("12856590", cfg)
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info.track_count, 2)
+        self.assertEqual(info.min_bitrate_kbps, 256)
+
+
 class TestGetAlbumInfo(unittest.TestCase):
     """Test get_album_info (postflight verify + quality gate data)."""
 
