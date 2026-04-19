@@ -534,15 +534,23 @@ class BeetsDB:
         } for i in items]
 
     def get_album_ids_by_mbids(self, mbids: list[str]) -> dict[str, int]:
-        """Map MBIDs to beets album IDs. Returns {mbid: album_id}."""
+        """Map release IDs to beets album IDs. Returns {id: album_id}.
+
+        Routes through ``locate`` per-ID (issue #121) so the mapping
+        stays in sync with ``check_mbids``. Without this, the browse
+        routes that call both would emit ``in_library=true`` with
+        ``beets_album_id=null`` for Discogs releases stored in
+        ``discogs_albumid`` — disabling the 'Remove from beets' button
+        in the UI for the very rows the presence check just surfaced.
+        """
         if not mbids:
             return {}
-        ph = ",".join("?" for _ in mbids)
-        rows = self._conn.execute(
-            f"SELECT mb_albumid, id FROM albums WHERE mb_albumid IN ({ph})",
-            mbids,
-        ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        result: dict[str, int] = {}
+        for m in mbids:
+            loc = self.locate(m)
+            if loc.kind == "exact" and loc.album_id is not None:
+                result[m] = loc.album_id
+        return result
 
     @staticmethod
     def delete_album(db_path: str, album_id: int) -> tuple[str, str, list[str]]:

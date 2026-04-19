@@ -1071,6 +1071,40 @@ class TestGetAlbumIdsByMbids(unittest.TestCase):
             result = db.get_album_ids_by_mbids([])
         self.assertEqual(result, {})
 
+    def test_resolves_discogs_new_layout(self) -> None:
+        """Codex round 1: ``get_album_ids_by_mbids`` MUST stay in sync
+        with ``check_mbids`` now that both route through ``locate``.
+
+        Before the fix, ``check_mbids`` reported Discogs releases as
+        present (correct), but ``get_album_ids_by_mbids`` silently
+        returned an empty mapping for them — so the browse routes
+        would emit ``in_library=true`` with ``beets_album_id=null``
+        and the frontend's 'Remove from beets' button would disable
+        for the very rows the presence check just surfaced.
+        """
+        _insert_album_full(self.db_path, 99, "", [
+            {"bitrate": 320000, "path": "/m/d/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], discogs_albumid=12856590)
+
+        with BeetsDB(self.db_path) as db:
+            result = db.get_album_ids_by_mbids(
+                ["aaa-111", "12856590", "zzz-999"])
+        self.assertEqual(result, {"aaa-111": 1, "12856590": 99})
+
+    def test_resolves_discogs_legacy_mb_albumid(self) -> None:
+        """Legacy Discogs imports (numeric in ``mb_albumid``) must also
+        resolve so the mapping stays consistent with ``check_mbids``.
+        """
+        _insert_album_full(self.db_path, 88, "5555555", [
+            {"bitrate": 320000, "path": "/m/l/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ])
+
+        with BeetsDB(self.db_path) as db:
+            result = db.get_album_ids_by_mbids(["5555555"])
+        self.assertEqual(result, {"5555555": 88})
+
 
 class TestDeleteAlbum(unittest.TestCase):
     """Test delete_album — static method for writable deletion."""
