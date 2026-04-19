@@ -290,25 +290,36 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         assert isinstance(request_id, int)
         group = groups.get(request_id)
         if group is None:
-            # Two different beets-presence questions: `in_library` is the
-            # fuzzy "does any edition of this album exist?" that drives the
-            # user-facing badge, while the quality summary needs the strict
-            # "is *this exact* MB release on disk?" — multiple pressings
-            # are intentionally kept, and quality fields describe the
-            # specific pressing.
+            # Two beets-presence questions with different precision:
+            #
+            # - ``in_library`` drives the user-facing badge. Fuzzy
+            #   "does any edition exist?" is the right answer — it
+            #   warns the user that some copy is already around even
+            #   if this specific pressing isn't.
+            # - ``has_on_disk_state`` gates the quality summary.
+            #   Multiple pressings are intentionally kept, so when
+            #   the request has an MBID we must match it exactly,
+            #   otherwise a sibling pressing's presence would let
+            #   stale quality fields from a removed pressing leak
+            #   through. When the request has NO MBID (manual add /
+            #   no-MB-release requests) we can't distinguish pressings
+            #   anyway, so the fuzzy fallback is the best signal.
             mbid = row.get("mb_release_id")
-            exact_on_disk = (isinstance(mbid, str) and mbid
-                             and mbid in beets_info)
+            in_library = _is_in_beets(row, beets_info)
+            if isinstance(mbid, str) and mbid:
+                has_on_disk_state = mbid in beets_info
+            else:
+                has_on_disk_state = in_library
             group = {
                 "request_id": request_id,
                 "artist": row["artist_name"],
                 "album": row["album_title"],
                 "mb_release_id": mbid,
-                "in_library": _is_in_beets(row, beets_info),
+                "in_library": in_library,
                 "pending_count": 0,
                 "entries": [],
                 "latest_import": None,  # filled in after the loop
-                **_quality_summary(row, beets_info, bool(exact_on_disk)),
+                **_quality_summary(row, beets_info, has_on_disk_state),
             }
             groups[request_id] = group
             order.append(request_id)

@@ -94,7 +94,11 @@ function renderQualityBadges(g) {
   // nothing on disk, so checking status alone would swallow the signal
   // and leave the badge strip empty. If the backend zeroed every quality
   // field for this release, there is nothing on disk worth describing.
-  if (!g.quality_label && !g.min_bitrate && !g.current_spectral_grade) {
+  // Include `format` — it's the fallback badge text below when
+  // bitrate is null (e.g. FLAC with no bitrate metadata), so its
+  // presence means an on-disk badge would render and this early
+  // return must not pre-empt it.
+  if (!g.quality_label && !g.min_bitrate && !g.current_spectral_grade && !g.format) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
   }
 

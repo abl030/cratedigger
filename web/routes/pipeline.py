@@ -671,17 +671,15 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         # Once the files have left beets, the pipeline DB's on-disk
         # quality fields (verified_lossless, current_spectral_*) are no
         # longer accurate. Clear them so wrong-matches / library views /
-        # the quality gate don't reason about phantom state. Only clear
-        # when we have POSITIVE evidence: either we just removed the
-        # album, or we queried beets with a real mbid and it confirmed
-        # the album wasn't there. Skip when the remove attempt failed
-        # — the album may still be on disk. Skip when the caller omitted
-        # mb_release_id — we never checked, so we can't claim the album
-        # is gone.
-        beets_confirmed_absent = (
-            bool(mb_release_id) and b is not None and not album_was_in_beets
-        )
-        if beets_removed or beets_confirmed_absent:
+        # the quality gate don't reason about phantom state. Trust only
+        # the ``beet remove -d`` exit code as positive evidence — an
+        # ``album_exists()`` miss alone isn't enough, because beets
+        # entries can legitimately be on disk with the ``mb_albumid``
+        # tag unset (manual imports, legacy entries). The display-side
+        # guard in ``_quality_summary`` is the belt-and-braces that keeps
+        # wrong-matches honest even if the DB still carries ghost values
+        # from some other code path.
+        if beets_removed:
             s._db().clear_on_disk_quality_fields(int(req_id))
 
     h._json({
