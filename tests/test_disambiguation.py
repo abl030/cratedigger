@@ -522,6 +522,30 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         self.assertIsNone(r.postflight.disambiguation_failure)
 
     @patch("harness.import_one.subprocess.run")
+    def test_clean_move_but_pf_info_after_none(self, mock_run):
+        """Edge case: move ran cleanly but beets DB no longer returns
+        the album (race / out-of-band deletion). Original code set
+        ``disambiguated=True`` and left ``imported_path`` unchanged.
+        Pin that behavior so a future refactor can't silently change
+        whether a partial-state album is treated as disambiguated."""
+        from harness import import_one
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = ""
+        mock_run.return_value = proc
+        r, beets = self._make_result_and_beets()
+        beets.get_album_info.return_value = None
+
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        self.assertEqual(new_path, self.ORIGINAL_PATH)
+        self.assertEqual(r.postflight.imported_path, self.ORIGINAL_PATH)
+        self.assertTrue(r.postflight.disambiguated)
+        self.assertIsNone(r.postflight.disambiguation_failure)
+
+    @patch("harness.import_one.subprocess.run")
     def test_clean_move_path_changed(self, mock_run):
         """Successful move: pf_info_after returns new path → path
         mutates and is propagated back via return value AND on
