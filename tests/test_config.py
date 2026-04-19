@@ -11,8 +11,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.config import (
     SoularrConfig,
+    invalidate_secret_cache,
     read_runtime_config,
     read_runtime_rank_config,
+    read_secret_file,
     read_verified_lossless_target,
 )
 
@@ -315,6 +317,168 @@ class TestReadRuntimeRankConfig(unittest.TestCase):
 
         self.assertEqual(cfg.gate_min_rank, QualityRank.GOOD)
         self.assertEqual(cfg.bitrate_metric.value, "min")
+
+
+class TestReadSecretFile(unittest.TestCase):
+    """Shared helper — reads a single-line secret from a file with in-process cache.
+
+    This helper is why the whole fix works: it's the one place the pipeline
+    reads plaintext secrets, so config.ini never has to embed them.
+    """
+
+    def setUp(self):
+        invalidate_secret_cache()
+        self.addCleanup(invalidate_secret_cache)
+
+    def test_reads_and_strips_trailing_whitespace(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write("my-secret\n")
+            path = tmp.name
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(read_secret_file(path), "my-secret")
+
+    def test_in_process_cache_hits_on_second_call(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write("v1\n")
+            path = tmp.name
+        self.addCleanup(os.unlink, path)
+
+        first = read_secret_file(path)
+        # Mutate the file — a fresh read would observe v2, but the cache
+        # must return v1 because we've already seen this path.
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("v2\n")
+        second = read_secret_file(path)
+        self.assertEqual(first, "v1")
+        self.assertEqual(second, "v1")
+
+    def test_invalidate_cache_forces_re_read(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write("before\n")
+            path = tmp.name
+        self.addCleanup(os.unlink, path)
+
+        self.assertEqual(read_secret_file(path), "before")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("after\n")
+        invalidate_secret_cache()
+        self.assertEqual(read_secret_file(path), "after")
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            read_secret_file("/nonexistent/secret")
+
+
+class TestSecretFileFields(unittest.TestCase):
+    """from_ini() reads *_file keys from the INI into SoularrConfig."""
+
+    def setUp(self):
+        invalidate_secret_cache()
+        self.addCleanup(invalidate_secret_cache)
+
+    def test_reads_all_secret_file_keys(self):
+        config = configparser.RawConfigParser()
+        config.read_string(
+            "[Slskd]\n"
+            "api_key_file = /run/secrets/slskd-key\n"
+            "[Meelo]\n"
+            "username_file = /run/secrets/meelo-user\n"
+            "password_file = /run/secrets/meelo-pass\n"
+            "[Plex]\n"
+            "token_file = /run/secrets/plex-token\n"
+            "[Jellyfin]\n"
+            "token_file = /run/secrets/jellyfin-token\n"
+        )
+        cfg = SoularrConfig.from_ini(config)
+        self.assertEqual(cfg.slskd_api_key_file, "/run/secrets/slskd-key")
+        self.assertEqual(cfg.meelo_username_file, "/run/secrets/meelo-user")
+        self.assertEqual(cfg.meelo_password_file, "/run/secrets/meelo-pass")
+        self.assertEqual(cfg.plex_token_file, "/run/secrets/plex-token")
+        self.assertEqual(cfg.jellyfin_token_file, "/run/secrets/jellyfin-token")
+
+    def test_file_paths_default_to_empty(self):
+        cfg = SoularrConfig.from_ini(configparser.RawConfigParser())
+        self.assertEqual(cfg.slskd_api_key_file, "")
+        self.assertEqual(cfg.meelo_username_file, "")
+        self.assertEqual(cfg.meelo_password_file, "")
+        self.assertEqual(cfg.plex_token_file, "")
+        self.assertEqual(cfg.jellyfin_token_file, "")
+
+
+class TestResolvedSecrets(unittest.TestCase):
+    """Resolver methods prefer *_file path over the legacy plaintext field.
+
+    This is how call sites read secrets now — cfg.resolved_slskd_api_key()
+    instead of cfg.slskd_api_key. Guarantees that if a *_file path is set,
+    the live file contents are returned (not whatever stale plaintext may
+    have survived in the INI).
+    """
+
+    def setUp(self):
+        invalidate_secret_cache()
+        self.addCleanup(invalidate_secret_cache)
+
+    def _write_secret(self, value: str) -> str:
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write(value)
+            path = tmp.name
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_slskd_api_key_resolves_file_over_direct(self):
+        path = self._write_secret("from-file\n")
+        cfg = SoularrConfig(slskd_api_key="from-direct", slskd_api_key_file=path)
+        self.assertEqual(cfg.resolved_slskd_api_key(), "from-file")
+
+    def test_slskd_api_key_falls_back_to_direct_when_no_file(self):
+        cfg = SoularrConfig(slskd_api_key="from-direct")
+        self.assertEqual(cfg.resolved_slskd_api_key(), "from-direct")
+
+    def test_slskd_api_key_empty_when_neither_set(self):
+        cfg = SoularrConfig()
+        self.assertEqual(cfg.resolved_slskd_api_key(), "")
+
+    def test_meelo_credentials_resolve_from_files(self):
+        user_path = self._write_secret("meelo-user")
+        pass_path = self._write_secret("meelo-pass")
+        cfg = SoularrConfig(
+            meelo_username_file=user_path,
+            meelo_password_file=pass_path,
+        )
+        self.assertEqual(cfg.resolved_meelo_username(), "meelo-user")
+        self.assertEqual(cfg.resolved_meelo_password(), "meelo-pass")
+
+    def test_plex_token_resolves_from_file(self):
+        path = self._write_secret("plex-live-token\n")
+        cfg = SoularrConfig(plex_url="http://plex", plex_token_file=path)
+        self.assertEqual(cfg.resolved_plex_token(), "plex-live-token")
+
+    def test_jellyfin_token_resolves_from_file(self):
+        path = self._write_secret("jellyfin-live-token\n")
+        cfg = SoularrConfig(jellyfin_url="http://jellyfin", jellyfin_token_file=path)
+        self.assertEqual(cfg.resolved_jellyfin_token(), "jellyfin-live-token")
+
+    def test_notifier_resolvers_none_when_unset(self):
+        cfg = SoularrConfig()
+        self.assertIsNone(cfg.resolved_meelo_username())
+        self.assertIsNone(cfg.resolved_meelo_password())
+        self.assertIsNone(cfg.resolved_plex_token())
+        self.assertIsNone(cfg.resolved_jellyfin_token())
+
+    def test_legacy_plaintext_field_still_resolves(self):
+        """Direct fields on SoularrConfig keep working so tests and old deployments
+        that haven't switched to *_file paths continue to function."""
+        cfg = SoularrConfig(
+            meelo_url="http://meelo",
+            meelo_username="legacy-user",
+            meelo_password="legacy-pass",
+            plex_token="legacy-plex",
+            jellyfin_token="legacy-jellyfin",
+        )
+        self.assertEqual(cfg.resolved_meelo_username(), "legacy-user")
+        self.assertEqual(cfg.resolved_meelo_password(), "legacy-pass")
+        self.assertEqual(cfg.resolved_plex_token(), "legacy-plex")
+        self.assertEqual(cfg.resolved_jellyfin_token(), "legacy-jellyfin")
 
 
 class TestRawConfigParserRegression(unittest.TestCase):

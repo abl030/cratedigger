@@ -6,6 +6,7 @@ frozen dataclass. Constructed once from config.ini via from_ini().
 
 import configparser
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
@@ -15,12 +16,51 @@ if TYPE_CHECKING:
     from lib.quality import AudioFileSpec
 
 
+# --- Secret file reader (issue #117) ---
+#
+# Secrets (slskd API key, notifier credentials) must NOT sit plaintext in the
+# rendered /var/lib/soularr/config.ini. Instead, the config stores a *_file path
+# pointing at an out-of-band secret (sops-nix, agenix, raw file, etc.) and the
+# Python pipeline reads it on demand here. The in-process cache avoids
+# re-reading on every notifier call while still picking up rotations across
+# process restarts.
+
+_SECRET_CACHE: dict[str, str] = {}
+_SECRET_CACHE_LOCK = threading.Lock()
+
+
+def read_secret_file(path: str) -> str:
+    """Read a single-line secret from a file, strip trailing whitespace,
+    and cache the value for subsequent calls in the same process.
+
+    The cache key is the path, so rotating the backing file requires either
+    a process restart or an explicit invalidate_secret_cache() call.
+    """
+    with _SECRET_CACHE_LOCK:
+        cached = _SECRET_CACHE.get(path)
+        if cached is not None:
+            return cached
+    with open(path, "r", encoding="utf-8") as f:
+        value = f.read().strip()
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE[path] = value
+    return value
+
+
+def invalidate_secret_cache() -> None:
+    """Clear the in-process secret cache. Tests call this between cases to
+    avoid cross-test contamination; production callers generally don't need it."""
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE.clear()
+
+
 @dataclass(frozen=True)
 class SoularrConfig:
     """All configuration values, read-only after initialization."""
 
     # --- Slskd ---
     slskd_api_key: str = ""
+    slskd_api_key_file: str = ""
     slskd_host_url: str = "http://localhost:5030"
     slskd_url_base: str = "/"
     slskd_download_dir: str = ""
@@ -79,16 +119,20 @@ class SoularrConfig:
     meelo_url: Optional[str] = None
     meelo_username: Optional[str] = None
     meelo_password: Optional[str] = None
+    meelo_username_file: str = ""
+    meelo_password_file: str = ""
 
     # --- Plex ---
     plex_url: Optional[str] = None
     plex_token: Optional[str] = None
+    plex_token_file: str = ""
     plex_library_section_id: Optional[str] = None
     plex_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/prom_music"
 
     # --- Jellyfin ---
     jellyfin_url: Optional[str] = None
     jellyfin_token: Optional[str] = None
+    jellyfin_token_file: str = ""
     jellyfin_library_id: Optional[str] = None  # optional; full refresh if unset
 
     # --- Paths (derived from args) ---
@@ -109,6 +153,34 @@ class SoularrConfig:
     @property
     def allowed_specs(self) -> "tuple[AudioFileSpec, ...]":
         return self._allowed_specs
+
+    # --- Secret resolution (issue #117) ---
+    #
+    # Prefer *_file paths over legacy plaintext fields so the rendered
+    # config.ini never has to embed credentials. Each resolver is exactly
+    # one line + delegation to the shared _resolve_secret helper — this is
+    # intentional: it keeps a single spelling of the precedence rule
+    # (file over direct) that every notifier and client relies on.
+
+    def _resolve_secret(self, direct: Optional[str], file_path: str) -> Optional[str]:
+        if file_path:
+            return read_secret_file(file_path)
+        return direct or None
+
+    def resolved_slskd_api_key(self) -> str:
+        return self._resolve_secret(self.slskd_api_key, self.slskd_api_key_file) or ""
+
+    def resolved_meelo_username(self) -> Optional[str]:
+        return self._resolve_secret(self.meelo_username, self.meelo_username_file)
+
+    def resolved_meelo_password(self) -> Optional[str]:
+        return self._resolve_secret(self.meelo_password, self.meelo_password_file)
+
+    def resolved_plex_token(self) -> Optional[str]:
+        return self._resolve_secret(self.plex_token, self.plex_token_file)
+
+    def resolved_jellyfin_token(self) -> Optional[str]:
+        return self._resolve_secret(self.jellyfin_token, self.jellyfin_token_file)
 
     @classmethod
     def from_ini(cls, config: configparser.RawConfigParser,
@@ -153,6 +225,7 @@ class SoularrConfig:
         return cls(
             # Slskd
             slskd_api_key=get("Slskd", "api_key"),
+            slskd_api_key_file=get("Slskd", "api_key_file"),
             slskd_host_url=get("Slskd", "host_url", "http://localhost:5030"),
             slskd_url_base=get("Slskd", "url_base", "/"),
             slskd_download_dir=get("Slskd", "download_dir"),
@@ -204,14 +277,18 @@ class SoularrConfig:
             meelo_url=get("Meelo", "url") or None,
             meelo_username=get("Meelo", "username") or None,
             meelo_password=get("Meelo", "password") or None,
+            meelo_username_file=get("Meelo", "username_file"),
+            meelo_password_file=get("Meelo", "password_file"),
             # Plex
             plex_url=get("Plex", "url") or None,
             plex_token=get("Plex", "token") or None,
+            plex_token_file=get("Plex", "token_file"),
             plex_library_section_id=get("Plex", "library_section_id") or None,
             plex_path_map=get("Plex", "path_map") or None,
             # Jellyfin
             jellyfin_url=get("Jellyfin", "url") or None,
             jellyfin_token=get("Jellyfin", "token") or None,
+            jellyfin_token_file=get("Jellyfin", "token_file"),
             jellyfin_library_id=get("Jellyfin", "library_id") or None,
             # Paths
             var_dir=var_dir,

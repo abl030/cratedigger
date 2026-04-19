@@ -633,7 +633,7 @@ def main():
         if cfg.meelo_url:
             logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
 
-        slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.slskd_api_key, url_base=cfg.slskd_url_base)
+        slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.resolved_slskd_api_key(), url_base=cfg.slskd_url_base)
 
         # Build context with fresh caches for this cycle
         from lib.context import SoularrContext
