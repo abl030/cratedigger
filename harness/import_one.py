@@ -705,6 +705,43 @@ def run_import(path, mb_release_id):
     return (0 if applied else 2), beets_lines, kept_duplicate
 
 
+def _run_disambiguation_move(mbid: str) -> str | None:
+    """Run ``beet move mb_albumid:<mbid>`` once, never raise (issue #127).
+
+    Mirrors ``lib/release_cleanup.py::_run_remove_selector``: one place
+    owns the subprocess invocation, catches every fragile failure mode
+    (``TimeoutExpired``, ``OSError`` from a missing ``beet`` binary,
+    non-zero rc), and returns a short error string the caller stores on
+    ``PostflightInfo.disambiguation_error``. Returns ``None`` on a
+    clean rc=0 exit.
+
+    Why this is its own function: the call site fires *after* beets has
+    already imported the album to disk. An uncaught exception here
+    would crash ``import_one.py`` before it could emit the
+    ``__IMPORT_RESULT__`` sentinel — the caller would treat the import
+    as failed even though the album is on disk, leaving a "semi-lie"
+    that can trigger duplicate force-import attempts (the bug PR #126
+    flagged as out-of-scope follow-up to #123).
+    """
+    try:
+        proc = subprocess.run(
+            [BEET_BIN, "move", f"mb_albumid:{mbid}"],
+            capture_output=True, text=True, timeout=120,
+            env=beets_subprocess_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return f"timeout after {exc.timeout}s"
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip().splitlines()
+        last = stderr[-1] if stderr else ""
+        return f"rc={proc.returncode}: {last}" if last else f"rc={proc.returncode}"
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Pipeline DB updates
 # ---------------------------------------------------------------------------
@@ -1182,12 +1219,8 @@ def main():
     # `beet move` re-evaluates all editions and fixes the paths.
     if kept_duplicate:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
-        move_result = subprocess.run(
-            [BEET_BIN, "move", f"mb_albumid:{mbid}"],
-            capture_output=True, text=True, timeout=120,
-            env=beets_subprocess_env(),
-        )
-        if move_result.returncode == 0:
+        move_error = _run_disambiguation_move(mbid)
+        if move_error is None:
             # Re-read path from beets DB — it may have changed
             pf_info_after = beets.get_album_info(mbid, _rank_cfg)
             if pf_info_after:
@@ -1200,8 +1233,13 @@ def main():
                     _log(f"  [DISAMBIGUATE] Path unchanged (already unique)")
             r.postflight.disambiguated = True
         else:
-            _log(f"  [DISAMBIGUATE] beet move failed (rc={move_result.returncode}): "
-                 f"{move_result.stderr[:200]}")
+            # Album is already imported to beets; the post-import path
+            # disambiguation didn't run cleanly. Surface the reason on
+            # PostflightInfo so the audit trail in download_log can
+            # show *why* the move failed without silently lying that
+            # disambiguation succeeded.
+            _log(f"  [DISAMBIGUATE] beet move failed: {move_error}")
+            r.postflight.disambiguation_error = move_error
 
     # --- Post-import extension check ---
     # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)

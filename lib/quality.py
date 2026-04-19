@@ -1313,7 +1313,14 @@ class PostflightInfo:
     track_count: Optional[int] = None
     imported_path: Optional[str] = None
     bad_extensions: list[str] = field(default_factory=list)  # files with non-audio extensions
-    disambiguated: bool = False  # True if beet move ran to fix %aunique paths
+    disambiguated: bool = False  # True if beet move ran cleanly to fix %aunique paths
+    # Issue #127: when ``beet move`` was attempted but did not exit cleanly
+    # (TimeoutExpired, OSError, or non-zero rc), this carries a short
+    # human-readable reason. The album was still imported to beets — only
+    # the post-import path-disambiguation move failed. ``None`` means
+    # either ``disambiguated=True`` (clean success) or that no move was
+    # attempted (no duplicate kept).
+    disambiguation_error: Optional[str] = None
 
 
 @dataclass

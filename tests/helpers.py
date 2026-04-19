@@ -89,6 +89,7 @@ def make_import_result(
     error: str | None = None,
     imported_path: str | None = None,
     disambiguated: bool = False,
+    disambiguation_error: str | None = None,
     final_format: str | None = None,
 ) -> ImportResult:
     """Build an ImportResult with sensible defaults."""
@@ -119,6 +120,7 @@ def make_import_result(
         postflight=PostflightInfo(
             imported_path=imported_path,
             disambiguated=disambiguated,
+            disambiguation_error=disambiguation_error,
         ),
         final_format=final_format,
     )

@@ -6,10 +6,15 @@ Covers:
 - run_import() returning kept_duplicate=False for same-MBID duplicates (replace)
 - run_import() returning kept_duplicate=False on normal imports (no duplicate)
 - beet move invocation after kept_duplicate import
+- _run_disambiguation_move() helper hardening (issue #127): subprocess
+  fragility around the post-import ``beet move`` call. The helper must
+  never raise — TimeoutExpired, OSError, and non-zero rc all surface as
+  a short error string (or None on clean exit).
 """
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch, MagicMock, ANY
@@ -269,6 +274,108 @@ class TestDisambiguateBeetMove(unittest.TestCase):
 
         self.assertFalse(pf.disambiguated)
         self.assertEqual(pf.imported_path, "/Beets/The National/2010 - High Violet")
+
+
+class TestRunDisambiguationMoveHelper(unittest.TestCase):
+    """Direct unit tests for ``_run_disambiguation_move(mbid)`` (issue #127).
+
+    Mirrors the hardened helper pattern in
+    ``lib/release_cleanup.py::_run_remove_selector``: one place owns the
+    subprocess invocation, never raises, returns a short typed-ish error
+    description (``str | None``) the caller stores on ``PostflightInfo``.
+
+    Bug being prevented: the original inline ``subprocess.run`` had no
+    try/except. A ``TimeoutExpired`` or ``OSError`` on the post-import
+    ``beet move`` crashed import_one.py *after* beets had already
+    written the album to disk, so callers parsed no JSON sentinel and
+    treated the import as failed — a semi-lie that could trigger a
+    duplicate force-import attempt.
+    """
+
+    MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+
+    @patch("harness.import_one.subprocess.run")
+    def test_clean_exit_returns_none(self, mock_run):
+        from harness import import_one
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = ""
+        mock_run.return_value = proc
+
+        result = import_one._run_disambiguation_move(self.MBID)
+
+        self.assertIsNone(result)
+        mock_run.assert_called_once()
+        # argv shape is the seam contract — must hit `beet move
+        # mb_albumid:<mbid>` with text capture and a 120s timeout.
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0][1:], ["move", f"mb_albumid:{self.MBID}"])
+        self.assertEqual(kwargs.get("timeout"), 120)
+        self.assertTrue(kwargs.get("capture_output"))
+        self.assertTrue(kwargs.get("text"))
+
+    @patch("harness.import_one.subprocess.run")
+    def test_timeout_returns_typed_string(self, mock_run):
+        from harness import import_one
+
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["beet", "move"], timeout=120)
+
+        result = import_one._run_disambiguation_move(self.MBID)
+
+        self.assertIsNotNone(result)
+        assert result is not None  # narrow for pyright
+        self.assertIn("timeout", result.lower())
+        self.assertIn("120", result)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_oserror_returns_typed_string(self, mock_run):
+        """FileNotFoundError (beet missing on PATH) must be caught."""
+        from harness import import_one
+
+        mock_run.side_effect = FileNotFoundError(2, "No such file", "beet")
+
+        result = import_one._run_disambiguation_move(self.MBID)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        # Reason tag should identify the exception class so the audit
+        # trail in download_log can distinguish "beet missing" from
+        # "beet timed out".
+        self.assertIn("FileNotFoundError", result)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_nonzero_rc_with_stderr_includes_last_line(self, mock_run):
+        from harness import import_one
+
+        proc = MagicMock()
+        proc.returncode = 1
+        proc.stderr = ("warning: ignored line\n"
+                       "error: could not find album with id mb_albumid:bogus\n")
+        mock_run.return_value = proc
+
+        result = import_one._run_disambiguation_move(self.MBID)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("rc=1", result)
+        self.assertIn("could not find album", result)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_nonzero_rc_with_empty_stderr_still_returns(self, mock_run):
+        from harness import import_one
+
+        proc = MagicMock()
+        proc.returncode = 2
+        proc.stderr = ""
+        mock_run.return_value = proc
+
+        result = import_one._run_disambiguation_move(self.MBID)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("rc=2", result)
 
 
 if __name__ == "__main__":
