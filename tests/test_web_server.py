@@ -2128,8 +2128,9 @@ class TestWrongMatchesContract(unittest.TestCase):
         "status", "min_bitrate", "format", "verified_lossless",
         "current_spectral_grade", "current_spectral_bitrate",
         "quality_label", "quality_rank",
-        # Most-recent download_log row for the expanded view.
-        "latest_download",
+        # Summary of the last successful import for the request — tells the
+        # user what's actually on disk, not the most recent attempt.
+        "latest_import",
     }
     ENTRY_REQUIRED_FIELDS = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
@@ -2285,21 +2286,28 @@ class TestWrongMatchesContract(unittest.TestCase):
         # a 'not on disk' badge from `status` and absent label.
         self.assertTrue(group["quality_label"] is None or isinstance(group["quality_label"], str))
 
-    def test_group_includes_latest_download(self):
-        """latest_download surfaces the newest download_log row for the request.
+    def test_group_latest_import_picks_most_recent_success(self):
+        """latest_import shows the last successful import, not the newest attempt.
 
-        This tells the user whether the release is still being actively retried
-        or has already been imported elsewhere.
+        A rejection that happened after a successful import doesn't change what
+        beets has — the earlier success is still what's on disk.
         """
         row = self._row(42, 100, "testuser", "/fi/Test")
         self.mock_db.get_wrong_matches.return_value = [row]
         self.mock_db.get_download_history_batch.return_value = {
             100: [
+                # Newest = rejected (a later force-import attempt that failed).
                 {"id": 999, "outcome": "rejected",
                  "created_at": "2026-04-19T09:00:00+00:00",
                  "soulseek_username": "newestuser",
                  "actual_filetype": "mp3", "actual_min_bitrate": 192,
                  "beets_scenario": "high_distance"},
+                # Then an older force_import — this is what's actually on disk.
+                {"id": 900, "outcome": "force_import",
+                 "created_at": "2026-04-10T09:00:00+00:00",
+                 "soulseek_username": "forceuser",
+                 "actual_filetype": "mp3", "actual_min_bitrate": 207,
+                 "beets_scenario": "force_import"},
                 {"id": 800, "outcome": "success",
                  "created_at": "2026-03-10T12:00:00+00:00",
                  "soulseek_username": "olderuser",
@@ -2308,20 +2316,40 @@ class TestWrongMatchesContract(unittest.TestCase):
         }
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
-        latest = group["latest_download"]
+        latest = group["latest_import"]
         self.assertIsNotNone(latest)
-        self.assertEqual(latest["id"], 999)
-        self.assertEqual(latest["outcome"], "rejected")
-        self.assertEqual(latest["soulseek_username"], "newestuser")
+        self.assertEqual(latest["id"], 900,
+                         "Must pick the most recent success/force/manual import, "
+                         "not the newest rejection.")
+        self.assertEqual(latest["outcome"], "force_import")
+        self.assertEqual(latest["soulseek_username"], "forceuser")
 
-    def test_group_latest_download_none_when_batch_empty(self):
-        """Edge case: if the history batch has no entry for a request, latest_download is None."""
+    def test_group_latest_import_none_when_never_imported(self):
+        """Release that has only rejections → latest_import is None."""
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_history_batch.return_value = {
+            100: [
+                {"id": 999, "outcome": "rejected",
+                 "created_at": "2026-04-19T09:00:00+00:00",
+                 "soulseek_username": "u1"},
+                {"id": 998, "outcome": "timeout",
+                 "created_at": "2026-04-18T09:00:00+00:00",
+                 "soulseek_username": "u2"},
+            ],
+        }
+        status, data = self._get("/api/wrong-matches")
+        group = data["groups"][0]
+        self.assertIsNone(group["latest_import"])
+
+    def test_group_latest_import_none_when_batch_empty(self):
+        """Edge case: no history rows at all → latest_import is None."""
         row = self._row(42, 100, "testuser", "/fi/Test")
         self.mock_db.get_wrong_matches.return_value = [row]
         self.mock_db.get_download_history_batch.return_value = {}
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
-        self.assertIsNone(group["latest_download"])
+        self.assertIsNone(group["latest_import"])
 
     def test_group_dropped_when_no_entries_have_existing_files(self):
         """If every entry's files are gone, the group is excluded from the UI."""

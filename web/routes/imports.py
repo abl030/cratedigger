@@ -184,30 +184,46 @@ def _quality_summary(row: dict[str, object],
     }
 
 
-def _latest_download_summary(row: dict[str, object]) -> dict[str, object] | None:
-    """Compact summary for the expanded view's 'Latest activity' row.
+_IMPORT_SUCCESS_OUTCOMES = ("success", "force_import", "manual_import")
 
-    The DB gives us ``download_log`` rows newest-first per request; we only
-    surface the metadata that fits in a one-line header — id, outcome,
-    timestamp, user, and the actual format/bitrate on disk.
+
+def _latest_import_summary(rows: list[dict[str, object]]
+                           ) -> dict[str, object] | None:
+    """Summary of the last successful import for a request.
+
+    The expanded-group header describes what's currently on disk, not the most
+    recent attempt. A rejection that happened after a successful import
+    doesn't change what beets has — the earlier success is still the
+    authoritative picture. Scan the newest-first history for the first
+    success/force_import/manual_import row and surface its metadata.
+
+    Returns ``None`` when the release has never been successfully imported.
     """
-    if not row:
+    if not rows:
         return None
     from datetime import datetime
-    created_raw = row.get("created_at")
+    picked: dict[str, object] | None = None
+    for row in rows:
+        outcome = row.get("outcome")
+        if isinstance(outcome, str) and outcome in _IMPORT_SUCCESS_OUTCOMES:
+            picked = row
+            break
+    if picked is None:
+        return None
+    created_raw = picked.get("created_at")
     created: str | None = None
     if isinstance(created_raw, datetime):
         created = created_raw.isoformat()
     elif isinstance(created_raw, str):
         created = created_raw
     return {
-        "id": row.get("id"),
-        "outcome": row.get("outcome"),
+        "id": picked.get("id"),
+        "outcome": picked.get("outcome"),
         "created_at": created,
-        "soulseek_username": row.get("soulseek_username"),
-        "actual_filetype": row.get("actual_filetype"),
-        "actual_min_bitrate": row.get("actual_min_bitrate"),
-        "beets_scenario": row.get("beets_scenario"),
+        "soulseek_username": picked.get("soulseek_username"),
+        "actual_filetype": picked.get("actual_filetype"),
+        "actual_min_bitrate": picked.get("actual_min_bitrate"),
+        "beets_scenario": picked.get("beets_scenario"),
     }
 
 
@@ -258,7 +274,7 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 "in_library": _is_in_beets(row, beets_info),
                 "pending_count": 0,
                 "entries": [],
-                "latest_download": None,  # filled in after the loop
+                "latest_import": None,  # filled in after the loop
                 **_quality_summary(row, beets_info),
             }
             groups[request_id] = group
@@ -281,16 +297,15 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         })
         group["pending_count"] = len(entries_list)
 
-    # Enrich each group with the most-recent download_log row for the request.
-    # Reuses the existing batch helper — returns newest-first per request, so
-    # the head of each list is the latest.
+    # Enrich each group with a summary of the last successful import for the
+    # request. Reuses the existing batch helper — returns newest-first per
+    # request — and filters for success/force_import/manual_import so the
+    # header describes what's on disk rather than the latest attempt.
     if order:
         history = pdb.get_download_history_batch(order)
         for rid in order:
             rows_for_req = history.get(rid) or []
-            if rows_for_req:
-                groups[rid]["latest_download"] = _latest_download_summary(
-                    rows_for_req[0])
+            groups[rid]["latest_import"] = _latest_import_summary(rows_for_req)
 
     h._json({"groups": [groups[rid] for rid in order]})
 
