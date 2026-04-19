@@ -508,7 +508,13 @@ class PipelineDB:
                 ar.album_title,
                 ar.mb_release_id,
                 dl.soulseek_username,
-                dl.validation_result
+                dl.validation_result,
+                ar.status AS request_status,
+                ar.min_bitrate AS request_min_bitrate,
+                ar.verified_lossless AS request_verified_lossless,
+                ar.current_spectral_grade AS request_current_spectral_grade,
+                ar.current_spectral_bitrate AS request_current_spectral_bitrate,
+                ar.imported_path AS request_imported_path
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
             WHERE dl.outcome = 'rejected'

@@ -35,6 +35,13 @@ _DEFAULT_WRONG_MATCH_ROW = {
     "album_title": "Test Album",
     "mb_release_id": "abc-123",
     "soulseek_username": "testuser",
+    # album_requests quality snapshot (joined in by get_wrong_matches)
+    "request_status": "wanted",
+    "request_min_bitrate": None,
+    "request_verified_lossless": False,
+    "request_current_spectral_grade": None,
+    "request_current_spectral_bitrate": None,
+    "request_imported_path": None,
     "validation_result": {
         "distance": 0.25,
         "scenario": "high_distance",
@@ -580,6 +587,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/manual-import/import",
         "/api/wrong-matches",
         "/api/wrong-matches/delete",
+        "/api/wrong-matches/delete-group",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -2099,6 +2107,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         self.mock_db.clear_wrong_match_path.reset_mock()
+        self.mock_db.clear_wrong_match_path.return_value = True
+        self.mock_db.get_download_history_batch.return_value = {}
         # Default: treat every failed_path as existing so the group survives
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Also stub rmtree so delete tests don't
@@ -2114,6 +2124,12 @@ class TestWrongMatchesContract(unittest.TestCase):
     GROUP_REQUIRED_FIELDS = {
         "request_id", "artist", "album", "mb_release_id",
         "in_library", "pending_count", "entries",
+        # Quality summary for the collapsed card (issue: "show quality on disk").
+        "status", "min_bitrate", "format", "verified_lossless",
+        "current_spectral_grade", "current_spectral_bitrate",
+        "quality_label", "quality_rank",
+        # Most-recent download_log row for the expanded view.
+        "latest_download",
     }
     ENTRY_REQUIRED_FIELDS = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
@@ -2127,6 +2143,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         "in_library": bool,
         "pending_count": int,
         "entries": list,
+        "status": str,
+        "verified_lossless": bool,
     }
     ENTRY_FIELD_TYPES = {
         "download_log_id": int,
@@ -2224,6 +2242,87 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(len(by_req[1]["entries"]), 2)
         self.assertEqual(len(by_req[2]["entries"]), 1)
 
+    @patch("web.server.check_beets_library_detail",
+           return_value={"abc-123": {"beets_format": "MP3",
+                                     "beets_bitrate": 207,
+                                     "beets_tracks": 12}})
+    def test_group_shows_current_quality_when_imported(self, _mock_beets):
+        """Imported album: quality_label, quality_rank, verified_lossless reflect on-disk state."""
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 207
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "genuine"
+        row["request_imported_path"] = "/mnt/virtio/Music/Beets/Artist/Album"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        status, data = self._get("/api/wrong-matches")
+        group = data["groups"][0]
+        self.assertEqual(group["status"], "imported")
+        self.assertEqual(group["min_bitrate"], 207)
+        self.assertTrue(group["verified_lossless"])
+        self.assertEqual(group["current_spectral_grade"], "genuine")
+        self.assertEqual(group["format"], "MP3")
+        # `quality_label` is bitrate-only: 207 kbps lands in the V2 band on
+        # the label function (V0 starts at ≥220). The rank is independent —
+        # it applies `compute_library_rank` which uses the codec-aware tiers.
+        self.assertIsInstance(group["quality_label"], str)
+        self.assertTrue(group["quality_label"].startswith("MP3"))
+        self.assertIsInstance(group["quality_rank"], str)
+
+    def test_group_shows_nothing_on_disk_when_wanted(self):
+        """Wanted album: no files in library yet — fields are null, label signals 'not on disk'."""
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        row["request_status"] = "wanted"
+        row["request_min_bitrate"] = None
+        row["request_verified_lossless"] = False
+        self.mock_db.get_wrong_matches.return_value = [row]
+        status, data = self._get("/api/wrong-matches")
+        group = data["groups"][0]
+        self.assertEqual(group["status"], "wanted")
+        self.assertIsNone(group["min_bitrate"])
+        self.assertFalse(group["verified_lossless"])
+        # No on-disk state → label and rank may be None; the frontend can render
+        # a 'not on disk' badge from `status` and absent label.
+        self.assertTrue(group["quality_label"] is None or isinstance(group["quality_label"], str))
+
+    def test_group_includes_latest_download(self):
+        """latest_download surfaces the newest download_log row for the request.
+
+        This tells the user whether the release is still being actively retried
+        or has already been imported elsewhere.
+        """
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_history_batch.return_value = {
+            100: [
+                {"id": 999, "outcome": "rejected",
+                 "created_at": "2026-04-19T09:00:00+00:00",
+                 "soulseek_username": "newestuser",
+                 "actual_filetype": "mp3", "actual_min_bitrate": 192,
+                 "beets_scenario": "high_distance"},
+                {"id": 800, "outcome": "success",
+                 "created_at": "2026-03-10T12:00:00+00:00",
+                 "soulseek_username": "olderuser",
+                 "actual_filetype": "flac", "actual_min_bitrate": 900},
+            ],
+        }
+        status, data = self._get("/api/wrong-matches")
+        group = data["groups"][0]
+        latest = group["latest_download"]
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["id"], 999)
+        self.assertEqual(latest["outcome"], "rejected")
+        self.assertEqual(latest["soulseek_username"], "newestuser")
+
+    def test_group_latest_download_none_when_batch_empty(self):
+        """Edge case: if the history batch has no entry for a request, latest_download is None."""
+        row = self._row(42, 100, "testuser", "/fi/Test")
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_history_batch.return_value = {}
+        status, data = self._get("/api/wrong-matches")
+        group = data["groups"][0]
+        self.assertIsNone(group["latest_download"])
+
     def test_group_dropped_when_no_entries_have_existing_files(self):
         """If every entry's files are gone, the group is excluded from the UI."""
         self.mock_db.get_wrong_matches.return_value = [
@@ -2296,7 +2395,49 @@ class TestWrongMatchesContract(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
-        mock_rmtree.assert_called_once_with("/mnt/virtio/music/slskd/failed_imports/Test")
+        mock_rmtree.assert_called_once_with(
+            "/mnt/virtio/music/slskd/failed_imports/Test", ignore_errors=True)
+
+    def test_delete_group_missing_request_id_returns_error(self):
+        status, data = self._post("/api/wrong-matches/delete-group", {})
+        self.assertEqual(status, 400)
+
+    def test_delete_group_removes_every_candidate_for_request(self):
+        """Bulk delete: every wrong-match entry for the given request_id is removed."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a"),
+            self._row(101, 42, "u2", "/fi/b"),
+            self._row(102, 42, "u3", "/fi/c"),
+            self._row(200, 99, "u-other", "/fi/other"),  # different request
+        ]
+        self.mock_db.get_download_log_entry.side_effect = lambda lid: (
+            copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
+        )
+        self.mock_db.clear_wrong_match_path.return_value = True
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-group", {"request_id": 42})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["request_id"], 42)
+        self.assertEqual(data["deleted"], 3,
+                         "All three candidates for request 42 should delete "
+                         "(request 99 must be left alone).")
+        # clear_wrong_match_path called once per candidate in the group, not
+        # for the unrelated row.
+        called_ids = {c.args[0] for c in self.mock_db.clear_wrong_match_path.call_args_list}
+        self.assertEqual(called_ids, {100, 101, 102})
+
+    def test_delete_group_zero_matches_still_succeeds(self):
+        """Idempotent: calling delete-group for a request with no candidates returns deleted=0."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a"),
+        ]
+        status, data = self._post(
+            "/api/wrong-matches/delete-group", {"request_id": 999})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""

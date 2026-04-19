@@ -64,6 +64,105 @@ function renderWrongMatches(data, el) {
 }
 
 /**
+ * Return a tier color for a quality_rank name (matches library tab palette).
+ * @param {string} rank
+ * @returns {string}
+ */
+function rankColor(rank) {
+  switch (rank) {
+    case 'lossless':     return '#7cf';
+    case 'transparent':  return '#6d6';
+    case 'excellent':    return '#6d6';
+    case 'good':         return '#da6';
+    case 'acceptable':   return '#da6';
+    case 'poor':         return '#f88';
+    default:             return '#888';
+  }
+}
+
+/**
+ * Build the quality badge strip for a group header. Shows format + bitrate,
+ * verified-lossless marker, spectral grade (when suspect/likely_transcode),
+ * and the rank tier — so the user can tell at a glance whether there's
+ * already a good version on disk.
+ * @param {any} g
+ * @returns {string}
+ */
+function renderQualityBadges(g) {
+  // Nothing in the library yet — tell the user force-import is a fresh add.
+  if (g.status !== 'imported' && !g.quality_label && !g.min_bitrate) {
+    return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
+  }
+
+  const parts = [];
+  const label = g.quality_label || (g.format ? String(g.format).toUpperCase() : null);
+  if (label) {
+    const color = rankColor(g.quality_rank || '');
+    parts.push(`<span class="badge" style="background:#222;color:${color};border:1px solid ${color};">${esc(label)}</span>`);
+  } else if (g.min_bitrate) {
+    parts.push(`<span class="badge" style="background:#222;color:#aaa;">${g.min_bitrate}k</span>`);
+  }
+  if (g.verified_lossless) {
+    parts.push('<span class="badge" style="background:#1a3a4a;color:#7cf;">verified lossless</span>');
+  }
+  // Spectral badge only when it's worth flagging.
+  if (g.current_spectral_grade && g.current_spectral_grade !== 'genuine') {
+    const sColor = g.current_spectral_grade === 'suspect' || g.current_spectral_grade === 'likely_transcode'
+      ? '#f88' : '#da6';
+    const suffix = g.current_spectral_bitrate ? ` (${g.current_spectral_bitrate}k)` : '';
+    parts.push(`<span class="badge" style="background:#2a1a1a;color:${sColor};">${esc(g.current_spectral_grade)}${suffix}</span>`);
+  }
+  if (g.quality_rank) {
+    const rColor = rankColor(g.quality_rank);
+    parts.push(`<span class="badge" style="background:#1a1a1a;color:${rColor};font-family:monospace;font-size:0.72em;">${esc(g.quality_rank)}</span>`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Format an ISO timestamp as "YYYY-MM-DD HH:MM".
+ * @param {string} iso
+ * @returns {string}
+ */
+function fmtTs(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const pad = (/** @type {number} */ n) => n < 10 ? '0' + n : '' + n;
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch (_e) {
+    return iso;
+  }
+}
+
+/**
+ * Render the "Latest activity" header inside an expanded group so the user
+ * can see at a glance whether the release is still being actively retried
+ * or has already seen a recent success.
+ * @param {any} d
+ * @returns {string}
+ */
+function renderLatestDownload(d) {
+  if (!d) return '<div style="color:#555;font-size:0.78em;padding:4px 8px;">No download history.</div>';
+  const outcomeColor = d.outcome === 'success' || d.outcome === 'force_import' || d.outcome === 'manual_import'
+    ? '#6d6'
+    : d.outcome === 'rejected' || d.outcome === 'failed' ? '#f88' : '#da6';
+  const fmtBr = d.actual_filetype ? `${String(d.actual_filetype).toUpperCase()}${d.actual_min_bitrate ? ' ' + d.actual_min_bitrate + 'k' : ''}` : '';
+  return `
+    <div style="background:#161616;border-left:3px solid ${outcomeColor};padding:6px 10px;margin:0 0 8px 0;font-size:0.78em;">
+      <div style="color:#aaa;">
+        <span style="color:${outcomeColor};font-weight:600;">Latest: ${esc(d.outcome || '?')}</span>
+        <span style="color:#666;margin-left:8px;">${esc(fmtTs(d.created_at))}</span>
+      </div>
+      <div style="color:#888;margin-top:2px;">
+        ${d.soulseek_username ? 'user ' + esc(d.soulseek_username) : ''}
+        ${fmtBr ? ' · ' + esc(fmtBr) : ''}
+        ${d.beets_scenario ? ' · ' + esc(d.beets_scenario) : ''}
+      </div>
+    </div>`;
+}
+
+/**
  * Render one release group (collapsed by default).
  * @param {any} g - group payload
  * @returns {string}
@@ -71,8 +170,11 @@ function renderWrongMatches(data, el) {
 function renderGroup(g) {
   const groupId = `wm-group-${g.request_id}`;
   const count = g.pending_count || (g.entries ? g.entries.length : 0);
-  const upgradeBadge = g.in_library
-    ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">upgrade</span>'
+  const libBadge = g.in_library
+    ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">in library</span>'
+    : '';
+  const statusBadge = g.status && g.status !== 'imported'
+    ? `<span class="badge" style="background:#2a2a3a;color:#9bf;">${esc(g.status)}</span>`
     : '';
 
   const header = `
@@ -81,8 +183,11 @@ function renderGroup(g) {
         <div>
           <span class="p-title">${esc(g.artist)} — ${esc(g.album)}</span>
           <span class="badge badge-library">${count} candidate${count !== 1 ? 's' : ''}</span>
-          ${upgradeBadge}
+          ${libBadge}${statusBadge}
         </div>
+      </div>
+      <div class="p-meta" style="margin-top:4px;">
+        ${renderQualityBadges(g)}
       </div>
       <div class="p-meta">
         ${g.mb_release_id ? `<span>${sourceLabel(g.mb_release_id)}: <a href="${externalReleaseUrl(g.mb_release_id)}" target="_blank" style="color:#6af;" onclick="event.stopPropagation();">${esc(g.mb_release_id)}</a></span>` : ''}
@@ -90,9 +195,19 @@ function renderGroup(g) {
     </div>`;
 
   const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e)).join('');
+  const latest = renderLatestDownload(g.latest_download);
+
+  // Group-level bulk actions: currently just "Delete All" so the user can
+  // clear an entire release's failed_imports without clicking each candidate.
+  const bulkActions = `
+    <div style="display:flex;justify-content:flex-end;margin:4px 0 0 0;">
+      <button class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, ${JSON.stringify(String(g.artist) + ' — ' + String(g.album))}, this)">Delete All (${count})</button>
+    </div>`;
 
   return `${header}
     <div class="p-detail" id="${groupId}">
+      ${latest}
+      ${bulkActions}
       <div style="padding:6px 0 0 0;">${entries}</div>
     </div>`;
 }
@@ -286,6 +401,37 @@ export async function forceImportWrongMatch(logId, btn) {
   } catch (e) {
     btn.textContent = 'Error';
     toast('Force import request failed', true);
+  }
+}
+
+/**
+ * Delete every wrong-match candidate for one release at once.
+ * @param {number} requestId
+ * @param {string} releaseName - "Artist — Album" for confirmation text
+ * @param {HTMLButtonElement} btn
+ */
+export async function deleteWrongMatchGroup(requestId, releaseName, btn) {
+  if (!confirm(`Delete ALL wrong-match candidates for "${releaseName}"?\nThis removes the files from disk and clears them from the review queue.`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete-group`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({request_id: requestId}),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      toast(`Deleted ${data.deleted} candidate${data.deleted !== 1 ? 's' : ''} for ${releaseName}`);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+    } else {
+      btn.textContent = 'Failed';
+      toast('Delete-all failed', true);
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+    toast('Delete-all request failed', true);
   }
 }
 
