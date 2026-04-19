@@ -75,6 +75,7 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertIsNone(p.track_count)
         self.assertIsNone(p.imported_path)
         self.assertFalse(p.disambiguated)
+        self.assertIsNone(p.disambiguation_error)
 
     def test_postflight_disambiguated_roundtrip(self):
         """disambiguated field survives JSON round-trip."""
@@ -86,7 +87,28 @@ class TestImportResultConstruction(unittest.TestCase):
         j = r.to_json()
         r2 = ImportResult.from_json(j)
         self.assertTrue(r2.postflight.disambiguated)
+        self.assertIsNone(r2.postflight.disambiguation_error)
         self.assertEqual(r2.postflight.imported_path, "/Beets/Artist/Album [CAD 3X03]")
+
+    def test_postflight_disambiguation_error_roundtrip(self):
+        """disambiguation_error survives JSON round-trip (issue #127).
+
+        When the post-import ``beet move`` fails (timeout, missing
+        binary, non-zero rc), the album is still imported but the path
+        wasn't fixed. The error string lives on PostflightInfo so the
+        audit trail in download_log.import_result can show *why* the
+        move didn't run.
+        """
+        r = ImportResult(
+            postflight=PostflightInfo(
+                beets_id=42, track_count=11,
+                imported_path="/Beets/Artist/Album",
+                disambiguated=False,
+                disambiguation_error="timeout after 120s"))
+        j = r.to_json()
+        r2 = ImportResult.from_json(j)
+        self.assertFalse(r2.postflight.disambiguated)
+        self.assertEqual(r2.postflight.disambiguation_error, "timeout after 120s")
 
     def test_full_construction(self):
         r = ImportResult(
