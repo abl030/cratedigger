@@ -2225,7 +2225,7 @@ def get_decision_tree(
             {
                 "id": "preimport_audio",
                 "title": "Preimport Audio Integrity",
-                "path": "shared",
+                "path": "preimport",
                 "function": "preimport_audio_gate",
                 "when": "Every import path, before any FLAC/MP3 branching "
                         "(lib.preimport.run_preimport_gates step 1)",
@@ -2248,7 +2248,7 @@ def get_decision_tree(
             {
                 "id": "preimport_nested",
                 "title": "Preimport Nested-Layout Gate",
-                "path": "shared",
+                "path": "preimport",
                 "function": "preimport_nested_gate",
                 "when": "Force-import and manual-import paths only — the auto "
                         "path flattens downloads before dispatch",
@@ -2588,29 +2588,41 @@ def full_pipeline_decision(
         "target_final_format": None,
     }
 
-    # --- Preimport audio gate (issue #91) ---
-    # Mirrors lib.preimport.run_preimport_gates step 1. Runs before any
-    # FLAC/MP3 branching — a corrupt download is rejected regardless of
-    # codec or spectral grade. When audio_check_mode is "off" the gate is
-    # reported as "skipped_off" so the Decisions tab can distinguish
-    # "config disabled the gate" from "gate passed".
-    audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
-    result["preimport_audio"] = audio_outcome
-    if audio_outcome == "reject_corrupt":
-        result["final_status"] = "wanted"
-        result["keep_searching"] = True
-        return result
-
-    # --- Preimport nested-layout gate (issue #91) ---
-    # Force/manual paths only — the auto path flattens downloads before
-    # dispatch. Sim reports "skipped_auto" on the auto path so the
-    # Decisions tab documents this difference without implying auto rejects
-    # nested downloads.
+    # --- Preimport gates (issue #91) ---
+    # Ordering mirrors the live flow: lib.import_dispatch.dispatch_import_from_db
+    # checks inspection.has_nested_audio *before* calling run_preimport_gates,
+    # so a force/manual import of a nested corrupt folder is rejected as
+    # nested_layout (not audio_corrupt). The nested gate returns "skipped_auto"
+    # on the auto path, which is a no-op — the auto pipeline flattens
+    # downloads upstream in process_completed_album, so audio integrity is
+    # the first real reject.
+    #
+    # Post-reject state also mirrors the two live paths:
+    #   * Auto-import rejects call reject_and_requeue() which transitions
+    #     the request back to "wanted" and bumps the validation attempt
+    #     counter → final_status="wanted", keep_searching=True.
+    #   * Force/manual-import rejects call _record_rejection_and_maybe_requeue
+    #     with requeue=False — the request's current status (often "manual"
+    #     or "imported") is left untouched → final_status=None (unchanged),
+    #     keep_searching=False.
     nested_outcome = preimport_nested_gate(import_mode, has_nested_audio)
     result["preimport_nested"] = nested_outcome
     if nested_outcome == "reject_nested":
-        result["final_status"] = "wanted"
-        result["keep_searching"] = True
+        # Force/manual-only reject — status stays whatever it was.
+        result["final_status"] = None
+        result["keep_searching"] = False
+        return result
+
+    audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
+    result["preimport_audio"] = audio_outcome
+    if audio_outcome == "reject_corrupt":
+        if import_mode == "auto":
+            result["final_status"] = "wanted"
+            result["keep_searching"] = True
+        else:
+            # Force/manual: no status transition, request stays as-is.
+            result["final_status"] = None
+            result["keep_searching"] = False
         return result
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
