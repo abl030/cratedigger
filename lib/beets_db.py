@@ -14,12 +14,44 @@ import os
 import sqlite3
 import statistics
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Literal, Optional, TYPE_CHECKING
 
 from lib.quality import detect_release_source
 
 if TYPE_CHECKING:
     from lib.quality import QualityRankConfig
+
+
+@dataclass(frozen=True)
+class ReleaseLocation:
+    """Single seam for 'is this release on disk?' — see issue #121.
+
+    The pipeline DB packs two ID kinds into one column (``mb_release_id``):
+    MusicBrainz UUIDs and Discogs numeric strings. Beets stores them in
+    up to two columns (``mb_albumid`` for UUIDs; ``discogs_albumid`` for
+    new-layout Discogs; ``mb_albumid`` again for legacy Discogs imports
+    predating the plugin patch). Every caller used to re-invent the
+    dispatch — this type is the one place we answer the presence
+    question, and callers pattern-match on ``.kind``.
+
+    - ``kind="exact"``: beets holds the specific pressing keyed by
+      ``release_id``. Quality / cleanup decisions may rely on this.
+    - ``kind="fuzzy"``: no ID hit, but artist+album name fuzzy-matched
+      something. Used ONLY for the user-facing 'in library' badge.
+      Never attribute quality or trigger removes off a fuzzy hit —
+      multiple pressings share titles, so we'd act on the wrong one.
+    - ``kind="absent"``: nothing matches. ``album_id is None`` and
+      ``selectors == ()``.
+
+    ``selectors`` is the set of ``beet remove -d`` queries the ID
+    could live under. Iterating every selector turns a selector-
+    skipped remove into a harmless no-op instead of silently leaving
+    the banned copy on disk — see ``BeetsDB.remove_selectors`` /
+    ``web/routes/pipeline.py::post_pipeline_ban_source``.
+    """
+    kind: Literal["exact", "fuzzy", "absent"]
+    album_id: int | None
+    selectors: tuple[str, ...]
 
 DEFAULT_BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 
@@ -103,52 +135,105 @@ class BeetsDB:
             return raw.decode("utf-8", errors="replace")
         return str(raw)
 
-    def _lookup_album_id(self, release_id: str) -> Optional[int]:
-        """Resolve a pipeline ``mb_release_id`` back to ``albums.id``.
+    def locate(
+        self,
+        release_id: str,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+    ) -> ReleaseLocation:
+        """Resolve a pipeline ``mb_release_id`` to a ``ReleaseLocation``.
 
-        Centralises the shape-aware dispatch that every album lookup in
-        this class needs. Two things complicate the mapping:
+        Single seam for 'is this release on disk?' (issue #121).
+        See ``ReleaseLocation`` for the contract.
 
-        - MusicBrainz UUIDs live in ``albums.mb_albumid`` (TEXT).
-        - Discogs releases live either in ``albums.discogs_albumid``
-          (INTEGER, newer imports) OR in ``albums.mb_albumid`` (TEXT)
-          for legacy libraries imported before the discogs plugin
-          started populating ``discogs_albumid``. ``artist_compare.py``
-          and the webui-primer both acknowledge this duality, so for a
-          numeric ID we have to check both columns or legacy Discogs
-          albums read as "not in beets" — and then postflight lookups
-          like ``get_album_info`` / ``get_album_path`` also miss them,
-          breaking the import quality pipeline for those releases.
-
-        Returns the resolved ``albums.id`` or ``None`` if no row matches.
+        Dispatch:
+        - Numeric ID (Discogs shape): check both ``discogs_albumid``
+          (new-layout) and ``mb_albumid`` (legacy) so pre-plugin-patch
+          libraries still resolve. Selectors include BOTH columns so
+          ``beet remove -d`` tries every layout.
+        - UUID shape: check ``mb_albumid`` only. Selector is the
+          single ``mb_albumid:<uuid>`` query.
+        - When the ID misses AND the caller supplied artist+album,
+          fall back to a fuzzy ``LIKE`` match. Fuzzy hits expose
+          ``kind="fuzzy"`` and EMPTY selectors — callers must not
+          turn a fuzzy hit into a ``beet remove -d``.
         """
-        from lib.quality import detect_release_source
-        if detect_release_source(release_id) == "discogs":
+        source = detect_release_source(release_id)
+        numeric: int | None = None
+        if source == "discogs":
             try:
                 numeric = int(release_id)
             except ValueError:
-                return None
+                numeric = None
+
+        album_id: Optional[int] = None
+        if numeric is not None:
             row = self._conn.execute(
                 "SELECT id FROM albums "
                 "WHERE discogs_albumid = ? OR mb_albumid = ? "
                 "LIMIT 1",
                 (numeric, release_id),
             ).fetchone()
-        else:
+            if row:
+                album_id = row[0]
+        elif release_id:
             row = self._conn.execute(
                 "SELECT id FROM albums WHERE mb_albumid = ?",
                 (release_id,),
             ).fetchone()
+            if row:
+                album_id = row[0]
+
+        if album_id is not None:
+            if numeric is not None:
+                selectors: tuple[str, ...] = (
+                    f"discogs_albumid:{release_id}",
+                    f"mb_albumid:{release_id}",
+                )
+            else:
+                selectors = (f"mb_albumid:{release_id}",)
+            return ReleaseLocation(
+                kind="exact", album_id=album_id, selectors=selectors)
+
+        # Fuzzy fallback — only when the caller supplies artist+album.
+        # Returns the first match so the UI can still show 'in library',
+        # but no selectors (we can't identify a specific pressing).
+        if artist and album:
+            fuzzy_id = self._fuzzy_album_id(artist, album)
+            if fuzzy_id is not None:
+                return ReleaseLocation(
+                    kind="fuzzy", album_id=fuzzy_id, selectors=())
+
+        return ReleaseLocation(kind="absent", album_id=None, selectors=())
+
+    def _fuzzy_album_id(self, artist: str, album: str) -> Optional[int]:
+        """Internal: first album whose artist+album fuzzily matches."""
+        row = self._conn.execute(
+            "SELECT id FROM albums "
+            "WHERE albumartist LIKE ? COLLATE NOCASE "
+            "  AND album LIKE ? COLLATE NOCASE "
+            "LIMIT 1",
+            (f"%{artist}%", f"%{album}%"),
+        ).fetchone()
         return row[0] if row else None
+
+    def _lookup_album_id(self, release_id: str) -> Optional[int]:
+        """Legacy thin wrapper — kept for internal callers only.
+
+        New code should call ``locate()`` and inspect ``.album_id``.
+        Returns the exact-match album id (no fuzzy fallback) or None.
+        """
+        loc = self.locate(release_id)
+        return loc.album_id if loc.kind == "exact" else None
 
     def album_exists(self, release_id: str) -> bool:
         """Check if a release is already in the beets library.
 
-        Thin wrapper over ``_lookup_album_id``. See that helper for the
-        full ID-shape contract (MusicBrainz UUID → ``mb_albumid``,
-        Discogs numeric → ``discogs_albumid`` OR legacy ``mb_albumid``).
+        Exact ID match only — no fuzzy fallback. For the 'in library'
+        badge with fuzzy fallback, use ``locate(id, artist, album)``
+        and check ``loc.kind in ("exact", "fuzzy")``.
         """
-        return self._lookup_album_id(release_id) is not None
+        return self.locate(release_id).kind == "exact"
 
     def get_album_info(
         self,
@@ -246,14 +331,18 @@ class BeetsDB:
     # ── Web UI query methods ────────────────────────────────────────
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
-        """Return the subset of MBIDs that exist in the beets library."""
+        """Return the subset of release IDs that exist in the beets library.
+
+        Routes through ``locate`` per-ID (issue #121) so Discogs numerics
+        resolve against ``discogs_albumid`` AND legacy ``mb_albumid``,
+        matching the single-lookup contract. Before the seam, this
+        method only queried ``mb_albumid`` — Discogs releases imported
+        under ``discogs_albumid`` silently disappeared from every
+        'already in library' check the browse routes make.
+        """
         if not mbids:
             return set()
-        ph = ",".join("?" for _ in mbids)
-        rows = self._conn.execute(
-            f"SELECT mb_albumid FROM albums WHERE mb_albumid IN ({ph})", mbids
-        ).fetchall()
-        return {r[0] for r in rows}
+        return {m for m in mbids if self.locate(m).kind == "exact"}
 
     def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
         """Batch lookup: release ID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}.
@@ -422,17 +511,21 @@ class BeetsDB:
         return [self._album_row_to_dict(r) for r in rows]
 
     def get_tracks_by_mb_release_id(self, mbid: str) -> Optional[list[dict[str, object]]]:
-        """Get all tracks for an album by MBID. Returns None if not found."""
-        album = self._conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mbid,)
-        ).fetchone()
-        if not album:
+        """Get all tracks for an album by release ID.
+
+        Routes through ``locate`` (issue #121) so Discogs numerics in
+        ``discogs_albumid`` resolve the same way ``album_exists`` does —
+        otherwise the browse-tab 'view release' endpoint would render a
+        release as in-library but fail to show its track list.
+        """
+        album_id = self._lookup_album_id(mbid)
+        if album_id is None:
             return None
         items = self._conn.execute(
             "SELECT title, track, disc, length, format, bitrate, "
             "       samplerate, bitdepth "
             "FROM items WHERE album_id = ? ORDER BY disc, track",
-            (album[0],),
+            (album_id,),
         ).fetchall()
         return [{
             "title": i[0], "track": i[1], "disc": i[2],
@@ -495,16 +588,18 @@ class BeetsDB:
         return count[0] if count else None
 
     def get_avg_bitrate_kbps(self, mb_release_id: str) -> Optional[int]:
-        """Get average track bitrate (kbps) for an MBID. Returns None if not found."""
-        album_row = self._conn.execute(
-            "SELECT id FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
-        if not album_row:
+        """Get average track bitrate (kbps) for a release. None if not found.
+
+        Routes through ``locate`` (issue #121) so Discogs numerics
+        resolve the same way every other postflight lookup does.
+        """
+        album_id = self._lookup_album_id(mb_release_id)
+        if album_id is None:
             return None
         avg_row = self._conn.execute(
             "SELECT CAST(AVG(bitrate) AS INTEGER) FROM items "
             "WHERE album_id = ? AND bitrate > 0",
-            (album_row[0],),
+            (album_id,),
         ).fetchone()
         if not avg_row or not avg_row[0]:
             return None

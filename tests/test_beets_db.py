@@ -192,6 +192,195 @@ class TestAlbumExists(unittest.TestCase):
                             "Legacy numeric mb_albumid must still resolve.")
 
 
+class TestLocate(unittest.TestCase):
+    """Single seam: ``BeetsDB.locate`` answers 'is this release on disk?'.
+
+    Every existing ``album_exists`` / ``get_album_info`` / ``get_min_bitrate``
+    / ``get_item_paths`` / ``get_album_path`` / ``get_tracks_by_mb_release_id``
+    / ``get_avg_bitrate_kbps`` / ``check_mbids`` caller must route through
+    this — see issue #121. Four outcomes:
+
+    - UUID in ``albums.mb_albumid`` → ``kind="exact"``,
+      ``selectors=("mb_albumid:<uuid>",)``.
+    - Discogs numeric in ``albums.discogs_albumid`` → ``kind="exact"``,
+      ``selectors`` iterates BOTH the new-layout and the legacy
+      ``mb_albumid`` selector so ``beet remove -d`` can't silently skip
+      the column that actually holds the album.
+    - Discogs numeric in legacy ``albums.mb_albumid`` (pre-plugin-patch
+      libraries) → ``kind="exact"`` with the same selector pair.
+    - No ID match but artist/album fuzzy-matches → ``kind="fuzzy"``.
+      Used only for the in-library badge, never for quality or cleanup.
+    - Nothing matches → ``kind="absent"`` with ``selectors=()`` and
+      ``album_id=None``.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        # UUID-indexed MusicBrainz album
+        _insert_album_full(self.db_path, 1, "aaa0bbb0-cccc-dddd-eeee-ffffffffffff", [
+            {"bitrate": 320000, "path": "/m/a/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], album="OK Computer", albumartist="Radiohead")
+        # New-layout Discogs numeric (in discogs_albumid)
+        _insert_album_full(self.db_path, 2, "", [
+            {"bitrate": 1411000, "path": "/m/disc/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ], discogs_albumid=12856590, album="New Ritual", albumartist="DICE")
+        # Legacy-layout Discogs (numeric in mb_albumid, no discogs_albumid)
+        _insert_album_full(self.db_path, 3, "5555555", [
+            {"bitrate": 320000, "path": "/m/legacy/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], album="Legacy Press", albumartist="Old Band")
+
+    def test_locate_uuid_exact(self) -> None:
+        """UUID → exact hit, selector is ``mb_albumid:<uuid>`` only."""
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("aaa0bbb0-cccc-dddd-eeee-ffffffffffff")
+        self.assertEqual(loc.kind, "exact")
+        self.assertEqual(loc.album_id, 1)
+        self.assertEqual(
+            loc.selectors,
+            ("mb_albumid:aaa0bbb0-cccc-dddd-eeee-ffffffffffff",))
+
+    def test_locate_discogs_numeric_new_layout(self) -> None:
+        """New-layout Discogs → exact hit, selectors cover both columns.
+
+        Even though the album lives in ``discogs_albumid`` on this
+        install, a sibling install might hold the same ID in
+        ``mb_albumid`` (legacy). ``beet remove -d`` must hit both.
+        """
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("12856590")
+        self.assertEqual(loc.kind, "exact")
+        self.assertEqual(loc.album_id, 2)
+        self.assertEqual(
+            set(loc.selectors),
+            {"discogs_albumid:12856590", "mb_albumid:12856590"})
+
+    def test_locate_discogs_legacy_mb_albumid(self) -> None:
+        """Numeric ID lives in ``mb_albumid`` (legacy) — still exact.
+
+        The only path that ever exposed this kind of album to the
+        pipeline before issue #121 was the fuzzy fallback; now the
+        locate seam resolves it by ID.
+        """
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("5555555")
+        self.assertEqual(loc.kind, "exact")
+        self.assertEqual(loc.album_id, 3)
+        self.assertEqual(
+            set(loc.selectors),
+            {"discogs_albumid:5555555", "mb_albumid:5555555"})
+
+    def test_locate_absent(self) -> None:
+        """No ID hit + no artist/album → absent with empty selectors."""
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("zzz-999-not-present")
+        self.assertEqual(loc.kind, "absent")
+        self.assertIsNone(loc.album_id)
+        self.assertEqual(loc.selectors, ())
+
+    def test_locate_fuzzy_matches_artist_album(self) -> None:
+        """No ID match but artist/album fuzzy-matches → kind='fuzzy'.
+
+        Legacy manual imports (Discogs-style metadata with neither
+        ``mb_albumid`` nor ``discogs_albumid`` populated) still want
+        to show as 'in library' for the UI badge. They must NOT leak
+        into quality-or-cleanup code paths — those pin on ``exact``.
+        """
+        # Insert an album with no ID at all
+        _insert_album_full(self.db_path, 4, "", [
+            {"bitrate": 320000, "path": "/m/u/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], album="Untagged", albumartist="Some Artist")
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("no-id-at-all",
+                            artist="Some Artist", album="Untagged")
+        self.assertEqual(loc.kind, "fuzzy")
+        self.assertEqual(loc.album_id, 4)
+        # Fuzzy hits don't produce selectors — `beet remove -d` should
+        # never target a fuzzy hit because it might delete a different
+        # pressing that happens to share the title.
+        self.assertEqual(loc.selectors, ())
+
+    def test_locate_no_fuzzy_when_artist_album_missing(self) -> None:
+        """Without artist/album args, we don't fuzzy-match.
+
+        The auto-import path (``album_exists`` at preflight) never
+        passes artist/album — it must get ``absent`` when the ID isn't
+        in beets, not a random fuzzy hit.
+        """
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("no-id-at-all")
+        self.assertEqual(loc.kind, "absent")
+
+    def test_locate_exact_beats_fuzzy(self) -> None:
+        """When an exact ID matches, fuzzy never fires."""
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("aaa0bbb0-cccc-dddd-eeee-ffffffffffff",
+                            artist="Different Artist", album="Different Album")
+        self.assertEqual(loc.kind, "exact")
+        self.assertEqual(loc.album_id, 1)
+
+    def test_locate_numeric_but_not_in_either_column(self) -> None:
+        """Numeric ID with no exact hit and no fuzzy → absent."""
+        with BeetsDB(self.db_path) as db:
+            loc = db.locate("99999999")
+        self.assertEqual(loc.kind, "absent")
+        self.assertEqual(loc.selectors, ())
+
+
+class TestCheckMbidsDiscogsAware(unittest.TestCase):
+    """Batch MBID existence check must handle Discogs IDs too.
+
+    ``check_mbids`` was a latent bug: it only queried ``mb_albumid``,
+    so Discogs releases with a numeric ID in ``discogs_albumid``
+    disappeared from every browse route that marks "already in library"
+    (release-group, master, artist discography). Downstream symptom:
+    Discogs releases showed an "Add" button even when the exact
+    pressing was already on disk. Routes through the ``locate`` seam
+    after issue #121.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        # Normal UUID
+        _insert_album_full(self.db_path, 1, "aaa-111", [
+            {"bitrate": 320000, "path": "/m/a/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ])
+        # Discogs numeric in discogs_albumid (new layout)
+        _insert_album_full(self.db_path, 2, "", [
+            {"bitrate": 1411000, "path": "/m/d/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ], discogs_albumid=12856590)
+        # Discogs numeric in mb_albumid (legacy layout)
+        _insert_album_full(self.db_path, 3, "5555555", [
+            {"bitrate": 320000, "path": "/m/l/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ])
+
+    def test_check_mbids_detects_new_layout_discogs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            found = db.check_mbids(["aaa-111", "12856590", "zzz-999"])
+        self.assertEqual(found, {"aaa-111", "12856590"})
+
+    def test_check_mbids_detects_legacy_discogs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            found = db.check_mbids(["5555555"])
+        self.assertEqual(found, {"5555555"})
+
+    def test_check_mbids_mixed_batch(self) -> None:
+        """Single batch mixing UUID, new-layout numeric, legacy numeric."""
+        with BeetsDB(self.db_path) as db:
+            found = db.check_mbids(["aaa-111", "12856590", "5555555", "99"])
+        self.assertEqual(found, {"aaa-111", "12856590", "5555555"})
+
+
 class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
     """Regression guard: ``album_exists`` understands Discogs IDs, so the
     postflight lookups called during import (``get_album_info``,
