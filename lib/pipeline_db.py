@@ -489,15 +489,19 @@ class PipelineDB:
     def get_wrong_matches(self) -> list[dict[str, object]]:
         """Return every rejected wrong-match candidate still on disk.
 
-        Issue #113: one row per eligible ``download_log`` entry (not collapsed
-        per request). Each request with N rejections returns N rows ordered
-        ``request_id, id DESC`` so the route layer can group them by release
-        and render every candidate. Only wrong-match rejections survive —
-        ``audio_corrupt`` / ``spectral_reject`` scenarios have their own
-        handling and stay out of the manual-review queue.
+        Issue #113: one row per actionable folder, not one per request.
+        ``download_log`` accumulates multiple rejected rows for the same
+        ``failed_path`` whenever a folder is retried (force/manual paths log
+        the same ``failed_path`` on every retry), so we collapse to the newest
+        row per ``(request_id, failed_path)`` pair — each surviving row
+        represents a distinct on-disk directory the user can act on.
+
+        Only wrong-match rejections survive — ``audio_corrupt`` /
+        ``spectral_reject`` scenarios have their own handling and stay out of
+        the manual-review queue.
         """
         cur = self._execute("""
-            SELECT
+            SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'failed_path')
                 dl.id AS download_log_id,
                 dl.request_id,
                 ar.artist_name,
@@ -511,9 +515,14 @@ class PipelineDB:
               AND dl.validation_result->>'failed_path' IS NOT NULL
               AND (dl.validation_result->>'scenario' IS NULL
                    OR dl.validation_result->>'scenario' NOT IN ('audio_corrupt', 'spectral_reject'))
-            ORDER BY dl.request_id, dl.id DESC
+            ORDER BY dl.request_id, dl.validation_result->>'failed_path', dl.id DESC
         """)
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+        # DISTINCT ON sorts by path within a request; re-sort so the route
+        # layer sees newest-first within each request, matching the frontend
+        # expectation that the most-recent candidate appears first.
+        rows.sort(key=lambda r: (r["request_id"], -int(r["download_log_id"])))
+        return rows
 
     def clear_wrong_match_path(self, log_id: int) -> bool:
         """Null out failed_path in validation_result for a download_log entry.

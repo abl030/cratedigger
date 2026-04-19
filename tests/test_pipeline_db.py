@@ -1341,6 +1341,33 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["soulseek_username"], "ok")
 
+    def test_deduplicates_same_failed_path_per_request(self):
+        """Codex round 2: when the same folder is retried and rejected repeatedly,
+        `download_log` accumulates duplicate rows for the same `failed_path`.
+        The UI must show one row per actionable folder, not one per log entry.
+        Keeps the newest row per `(request_id, failed_path)` pair.
+        """
+        # Live pattern: slskd reuses the `_9` suffix after the folder is
+        # deleted, so the same failed_path can appear on two distinct rejected
+        # download_log rows (older one is stale, newer is actionable).
+        self._log_rejected(self.req1, "alice-old", "/fi/path_9")
+        self._log_rejected(self.req1, "alice-new", "/fi/path_9")  # same path, newer
+        self._log_rejected(self.req1, "bob",       "/fi/path_8")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(
+            len(rows), 2,
+            f"Expected 2 distinct folders (_9, _8), got {len(rows)}. "
+            f"Same failed_path should collapse to newest row.")
+        by_path = {
+            r["soulseek_username"]: r for r in rows
+        }
+        # The surviving row for path_9 must be the newest ("alice-new"),
+        # not the stale "alice-old".
+        self.assertIn("alice-new", by_path)
+        self.assertNotIn("alice-old", by_path)
+        self.assertIn("bob", by_path)
+
     def test_excludes_non_rejected_outcomes(self):
         """success / force_import / timeout must never surface in wrong-matches."""
         self._log_rejected(self.req1, "reject-me", "/fi/keep")
