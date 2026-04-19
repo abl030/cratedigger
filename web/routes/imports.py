@@ -137,7 +137,7 @@ def post_manual_import(h, body: dict) -> None:
 
 def _quality_summary(row: dict[str, object],
                      beets_info: dict[str, dict[str, object]],
-                     exact_release_on_disk: bool,
+                     album_on_disk: bool,
                      ) -> dict[str, object]:
     """Describe the album's current on-disk quality for a group header.
 
@@ -146,18 +146,17 @@ def _quality_summary(row: dict[str, object],
     (those never live in beets). We combine them so the user can see at a
     glance whether force-importing is worthwhile.
 
-    When THIS exact MB release isn't in beets (``exact_release_on_disk=False``),
-    every on-disk field is zeroed out regardless of what the pipeline DB
-    still holds — a prior import that was later removed via ban-source or a
-    manual ``beet rm`` leaves stale values behind that the write-side now
-    clears, but old rows may still carry them. Multiple pressings of the
-    same album are intentionally preserved in this library (CLAUDE.md), so
-    "some edition exists" is NOT sufficient — the quality summary
-    describes *this* release specifically, so we require an exact MBID
-    match in ``beets_info``.
+    When the album isn't on disk (``album_on_disk=False``), every on-disk
+    field is zeroed out regardless of what the pipeline DB still holds —
+    that's the belt-and-braces for any path that removed files without
+    clearing the quality fields (the ban-source path now clears them on
+    the write side, but older rows or out-of-band ``beet rm`` invocations
+    can still leave ghosts). The caller computes ``album_on_disk`` with
+    the same ``_is_in_beets`` fuzzy-or-exact logic that drives the
+    ``in_library`` badge, so the two are consistent.
     """
     status = str(row.get("request_status") or "wanted")
-    if not exact_release_on_disk:
+    if not album_on_disk:
         return {
             "status": status,
             "min_bitrate": None,
@@ -290,36 +289,32 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         assert isinstance(request_id, int)
         group = groups.get(request_id)
         if group is None:
-            # Two beets-presence questions with different precision:
+            # ``_is_in_beets`` is authoritative for "files on disk for
+            # this request": exact MBID match when beets has the tag,
+            # fuzzy artist/album fallback when it doesn't. That second
+            # path covers legacy entries (Discogs imports stored in
+            # ``mb_albumid``, manual imports with the tag unset) where
+            # the album really is on disk but the MBID lookup misses.
             #
-            # - ``in_library`` drives the user-facing badge. Fuzzy
-            #   "does any edition exist?" is the right answer — it
-            #   warns the user that some copy is already around even
-            #   if this specific pressing isn't.
-            # - ``has_on_disk_state`` gates the quality summary.
-            #   Multiple pressings are intentionally kept, so when
-            #   the request has an MBID we must match it exactly,
-            #   otherwise a sibling pressing's presence would let
-            #   stale quality fields from a removed pressing leak
-            #   through. When the request has NO MBID (manual add /
-            #   no-MB-release requests) we can't distinguish pressings
-            #   anyway, so the fuzzy fallback is the best signal.
-            mbid = row.get("mb_release_id")
+            # The original multi-pressing concern that motivated a
+            # strict MBID-only check is now handled on the write side:
+            # ``post_pipeline_ban_source`` clears on-disk quality
+            # fields after a successful ``beet remove -d``, so a
+            # sibling pressing's presence can't surface ghost quality
+            # from the removed one. The invariant is now:
+            # on-disk fields are populated ⇔ files exist, maintained
+            # by the cleanup path on the writer side.
             in_library = _is_in_beets(row, beets_info)
-            if isinstance(mbid, str) and mbid:
-                has_on_disk_state = mbid in beets_info
-            else:
-                has_on_disk_state = in_library
             group = {
                 "request_id": request_id,
                 "artist": row["artist_name"],
                 "album": row["album_title"],
-                "mb_release_id": mbid,
+                "mb_release_id": row.get("mb_release_id"),
                 "in_library": in_library,
                 "pending_count": 0,
                 "entries": [],
                 "latest_import": None,  # filled in after the loop
-                **_quality_summary(row, beets_info, has_on_disk_state),
+                **_quality_summary(row, beets_info, in_library),
             }
             groups[request_id] = group
             order.append(request_id)
