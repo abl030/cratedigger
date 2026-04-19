@@ -217,6 +217,76 @@ class BeetsDB:
         ).fetchone()
         return row[0] if row else None
 
+    def _batch_lookup_album_ids(
+        self, release_ids: list[str]
+    ) -> dict[str, int]:
+        """Batched version of ``locate(id).album_id`` for exact hits only.
+
+        Single source of truth for 'which of these release IDs has an
+        exact beets row, and what's its album_id?'. Two ``IN (...)``
+        queries — one against ``mb_albumid`` (covers UUIDs AND legacy
+        Discogs numerics stored there), one against ``discogs_albumid``
+        (new-layout Discogs numerics). Returns a dict keyed by the
+        input ID string.
+
+        Used by ``check_mbids`` and ``get_album_ids_by_mbids`` so they
+        stay in sync without either falling into an N+1 pattern — the
+        paired-consistency concern Codex round 1 + round 2 kept circling
+        (issue #121).
+
+        Fuzzy fallback is NOT applied here — batch callers never want
+        fuzzy hits for 'in library' quality or album-id uses. For the
+        single-ID fuzzy case, use ``locate(id, artist, album)``.
+        """
+        if not release_ids:
+            return {}
+
+        # Split by ID shape. UUIDs only ever live in ``mb_albumid``.
+        # Numerics can live in ``discogs_albumid`` (new layout) OR
+        # ``mb_albumid`` (legacy pre-plugin-patch imports), so we
+        # include them in both queries.
+        mb_candidates: list[str] = []
+        discogs_candidates: list[int] = []
+        for rid in release_ids:
+            if not rid:
+                continue
+            if detect_release_source(rid) == "discogs":
+                try:
+                    discogs_candidates.append(int(rid))
+                except ValueError:
+                    pass
+                # Also check mb_albumid as TEXT (legacy layout).
+                mb_candidates.append(rid)
+            else:
+                mb_candidates.append(rid)
+
+        result: dict[str, int] = {}
+
+        if mb_candidates:
+            ph = ",".join("?" for _ in mb_candidates)
+            rows = self._conn.execute(
+                f"SELECT mb_albumid, id FROM albums "
+                f"WHERE mb_albumid IN ({ph})",
+                mb_candidates,
+            ).fetchall()
+            for mb_albumid, album_id in rows:
+                if mb_albumid:
+                    result[mb_albumid] = album_id
+
+        if discogs_candidates:
+            ph = ",".join("?" for _ in discogs_candidates)
+            rows = self._conn.execute(
+                f"SELECT discogs_albumid, id FROM albums "
+                f"WHERE discogs_albumid IN ({ph})",
+                discogs_candidates,
+            ).fetchall()
+            for discogs_id, album_id in rows:
+                # Key by the original string form so callers can
+                # round-trip their input back.
+                result[str(discogs_id)] = album_id
+
+        return result
+
     def _lookup_album_id(self, release_id: str) -> Optional[int]:
         """Legacy thin wrapper — kept for internal callers only.
 
@@ -333,16 +403,16 @@ class BeetsDB:
     def check_mbids(self, mbids: list[str]) -> set[str]:
         """Return the subset of release IDs that exist in the beets library.
 
-        Routes through ``locate`` per-ID (issue #121) so Discogs numerics
-        resolve against ``discogs_albumid`` AND legacy ``mb_albumid``,
-        matching the single-lookup contract. Before the seam, this
-        method only queried ``mb_albumid`` — Discogs releases imported
-        under ``discogs_albumid`` silently disappeared from every
-        'already in library' check the browse routes make.
+        Routes through ``_batch_lookup_album_ids`` (issue #121) so
+        Discogs numerics resolve against ``discogs_albumid`` AND
+        legacy ``mb_albumid``, matching the single-lookup contract.
+        Two batched ``IN (...)`` queries — no N+1 per call site.
+        Before the seam, this method only queried ``mb_albumid`` —
+        Discogs releases imported under ``discogs_albumid`` silently
+        disappeared from every 'already in library' check the browse
+        routes make.
         """
-        if not mbids:
-            return set()
-        return {m for m in mbids if self.locate(m).kind == "exact"}
+        return set(self._batch_lookup_album_ids(mbids).keys())
 
     def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
         """Batch lookup: release ID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}.
@@ -536,21 +606,14 @@ class BeetsDB:
     def get_album_ids_by_mbids(self, mbids: list[str]) -> dict[str, int]:
         """Map release IDs to beets album IDs. Returns {id: album_id}.
 
-        Routes through ``locate`` per-ID (issue #121) so the mapping
-        stays in sync with ``check_mbids``. Without this, the browse
-        routes that call both would emit ``in_library=true`` with
-        ``beets_album_id=null`` for Discogs releases stored in
-        ``discogs_albumid`` — disabling the 'Remove from beets' button
-        in the UI for the very rows the presence check just surfaced.
+        Shares the ``_batch_lookup_album_ids`` seam with
+        ``check_mbids`` so presence and album-id mapping stay in
+        sync — the paired-consistency concern Codex round 1 + 2
+        kept circling (issue #121). Without shared batching, the
+        browse routes would either diverge on Discogs visibility
+        or regress to an N+1 query pattern for large artist pages.
         """
-        if not mbids:
-            return {}
-        result: dict[str, int] = {}
-        for m in mbids:
-            loc = self.locate(m)
-            if loc.kind == "exact" and loc.album_id is not None:
-                result[m] = loc.album_id
-        return result
+        return self._batch_lookup_album_ids(mbids)
 
     @staticmethod
     def delete_album(db_path: str, album_id: int) -> tuple[str, str, list[str]]:
