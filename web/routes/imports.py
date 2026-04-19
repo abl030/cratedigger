@@ -135,6 +135,82 @@ def post_manual_import(h, body: dict) -> None:
     })
 
 
+def _quality_summary(row: dict[str, object],
+                     beets_info: dict[str, dict[str, object]]
+                     ) -> dict[str, object]:
+    """Describe the album's current on-disk quality for a group header.
+
+    Beets is the source of truth for format and bitrate when the album is
+    imported; the pipeline DB carries the spectral + verified-lossless signal
+    (those never live in beets). We combine them so the user can see at a
+    glance whether force-importing is worthwhile.
+    """
+    srv = _server()
+    mbid = row.get("mb_release_id")
+    detail = beets_info.get(mbid) if isinstance(mbid, str) and mbid else None
+
+    # Bitrate: prefer pipeline DB (kbps, always authoritative for spectral
+    # classification), fall back to beets. For the quality label + rank,
+    # prefer beets's actual value once imported.
+    def _as_int(val: object) -> int | None:
+        return val if isinstance(val, int) and not isinstance(val, bool) else None
+
+    def _as_str(val: object) -> str | None:
+        return val if isinstance(val, str) else None
+
+    db_kbps = _as_int(row.get("request_min_bitrate"))
+    beets_kbps = _as_int(detail.get("beets_bitrate")) if detail else None
+    fmt = _as_str(detail.get("beets_format")) if detail else None
+
+    label: str | None = None
+    rank: str | None = None
+    if fmt:
+        # Label is only meaningful with a bitrate; rank is meaningful from
+        # format alone (falls through to the bare-codec band table).
+        if beets_kbps:
+            from web.classify import quality_label as _ql
+            label = _ql(fmt, beets_kbps)
+        rank = srv.compute_library_rank(fmt, beets_kbps)
+
+    return {
+        "status": str(row.get("request_status") or "wanted"),
+        "min_bitrate": db_kbps if db_kbps is not None else beets_kbps,
+        "format": fmt,
+        "verified_lossless": bool(row.get("request_verified_lossless") or False),
+        "current_spectral_grade": row.get("request_current_spectral_grade"),
+        "current_spectral_bitrate": row.get("request_current_spectral_bitrate"),
+        "quality_label": label,
+        "quality_rank": rank,
+    }
+
+
+def _latest_download_summary(row: dict[str, object]) -> dict[str, object] | None:
+    """Compact summary for the expanded view's 'Latest activity' row.
+
+    The DB gives us ``download_log`` rows newest-first per request; we only
+    surface the metadata that fits in a one-line header — id, outcome,
+    timestamp, user, and the actual format/bitrate on disk.
+    """
+    if not row:
+        return None
+    from datetime import datetime
+    created_raw = row.get("created_at")
+    created: str | None = None
+    if isinstance(created_raw, datetime):
+        created = created_raw.isoformat()
+    elif isinstance(created_raw, str):
+        created = created_raw
+    return {
+        "id": row.get("id"),
+        "outcome": row.get("outcome"),
+        "created_at": created,
+        "soulseek_username": row.get("soulseek_username"),
+        "actual_filetype": row.get("actual_filetype"),
+        "actual_min_bitrate": row.get("actual_min_bitrate"),
+        "beets_scenario": row.get("beets_scenario"),
+    }
+
+
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     """Group wrong-match rejections by release (issue #113).
 
@@ -142,6 +218,11 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     ``download_log`` entry with an on-disk ``failed_path`` becomes one entry
     inside its group. Groups with zero surviving entries are dropped so the
     UI only shows actionable work.
+
+    Each group also carries an on-disk quality snapshot (format, bitrate,
+    verified_lossless, spectral grade, rank tier) and the most-recent
+    ``download_log`` row for the request, so the user can judge at a glance
+    whether it's worth trying to force-import a rejected candidate.
     """
     srv = _server()
     pdb = srv._db()
@@ -177,6 +258,8 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 "in_library": _is_in_beets(row, beets_info),
                 "pending_count": 0,
                 "entries": [],
+                "latest_download": None,  # filled in after the loop
+                **_quality_summary(row, beets_info),
             }
             groups[request_id] = group
             order.append(request_id)
@@ -198,7 +281,38 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         })
         group["pending_count"] = len(entries_list)
 
+    # Enrich each group with the most-recent download_log row for the request.
+    # Reuses the existing batch helper — returns newest-first per request, so
+    # the head of each list is the latest.
+    if order:
+        history = pdb.get_download_history_batch(order)
+        for rid in order:
+            rows_for_req = history.get(rid) or []
+            if rows_for_req:
+                groups[rid]["latest_download"] = _latest_download_summary(
+                    rows_for_req[0])
+
     h._json({"groups": [groups[rid] for rid in order]})
+
+
+def _delete_wrong_match_row(pdb, log_id: int) -> bool:
+    """Shared helper: delete files for one wrong-match entry and clear its path.
+
+    Returns ``True`` if the entry existed and was processed, ``False`` if the
+    download_log row was missing. Used by both the single-row delete endpoint
+    and the per-release bulk delete.
+    """
+    entry = pdb.get_download_log_entry(log_id)
+    if not entry:
+        return False
+    vr = _parse_validation_result(entry.get("validation_result"))
+    failed_path_raw = vr.get("failed_path")
+    failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
+    resolved_path = resolve_failed_path(failed_path)
+    if resolved_path is not None:
+        shutil.rmtree(resolved_path, ignore_errors=True)
+    pdb.clear_wrong_match_path(log_id)
+    return True
 
 
 def post_wrong_match_delete(h, body: dict) -> None:
@@ -209,24 +323,45 @@ def post_wrong_match_delete(h, body: dict) -> None:
         return
 
     pdb = _server()._db()
-    entry = pdb.get_download_log_entry(int(log_id))
-    if not entry:
+    if not _delete_wrong_match_row(pdb, int(log_id)):
         h._error(f"Download log entry {log_id} not found", 404)
         return
 
-    vr = _parse_validation_result(entry.get("validation_result"))
-    failed_path_raw = vr.get("failed_path")
-    failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
-    resolved_path = resolve_failed_path(failed_path)
-
-    # Delete files from disk if they exist
-    if resolved_path is not None:
-        shutil.rmtree(resolved_path)
-
-    # Clear failed_path so it stops appearing in wrong matches list
-    pdb.clear_wrong_match_path(int(log_id))
-
     h._json({"status": "ok", "download_log_id": log_id})
+
+
+def post_wrong_match_delete_group(h, body: dict) -> None:
+    """Delete every wrong-match candidate for one release (request_id).
+
+    Iterates the current ``get_wrong_matches()`` set, filters to rows for the
+    given ``request_id``, and deletes each in turn via the same helper as the
+    single-row endpoint — so files on disk are removed and ``failed_path`` is
+    cleared uniformly. Returns the count deleted so the UI can toast it.
+    """
+    request_id = body.get("request_id")
+    if request_id is None:
+        h._error("Missing request_id")
+        return
+    try:
+        rid = int(request_id)
+    except (TypeError, ValueError):
+        h._error("request_id must be an integer")
+        return
+
+    pdb = _server()._db()
+    rows = pdb.get_wrong_matches()
+    log_ids: list[int] = []
+    for r in rows:
+        if r.get("request_id") != rid:
+            continue
+        lid = r.get("download_log_id")
+        if isinstance(lid, int):
+            log_ids.append(lid)
+    deleted = 0
+    for log_id in log_ids:
+        if _delete_wrong_match_row(pdb, log_id):
+            deleted += 1
+    h._json({"status": "ok", "request_id": rid, "deleted": deleted})
 
 
 GET_ROUTES: dict[str, object] = {
@@ -236,4 +371,5 @@ GET_ROUTES: dict[str, object] = {
 POST_ROUTES: dict[str, object] = {
     "/api/manual-import/import": post_manual_import,
     "/api/wrong-matches/delete": post_wrong_match_delete,
+    "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
 }

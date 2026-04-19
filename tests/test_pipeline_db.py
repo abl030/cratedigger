@@ -1400,6 +1400,36 @@ class TestGetWrongMatches(unittest.TestCase):
                       "validation_result"):
             self.assertIn(field, row)
 
+    def test_result_carries_current_request_quality_fields(self):
+        """Row must expose the request's on-disk quality state.
+
+        The wrong-matches tab needs to show the current album's quality at
+        the group level so the user can judge whether force-importing is
+        worthwhile. That data lives on ``album_requests`` (status,
+        min_bitrate, verified_lossless, spectral pair) and is pulled in via
+        the existing JOIN.
+        """
+        # Seed the request with imported-quality state.
+        self.db._execute(
+            "UPDATE album_requests SET status = %s, min_bitrate = %s, "
+            "verified_lossless = %s, current_spectral_grade = %s, "
+            "current_spectral_bitrate = %s, imported_path = %s "
+            "WHERE id = %s",
+            ("imported", 207, True, "genuine", None,
+             "/mnt/virtio/Music/Beets/Artist/Album", self.req1),
+        )
+        self._log_rejected(self.req1, "alice", "/fi/a")
+
+        rows = self.db.get_wrong_matches()
+        row = rows[0]
+        self.assertEqual(row["request_status"], "imported")
+        self.assertEqual(row["request_min_bitrate"], 207)
+        self.assertTrue(row["request_verified_lossless"])
+        self.assertEqual(row["request_current_spectral_grade"], "genuine")
+        self.assertIsNone(row["request_current_spectral_bitrate"])
+        self.assertEqual(row["request_imported_path"],
+                         "/mnt/virtio/Music/Beets/Artist/Album")
+
 
 if __name__ == "__main__":
     unittest.main()
