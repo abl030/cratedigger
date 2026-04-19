@@ -673,8 +673,11 @@ in {
       ${cfg.group} = {};
     };
 
+    # When configGroup is set, group-own the stateDir so the configGroup
+    # can traverse into it. Without this, any non-cfg.group user gets EACCES
+    # before the per-file mode on config.ini is even consulted (issue #117).
     systemd.tmpfiles.rules = [
-      "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.stateDir} 0750 ${cfg.user} ${if cfg.configGroup != null then cfg.configGroup else cfg.group} -"
     ];
 
     # Schema migrator. RemainAfterExit=true so soularr / soularr-web can
