@@ -256,7 +256,19 @@ export async function banSource(requestId, username, mbid) {
     });
     const data = await r.json();
     if (data.status === 'ok') {
-      toast(`Banned ${username}, ${data.beets_removed ? 'removed from beets' : 'not in beets'}, requeued`);
+      // Issue #123 PR B: distinguish three outcomes. `cleanup_errors`
+      // non-empty means at least one beet-remove selector timed out /
+      // exited non-zero / raised — the denylist committed, but the
+      // album may still be on disk under one of the selectors. Show
+      // a warning toast so the user knows to investigate rather than
+      // reporting a clean "not in beets".
+      const errs = data.cleanup_errors || [];
+      if (errs.length > 0) {
+        const reasons = errs.map(e => e.reason).join(', ');
+        toast(`Banned ${username}, but beet remove had ${errs.length} failure(s) (${reasons}). Album may still be on disk; check journalctl.`, true);
+      } else {
+        toast(`Banned ${username}, ${data.beets_removed ? 'removed from beets' : 'not in beets'}, requeued`);
+      }
     } else {
       toast(data.error || 'Ban failed', true);
     }
