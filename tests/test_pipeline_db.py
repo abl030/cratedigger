@@ -694,6 +694,24 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
 
+    def test_clears_imported_path(self):
+        """After ``beet remove -d`` the on-disk path is stale — the pipeline
+        tab renders ``imported_path`` directly, so leaving it populated
+        would claim the album is imported at a directory that has just
+        been deleted.
+        """
+        req_id = self._make_request("path")
+        self.db.update_request_fields(
+            req_id,
+            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
+        )
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertIsNone(req["imported_path"])
+
     def test_preserves_min_bitrate(self):
         """min_bitrate is a baseline for the NEXT gate, not on-disk state."""
         req_id = self._make_request("preserve-min")

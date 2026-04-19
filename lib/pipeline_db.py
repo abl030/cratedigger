@@ -226,9 +226,15 @@ class PipelineDB:
 
         Call this whenever an album leaves the beets library — ban-source
         followed by ``beet remove -d``, a manual ``beet rm``, etc. The
-        fields cleared describe on-disk state: ``verified_lossless`` (set
-        only after a genuine FLAC→V0 chain) and ``current_spectral_*``
-        (spectral grade of files currently in beets).
+        fields cleared describe on-disk state:
+
+        - ``verified_lossless`` (set only after a genuine FLAC→V0 chain)
+        - ``current_spectral_*`` (spectral grade of files currently in
+          beets)
+        - ``imported_path`` (beets filesystem path for the release, shown
+          directly by the web UI — leaving it populated after a remove
+          means the pipeline tab still claims the album is imported at a
+          path that has just been deleted)
 
         ``min_bitrate`` and ``prev_min_bitrate`` are preserved deliberately
         — they still act as a conservative baseline for the next quality-
@@ -242,6 +248,7 @@ class PipelineDB:
                    verified_lossless = FALSE,
                    current_spectral_grade = NULL,
                    current_spectral_bitrate = NULL,
+                   imported_path = NULL,
                    updated_at = %s
                WHERE id = %s""",
             (now, request_id),
