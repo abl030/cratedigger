@@ -34,7 +34,7 @@ def _create_test_db(path: str) -> None:
             release_group_title TEXT,
             format TEXT,
             artpath BLOB,
-            discogs_albumid TEXT,
+            discogs_albumid INTEGER,
             mb_albumartistid TEXT,
             mb_albumartistids TEXT
         );
@@ -503,6 +503,43 @@ class TestCheckMbidsDetail(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             detail = db.check_mbids_detail(["zzz-999"])
         self.assertEqual(detail, {})
+
+    def test_discogs_numeric_id_matches_discogs_albumid(self) -> None:
+        """Discogs-sourced releases are stored in beets under
+        ``albums.discogs_albumid`` (INTEGER), not ``mb_albumid``. The
+        pipeline DB packs both kinds of identifier into ``mb_release_id``
+        — a UUID for MusicBrainz, a numeric string for Discogs — so the
+        detail lookup must round-trip the numeric string back to the
+        right beets column. Without this, Discogs wrong-matches lose
+        their quality summary and regress to "nothing on disk".
+        """
+        _insert_album_full(self.db_path, 10, "", [
+            {"bitrate": 1411000, "path": "/m/disc/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ], discogs_albumid=12856590)
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.check_mbids_detail(["12856590"])
+
+        self.assertIn("12856590", detail)
+        self.assertEqual(detail["12856590"]["beets_tracks"], 1)
+        self.assertEqual(detail["12856590"]["beets_format"], "FLAC")
+
+    def test_mixed_mbid_and_discogs_ids(self) -> None:
+        """A single batch can contain both UUID and numeric IDs — e.g.
+        the web UI renders a grid that contains both sources at once.
+        """
+        _insert_album_full(self.db_path, 11, "", [
+            {"bitrate": 320000, "path": "/m/disc/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ], discogs_albumid=99)
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.check_mbids_detail(["aaa-111", "99"])
+
+        self.assertIn("aaa-111", detail)
+        self.assertIn("99", detail)
+        self.assertEqual(detail["99"]["beets_format"], "MP3")
 
 
 class TestSearchAlbums(unittest.TestCase):

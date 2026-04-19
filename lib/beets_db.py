@@ -220,30 +220,75 @@ class BeetsDB:
         return {r[0] for r in rows}
 
     def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
-        """Batch lookup: MBID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}."""
+        """Batch lookup: release ID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}.
+
+        Accepts both MusicBrainz UUIDs (matched against ``albums.mb_albumid``)
+        and Discogs numeric IDs (matched against ``albums.discogs_albumid``,
+        which beets stores as an INTEGER). The pipeline DB packs both kinds
+        of identifier into the ``mb_release_id`` column for compatibility,
+        so consumers must be able to round-trip either one back to the
+        right beets column.
+        """
         if not mbids:
             return {}
-        ph = ",".join("?" for _ in mbids)
-        rows = self._conn.execute(
-            f"SELECT a.mb_albumid, "
-            f"  (SELECT COUNT(*) FROM items WHERE album_id = a.id) AS track_count, "
-            f"  (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) AS formats, "
-            f"  (SELECT MIN(i.bitrate) FROM items i WHERE i.album_id = a.id) AS min_bitrate, "
-            f"  (SELECT MIN(i.samplerate) FROM items i WHERE i.album_id = a.id) AS samplerate, "
-            f"  (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) AS bitdepth "
-            f"FROM albums a WHERE a.mb_albumid IN ({ph})", mbids
-        ).fetchall()
+
+        # Split by ID shape: UUID → mb_albumid (TEXT), numeric → discogs_albumid (INTEGER).
+        # Anything else falls through to mb_albumid too — it's the catch-all
+        # TEXT column, and old/synthetic non-UUID strings (manual fixtures,
+        # tests) still round-trip that way.
+        from lib.quality import detect_release_source
+        mb_ids: list[str] = []
+        discogs_ids: list[int] = []
+        for raw in mbids:
+            source = detect_release_source(raw)
+            if source == "discogs":
+                try:
+                    discogs_ids.append(int(raw))
+                except ValueError:
+                    continue
+            else:
+                mb_ids.append(raw)
+
         result: dict[str, dict[str, object]] = {}
-        for r in rows:
-            if r[0] is None:
-                continue
-            result[r[0]] = {
-                "beets_tracks": r[1],
-                "beets_format": r[2],
-                "beets_bitrate": int(r[3] / 1000) if r[3] else None,
-                "beets_samplerate": r[4],
-                "beets_bitdepth": r[5],
-            }
+
+        def _add_rows(rows: list[tuple[object, ...]]) -> None:
+            for r in rows:
+                if r[0] is None:
+                    continue
+                bitrate = r[3]
+                kbps = int(bitrate / 1000) if isinstance(bitrate, (int, float)) else None
+                result[str(r[0])] = {
+                    "beets_tracks": r[1],
+                    "beets_format": r[2],
+                    "beets_bitrate": kbps,
+                    "beets_samplerate": r[4],
+                    "beets_bitdepth": r[5],
+                }
+
+        detail_cols = (
+            "  (SELECT COUNT(*) FROM items WHERE album_id = a.id) AS track_count, "
+            "  (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) AS formats, "
+            "  (SELECT MIN(i.bitrate) FROM items i WHERE i.album_id = a.id) AS min_bitrate, "
+            "  (SELECT MIN(i.samplerate) FROM items i WHERE i.album_id = a.id) AS samplerate, "
+            "  (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) AS bitdepth "
+        )
+
+        if mb_ids:
+            ph = ",".join("?" for _ in mb_ids)
+            _add_rows(self._conn.execute(
+                f"SELECT a.mb_albumid, {detail_cols}"
+                f"FROM albums a WHERE a.mb_albumid IN ({ph})",
+                mb_ids,
+            ).fetchall())
+
+        if discogs_ids:
+            ph = ",".join("?" for _ in discogs_ids)
+            _add_rows(self._conn.execute(
+                f"SELECT a.discogs_albumid, {detail_cols}"
+                f"FROM albums a WHERE a.discogs_albumid IN ({ph})",
+                discogs_ids,
+            ).fetchall())
+
         return result
 
     def search_albums(self, query: str, limit: int = 100) -> list[dict[str, object]]:
