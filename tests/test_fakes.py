@@ -75,8 +75,9 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
-        zero the on-disk spectral + verified_lossless, preserve min_bitrate
-        and last_download_spectral_* (those aren't on-disk state).
+        zero the on-disk spectral + verified_lossless + imported_path,
+        preserve min_bitrate and last_download_spectral_* (those aren't
+        on-disk state).
         """
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -87,6 +88,7 @@ class TestFakePipelineDB(unittest.TestCase):
             current_spectral_bitrate=160,
             last_download_spectral_grade="suspect",
             last_download_spectral_bitrate=192,
+            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         ))
 
         db.clear_on_disk_quality_fields(42)
@@ -95,6 +97,10 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertFalse(row["verified_lossless"])
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
+        self.assertIsNone(row["imported_path"],
+                          "imported_path must clear — the web UI renders it "
+                          "directly and a stale path after beet rm is worse "
+                          "than no path at all.")
         # min_bitrate preserved as baseline for next gate.
         self.assertEqual(row["min_bitrate"], 320)
         # Recent download's spectral is an audit trail, not on-disk state.
