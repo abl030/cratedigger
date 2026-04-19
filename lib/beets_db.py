@@ -106,13 +106,17 @@ class BeetsDB:
     def album_exists(self, release_id: str) -> bool:
         """Check if a release is already in the beets library.
 
-        Dispatches by identifier shape so Discogs requests (numeric IDs
-        stored in ``albums.discogs_albumid``, INTEGER) round-trip as
-        reliably as MusicBrainz ones (UUIDs in ``albums.mb_albumid``,
-        TEXT). The pipeline DB packs both kinds into the same
-        ``mb_release_id`` column for compatibility, and downstream
-        callers like ban-source's ``beet remove -d`` depend on this
-        method returning the right answer for both.
+        Dispatches by identifier shape so Discogs requests round-trip as
+        reliably as MusicBrainz ones. Two things complicate the lookup:
+
+        - MusicBrainz UUIDs live in ``albums.mb_albumid`` (TEXT).
+        - Discogs releases live either in ``albums.discogs_albumid``
+          (INTEGER, newer imports) OR in ``albums.mb_albumid`` (TEXT)
+          for legacy libraries imported before the discogs plugin
+          started populating ``discogs_albumid``. ``artist_compare.py``
+          and the webui-primer both acknowledge this duality, so for a
+          numeric ID we have to check both columns or legacy Discogs
+          albums read as "not in beets".
         """
         from lib.quality import detect_release_source
         if detect_release_source(release_id) == "discogs":
@@ -121,8 +125,10 @@ class BeetsDB:
             except ValueError:
                 return False
             row = self._conn.execute(
-                "SELECT 1 FROM albums WHERE discogs_albumid = ?",
-                (numeric,),
+                "SELECT 1 FROM albums "
+                "WHERE discogs_albumid = ? OR mb_albumid = ? "
+                "LIMIT 1",
+                (numeric, release_id),
             ).fetchone()
         else:
             row = self._conn.execute(
@@ -253,10 +259,18 @@ class BeetsDB:
         if not mbids:
             return {}
 
-        # Split by ID shape: UUID → mb_albumid (TEXT), numeric → discogs_albumid (INTEGER).
-        # Anything else falls through to mb_albumid too — it's the catch-all
-        # TEXT column, and old/synthetic non-UUID strings (manual fixtures,
-        # tests) still round-trip that way.
+        # Split by ID shape so each id queries the columns it could possibly
+        # live in:
+        # - UUIDs → ``mb_albumid`` only (UUID format can't land in
+        #   ``discogs_albumid``, which is INTEGER).
+        # - Numerics → both ``discogs_albumid`` (newer imports) and
+        #   ``mb_albumid`` (legacy Discogs imports that predate
+        #   ``discogs_albumid`` being populated). Skipping ``mb_albumid``
+        #   for numerics would silently drop real on-disk matches for
+        #   older libraries — see lib/artist_compare.py and
+        #   docs/webui-primer.md for the duality contract.
+        # - Anything else falls through to ``mb_albumid`` (synthetic
+        #   fixture strings, manual edits).
         from lib.quality import detect_release_source
         mb_ids: list[str] = []
         discogs_ids: list[int] = []
@@ -267,6 +281,9 @@ class BeetsDB:
                     discogs_ids.append(int(raw))
                 except ValueError:
                     continue
+                # Also check mb_albumid as the TEXT value; covers legacy
+                # Discogs imports that stored the numeric ID there.
+                mb_ids.append(raw)
             else:
                 mb_ids.append(raw)
 
