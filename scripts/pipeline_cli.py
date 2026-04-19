@@ -774,15 +774,22 @@ def cmd_quality(db, args):
     # lib.preimport.run_preimport_gates and
     # lib.import_dispatch.dispatch_import_from_db.
     #
-    # `audio_check_mode` is read from the active runtime config so the
-    # preview matches what the deployment actually does. On a deployment
-    # with `[Beets Validation] audio_check = off` the audio_corrupt scenario
-    # correctly reports `skipped_off` (Codex round 2, P3).
+    # `audio_check_mode` is read from the active runtime config and
+    # applied to every scenario — on deployments with
+    # `[Beets Validation] audio_check = off`, ALL scenarios must report
+    # `preimport_audio=skipped_off`, not just the synthetic preimport
+    # ones (Codex round 3 P2). Scenarios that explicitly want to
+    # demonstrate the gate (e.g. the audio_corrupt demo) override this
+    # value.
     runtime_audio_check = _load_runtime_audio_check_mode()
     scenarios.extend([
+        # `audio_check_mode` not set here — defaults to the runtime value
+        # below so the scenario honestly reflects the deployment: on an
+        # `audio_check = off` deployment this prints `skipped_off`, which
+        # is what the live pipeline would do (Codex round 2 P3 + round 3 P2).
         ("PREIMPORT: Audio corrupt (ffmpeg fail)", dict(
             is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_check_mode=runtime_audio_check, audio_corrupt=True)),
+            audio_corrupt=True)),
         ("PREIMPORT: Force-import with nested folders", dict(
             is_flac=False, min_bitrate=320, is_cbr=True,
             import_mode="force", has_nested_audio=True)),
@@ -790,6 +797,12 @@ def cmd_quality(db, args):
 
     print(f"\n  What would happen if we downloaded:")
     for name, params in scenarios:
+        # Apply runtime audio_check_mode as a default; scenarios that
+        # explicitly override it still win (dict unpack order).
+        params_with_runtime = {
+            "audio_check_mode": runtime_audio_check,
+            **params,
+        }
         result = full_pipeline_decision(
             existing_min_bitrate=min_br,
             # Forward avg_bitrate too — under the default AVG policy the
@@ -805,7 +818,7 @@ def cmd_quality(db, args):
             target_format=target_format,
             verified_lossless_target=verified_lossless_target,
             cfg=rank_cfg,
-            **params)
+            **params_with_runtime)
 
         imported = "IMPORT" if result["imported"] else "REJECT"
         parts = [imported]

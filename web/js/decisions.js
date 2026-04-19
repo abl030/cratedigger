@@ -294,6 +294,18 @@ export function renderSimulatorForm() {
     </div>
     <div id="ds-results"></div>
   </div>`;
+
+  // Initialize the audio_check_mode control from runtime config so the
+  // simulator submits the deployment's real setting even without clicking
+  // a preset first (Codex round 3 P2). Same story for import_mode — we
+  // default to `auto` which matches the live default, but explicit
+  // initialization keeps the two fields consistent.
+  const runtimeAudio = state.dsConstants?.constants?.audio_check_mode;
+  if (runtimeAudio) {
+    const ac = /** @type {HTMLSelectElement|null} */ (
+      document.getElementById('ds-audio_check_mode'));
+    if (ac) ac.value = runtimeAudio;
+  }
 }
 
 /** @type {Object<string, Object<string, string>>} */
