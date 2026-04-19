@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ReleaseLocation:
-    """Single seam for 'is this release on disk?' — see issue #121.
+    """Single seam for 'is this release on disk?' — see issues #121 / #123.
 
     The pipeline DB packs two ID kinds into one column (``mb_release_id``):
     MusicBrainz UUIDs and Discogs numeric strings. Beets stores them in
@@ -36,20 +36,22 @@ class ReleaseLocation:
 
     - ``kind="exact"``: beets holds the specific pressing keyed by
       ``release_id``. Quality / cleanup decisions may rely on this.
-    - ``kind="fuzzy"``: no ID hit, but artist+album name fuzzy-matched
-      something. Used ONLY for the user-facing 'in library' badge.
-      Never attribute quality or trigger removes off a fuzzy hit —
-      multiple pressings share titles, so we'd act on the wrong one.
     - ``kind="absent"``: nothing matches. ``album_id is None`` and
       ``selectors == ()``.
+
+    Issue #123 collapsed the older 3-state Literal (``exact`` / ``fuzzy``
+    / ``absent``) down to 2. The fuzzy artist+album fallback conflated
+    identity with presence — a sibling pressing title-match would
+    silently attribute another release's quality fields to the badge.
+    'In library' now means exact-ID match, period.
 
     ``selectors`` is the set of ``beet remove -d`` queries the ID
     could live under. Iterating every selector turns a selector-
     skipped remove into a harmless no-op instead of silently leaving
-    the banned copy on disk — see ``BeetsDB.remove_selectors`` /
+    the banned copy on disk — see
     ``web/routes/pipeline.py::post_pipeline_ban_source``.
     """
-    kind: Literal["exact", "fuzzy", "absent"]
+    kind: Literal["exact", "absent"]
     album_id: int | None
     selectors: tuple[str, ...]
 
@@ -135,12 +137,7 @@ class BeetsDB:
             return raw.decode("utf-8", errors="replace")
         return str(raw)
 
-    def locate(
-        self,
-        release_id: str,
-        artist: Optional[str] = None,
-        album: Optional[str] = None,
-    ) -> ReleaseLocation:
+    def locate(self, release_id: str) -> ReleaseLocation:
         """Resolve a pipeline ``mb_release_id`` to a ``ReleaseLocation``.
 
         Single seam for 'is this release on disk?' (issue #121).
@@ -153,10 +150,13 @@ class BeetsDB:
           ``beet remove -d`` tries every layout.
         - UUID shape: check ``mb_albumid`` only. Selector is the
           single ``mb_albumid:<uuid>`` query.
-        - When the ID misses AND the caller supplied artist+album,
-          fall back to a fuzzy ``LIKE`` match. Fuzzy hits expose
-          ``kind="fuzzy"`` and EMPTY selectors — callers must not
-          turn a fuzzy hit into a ``beet remove -d``.
+        - Miss on both paths → ``kind="absent"``.
+
+        Issue #123: the artist/album fuzzy fallback was removed. It
+        conflated identity with presence and silently attributed stale
+        quality fields from sibling pressings to the badge. The honest
+        UI for a legacy untagged album is 'not in library' — re-tag it
+        or add the release to the pipeline.
         """
         source = detect_release_source(release_id)
         numeric: int | None = None
@@ -195,27 +195,7 @@ class BeetsDB:
             return ReleaseLocation(
                 kind="exact", album_id=album_id, selectors=selectors)
 
-        # Fuzzy fallback — only when the caller supplies artist+album.
-        # Returns the first match so the UI can still show 'in library',
-        # but no selectors (we can't identify a specific pressing).
-        if artist and album:
-            fuzzy_id = self._fuzzy_album_id(artist, album)
-            if fuzzy_id is not None:
-                return ReleaseLocation(
-                    kind="fuzzy", album_id=fuzzy_id, selectors=())
-
         return ReleaseLocation(kind="absent", album_id=None, selectors=())
-
-    def _fuzzy_album_id(self, artist: str, album: str) -> Optional[int]:
-        """Internal: first album whose artist+album fuzzily matches."""
-        row = self._conn.execute(
-            "SELECT id FROM albums "
-            "WHERE albumartist LIKE ? COLLATE NOCASE "
-            "  AND album LIKE ? COLLATE NOCASE "
-            "LIMIT 1",
-            (f"%{artist}%", f"%{album}%"),
-        ).fetchone()
-        return row[0] if row else None
 
     def _batch_lookup_album_ids(
         self, release_ids: list[str]
@@ -233,10 +213,6 @@ class BeetsDB:
         stay in sync without either falling into an N+1 pattern — the
         paired-consistency concern Codex round 1 + round 2 kept circling
         (issue #121).
-
-        Fuzzy fallback is NOT applied here — batch callers never want
-        fuzzy hits for 'in library' quality or album-id uses. For the
-        single-ID fuzzy case, use ``locate(id, artist, album)``.
         """
         if not release_ids:
             return {}
@@ -291,7 +267,7 @@ class BeetsDB:
         """Legacy thin wrapper — kept for internal callers only.
 
         New code should call ``locate()`` and inspect ``.album_id``.
-        Returns the exact-match album id (no fuzzy fallback) or None.
+        Returns the exact-match album id or None.
         """
         loc = self.locate(release_id)
         return loc.album_id if loc.kind == "exact" else None
@@ -299,9 +275,10 @@ class BeetsDB:
     def album_exists(self, release_id: str) -> bool:
         """Check if a release is already in the beets library.
 
-        Exact ID match only — no fuzzy fallback. For the 'in library'
-        badge with fuzzy fallback, use ``locate(id, artist, album)``
-        and check ``loc.kind in ("exact", "fuzzy")``.
+        Exact ID match. Issue #123 collapsed the 'in library' signal
+        to this single predicate — the fuzzy artist+album fallback was
+        deleted because it attributed sibling pressings' quality to
+        the badge.
         """
         return self.locate(release_id).kind == "exact"
 
@@ -642,21 +619,6 @@ class BeetsDB:
             return album_row[0], album_row[1], file_paths
         finally:
             conn.close()
-
-    def find_by_artist_album(self, artist: str, album: str) -> Optional[int]:
-        """Find track count by artist+album name. Returns None if not found."""
-        row = self._conn.execute(
-            "SELECT a.id FROM albums a "
-            "WHERE a.albumartist LIKE ? COLLATE NOCASE AND a.album LIKE ? COLLATE NOCASE "
-            "LIMIT 1",
-            (f"%{artist}%", f"%{album}%"),
-        ).fetchone()
-        if not row:
-            return None
-        count = self._conn.execute(
-            "SELECT COUNT(*) FROM items WHERE album_id = ?", (row[0],)
-        ).fetchone()
-        return count[0] if count else None
 
     def get_avg_bitrate_kbps(self, mb_release_id: str) -> Optional[int]:
         """Get average track bitrate (kbps) for a release. None if not found.

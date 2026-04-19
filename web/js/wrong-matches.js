@@ -94,26 +94,23 @@ function renderQualityBadges(g) {
   // nothing on disk, so checking status alone would swallow the signal
   // and leave the badge strip empty.
   //
-  // Issue #121: the backend splits the signal — `in_library`
-  // reflects both exact and fuzzy hits (for the badge), while the
-  // quality strip (`quality_label`, `min_bitrate`,
-  // `current_spectral_grade`, `format`) is populated ONLY on an
-  // exact ID match. A fuzzy substring hit can match the wrong
-  // pressing, so we can't honestly attribute quality to it; the
-  // in_library=true + no-quality case is normal for fuzzy hits
-  // (and still safe for the 'not on disk' badge guard below).
-  // `format` stays in the guard because it's the fallback badge
-  // text below when bitrate is null (e.g. FLAC with no bitrate
-  // metadata), so its presence means an on-disk badge will render.
+  // Issues #121 / #123: the backend gates `in_library` and the
+  // quality fields (`quality_label`, `min_bitrate`,
+  // `current_spectral_grade`, `format`) on exact-ID match — no
+  // fuzzy fallback. When `in_library=true` the quality fields will
+  // be populated; when false they'll be null. `format` stays in the
+  // guard because it's the fallback badge text when bitrate is null
+  // (e.g. FLAC with no bitrate metadata).
   const hasOnDiskQuality = g.quality_label || g.min_bitrate
     || g.current_spectral_grade || g.format;
   if (!hasOnDiskQuality && !g.in_library) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
   }
   if (!hasOnDiskQuality) {
-    // Fuzzy library hit without indexed quality data — defer to
-    // the separate 'in library' badge rendered on the group card;
-    // we can't honestly assert more than that.
+    // Defensive: in_library=true should imply quality fields are
+    // set post-#123, but keep the empty-string return so a partial
+    // dataset (e.g. beets row exists but items table is empty)
+    // doesn't break the UI.
     return '';
   }
 

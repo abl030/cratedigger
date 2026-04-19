@@ -113,15 +113,14 @@ def get_pipeline_recent(h, params: dict[str, list[str]]) -> None:
                 if bi.get(k):
                     item[k] = bi[k]
         else:
-            fallback = s.check_beets_by_artist_album(
-                r.get("artist_name", ""), r.get("album_title", "")
-            )
-            if fallback is not None:
-                item["in_beets"] = True
-                item["beets_tracks"] = fallback
-            else:
-                item["in_beets"] = False
-                item["beets_tracks"] = 0
+            # Issue #123: artist+album fuzzy fallback deleted. Legacy
+            # rows with an untagged beets copy now honestly read as
+            # 'not in library' — fuzzy LIKE matches could return a
+            # track count for an unrelated sibling pressing by the
+            # same artist, which misled the UI's 'already on disk'
+            # signal.
+            item["in_beets"] = False
+            item["beets_tracks"] = 0
         history = history_batch.get(r["id"], [])
         success = next((dl for dl in history if dl.get("outcome") == "success"), None)
         if success:

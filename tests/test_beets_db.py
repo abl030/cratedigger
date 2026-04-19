@@ -208,10 +208,14 @@ class TestLocate(unittest.TestCase):
       the column that actually holds the album.
     - Discogs numeric in legacy ``albums.mb_albumid`` (pre-plugin-patch
       libraries) → ``kind="exact"`` with the same selector pair.
-    - No ID match but artist/album fuzzy-matches → ``kind="fuzzy"``.
-      Used only for the in-library badge, never for quality or cleanup.
     - Nothing matches → ``kind="absent"`` with ``selectors=()`` and
       ``album_id=None``.
+
+    Issue #123 sharpened the seam: the fuzzy ``kind="fuzzy"`` fallback was
+    deleted because it silently attributed quality to sibling pressings
+    (the PR #119 marathon). After this change, 'is this release on disk?'
+    is answered solely by exact-ID match and ``locate()`` takes only a
+    ``release_id`` argument — no artist/album fallback.
     """
 
     def setUp(self) -> None:
@@ -282,54 +286,66 @@ class TestLocate(unittest.TestCase):
         self.assertIsNone(loc.album_id)
         self.assertEqual(loc.selectors, ())
 
-    def test_locate_fuzzy_matches_artist_album(self) -> None:
-        """No ID match but artist/album fuzzy-matches → kind='fuzzy'.
+    def test_locate_untagged_album_is_absent(self) -> None:
+        """Legacy untagged albums resolve to absent, not a fuzzy ghost hit.
 
-        Legacy manual imports (Discogs-style metadata with neither
-        ``mb_albumid`` nor ``discogs_albumid`` populated) still want
-        to show as 'in library' for the UI badge. They must NOT leak
-        into quality-or-cleanup code paths — those pin on ``exact``.
+        Issue #123: the old fuzzy fallback claimed the album was 'in
+        library' when artist+album matched an untagged row. That leaked
+        a sibling pressing's quality into the UI (see the PR #119
+        marathon). After the refactor, the honest answer is ``absent``
+        — the user can re-tag their library or add the release to the
+        pipeline.
         """
-        # Insert an album with no ID at all
         _insert_album_full(self.db_path, 4, "", [
             {"bitrate": 320000, "path": "/m/u/01.mp3", "format": "MP3",
              "samplerate": 44100, "bitdepth": 0},
         ], album="Untagged", albumartist="Some Artist")
         with BeetsDB(self.db_path) as db:
-            loc = db.locate("no-id-at-all",
-                            artist="Some Artist", album="Untagged")
-        self.assertEqual(loc.kind, "fuzzy")
-        self.assertEqual(loc.album_id, 4)
-        # Fuzzy hits don't produce selectors — `beet remove -d` should
-        # never target a fuzzy hit because it might delete a different
-        # pressing that happens to share the title.
-        self.assertEqual(loc.selectors, ())
-
-    def test_locate_no_fuzzy_when_artist_album_missing(self) -> None:
-        """Without artist/album args, we don't fuzzy-match.
-
-        The auto-import path (``album_exists`` at preflight) never
-        passes artist/album — it must get ``absent`` when the ID isn't
-        in beets, not a random fuzzy hit.
-        """
-        with BeetsDB(self.db_path) as db:
             loc = db.locate("no-id-at-all")
         self.assertEqual(loc.kind, "absent")
+        self.assertIsNone(loc.album_id)
+        self.assertEqual(loc.selectors, ())
 
-    def test_locate_exact_beats_fuzzy(self) -> None:
-        """When an exact ID matches, fuzzy never fires."""
+    def test_locate_rejects_artist_album_kwargs(self) -> None:
+        """``locate`` takes only a release_id — no fuzzy escape hatch.
+
+        Issue #123: the old signature accepted optional artist/album
+        kwargs to drive the fuzzy fallback. Removing the fallback means
+        the kwargs are dead weight that would invite future callers to
+        re-introduce the bug. Passing them now is a TypeError.
+        """
+        # Cast to Any so the test's runtime TypeError assertion is the
+        # guard — without the cast, pyright statically rejects the call
+        # (which is also desired, just not what this runtime test is
+        # proving).
+        from typing import Any
         with BeetsDB(self.db_path) as db:
-            loc = db.locate("aaa0bbb0-cccc-dddd-eeee-ffffffffffff",
-                            artist="Different Artist", album="Different Album")
-        self.assertEqual(loc.kind, "exact")
-        self.assertEqual(loc.album_id, 1)
+            locate_any: Any = db.locate
+            with self.assertRaises(TypeError):
+                locate_any("no-id-at-all",
+                           artist="Some Artist",
+                           album="Untagged")
 
     def test_locate_numeric_but_not_in_either_column(self) -> None:
-        """Numeric ID with no exact hit and no fuzzy → absent."""
+        """Numeric ID with no exact hit → absent."""
         with BeetsDB(self.db_path) as db:
             loc = db.locate("99999999")
         self.assertEqual(loc.kind, "absent")
         self.assertEqual(loc.selectors, ())
+
+    def test_release_location_kind_literal_is_exact_or_absent(self) -> None:
+        """``ReleaseLocation.kind`` is narrowed to 2 states (issue #123).
+
+        Pyright enforces the Literal at static time; this runtime guard
+        asserts the ``__args__`` of the annotation so a future
+        well-meaning contributor can't re-add ``"fuzzy"`` as a valid
+        value without tripping the test suite.
+        """
+        from typing import get_args, get_type_hints
+        from lib.beets_db import ReleaseLocation
+        hints = get_type_hints(ReleaseLocation)
+        kind_args = get_args(hints["kind"])
+        self.assertEqual(set(kind_args), {"exact", "absent"})
 
 
 class TestCheckMbidsDiscogsAware(unittest.TestCase):
@@ -1037,28 +1053,30 @@ class TestGetAlbumsByArtist(unittest.TestCase):
         self.assertEqual(len(results), 0)
 
 
-class TestFindByArtistAlbum(unittest.TestCase):
-    """Test find_by_artist_album — track count for artist+album match."""
+class TestFuzzyMethodsRemoved(unittest.TestCase):
+    """Issue #123: ``find_by_artist_album`` / ``_fuzzy_album_id`` deleted.
 
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        _create_test_db(self.db_path)
-        _insert_album(self.db_path, 1, "aaa-111", [
-            (320000, "/m/a/01.mp3"),
-            (320000, "/m/a/02.mp3"),
-            (320000, "/m/a/03.mp3"),
-        ], album="OK Computer", albumartist="Radiohead")
+    The fuzzy presence path conflated identity (which pressing?) with
+    presence (is anything by this artist here?) and silently attributed
+    quality to sibling pressings. These methods were the last entry
+    points into that path. Guard against accidental reintroduction.
+    """
 
-    def test_returns_track_count(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            count = db.find_by_artist_album("Radiohead", "OK Computer")
-        self.assertEqual(count, 3)
+    def test_find_by_artist_album_no_longer_exists(self) -> None:
+        from lib.beets_db import BeetsDB
+        self.assertFalse(
+            hasattr(BeetsDB, "find_by_artist_album"),
+            "find_by_artist_album was deleted in issue #123 "
+            "— fuzzy presence checks must not return.",
+        )
 
-    def test_returns_none_for_no_match(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            count = db.find_by_artist_album("Nonexistent", "Nonexistent")
-        self.assertIsNone(count)
+    def test_fuzzy_album_id_no_longer_exists(self) -> None:
+        from lib.beets_db import BeetsDB
+        self.assertFalse(
+            hasattr(BeetsDB, "_fuzzy_album_id"),
+            "_fuzzy_album_id was deleted in issue #123 "
+            "— fuzzy LIKE query must not return.",
+        )
 
 
 class TestGetAvgBitrateKbps(unittest.TestCase):
