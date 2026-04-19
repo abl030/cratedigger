@@ -1,10 +1,12 @@
 # Deployment Rules
 
-- All code deploys via Nix flake: push → flake update on doc1 → rebuild doc2
+- All code deploys via Nix flake: push soularr → `nix flake update soularr-src` on doc1 → `nixos-rebuild switch` doc2
+- The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/soularr.nix` imports it via `inputs.soularr-src.nixosModules.default`.
 - Flake updates MUST happen on doc1 (has git push credentials). NEVER from doc2.
-- `restartIfChanged = false` on the soularr service — deploys don't restart it. The 5-min timer picks up new code on the next cycle.
-- Always verify deployed code: `ssh doc2 'grep "<unique string>" /nix/store/*/lib/quality.py 2>/dev/null'`
-- Use the `/deploy` command for the full sequence
+- `restartIfChanged = false` on the soularr service — deploys don't restart it. The 5-min timer picks up new code on the next cycle. `soularr-web` and `soularr-db-migrate` use the systemd default and DO restart on switch.
+- Always verify deployed code: `ssh doc2 'grep "<unique string>" /nix/store/*/lib/quality.py 2>/dev/null'`. For module changes: `ssh doc2 'cat /etc/systemd/system/soularr.service'` or check the rendered `/var/lib/soularr/config.ini`.
+- Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
+- Use the `/deploy` command for the full sequence.
 
 ## Database migrations
 

@@ -59,6 +59,61 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Discogs as first-class citizen** -- browse, add, and import Discogs releases through the same pipeline as MusicBrainz. Beets auto-routes numeric IDs to the Discogs plugin; local Discogs mirror eliminates external API dependencies.
 - **Comprehensive test suite** -- 1500+ tests (`nix-shell --run "bash scripts/run_tests.sh"`) with a 4-category taxonomy (pure / seam / orchestration / integration slice), shared `FakePipelineDB`/`FakeSlskdAPI` fakes, builders for typed data, and a route contract audit guard that fails at test time if a new web endpoint is added without frontend contract coverage
 
+## Install
+
+Cratedigger ships as a Nix flake. The repo provides:
+
+- `nixosModules.default` — the NixOS module (systemd units, configTemplate, options surface)
+- `packages.<system>.slskd-api` — the `slskd-api` PyPI build (not in nixpkgs)
+- `devShells.<system>.default` — dev environment for running tests
+- `checks.<system>.moduleVm` — NixOS VM test booting the module against an ephemeral postgres
+
+Add it to your flake:
+
+```nix
+{
+  inputs.cratedigger.url = "github:abl030/soularr";
+  outputs = { self, nixpkgs, cratedigger, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        cratedigger.nixosModules.default
+        ({ config, ... }: {
+          services.soularr = {
+            enable = true;
+            slskd = {
+              apiKeyFile = "/run/secrets/slskd-api-key";   # raw key, one line
+              downloadDir = "/var/lib/slskd/downloads";
+            };
+            pipelineDb.dsn = "postgresql://soularr@localhost/soularr";
+            beetsValidation = {
+              enable = true;
+              stagingDir = "/srv/music/Incoming";
+              trackingFile = "/srv/music/beets-validated.jsonl";
+            };
+            web = {
+              enable = true;
+              beetsDb = "/srv/music/beets-library.db";
+            };
+          };
+        })
+      ];
+    };
+  };
+}
+```
+
+You provide: PostgreSQL (the module just takes a DSN), slskd, redis if you want web caching, and a secrets backend that materializes `*File` paths the module reads. The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.soularr.user` once you've set up the surrounding permissions.
+
+Try it without committing:
+
+```bash
+nix develop github:abl030/soularr        # dev shell with deps
+nix run github:abl030/soularr#slskd-api  # build the slskd-api package
+nix flake check github:abl030/soularr    # boot the VM check
+```
+
+For homelab consumers (sops-nix, nspawn DB containers, reverse proxies), see `~/nixosconfig/modules/nixos/services/soularr.nix` for a worked example wrapping this module.
+
 ## Quality decision pipeline
 
 All quality decisions are pure functions in `lib/quality.py` with full unit test coverage:
@@ -76,7 +131,7 @@ Every threshold, enum, and per-codec band in the rank model is tunable via Nix o
 
 ### Where to tune
 
-All options live under `homelab.services.soularr.qualityRanks.*` in `nixosconfig/modules/nixos/services/soularr.nix` (separate repo). Edit on doc1 (has git push credentials), commit, push, `nixos-rebuild switch` on doc2. The `[Quality Ranks]` section of `config.ini` is regenerated from these options; Soularr picks up the new values on its next 5-min timer fire.
+All options live under `services.soularr.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Soularr picks up the new values on its next 5-min timer fire.
 
 **Source of truth**: `QualityRankConfig.defaults()` in `lib/quality.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `soularr.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at soularr test time: bump a default in either repo, the pin test fails and reminds you to update the other.
 
@@ -99,11 +154,11 @@ All options live under `homelab.services.soularr.qualityRanks.*` in `nixosconfig
 | `bands.mp3Cbr` | 320 | 256 | 192 | 128 | Unverifiable CBR is only `transparent` at 320 because we can't prove a CBR file came from lossless source. Below that → requeue for a FLAC source to re-verify. |
 | `bands.aac`    | 192 | 144 | 112 | 80  | Hydrogenaudio consensus places the "no meaningful quality gain above here" ceiling for music at 192 kbps. |
 
-An unmodified `nixosconfig` produces exactly `QualityRankConfig.defaults()` -- the defaults above are the shipping values.
+Leaving every option at its default produces exactly `QualityRankConfig.defaults()` -- the defaults above are the shipping values.
 
 ### Collection fields (NOT exposed via Nix -- edit `lib/quality.py` directly)
 
-Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `soularr.nix` to render them is a trivial follow-up if you find yourself retuning them often.
+Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
 
 - **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is an **explicit label contract** -- when a download advertises `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3Vbr` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT: the V0 label beats the 210 threshold.
 
@@ -125,12 +180,21 @@ Three fields are part of the rank model but are NOT surfaced as Nix options beca
 
 ### How to tune and deploy
 
+The exact deploy flow depends on where you set the options. For a host config that imports `cratedigger.nixosModules.default` directly:
+
 ```bash
-# On doc1 (has git push credentials for nixosconfig)
+$EDITOR hosts/<your-host>/configuration.nix   # tweak services.soularr.qualityRanks.*
+git commit -am "soularr: retune <what>" && git push
+sudo nixos-rebuild switch --flake .
+```
+
+For the abl030 homelab (this project's reference deployment):
+
+```bash
+# On doc1 — has git push credentials for nixosconfig
 cd ~/nixosconfig
-$EDITOR modules/nixos/services/soularr.nix     # tweak qualityRanks.*
-git add -p && git commit -m "soularr: retune <what>"
-git push
+$EDITOR hosts/doc2/configuration.nix          # tweak services.soularr.qualityRanks.*
+git commit -am "soularr: retune <what>" && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```
 
@@ -144,7 +208,7 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 ### The search filter is deliberately permissive
 
-The `[Search Settings] allowed_filetypes` list in `config.ini` (set via the `configTemplate` string in `soularr.nix`, not yet a Nix option) is a **priority-ordered preference list**, not a quality gate. It decides which codecs Soularr prefers when multiple options exist for the same album and drives peer selection within each tier; it does NOT decide whether a file is "good enough". That call belongs to the rank model.
+The `[Search Settings] allowed_filetypes` list in `config.ini` (exposed as `services.soularr.searchSettings.allowedFiletypes` on the upstream module) is a **priority-ordered preference list**, not a quality gate. It decides which codecs Soularr prefers when multiple options exist for the same album and drives peer selection within each tier; it does NOT decide whether a file is "good enough". That call belongs to the rank model.
 
 **Current production list** (top-to-bottom priority):
 
@@ -177,7 +241,7 @@ mp3 v0,mp3 320,flac 24/192,flac 24/96,flac 24/48,flac 16/44.1,flac,alac,aac,opus
 - **Remove a bare-codec fallback tier** if you want the search filter to enforce a codec floor. E.g. removing `opus` means Opus 128 is invisible again, matching the pre-2026-04-11 behavior.
 - **Add format/bitrate-specific tiers** if you want to promote or demote specific subsets. E.g. inserting `opus 128+` between `alac` and the bare-codec fallbacks would prefer Opus 128 before falling through to AAC/OGG.
 
-**Not currently a Nix option** -- it's hardcoded in `soularr.nix`'s `configTemplate` string. Making it a `homelab.services.soularr.searchFiletypes` option is a trivial follow-up if you find yourself retuning it.
+**Exposed as `services.soularr.searchSettings.allowedFiletypes`** (a `listOf str`). Set it on the host config that imports the upstream module to override the default list above.
 
 ### Where the docs live
 
@@ -256,15 +320,13 @@ curl -s "http://192.168.1.35:5200/ws/2/release/<MBID>?inc=recordings+media&fmt=j
 
 ## Verified lossless target format
 
-After verifying a FLAC download is genuine (via spectral analysis + V0 conversion), the pipeline can convert to a configurable target format instead of keeping V0. Set in `config.ini`:
+After verifying a FLAC download is genuine (via spectral analysis + V0 conversion), the pipeline can convert to a configurable target format instead of keeping V0. Set via the upstream module:
 
-```ini
-[Beets Validation]
-# Target format after verified lossless. Empty = keep V0 (default).
-# The V0 conversion always runs first as a verification step.
-# Examples: "opus 128", "opus 96", "mp3 v2", "mp3 192", "aac 128"
-verified_lossless_target = opus 128
+```nix
+services.soularr.beetsValidation.verifiedLosslessTarget = "opus 128";
 ```
+
+This renders into `[Beets Validation] verified_lossless_target = opus 128` in the runtime `config.ini`.
 
 Supported formats:
 
@@ -282,7 +344,34 @@ The V0 verification step always runs first regardless of target format. Genuinen
 
 ## Notifiers (Meelo / Plex / Jellyfin)
 
-After a successful auto-import, Cratedigger fires a best-effort library-refresh POST to each configured downstream media server so newly-imported albums appear without a manual rescan. Each notifier is independent and disabled by default — omit the section (or leave `url` blank) to skip it. Failures are logged and non-fatal: a broken Plex will never block a successful beets import. The three sections live in `config.ini` at the repo root with every supported key commented out, and the typed fields + `from_config` wiring live in [`lib/config.py`](lib/config.py); the HTTP calls themselves are `trigger_meelo_scan()` / `trigger_plex_scan()` / `trigger_jellyfin_scan()` in [`lib/util.py`](lib/util.py), dispatched from `lib/import_dispatch.py` under the `trigger_notifiers` flag on `DispatchAction`. Jellyfin's `library_id` is optional — leave it unset to trigger a full refresh, or set it to an `ItemId` from `/Library/VirtualFolders` to scope the refresh to one library.
+After a successful auto-import, Cratedigger fires a best-effort library-refresh POST to each configured downstream media server so newly-imported albums appear without a manual rescan. Each notifier is independent and disabled by default. Failures are logged and non-fatal: a broken Plex will never block a successful beets import.
+
+Configure via the upstream module:
+
+```nix
+services.soularr.notifiers = {
+  meelo = {
+    enable = true;
+    url = "https://meelo.example.com";
+    usernameFile = "/run/secrets/meelo-username";
+    passwordFile = "/run/secrets/meelo-password";
+  };
+  plex = {
+    enable = true;
+    url = "https://plex.example.com";
+    tokenFile = "/run/secrets/plex-token";
+    librarySectionId = 3;
+    pathMap = "/srv/music/Beets:/data/music";   # optional, scopes refresh to one path
+  };
+  jellyfin = {
+    enable = true;
+    url = "https://jellyfin.example.com";
+    tokenFile = "/run/secrets/jellyfin-token";
+  };
+};
+```
+
+The module renders the `[Meelo]` / `[Plex]` / `[Jellyfin]` sections of `config.ini` from these options at boot, sed-substituting credentials read from each `*File` path. The typed fields + `from_config` wiring live in [`lib/config.py`](lib/config.py); the HTTP calls themselves are `trigger_meelo_scan()` / `trigger_plex_scan()` / `trigger_jellyfin_scan()` in [`lib/util.py`](lib/util.py), dispatched from `lib/import_dispatch.py` under the `trigger_notifiers` flag on `DispatchAction`. Jellyfin's `library_id` is optional — leave it unset to trigger a full refresh.
 
 ## Running tests
 
@@ -302,7 +391,31 @@ Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/help
 
 ## Deployment
 
-Deployed via NixOS. The NixOS module builds a Python environment with dependencies and runs Cratedigger as a systemd oneshot on a 5-minute timer.
+Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) builds a Python environment with dependencies and registers four systemd units:
+
+- `soularr-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
+- `soularr.service` — oneshot pipeline run, triggered by `soularr.timer`. Runs healthcheck → prestart (renders `config.ini`) → `soularr.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
+- `soularr.timer` — fires every 5 minutes by default (`services.soularr.timer.onUnitActiveSec`).
+- `soularr-web.service` — long-running web UI bound to `services.soularr.web.port` (default 8085).
+
+`soularr.service` and `soularr-web.service` both `requires` the migrate unit, so the app cannot start against an un-migrated DB.
+
+To deploy a new revision:
+
+```bash
+# 1. Push your soularr changes
+cd /path/to/soularr && git push
+
+# 2. Update the flake input on the consumer side
+cd /path/to/your-nixos-config
+nix flake update cratedigger              # or whatever you named the input
+git commit -am "cratedigger: bump" && git push
+
+# 3. Rebuild
+sudo nixos-rebuild switch --flake .       # or via --flake github:user/repo#host
+```
+
+`restartIfChanged = false` on `soularr.service` means the deploy completes without restarting an in-flight cycle; the next 5-min timer fire runs the new code.
 
 ### Schema migrations
 

@@ -585,7 +585,8 @@ def main():
             logger.error(
                 f"Config file not found at {config_file_path}. "
                 "Pass --config-dir to specify its location. "
-                "See config.ini in the repo for an example."
+                "Under the upstream NixOS module, /var/lib/soularr/config.ini "
+                "is rendered by preStartScript at boot."
             )
             sys.exit(1)
 

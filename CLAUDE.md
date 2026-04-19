@@ -40,7 +40,6 @@ Beets' Discogs plugin is patched (Nix `substituteInPlace` in `beets.nix`) to use
 soularr.py              — Search, match, enqueue logic + main(). Thin wrappers delegate
                            to lib/ modules for download processing and utilities.
 album_source.py         — AlbumRecord, DatabaseSource abstraction
-config.ini              — Config template (not used in production — Nix generates it)
 web/
   server.py             — Web UI server (http.server, JSON API)
   mb.py                 — MusicBrainz API helpers
@@ -160,6 +159,26 @@ tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash
                            and fails if any route is unclassified — enforces contract coverage
                            at test time, not at review time.
 test_soularr.py         — Legacy verify_filetype tests (imports from lib/quality)
+nix/                    — Nix-native distribution (PR series 2026-04-19)
+  slskd-api.nix         — slskd-api PyPI build (single source of truth — was duplicated
+                           between shell.nix and the downstream module before)
+  package.nix           — Wraps slskd-api + python3.withPackages(...) into a pythonEnv
+                           for both the dev shell and the NixOS module to consume
+  shell.nix             — Dev shell definition. Top-level shell.nix is a 4-line shim
+                           delegating here so `nix-shell` and `nix develop` resolve
+                           to identical environments.
+  module.nix            — Upstream NixOS module exposed as nixosModules.default.
+                           Generic, paths-as-options, no sops/homelab assumptions.
+                           Owns: configTemplate, preStartScript, slskdHealthCheck,
+                           qualityRanksSection, all systemd unit definitions, and
+                           the full options surface (services.soularr.*).
+  tests/module-vm.nix   — NixOS VM check (nix flake check #moduleVm). Boots the
+                           module against an ephemeral postgres and asserts:
+                           migrator runs, config.ini renders, pipeline-cli works,
+                           soularr-web responds 200. Catches breakage in the option
+                           surface, prestart, systemd graph, wrapper PYTHONPATH.
+flake.nix               — Outputs: packages.slskd-api, devShells.default,
+                           nixosModules.default, checks.moduleVm
 .claude/
   commands/beets-docs.md — Skill: look up beets RST docs from nix store
   rules/code-quality.md  — Type safety, TDD, test taxonomy, fakes/builders inventory,
@@ -173,7 +192,7 @@ test_soularr.py         — Legacy verify_filetype tests (imports from lib/quali
 - **doc1** (`192.168.1.29`): Runs beets (Home Manager), this repo lives at `/home/abl030/soularr`
 - **doc2** (`192.168.1.35`): Runs Soularr (systemd oneshot, 5-min timer), MusicBrainz mirror (`:5200`), slskd (`:5030`)
 - **Shared storage**: `/mnt/virtio` (virtiofs) — beets DB, pipeline DB, music library all accessible from both machines
-- **Nix deployment**: Soularr is a flake input (`soularr-src`) in nixosconfig. All scripts deploy from the Nix store via `${inputs.soularr-src}/...`
+- **Nix deployment**: Soularr is a flake input (`soularr-src`) in `~/nixosconfig/flake.nix`. The downstream wrapper at `~/nixosconfig/modules/nixos/services/soularr.nix` imports `inputs.soularr-src.nixosModules.default` for the upstream module and layers on sops + nspawn DB + redis + localProxy. All scripts deploy from the Nix store via `${inputs.soularr-src}/...` paths set up by the upstream module's `cfg.src` (default `../.`).
 
 ### Key Paths
 
@@ -359,7 +378,7 @@ Quality comparison is now **rank-based**, not raw-bitrate-based. Every measureme
 - **FLAC > any lossy** (LOSSLESS > TRANSPARENT)
 - **Unverifiable CBR 320** → TRANSPARENT but still `requeue_lossless` via the `is_cbr && !verified_lossless` branch
 
-Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be retuned via Nix options at `homelab.services.soularr.qualityRanks.*` in `nixosconfig/modules/nixos/services/soularr.nix`, which render into `[Quality Ranks]` in `/var/lib/soularr/config.ini` on every `nixos-rebuild`. The default `mp3_vbr.excellent=210` preserves the legacy 210kbps gate threshold for bare-codec measurements. **To retune: see `README.md` § "Tuning the quality rank model"** — every option documented with defaults, meaning, and when to retune, plus the three collection fields (`mp3_vbr_levels`, `lossless_codecs`, `mixed_format_precedence`) that are NOT Nix-exposed but live on the same dataclass. Full rationale in `docs/quality-ranks.md`; default drift caught by `TestQualityRankConfigDefaults` pin tests (#67). **The search filter (`[Search Settings] allowed_filetypes`) is deliberately permissive**: high-quality preferred tiers lead, bare-codec fallback tiers at the end (`aac, opus, ogg, mp3, wav`) catch anything the rank model understands so the rank model is the authoritative quality decision (not the search filter). README § "The search filter is deliberately permissive" has the full design.
+Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be retuned via Nix options at `services.soularr.qualityRanks.*` on the upstream module (`nix/module.nix` in this repo), which render into `[Quality Ranks]` in `/var/lib/soularr/config.ini` on every `nixos-rebuild`. The default `mp3_vbr.excellent=210` preserves the legacy 210kbps gate threshold for bare-codec measurements. **To retune: see `README.md` § "Tuning the quality rank model"** — every option documented with defaults, meaning, and when to retune, plus the three collection fields (`mp3_vbr_levels`, `lossless_codecs`, `mixed_format_precedence`) that are NOT Nix-exposed but live on the same dataclass. Full rationale in `docs/quality-ranks.md`; default drift caught by `TestQualityRankConfigDefaults` pin tests (#67). **The search filter (`[Search Settings] allowed_filetypes`) is deliberately permissive**: high-quality preferred tiers lead, bare-codec fallback tiers at the end (`aac, opus, ogg, mp3, wav`) catch anything the rank model understands so the rank model is the authoritative quality decision (not the search filter). README § "The search filter is deliberately permissive" has the full design.
 
 **Key rule**: the `verified_lossless=True` bypass is now **tier-gated**. It imports on verdict `"better"` or `"equivalent"` but blocks on `"worse"`. This prevents a deliberately-too-low `verified_lossless_target` (Opus 64) from replacing a good existing album.
 
@@ -537,24 +556,29 @@ git add <files> && git commit -m "description" && git push
 # 2. Update Nix flake input (MUST be on doc1 — it has git push access)
 ssh doc1 'cd ~/nixosconfig && nix flake update soularr-src && git add flake.lock && git commit -m "soularr: description" && git push'
 
-# 3. Deploy to doc2 — this also runs soularr-db-migrate.service automatically
+# 3. Deploy to doc2 — runs soularr-db-migrate.service AND restarts soularr-web automatically
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
-
-# 4. Restart the web UI (soularr itself picks up changes on next timer cycle)
-ssh doc2 'sudo systemctl restart soularr-web'
 ```
 
 **From doc1 directly:**
 ```bash
-# Steps 2-4 without the ssh wrapper
 cd ~/nixosconfig
 nix flake update soularr-src
 git add flake.lock && git commit -m "soularr: description" && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
-ssh doc2 'sudo systemctl restart soularr-web'
 ```
 
-**IMPORTANT**: `restartIfChanged = false` on `soularr.service` — deploys don't restart Soularr itself. The 5-min timer picks up new code on the next cycle, or manually start.
+**IMPORTANT**: `restartIfChanged = false` on `soularr.service` — deploys don't restart Soularr itself. The 5-min timer picks up new code on the next cycle, or manually start. `soularr-web` and `soularr-db-migrate` use the systemd default (restart on change) so they pick up the new code immediately at switch time.
+
+### Validating before deploy
+
+The flake exposes a NixOS VM check that boots the upstream module against an ephemeral postgres + stub slskd:
+
+```bash
+nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
+```
+
+This catches: option surface breakage, prestart sed-substitution bugs, systemd dep graph cycles, wrapper script PYTHONPATH errors, missing python deps. It does NOT exercise slskd interaction or real downloads (those need fixture data — see the python suite). Run before any `nix/module.nix` change.
 
 ## Database Migrations
 
@@ -587,29 +611,85 @@ ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migra
 
 ## NixOS Module
 
-Located at: `nixosconfig/modules/nixos/services/soularr.nix`
+The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosModules.default` in `flake.nix`. It's generic and homelab-agnostic: every secret is a `*File` path, the DB is a `dsn` string, no sops/nspawn/reverse-proxy assumptions.
 
-Key options under `homelab.services.soularr`:
-- `enable` — enable service + timer
-- `downloadDir` — slskd download directory
-- `beetsValidation.enable` — enable beets validation
-- `beetsValidation.harnessPath` — path to harness (defaults to `${inputs.soularr-src}/harness/...`)
-- `pipelineDb.enable` — use pipeline DB as album source
-- `pipelineDb.dbPath` — PostgreSQL connection string
+`~/nixosconfig/modules/nixos/services/soularr.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
+- sops-nix per-key secret materialization (`soularr-secrets-split` oneshot — see "Sops + per-key secrets" below)
+- the nspawn PostgreSQL container for the pipeline DB
+- the redis instance for the web UI cache
+- the `homelab.localProxy.hosts` entry for `music.ablz.au`
+- systemd `after`/`wants`/`restartTriggers` splicing in `container@soularr-db.service`
+
+Key options on the upstream module (full set in `nix/module.nix`):
+
+| Option | Default | Purpose |
+|---|---|---|
+| `enable` | `false` | Master switch |
+| `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. |
+| `src` | `../.` | Path to soularr source tree. Defaults to this flake's repo root. |
+| `stateDir` | `/var/lib/soularr` | Runtime state (config.ini, lock file). |
+| `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
+| `slskd.downloadDir` | (required) | Where slskd downloads land. |
+| `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
+| `pipelineDb.dsn` | (required) | PostgreSQL DSN. |
+| `beetsValidation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
+| `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. The module does NOT enable redis — provide one. |
+| `notifiers.meelo.{enable,url,usernameFile,passwordFile}` | disabled | Meelo notifier. |
+| `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
+| `notifiers.jellyfin.{enable,url,tokenFile}` | disabled | Jellyfin notifier. |
+| `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
+| `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. |
+| `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See README § "Tuning the quality rank model". |
+| `timer.{enable,onBootSec,onUnitActiveSec}` | every 5 min | Cycle frequency. |
+| `logging.{level,format,datefmt}` | INFO | Python logging config. |
 
 The module:
-1. Builds a Python environment with dependencies (requests, music-tag, slskd-api, psycopg2)
-2. Wraps `soularr.py` in a shell script with ffmpeg, sox, mp3val, flac in PATH
-3. Wraps `pipeline-cli` with the same tools in PATH (needed for `force-import` which calls `import_one.py`)
-4. Wraps `pipeline-migrate` (`scripts/migrate_db.py`) for the schema migrator
-5. Generates `config.ini` at runtime from sops secrets
-6. Pre-start: health-check slskd → integrity-check DB → start Soularr
+1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, slskd-api)
+2. Wraps `soularr.py` / `pipeline_cli.py` / `migrate_db.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH
+3. Renders `/var/lib/soularr/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path
+4. Pre-start: health-check slskd → render config.ini → start `soularr.py`
 
 Systemd units:
 - `soularr-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. Both `soularr.service` and `soularr-web.service` `requires` it, so the app cannot start against an un-migrated DB.
 - `soularr.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
-- `soularr.timer` — fires every 5 minutes.
+- `soularr.timer` — fires every 5 minutes (configurable via `timer.onUnitActiveSec`).
 - `soularr-web.service` — long-running web UI for music.ablz.au.
+
+### Sops + per-key secrets
+
+sops-nix's `key = "..."` does NOT actually extract a single value from a multi-key dotenv file (it writes the whole `KEY=VALUE` envfile regardless — verified empirically; same gotcha is documented in `~/nixosconfig/modules/nixos/services/alerting.nix` for the gotify token). The upstream module wants raw values per file, so the homelab wrapper materializes them via a `soularr-secrets-split` oneshot at boot:
+
+```nix
+systemd.services.soularr-secrets-split = {
+  before = ["soularr.service" "soularr-web.service" "soularr-db-migrate.service"];
+  serviceConfig.ExecStart = pkgs.writeShellScript "soularr-secrets-split" ''
+    set -euo pipefail
+    install -d -m 0700 /run/soularr-secrets
+    for key in SOULARR_SLSKD_API_KEY MEELO_USERNAME MEELO_PASSWORD PLEX_TOKEN JELLYFIN_TOKEN; do
+      grep -m1 "^$key=" "${config.sops.secrets."soularr/env".path}" \
+        | cut -d= -f2- | tr -d '\n' > "/run/soularr-secrets/$key"
+      chmod 0400 "/run/soularr-secrets/$key"
+    done
+  '';
+};
+services.soularr.slskd.apiKeyFile = "/run/soularr-secrets/SOULARR_SLSKD_API_KEY";
+services.soularr.notifiers.meelo.usernameFile = "/run/soularr-secrets/MEELO_USERNAME";
+# ... etc
+```
+
+If you don't use sops or have one key per encrypted file, skip the splitter and point `apiKeyFile` directly at the secret path.
+
+### Flake outputs
+
+```
+github:abl030/soularr
+├── nixosModules.default              ← upstream NixOS module
+├── packages.<system>.slskd-api        ← slskd-api PyPI build (not in nixpkgs)
+├── devShells.<system>.default         ← test/dev environment
+└── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
+```
+
+Build the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 
 ## Running Tests
 

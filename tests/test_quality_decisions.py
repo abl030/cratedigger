@@ -2494,13 +2494,12 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
 class TestQualityRankConfigDefaults(unittest.TestCase):
     """Lock the default policy values so changes are explicit.
 
-    **These values are mirrored in the Nix module at**
-    ``nixosconfig/modules/nixos/services/soularr.nix`` →
-    ``homelab.services.soularr.qualityRanks.*`` (see README §
-    "Tuning the quality rank model" for the deployment surface and
+    **These values are mirrored in the upstream NixOS module at**
+    ``nix/module.nix`` → ``services.soularr.qualityRanks.*`` (see README
+    § "Tuning the quality rank model" for the deployment surface and
     issue #67 for the rationale). If you change a default here, you
     MUST also update the Nix defaults, otherwise a fresh
-    ``nixos-rebuild switch`` will revert the change on doc2.
+    ``nixos-rebuild switch`` will revert the change on any consumer.
 
     This class is the single source of truth for what
     ``QualityRankConfig.defaults()`` returns. The Nix mirror is a

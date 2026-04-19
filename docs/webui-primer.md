@@ -66,25 +66,32 @@ Browser → https://music.ablz.au
 
 ## NixOS Configuration
 
-In `soularr.nix`:
+The upstream module declares the web options at `nix/module.nix` in this repo:
 
 ```nix
-# Options under homelab.services.soularr.web:
-web = {
-  enable = mkEnableOption "music.ablz.au web UI";
+services.soularr.web = {
+  enable = mkOption { type = types.bool; default = false; };
   port = mkOption { type = types.port; default = 8085; };
-  beetsDb = mkOption { type = types.str; default = "/mnt/virtio/Music/beets-library.db"; };
+  beetsDb = mkOption { type = types.str; description = "Path to beets-library.db (read-only)"; };
+  redis = {
+    host = mkOption { type = types.str; default = "127.0.0.1"; };  # the module does NOT enable redis
+    port = mkOption { type = types.port; default = 6379; };
+  };
 };
 ```
 
-Enabled in doc2's `configuration.nix`:
+Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (and the wrapper at `~/nixosconfig/modules/nixos/services/soularr.nix` provides the redis instance + reverse proxy entry):
+
 ```nix
-homelab.services.soularr.web.enable = true;
+# in hosts/doc2/configuration.nix — picks up the wrapper's defaults
+homelab.services.soularr.enable = true;
+# the wrapper sets services.soularr.web.enable = true; on its own
 ```
 
-Creates:
-- `soularr-web` systemd service (simple, restart on failure)
-- `music.ablz.au` nginx reverse proxy via localProxy
+What this creates on doc2:
+- `soularr-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
+- `services.redis.servers.soularr` — provided by the homelab wrapper (not the upstream module)
+- `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
 - Cloudflare DNS + ACME cert auto-provisioned
 
 ## Deployment
