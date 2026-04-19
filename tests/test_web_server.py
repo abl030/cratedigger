@@ -938,6 +938,9 @@ class TestPipelineRouteDirectEquivalence(_WebServerCase):
             "MIN_CLIFF_SLICES", "CLIFF_THRESHOLD_DB_PER_KHZ",
             "rank_gate_min_rank", "rank_bitrate_metric",
             "rank_within_tolerance_kbps",
+            # Preimport audio_check_mode is loaded from runtime config so
+            # the Decisions tab presets reflect the deployment (issue #91).
+            "audio_check_mode",
         }
         route_consts = {k: v for k, v in route["constants"].items()
                         if k not in overlay_keys}

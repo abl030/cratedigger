@@ -2617,10 +2617,18 @@ def full_pipeline_decision(
     result["preimport_audio"] = audio_outcome
     if audio_outcome == "reject_corrupt":
         if import_mode == "auto":
+            # Auto-path rejects call reject_and_requeue(), which denylists
+            # every source username (album_source.py:280). Mirror that side
+            # effect in the simulator so the Decisions tab and
+            # pipeline-cli quality don't underreport what the live pipeline
+            # actually does on an audio_corrupt reject.
             result["final_status"] = "wanted"
             result["keep_searching"] = True
+            result["denylisted"] = True
         else:
-            # Force/manual: no status transition, request stays as-is.
+            # Force/manual: no status transition, no denylist (live helper
+            # _record_rejection_and_maybe_requeue leaves denylisting to the
+            # caller's action.denylist, which audio_corrupt rejects don't set).
             result["final_status"] = None
             result["keep_searching"] = False
         return result

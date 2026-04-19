@@ -195,6 +195,13 @@ def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
     tree["constants"]["rank_bitrate_metric"] = rank_cfg.bitrate_metric.value
     tree["constants"]["rank_within_tolerance_kbps"] = (
         rank_cfg.within_rank_tolerance_kbps)
+    # Expose the runtime audio_check_mode so the simulator presets can
+    # reflect deployments with `[Beets Validation] audio_check = off`.
+    # Without this, the Decisions tab would claim corrupt downloads get
+    # rejected even though run_preimport_gates() skips validation there
+    # (issue #91 codex round 2).
+    from lib.config import read_runtime_config  # type: ignore[import-not-found]
+    tree["constants"]["audio_check_mode"] = read_runtime_config().audio_check_mode
     h._json(tree)
 
 

@@ -306,11 +306,34 @@ export function renderSimulatorForm() {
 // has_nested_audio, issue #91) are set explicitly for the same reason —
 // switching from the audio_corrupt preset back to a normal scenario must
 // reset the corruption flag so downstream stages run again.
+//
+// `audio_check_mode` reflects the live deployment's
+// `[Beets Validation] audio_check` setting (threaded through
+// /api/pipeline/constants). On a deployment with `audio_check = off` the
+// audio gate is reported as `skipped_off` — the Decisions tab would
+// otherwise claim corrupt downloads get rejected when the live pipeline
+// skips validation. See web/routes/pipeline.py::get_pipeline_constants.
 /** @type {Object<string, string>} */
 const _preimport_defaults = {
   audio_check_mode: 'normal', audio_corrupt: 'false',
   import_mode: 'auto', has_nested_audio: 'false',
 };
+
+/**
+ * Merge runtime audio_check_mode from /api/pipeline/constants into preset
+ * defaults so presets reflect the live deployment's config.
+ * @param {Object<string, string>} preset
+ * @returns {Object<string, string>}
+ */
+function _applyRuntimePreimport(preset) {
+  const runtimeMode = state.dsConstants?.constants?.audio_check_mode;
+  // Only override the default — explicit overrides in a preset (e.g. the
+  // audio_corrupt demo flipping audio_corrupt=true) still win.
+  if (runtimeMode && preset.audio_check_mode === _preimport_defaults.audio_check_mode) {
+    return { ...preset, audio_check_mode: runtimeMode };
+  }
+  return preset;
+}
 export const DS_PRESETS = {
   virginia: {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
@@ -405,8 +428,9 @@ export const DS_PRESETS = {
  * @param {string} name - Preset key
  */
 export function dsPreset(name) {
-  const p = DS_PRESETS[name];
-  if (!p) return;
+  const raw = DS_PRESETS[name];
+  if (!raw) return;
+  const p = _applyRuntimePreimport(raw);
   for (const [key, val] of Object.entries(p)) {
     const el = document.getElementById('ds-' + key);
     if (el) /** @type {HTMLInputElement} */ (el).value = val;
