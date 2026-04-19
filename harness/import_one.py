@@ -224,7 +224,8 @@ def target_cleanup_decision(target_achieved: bool,
     1. A ``verified_lossless_target`` was configured — the second conversion
        pass planned to consume them. If that pass was skipped (transcode
        detected → not verified lossless), originals must be removed so beets
-       only sees V0 MP3s.
+       only sees V0 MP3s. Gated on ``sources_kept > 0`` because without a
+       kept source there is nothing to clean.
     2. ``--preserve-source`` was set (force/manual import, issue #111) — we
        held originals back in case the quality decision rejected the import,
        so the user's source FLACs in ``failed_imports/`` would not be
@@ -232,14 +233,25 @@ def target_cleanup_decision(target_achieved: bool,
        site, the quality decision was non-terminal and beets is about to
        run — originals must be removed so beets only sees V0 MP3s.
 
-    Returns False when the target path already cleaned sources itself
-    (``target_achieved=True``) or when nothing was kept to begin with.
+       Unlike case 1 we deliberately do NOT gate on ``sources_kept > 0``:
+       on a retry of a previously-rejected force/manual attempt the V0
+       MP3s already exist, so ``convert_lossless`` skips and reports
+       ``converted == 0`` — but the lossless originals from the prior run
+       are still on disk and still must be cleaned before beets runs
+       (PR #112 Codex round 1 P2). ``_remove_lossless_files`` is
+       idempotent, so a True verdict with nothing to remove is a safe
+       no-op.
+
+    Callers must additionally gate on "did the V0 pass run at all?" —
+    passing ``preserve_source`` through when the harness is in
+    keep-lossless-on-disk mode would delete the very files beets is
+    supposed to receive (PR #112 Codex round 1 P1).
     """
+    if preserve_source:
+        return True
     if sources_kept <= 0:
         return False
-    if target_was_configured:
-        return not target_achieved
-    return preserve_source
+    return target_was_configured and not target_achieved
 
 
 def final_exit_decision(is_transcode: bool) -> int:
@@ -1111,8 +1123,14 @@ def main():
     # so remaining lossless originals must be removed so only V0 MP3s are
     # cataloged. On terminal verdicts we exit at line 997 above and the
     # originals stay intact for the user. ---
-    if target_cleanup_decision(target_achieved, has_target, converted,
-                               preserve_source=args.preserve_source):
+    # Skip this cleanup entirely when target_format asks for lossless on
+    # disk (keep_lossless=True): in that branch ``converted`` counts
+    # ALAC/WAV→FLAC normalization, and the lossless files are exactly what
+    # beets is meant to receive — removing them would destroy the only
+    # copy (PR #112 Codex round 1 P1).
+    if not keep_lossless and target_cleanup_decision(
+            target_achieved, has_target, converted,
+            preserve_source=args.preserve_source):
         _remove_lossless_files(args.path)
         _log(f"  [CLEANUP] Removed lossless originals "
              f"(target skipped or preserve-source approved)")
