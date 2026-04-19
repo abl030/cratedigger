@@ -103,12 +103,6 @@ def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dic
     return b.check_mbids_detail([str(m) for m in mbids]) if b else {}
 
 
-def check_beets_by_artist_album(artist: str, album: str) -> int | None:
-    """Fuzzy check: is there an album by this artist in beets? Returns track count or None."""
-    b = _beets_db()
-    return b.find_by_artist_album(artist, album) if b else None
-
-
 def get_library_artist(artist_name, mb_artist_id=None):
     """Get albums by an artist from the beets library."""
     b = _beets_db()

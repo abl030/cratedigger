@@ -714,6 +714,38 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["recent"][0], self.RECENT_REQUIRED_FIELDS,
                                 "pipeline recent item")
 
+    @patch("web.server.check_beets_by_artist_album",
+           create=True, return_value=12)
+    @patch("web.server.check_beets_library_detail", return_value={})
+    def test_pipeline_recent_in_beets_false_when_mbid_not_in_beets(
+            self, _mock_detail, _mock_fuzzy):
+        """No exact MBID hit → ``in_beets`` False, no fuzzy fallback.
+
+        Issue #123: ``get_pipeline_recent`` previously fell back to
+        ``check_beets_by_artist_album`` when the MBID missed the batch
+        lookup. That fuzzy LIKE match could return a track count for
+        an unrelated pressing by the same artist. After deleting the
+        fuzzy path, the recents row honestly reports ``in_beets=False``
+        and ``beets_tracks=0`` when the exact ID is not in beets —
+        even if a shim would have returned 12 tracks (mocked here with
+        ``create=True`` so the test is RED against the current code).
+        """
+        row = make_request_row(
+            id=303, status="imported", album_title="Recent Album",
+            mb_release_id="no-such-id-in-beets")
+        self.mock_db.get_recent.return_value = [row]
+        self.mock_db.get_track_counts.return_value = {303: 8}
+        self.mock_db.get_download_history_batch.return_value = {}
+
+        status, data = self._get("/api/pipeline/recent")
+        self.assertEqual(status, 200)
+        item = data["recent"][0]
+        self.assertFalse(
+            item["in_beets"],
+            "Issue #123: no exact ID match → in_beets False "
+            "(artist/album fuzzy fallback was deleted).")
+        self.assertEqual(item["beets_tracks"], 0)
+
     def test_pipeline_constants_contract(self):
         status, data = self._get("/api/pipeline/constants")
 
@@ -2535,21 +2567,26 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertFalse(group["verified_lossless"],
                          "verified_lossless must read False when nothing is on disk.")
 
-    @patch("web.server.check_beets_by_artist_album", return_value=12)
+    @patch("web.server.check_beets_by_artist_album",
+           create=True, return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_shows_badge_but_blanks_quality_when_fuzzy_only(
+    def test_group_in_library_false_when_mbid_not_in_beets(
             self, _mock_detail, _mock_fuzzy):
-        """Fuzzy match → in-library badge, but on-disk quality stays blank.
+        """No exact MBID hit → ``in_library`` is False, quality blanks.
 
-        Issue #121: a fuzzy artist+album hit does NOT identify a specific
-        pressing — multiple pressings of 'OK Computer' will all match
-        'Radiohead' + 'OK Computer'. Attributing the pipeline DB's
-        ``min_bitrate`` / ``verified_lossless`` / ``current_spectral_*``
-        to 'whatever fuzzy happened to match' mislabels sibling pressings.
+        Issue #123: the old behavior was a fuzzy artist+album fallback
+        that turned on the badge for a sibling pressing match. That
+        conflated identity and presence and silently attributed stale
+        pipeline DB quality fields to whatever row fuzzy happened to
+        catch. After deleting the fuzzy path, 'in library' means
+        'beets holds this exact release ID' and nothing else.
 
-        The badge stays on (the UI still tells the user 'something by
-        this artist exists'), but the quality strip goes silent because
-        we can't honestly claim which pressing's quality we're reporting.
+        The fuzzy shim is mocked with ``create=True`` so the test is
+        RED against the current code (which would call it and flip the
+        badge on) and GREEN after the deletion (the call site vanishes,
+        so the mock sits unused). If a user has an untagged legacy copy
+        of the album, the honest UI answer is 'not in library' — re-tag
+        it or add it to the pipeline.
         """
         row = self._row(42, 100, "testuser", "/fi/Test",
                          mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -2563,31 +2600,29 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         group = data["groups"][0]
-        self.assertTrue(group["in_library"],
-                        "Fuzzy match still drives the in-library badge.")
-        self.assertIsNone(group["min_bitrate"],
-                          "Fuzzy-only: must not claim a bitrate for an "
-                          "unknown pressing.")
-        self.assertFalse(group["verified_lossless"],
-                         "Fuzzy-only: verified_lossless must read False.")
+        self.assertFalse(
+            group["in_library"],
+            "Issue #123: no exact ID match → in_library False "
+            "(fuzzy fallback was deleted).")
+        self.assertIsNone(group["min_bitrate"])
+        self.assertFalse(group["verified_lossless"])
         self.assertIsNone(group["current_spectral_grade"])
         self.assertIsNone(group["quality_label"])
         self.assertIsNone(group["quality_rank"])
 
-    @patch("web.server.check_beets_by_artist_album", return_value=12)
+    @patch("web.server.check_beets_by_artist_album",
+           create=True, return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_blanks_quality_for_mbidless_request_via_fuzzy(
+    def test_group_in_library_false_for_mbidless_request(
             self, _mock_detail, _mock_fuzzy):
-        """No MBID → locate cannot produce an exact hit, so quality blanks.
+        """Request with no MBID → always ``in_library`` False (issue #123).
 
-        Same rule as the fuzzy-with-MBID case: the badge reflects the
-        fuzzy signal so the user still sees 'something exists', but
-        the quality strip stays honest about how much we actually
-        know. An adversarial review (issue #123 follow-up) showed the
-        MBID-less case is just as vulnerable to misidentification —
-        ``LIKE %artist%`` can match unrelated rows when artist/album
-        names contain wildcard chars, and legacy imports with missing
-        tags can collide with sibling pressings by the same artist.
+        A request that never had an MBID (edge case — shouldn't happen
+        in current flows but persists in old rows) cannot pattern-match
+        anything exact. After fuzzy deletion, the only honest answer
+        is 'not in library' — even if a fuzzy artist+album shim would
+        have returned a match (mocked here with ``create=True`` so the
+        test is RED against the current code).
         """
         row = self._row(42, 100, "testuser", "/fi/Test", mb_release_id=None)
         row["request_status"] = "imported"
@@ -2599,7 +2634,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         group = data["groups"][0]
-        self.assertTrue(group["in_library"])
+        self.assertFalse(group["in_library"])
         self.assertIsNone(group["min_bitrate"])
         self.assertFalse(group["verified_lossless"])
         self.assertIsNone(group["current_spectral_grade"])
@@ -3380,6 +3415,23 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             second["both"][0]["mb"].get("in_library"),
             "Compare overlay must run per-request — a warm skeleton "
             "cache must not mask a library-state change.")
+
+
+class TestFuzzyShimRemoved(unittest.TestCase):
+    """Issue #123: ``web.server.check_beets_by_artist_album`` deleted.
+
+    Guard against accidental reintroduction — the shim was the only
+    path from the web layer into the fuzzy fallback, so deleting it
+    completes the closure.
+    """
+
+    def test_check_beets_by_artist_album_no_longer_exposed(self) -> None:
+        from web import server
+        self.assertFalse(
+            hasattr(server, "check_beets_by_artist_album"),
+            "check_beets_by_artist_album was deleted in issue #123 "
+            "— the fuzzy artist+album shim must not return.",
+        )
 
 
 if __name__ == "__main__":
