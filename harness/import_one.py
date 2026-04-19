@@ -47,8 +47,8 @@ from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
 from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, ImportResult,
-                         PostflightInfo, QualityRankConfig,
+                         AudioQualityMeasurement, DisambiguationFailure,
+                         ImportResult, PostflightInfo, QualityRankConfig,
                          comparison_format_hint,
                          determine_verified_lossless,
                          import_quality_decision, transcode_detection)
@@ -705,18 +705,65 @@ def run_import(path, mb_release_id):
     return (0 if applied else 2), beets_lines, kept_duplicate
 
 
-def _run_disambiguation_move(mbid: str) -> str | None:
+def _apply_disambiguation(
+    mbid: str,
+    beets: BeetsDB,
+    album_path: str,
+    r: ImportResult,
+) -> str:
+    """Run the post-import ``beet move`` and update ImportResult/path.
+
+    Never raises. Returns the (possibly updated) album path. On clean
+    exit, sets ``r.postflight.disambiguated = True`` and re-reads the
+    path from beets DB. On any failure mode (timeout, OSError,
+    non-zero rc), records a typed ``DisambiguationFailure`` on
+    ``r.postflight.disambiguation_failure`` and returns the original
+    ``album_path`` unchanged.
+
+    Extracting this from ``main()`` makes the call-site contract
+    testable in isolation: the album-on-disk state is decoupled from
+    disambiguation success, ImportResult JSON always emits cleanly,
+    and ``r.exit_code`` / ``r.decision`` are never touched by a
+    disambiguation failure.
+    """
+    move_failure = _run_disambiguation_move(mbid)
+    if move_failure is not None:
+        # Album is already imported to beets — only the post-import
+        # path-disambiguation move did not exit cleanly. Surface the
+        # typed reason so the audit trail in download_log shows *why*
+        # without lying that disambiguation succeeded.
+        _log(f"  [DISAMBIGUATE] beet move failed "
+             f"({move_failure.reason}): {move_failure.detail}")
+        r.postflight.disambiguation_failure = move_failure
+        return album_path
+
+    pf_info_after = beets.get_album_info(mbid, _rank_cfg)
+    if pf_info_after:
+        new_path = pf_info_after.album_path
+        if new_path != album_path:
+            _log(f"  [DISAMBIGUATE] Path changed: {album_path} → {new_path}")
+            album_path = new_path
+            r.postflight.imported_path = new_path
+        else:
+            _log(f"  [DISAMBIGUATE] Path unchanged (already unique)")
+    r.postflight.disambiguated = True
+    return album_path
+
+
+def _run_disambiguation_move(mbid: str) -> DisambiguationFailure | None:
     """Run ``beet move mb_albumid:<mbid>`` once, never raise (issue #127).
 
     Mirrors ``lib/release_cleanup.py::_run_remove_selector``: one place
     owns the subprocess invocation, catches every fragile failure mode
     (``TimeoutExpired``, ``OSError`` from a missing ``beet`` binary,
-    non-zero rc), and returns a short error string the caller stores on
-    ``PostflightInfo.disambiguation_error``. Returns ``None`` on a
-    clean rc=0 exit.
+    non-zero rc), and returns a typed ``DisambiguationFailure`` (with a
+    ``Literal["timeout","nonzero_rc","exception"]`` reason tag) so the
+    caller and downstream consumers can classify failures without
+    parsing the ``detail`` string. Returns ``None`` on a clean rc=0
+    exit.
 
-    Why this is its own function: the call site fires *after* beets has
-    already imported the album to disk. An uncaught exception here
+    Why this is its own function: the call site fires *after* beets
+    has already imported the album to disk. An uncaught exception here
     would crash ``import_one.py`` before it could emit the
     ``__IMPORT_RESULT__`` sentinel — the caller would treat the import
     as failed even though the album is on disk, leaving a "semi-lie"
@@ -730,14 +777,18 @@ def _run_disambiguation_move(mbid: str) -> str | None:
             env=beets_subprocess_env(),
         )
     except subprocess.TimeoutExpired as exc:
-        return f"timeout after {exc.timeout}s"
+        return DisambiguationFailure(
+            reason="timeout", detail=f"timeout after {exc.timeout}s")
     except OSError as exc:
-        return f"{type(exc).__name__}: {exc}"
+        return DisambiguationFailure(
+            reason="exception", detail=f"{type(exc).__name__}: {exc}")
 
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip().splitlines()
         last = stderr[-1] if stderr else ""
-        return f"rc={proc.returncode}: {last}" if last else f"rc={proc.returncode}"
+        detail = (f"rc={proc.returncode}: {last}"
+                  if last else f"rc={proc.returncode}")
+        return DisambiguationFailure(reason="nonzero_rc", detail=detail)
 
     return None
 
@@ -1219,27 +1270,7 @@ def main():
     # `beet move` re-evaluates all editions and fixes the paths.
     if kept_duplicate:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
-        move_error = _run_disambiguation_move(mbid)
-        if move_error is None:
-            # Re-read path from beets DB — it may have changed
-            pf_info_after = beets.get_album_info(mbid, _rank_cfg)
-            if pf_info_after:
-                new_path = pf_info_after.album_path
-                if new_path != album_path:
-                    _log(f"  [DISAMBIGUATE] Path changed: {album_path} → {new_path}")
-                    album_path = new_path
-                    r.postflight.imported_path = new_path
-                else:
-                    _log(f"  [DISAMBIGUATE] Path unchanged (already unique)")
-            r.postflight.disambiguated = True
-        else:
-            # Album is already imported to beets; the post-import path
-            # disambiguation didn't run cleanly. Surface the reason on
-            # PostflightInfo so the audit trail in download_log can
-            # show *why* the move failed without silently lying that
-            # disambiguation succeeded.
-            _log(f"  [DISAMBIGUATE] beet move failed: {move_error}")
-            r.postflight.disambiguation_error = move_error
+        album_path = _apply_disambiguation(mbid, beets, album_path, r)
 
     # --- Post-import extension check ---
     # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)

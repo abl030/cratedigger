@@ -281,8 +281,9 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
 
     Mirrors the hardened helper pattern in
     ``lib/release_cleanup.py::_run_remove_selector``: one place owns the
-    subprocess invocation, never raises, returns a short typed-ish error
-    description (``str | None``) the caller stores on ``PostflightInfo``.
+    subprocess invocation, never raises, returns a typed
+    ``DisambiguationFailure`` (with a ``Literal`` reason tag) the
+    caller stores on ``PostflightInfo``. Returns ``None`` on clean exit.
 
     Bug being prevented: the original inline ``subprocess.run`` had no
     try/except. A ``TimeoutExpired`` or ``OSError`` on the post-import
@@ -316,7 +317,7 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
         self.assertTrue(kwargs.get("text"))
 
     @patch("harness.import_one.subprocess.run")
-    def test_timeout_returns_typed_string(self, mock_run):
+    def test_timeout_returns_typed_failure(self, mock_run):
         from harness import import_one
 
         mock_run.side_effect = subprocess.TimeoutExpired(
@@ -326,11 +327,12 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None  # narrow for pyright
-        self.assertIn("timeout", result.lower())
-        self.assertIn("120", result)
+        self.assertEqual(result.reason, "timeout")
+        self.assertIn("timeout", result.detail.lower())
+        self.assertIn("120", result.detail)
 
     @patch("harness.import_one.subprocess.run")
-    def test_oserror_returns_typed_string(self, mock_run):
+    def test_oserror_returns_typed_failure(self, mock_run):
         """FileNotFoundError (beet missing on PATH) must be caught."""
         from harness import import_one
 
@@ -340,10 +342,11 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        # Reason tag should identify the exception class so the audit
-        # trail in download_log can distinguish "beet missing" from
-        # "beet timed out".
-        self.assertIn("FileNotFoundError", result)
+        # Reason tag matches SelectorFailure's "exception" class.
+        self.assertEqual(result.reason, "exception")
+        # Detail carries the exception class name so the audit trail can
+        # distinguish "beet missing" from other OSError flavors.
+        self.assertIn("FileNotFoundError", result.detail)
 
     @patch("harness.import_one.subprocess.run")
     def test_nonzero_rc_with_stderr_includes_last_line(self, mock_run):
@@ -359,8 +362,9 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertIn("rc=1", result)
-        self.assertIn("could not find album", result)
+        self.assertEqual(result.reason, "nonzero_rc")
+        self.assertIn("rc=1", result.detail)
+        self.assertIn("could not find album", result.detail)
 
     @patch("harness.import_one.subprocess.run")
     def test_nonzero_rc_with_empty_stderr_still_returns(self, mock_run):
@@ -375,7 +379,174 @@ class TestRunDisambiguationMoveHelper(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertIn("rc=2", result)
+        self.assertEqual(result.reason, "nonzero_rc")
+        self.assertEqual(result.detail, "rc=2")
+
+
+class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
+    """Integration test for the ``_apply_disambiguation`` callsite contract.
+
+    The reviewer's P2 ask on PR #128: prove that the import-success
+    path is preserved when the move fails. Specifically — when the
+    underlying ``beet move`` raises ``TimeoutExpired`` (or returns
+    non-zero rc), the function:
+
+    1. Must NOT raise — the album is already on disk, the caller's
+       ``ImportResult`` exit_code/decision must be untouched.
+    2. Must record a typed ``DisambiguationFailure`` on
+       ``r.postflight.disambiguation_failure``.
+    3. Must NOT set ``r.postflight.disambiguated = True`` (lying).
+    4. Must NOT mutate ``imported_path`` (the failed move did not
+       change the path on disk).
+    5. Must round-trip cleanly through ImportResult JSON serialization
+       — proving the ``__IMPORT_RESULT__`` sentinel still emits.
+    """
+
+    MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+    ORIGINAL_PATH = "/Beets/The National/2010 - High Violet"
+
+    def _make_result_and_beets(self):
+        from lib.quality import ImportResult, PostflightInfo
+
+        r = ImportResult(
+            decision="import",
+            postflight=PostflightInfo(
+                beets_id=42, track_count=11,
+                imported_path=self.ORIGINAL_PATH))
+        beets = MagicMock()
+        return r, beets
+
+    def _assert_import_success_preserved(self, r):
+        """Properties (1)+(5): import succeeded; ImportResult JSON survives."""
+        from lib.quality import ImportResult
+
+        self.assertEqual(r.exit_code, 0)
+        self.assertEqual(r.decision, "import")
+        # JSON round-trip — proves the sentinel line will emit cleanly
+        # and downstream parse_import_result() can still consume it.
+        roundtrip = ImportResult.from_json(r.to_json())
+        self.assertEqual(roundtrip.exit_code, 0)
+        self.assertEqual(roundtrip.decision, "import")
+        self.assertFalse(roundtrip.postflight.disambiguated)
+        self.assertEqual(roundtrip.postflight.imported_path,
+                         self.ORIGINAL_PATH)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_timeout_does_not_crash_and_preserves_import(self, mock_run):
+        from harness import import_one
+
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["beet", "move"], timeout=120)
+        r, beets = self._make_result_and_beets()
+
+        # Must NOT raise.
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        # Property (4): path unchanged on failure.
+        self.assertEqual(new_path, self.ORIGINAL_PATH)
+        # Property (3): not lying about disambiguation.
+        self.assertFalse(r.postflight.disambiguated)
+        # Property (2): typed failure recorded with correct reason tag.
+        self.assertIsNotNone(r.postflight.disambiguation_failure)
+        assert r.postflight.disambiguation_failure is not None
+        self.assertEqual(
+            r.postflight.disambiguation_failure.reason, "timeout")
+        # beets.get_album_info MUST NOT be called when move fails —
+        # we don't trust the DB state to update the path.
+        beets.get_album_info.assert_not_called()
+        # Properties (1)+(5).
+        self._assert_import_success_preserved(r)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_nonzero_rc_does_not_crash_and_preserves_import(self, mock_run):
+        from harness import import_one
+
+        proc = MagicMock()
+        proc.returncode = 1
+        proc.stderr = "error: beets db locked\n"
+        mock_run.return_value = proc
+        r, beets = self._make_result_and_beets()
+
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        self.assertEqual(new_path, self.ORIGINAL_PATH)
+        self.assertFalse(r.postflight.disambiguated)
+        assert r.postflight.disambiguation_failure is not None
+        self.assertEqual(
+            r.postflight.disambiguation_failure.reason, "nonzero_rc")
+        self._assert_import_success_preserved(r)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_oserror_does_not_crash_and_preserves_import(self, mock_run):
+        from harness import import_one
+
+        mock_run.side_effect = FileNotFoundError(2, "No such file", "beet")
+        r, beets = self._make_result_and_beets()
+
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        self.assertEqual(new_path, self.ORIGINAL_PATH)
+        self.assertFalse(r.postflight.disambiguated)
+        assert r.postflight.disambiguation_failure is not None
+        self.assertEqual(
+            r.postflight.disambiguation_failure.reason, "exception")
+        self._assert_import_success_preserved(r)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_clean_move_path_unchanged(self, mock_run):
+        """Successful move: pf_info_after returns same path → no path
+        mutation, but disambiguated=True and failure is None."""
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = ""
+        mock_run.return_value = proc
+        r, beets = self._make_result_and_beets()
+        # Same path returned — no rename happened.
+        beets.get_album_info.return_value = AlbumInfo(
+            album_id=42, track_count=11,
+            min_bitrate_kbps=245, is_cbr=False,
+            album_path=self.ORIGINAL_PATH)
+
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        self.assertEqual(new_path, self.ORIGINAL_PATH)
+        self.assertTrue(r.postflight.disambiguated)
+        # Property: no_failure on success.
+        self.assertIsNone(r.postflight.disambiguation_failure)
+
+    @patch("harness.import_one.subprocess.run")
+    def test_clean_move_path_changed(self, mock_run):
+        """Successful move: pf_info_after returns new path → path
+        mutates and is propagated back via return value AND on
+        r.postflight.imported_path."""
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = ""
+        mock_run.return_value = proc
+        r, beets = self._make_result_and_beets()
+        renamed = self.ORIGINAL_PATH + " [expanded edition]"
+        beets.get_album_info.return_value = AlbumInfo(
+            album_id=42, track_count=11,
+            min_bitrate_kbps=245, is_cbr=False,
+            album_path=renamed)
+
+        new_path = import_one._apply_disambiguation(
+            self.MBID, beets, self.ORIGINAL_PATH, r)
+
+        self.assertEqual(new_path, renamed)
+        self.assertEqual(r.postflight.imported_path, renamed)
+        self.assertTrue(r.postflight.disambiguated)
+        self.assertIsNone(r.postflight.disambiguation_failure)
 
 
 if __name__ == "__main__":
