@@ -290,6 +290,13 @@ in {
           Path to a file containing the slskd API key (raw, no envvar prefix).
           Must be readable by services.soularr.user. Use sops/agenix or any
           out-of-band mechanism — the module just reads the file at runtime.
+
+          Since issue #117 this path is written directly into config.ini and
+          read on demand by the Python pipeline. No plaintext copy lives in
+          config.ini, and the rendered file is world-readable. If non-root
+          tooling (e.g. pipeline-cli force-import) also needs to reach slskd,
+          that operator user must be able to read this file too — typically
+          done by mode 0440 + an operator group, not by loosening config.ini.
         '';
       };
       hostUrl = mkOption {
@@ -394,6 +401,13 @@ in {
       };
     };
 
+    # Notifier credential *File options follow the same contract as
+    # slskd.apiKeyFile (issue #117): paths written into config.ini, read on
+    # demand by SoularrConfig.resolved_*(). They must be readable by
+    # services.soularr.user. If the operator also triggers imports via
+    # pipeline-cli from a non-root shell, the same files must be readable
+    # by that user too, otherwise notifier scans silently no-op after
+    # CLI-triggered imports (the import itself still succeeds).
     notifiers = {
       meelo = {
         enable = mkEnableOption "Meelo post-import scanner notifier";
