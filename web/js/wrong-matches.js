@@ -280,12 +280,20 @@ export async function deleteWrongMatch(logId, btn) {
       toast('Wrong match deleted');
       invalidateWrongMatches();
       // Re-fetch to reflect group/entry removal (and possibly the whole group disappearing).
+      // Only cache the refreshed render if the refresh itself succeeded — a transient 5xx
+      // on the GET must not erase legitimate remaining rows from the tab.
       const el = document.getElementById('wrong-matches-content');
       if (el) {
-        const fetchRes = await fetch(`${API}/api/wrong-matches`);
-        const fresh = await fetchRes.json();
-        renderWrongMatches(fresh, el);
-        _loaded = true;
+        try {
+          const fetchRes = await fetch(`${API}/api/wrong-matches`);
+          if (fetchRes.ok) {
+            const fresh = await fetchRes.json();
+            renderWrongMatches(fresh, el);
+            _loaded = true;
+          }
+        } catch (_refreshErr) {
+          // Leave the cache invalidated; next tab switch will retry the fetch.
+        }
       }
     } else {
       btn.textContent = 'Failed';
