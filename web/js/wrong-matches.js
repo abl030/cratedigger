@@ -94,27 +94,26 @@ function renderQualityBadges(g) {
   // nothing on disk, so checking status alone would swallow the signal
   // and leave the badge strip empty.
   //
-  // But only when the library is genuinely empty for this album —
-  // `g.in_library` can be true via the fuzzy artist/album fallback
-  // while every quality field is blank because this *exact pressing*
-  // isn't on disk (multi-pressing case). In that scenario the user
-  // already sees the green "in library" badge; pairing it with a red
-  // "nothing on disk" would be self-contradictory and push them
-  // toward unnecessary reimports.
-  //
-  // `format` stays in the guard because it's the fallback badge text
-  // below when bitrate is null (e.g. FLAC with no bitrate metadata),
-  // so its presence means an on-disk badge will render.
+  // The backend now uses the same fuzzy-or-exact `_is_in_beets`
+  // check to both populate `in_library` and to blank the quality
+  // fields, so they move together: fields populated ⇔ library hit.
+  // The remaining in_library=true + no-quality case is a fuzzy
+  // substring collision where beets has nothing actually indexed for
+  // this release — stay silent rather than speculating on a
+  // "different edition" claim the data doesn't support. `format`
+  // stays in the guard because it's the fallback badge text below
+  // when bitrate is null (e.g. FLAC with no bitrate metadata), so
+  // its presence means an on-disk badge will render.
   const hasOnDiskQuality = g.quality_label || g.min_bitrate
     || g.current_spectral_grade || g.format;
   if (!hasOnDiskQuality && !g.in_library) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
   }
   if (!hasOnDiskQuality) {
-    // Fuzzy library hit, exact pressing missing — signal the
-    // ambiguity without the red alarm that implies the album
-    // is entirely absent.
-    return '<span class="badge" style="background:#2a2a3a;color:#9bf;">different edition on disk</span>';
+    // Fuzzy library hit without indexed quality data — defer to
+    // the separate 'in library' badge rendered on the group card;
+    // we can't honestly assert more than that.
+    return '';
   }
 
   const parts = [];

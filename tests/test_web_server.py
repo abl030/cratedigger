@@ -2440,20 +2440,27 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertFalse(group["verified_lossless"],
                          "verified_lossless must read False when nothing is on disk.")
 
-    @patch("web.server.check_beets_by_artist_album", return_value=20)
+    @patch("web.server.check_beets_by_artist_album", return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_hides_stale_quality_when_only_fuzzy_match(
+    def test_group_shows_quality_when_fuzzy_match_only(
             self, _mock_detail, _mock_fuzzy):
-        """Multiple pressings of the same album are kept intentionally, so a
-        fuzzy artist/album match in beets does NOT mean *this* exact MB
-        release is on disk. The quality summary describes the specific
-        pressing — if the exact MBID isn't in beets, the fields must still
-        be zeroed even when ``in_library`` reads True from the fallback.
+        """Legacy / untagged beets entries still have their files on disk
+        — only the MBID tag is missing. ``_is_in_beets`` falls back to
+        a fuzzy artist/album lookup for that case, and the quality
+        summary must honour the same signal: blanking the pipeline DB's
+        real ``min_bitrate`` / ``verified_lossless`` would mislabel a
+        genuinely on-disk album as absent and push users toward
+        unnecessary force-imports.
+
+        The original multi-pressing concern is handled on the write
+        side — ``post_pipeline_ban_source`` clears on-disk quality
+        fields after a successful ``beet remove``, so a sibling
+        pressing can't leak ghost data through the fuzzy fallback.
         """
         row = self._row(42, 100, "testuser", "/fi/Test",
                          mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        row["request_status"] = "wanted"
-        row["request_min_bitrate"] = 320
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 245
         row["request_verified_lossless"] = True
         row["request_current_spectral_grade"] = "genuine"
         row["request_current_spectral_bitrate"] = None
@@ -2462,17 +2469,10 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         group = data["groups"][0]
-        # Fuzzy fallback finds *some* edition → in_library badge is correct.
         self.assertTrue(group["in_library"])
-        # …but this exact pressing isn't on disk, so the quality summary
-        # must blank out every on-disk field. Otherwise the removed
-        # pressing's ghost quality leaks through despite the edge case.
-        self.assertIsNone(group["min_bitrate"])
-        self.assertIsNone(group["current_spectral_grade"])
-        self.assertIsNone(group["current_spectral_bitrate"])
-        self.assertFalse(group["verified_lossless"])
-        self.assertIsNone(group["quality_label"])
-        self.assertIsNone(group["quality_rank"])
+        self.assertEqual(group["min_bitrate"], 245)
+        self.assertTrue(group["verified_lossless"])
+        self.assertEqual(group["current_spectral_grade"], "genuine")
 
     @patch("web.server.check_beets_by_artist_album", return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
