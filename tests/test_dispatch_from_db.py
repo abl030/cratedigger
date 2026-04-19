@@ -199,16 +199,26 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         r = self._dispatch(force=False, ir=ir)
         r["mock_cleanup"].assert_not_called()
 
-    def test_force_import_success_still_no_cleanup(self):
-        """Issue #89: even on successful force-import, we don't rmtree the
-        source. Beets has moved the files out, leaving an empty folder;
-        the user gets to decide whether to remove it. Predictable behavior
-        (never delete) beats clever behavior (delete-if-empty-after-success)
-        because the latter still surprises users on partial imports.
+    def test_force_import_success_cleans_empty_source(self):
+        """Issue #89 (Codex round 1): on successful force-import, beets
+        has moved the files out so the source folder is empty. We MUST
+        clean it — otherwise ``get_wrong_matches()`` keeps treating the
+        still-existing path as an active pending entry, the
+        wrong-matches tab shows a ghost row, and the album can be
+        re-force-imported even though beets already has it. Cleanup on
+        mark_done=True is what makes the wrong-matches tab honest.
         """
         r = self._dispatch(force=True)  # default decision="import"
         self.assertTrue(r["result"].success)
-        r["mock_cleanup"].assert_not_called()
+        r["mock_cleanup"].assert_called_once_with(r["path"])
+
+    def test_manual_import_success_cleans_empty_source(self):
+        """Same invariant for manual-import: successful import cleans the
+        now-empty source folder so the wrong-matches tab reflects reality.
+        """
+        r = self._dispatch(force=False)
+        self.assertTrue(r["result"].success)
+        r["mock_cleanup"].assert_called_once_with(r["path"])
 
 
 class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
