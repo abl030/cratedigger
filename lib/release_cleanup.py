@@ -161,6 +161,13 @@ def remove_and_reset_release(
         # never leaves the others untried. That's the PR #123B bug:
         # the raw loop raised out on the first ``TimeoutExpired``,
         # after the ban-source caller had committed the denylist row.
+        # NB: when selector N times out, Python kills the child process
+        # before moving on. Beets uses a file-backed SQLite DB, so a
+        # killed-mid-transaction remove can leave the WAL in a state
+        # where selector N+1 briefly blocks acquiring the write lock.
+        # SQLite clears this on its own; tests mock subprocess so they
+        # can't exercise it, but if production logs show lock contention
+        # the fix is to increase the timeout or serialize retries.
         for selector in before.selectors:
             failure = _run_remove_selector(selector)
             if failure is not None:
