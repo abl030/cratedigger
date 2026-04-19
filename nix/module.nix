@@ -667,7 +667,15 @@ in {
       after = ["soularr-db-migrate.service"];
       requires = ["soularr-db-migrate.service"];
       restartIfChanged = false;
-      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pythonEnv pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
+      # Deliberately exclude pythonEnv: it ships a `beet` binary (because
+      # `pkgs.beets` is in pythonEnv for the dev shell + tests), and putting
+      # it on PATH shadows whatever `beet` the consumer has provisioned for
+      # the harness wrapper to find. The python interpreter is invoked via
+      # absolute path inside soularrPkg / pipelineCli, so it doesn't need
+      # to be on PATH. The harness wrapper at harness/run_beets_harness.sh
+      # uses `command -v beet` to find a beets installation that already
+      # has the consumer's plugins/config (e.g. home-manager).
+      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {
         Type = "oneshot";
         User = cfg.user;
