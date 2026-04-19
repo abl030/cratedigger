@@ -106,12 +106,18 @@ pkgs.testers.nixosTest {
     assert "1" in versions, f"baseline migration missing, got {versions}"
     assert "2" in versions, f"002 migration missing, got {versions}"
 
-    # config.ini rendered with API key substituted. The soularr ExecStart will
+    # config.ini rendered with api_key_file pointing at the out-of-band secret,
+    # not the plaintext key itself (issue #117). The soularr ExecStart will
     # fail because there's no real slskd, but ExecStartPre (preStartScript)
     # runs first and writes the config — that's all we need to assert here.
     machine.succeed("systemctl start soularr.service || true")
     machine.succeed("test -f /var/lib/soularr/config.ini")
-    machine.succeed("grep -q 'api_key = test-api-key-do-not-use' /var/lib/soularr/config.ini")
+    machine.succeed("grep -q 'api_key_file = /etc/soularr/slskd-api-key' /var/lib/soularr/config.ini")
+    # The secret itself must NEVER appear in config.ini — that's the whole fix.
+    machine.fail("grep -q 'test-api-key-do-not-use' /var/lib/soularr/config.ini")
+    # config.ini is now world-readable since it contains no secrets.
+    mode = machine.succeed("stat -c %a /var/lib/soularr/config.ini").strip()
+    assert mode == "644", f"config.ini should be 0644, got {mode}"
     machine.succeed("grep -q 'enabled = False' /var/lib/soularr/config.ini")  # beets disabled
     machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/soularr/config.ini")
 

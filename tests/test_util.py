@@ -434,6 +434,8 @@ class TestTriggerMeeloScan(unittest.TestCase):
         cfg.meelo_url = url
         cfg.meelo_username = user
         cfg.meelo_password = pw
+        cfg.resolved_meelo_username.return_value = user
+        cfg.resolved_meelo_password.return_value = pw
         return cfg
 
     @patch("lib.util._meelo_jwt_login", return_value="tok")
@@ -458,6 +460,8 @@ class TestTriggerMeeloClean(unittest.TestCase):
         cfg.meelo_url = url
         cfg.meelo_username = user
         cfg.meelo_password = pw
+        cfg.resolved_meelo_username.return_value = user
+        cfg.resolved_meelo_password.return_value = pw
         return cfg
 
     @patch("lib.util._meelo_jwt_login", return_value="tok")
@@ -490,6 +494,7 @@ class TestTriggerPlexScan(unittest.TestCase):
         cfg.plex_token = token
         cfg.plex_library_section_id = section
         cfg.plex_path_map = path_map
+        cfg.resolved_plex_token.return_value = token
         return cfg
 
     @patch("lib.util.urllib.request.urlopen")
@@ -543,6 +548,7 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         cfg.jellyfin_url = url
         cfg.jellyfin_token = token
         cfg.jellyfin_library_id = library_id
+        cfg.resolved_jellyfin_token.return_value = token
         return cfg
 
     @patch("lib.util.urllib.request.urlopen")
@@ -584,6 +590,110 @@ class TestTriggerJellyfinScan(unittest.TestCase):
     def test_does_not_raise_on_failure(self, mock_urlopen):
         from lib.util import trigger_jellyfin_scan
         trigger_jellyfin_scan(self._make_cfg())  # best-effort, no raise
+
+
+class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
+    """Issue #117: notifier functions must read secrets from *_file paths so
+    the rendered config.ini never embeds plaintext credentials.
+
+    These tests use a real SoularrConfig (not MagicMock) so the resolver
+    methods actually run and the file-reading path is exercised end to end.
+    """
+
+    def setUp(self):
+        from lib.config import invalidate_secret_cache
+        invalidate_secret_cache()
+        self.addCleanup(invalidate_secret_cache)
+        self._tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._tmpdir, True)
+
+    def _write(self, name: str, value: str) -> str:
+        path = os.path.join(self._tmpdir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(value)
+        return path
+
+    @patch("lib.util._meelo_scanner_post")
+    @patch("lib.util._meelo_jwt_login", return_value="tok")
+    def test_meelo_scan_reads_credentials_from_files(self, mock_login, mock_post):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_meelo_scan
+        user_path = self._write("meelo-user", "live-user\n")
+        pass_path = self._write("meelo-pass", "live-pass\n")
+        cfg = SoularrConfig(
+            meelo_url="http://meelo:5001",
+            meelo_username_file=user_path,
+            meelo_password_file=pass_path,
+        )
+        trigger_meelo_scan(cfg)
+        mock_login.assert_called_once_with("http://meelo:5001", "live-user", "live-pass")
+        mock_post.assert_called_once()
+
+    @patch("lib.util._meelo_scanner_post")
+    @patch("lib.util._meelo_jwt_login", return_value="tok")
+    def test_meelo_clean_reads_credentials_from_files(self, mock_login, mock_post):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_meelo_clean
+        user_path = self._write("meelo-user", "live-user\n")
+        pass_path = self._write("meelo-pass", "live-pass\n")
+        cfg = SoularrConfig(
+            meelo_url="http://meelo:5001",
+            meelo_username_file=user_path,
+            meelo_password_file=pass_path,
+        )
+        trigger_meelo_clean(cfg)
+        mock_login.assert_called_once_with("http://meelo:5001", "live-user", "live-pass")
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_plex_scan_reads_token_from_file(self, mock_urlopen):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_plex_scan
+        token_path = self._write("plex-token", "plex-live-tok\n")
+        cfg = SoularrConfig(
+            plex_url="http://plex:32400",
+            plex_token_file=token_path,
+            plex_library_section_id="3",
+        )
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_plex_scan(cfg, "/Beets/Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("X-Plex-Token=plex-live-tok", req.full_url)
+        self.assertNotIn(token_path, req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_jellyfin_scan_reads_token_from_file(self, mock_urlopen):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_jellyfin_scan
+        token_path = self._write("jf-token", "jellyfin-live-tok\n")
+        cfg = SoularrConfig(
+            jellyfin_url="http://jellyfin:8096",
+            jellyfin_token_file=token_path,
+        )
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        trigger_jellyfin_scan(cfg)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_header("X-emby-token"), "jellyfin-live-tok")
+
+    def test_plex_scan_skipped_when_token_file_empty_and_no_direct_token(self):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_plex_scan
+        cfg = SoularrConfig(plex_url="http://plex:32400")
+        # Should not raise, should just skip — no token available.
+        trigger_plex_scan(cfg, "/path")
+
+    def test_jellyfin_scan_skipped_when_token_file_empty(self):
+        from lib.config import SoularrConfig
+        from lib.util import trigger_jellyfin_scan
+        cfg = SoularrConfig(jellyfin_url="http://jellyfin:8096")
+        trigger_jellyfin_scan(cfg)
 
 
 class TestBeetsSubprocessEnv(unittest.TestCase):

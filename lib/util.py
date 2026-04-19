@@ -392,10 +392,14 @@ def _meelo_scanner_post(url: str, jwt: str, path: str) -> None:
 
 def trigger_meelo_scan(cfg: SoularrConfig) -> None:
     """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
-    if not cfg.meelo_url or not cfg.meelo_username or not cfg.meelo_password:
+    if not cfg.meelo_url:
         return
     try:
-        jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
+        username = cfg.resolved_meelo_username()
+        password = cfg.resolved_meelo_password()
+        if not username or not password:
+            return
+        jwt = _meelo_jwt_login(cfg.meelo_url, username, password)
         _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/scan?library=beets")
         logger.info("MEELO: triggered beets library scan")
     except Exception as e:
@@ -404,10 +408,14 @@ def trigger_meelo_scan(cfg: SoularrConfig) -> None:
 
 def trigger_meelo_clean(cfg: SoularrConfig) -> None:
     """Trigger a Meelo library clean to remove orphaned entries. Best-effort."""
-    if not cfg.meelo_url or not cfg.meelo_username or not cfg.meelo_password:
+    if not cfg.meelo_url:
         return
     try:
-        jwt = _meelo_jwt_login(cfg.meelo_url, cfg.meelo_username, cfg.meelo_password)
+        username = cfg.resolved_meelo_username()
+        password = cfg.resolved_meelo_password()
+        if not username or not password:
+            return
+        jwt = _meelo_jwt_login(cfg.meelo_url, username, password)
         _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/clean?library=beets")
         logger.info("MEELO: triggered beets library clean")
     except Exception as e:
@@ -423,12 +431,16 @@ def trigger_plex_scan(cfg: SoularrConfig, imported_path: str | None = None) -> N
     If imported_path is provided, does a targeted partial scan of just that folder.
     Otherwise triggers a full library section refresh.
     """
-    if not cfg.plex_url or not cfg.plex_token:
-        logger.debug("PLEX: skipped scan (no url or token configured)")
+    if not cfg.plex_url:
+        logger.debug("PLEX: skipped scan (no url configured)")
         return
     try:
+        token = cfg.resolved_plex_token()
+        if not token:
+            logger.debug("PLEX: skipped scan (no token configured)")
+            return
         section = cfg.plex_library_section_id or "1"
-        url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={cfg.plex_token}"
+        url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={token}"
         if imported_path:
             from urllib.parse import quote
             scan_path = imported_path
@@ -462,10 +474,14 @@ def trigger_jellyfin_scan(cfg: SoularrConfig) -> None:
     If jellyfin_library_id is set, refreshes just that library item.
     Otherwise triggers a full library refresh.
     """
-    if not cfg.jellyfin_url or not cfg.jellyfin_token:
-        logger.debug("JELLYFIN: skipped scan (no url or token configured)")
+    if not cfg.jellyfin_url:
+        logger.debug("JELLYFIN: skipped scan (no url configured)")
         return
     try:
+        token = cfg.resolved_jellyfin_token()
+        if not token:
+            logger.debug("JELLYFIN: skipped scan (no token configured)")
+            return
         if cfg.jellyfin_library_id:
             url = f"{cfg.jellyfin_url}/Items/{cfg.jellyfin_library_id}/Refresh"
         else:
@@ -473,7 +489,7 @@ def trigger_jellyfin_scan(cfg: SoularrConfig) -> None:
         req = urllib.request.Request(
             url,
             method="POST",
-            headers={"X-Emby-Token": cfg.jellyfin_token},
+            headers={"X-Emby-Token": token},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()

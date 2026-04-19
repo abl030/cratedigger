@@ -89,9 +89,13 @@
       ${bandSection "aac" qr.bands.aac}
     '';
 
+  # Issue #117: secrets live at the *File paths referenced here. The soularr
+  # Python code reads them on demand via SoularrConfig.resolved_*() accessors,
+  # so nothing sensitive is ever embedded in config.ini and the file can be
+  # world-readable (see absence of chmod/chgrp in preStartScript).
   configTemplate = pkgs.writeText "soularr-config.ini" ''
     [Slskd]
-    api_key = SLSKD_API_KEY_PLACEHOLDER
+    api_key_file = ${cfg.slskd.apiKeyFile}
     host_url = ${cfg.slskd.hostUrl}
     url_base = ${cfg.slskd.urlBase}
     download_dir = ${cfg.slskd.downloadDir}
@@ -142,18 +146,18 @@
 
     [Meelo]
     url = ${cfg.notifiers.meelo.url}
-    username = MEELO_USERNAME_PLACEHOLDER
-    password = MEELO_PASSWORD_PLACEHOLDER
+    username_file = ${toString cfg.notifiers.meelo.usernameFile}
+    password_file = ${toString cfg.notifiers.meelo.passwordFile}
 
     [Plex]
     url = ${cfg.notifiers.plex.url}
-    token = PLEX_TOKEN_PLACEHOLDER
+    token_file = ${toString cfg.notifiers.plex.tokenFile}
     library_section_id = ${toString cfg.notifiers.plex.librarySectionId}
     path_map = ${cfg.notifiers.plex.pathMap}
 
     [Jellyfin]
     url = ${cfg.notifiers.jellyfin.url}
-    token = JELLYFIN_TOKEN_PLACEHOLDER
+    token_file = ${toString cfg.notifiers.jellyfin.tokenFile}
 
     [Logging]
     level = ${cfg.logging.level}
@@ -161,56 +165,16 @@
     datefmt = ${cfg.logging.datefmt}
   '';
 
-  # Reads each enabled secret file, substitutes placeholders. Generic — doesn't
-  # care whether the files were placed by sops, agenix, or `echo > file`.
+  # Install the rendered template into stateDir. Since config.ini no longer
+  # embeds any plaintext secrets (issue #117 — they're *File paths now), there's
+  # no chmod dance, no sed substitution, and no group-ownership hack. The
+  # secrets themselves still need to be readable by cfg.user at whatever paths
+  # slskd.apiKeyFile / notifiers.*.{username,password,token}File point to.
   preStartScript = pkgs.writeShellScript "soularr-prestart" ''
     set -euo pipefail
     config_dir="${cfg.stateDir}"
     mkdir -p "$config_dir"
-
-    read_file() {
-      local f="$1"
-      if [[ ! -r "$f" ]]; then
-        echo "soularr: required secret file $f not readable" >&2
-        exit 1
-      fi
-      ${pkgs.coreutils}/bin/cat "$f"
-    }
-
-    slskd_key=$(read_file "${cfg.slskd.apiKeyFile}")
-    ${optionalString cfg.notifiers.meelo.enable ''
-      meelo_user=$(read_file "${toString cfg.notifiers.meelo.usernameFile}")
-      meelo_pass=$(read_file "${toString cfg.notifiers.meelo.passwordFile}")
-    ''}
-    ${optionalString (!cfg.notifiers.meelo.enable) ''
-      meelo_user=""
-      meelo_pass=""
-    ''}
-    ${optionalString cfg.notifiers.plex.enable ''
-      plex_token=$(read_file "${toString cfg.notifiers.plex.tokenFile}")
-    ''}
-    ${optionalString (!cfg.notifiers.plex.enable) ''
-      plex_token=""
-    ''}
-    ${optionalString cfg.notifiers.jellyfin.enable ''
-      jellyfin_token=$(read_file "${toString cfg.notifiers.jellyfin.tokenFile}")
-    ''}
-    ${optionalString (!cfg.notifiers.jellyfin.enable) ''
-      jellyfin_token=""
-    ''}
-
-    ${pkgs.gnused}/bin/sed \
-      -e "s|SLSKD_API_KEY_PLACEHOLDER|$slskd_key|" \
-      -e "s|MEELO_USERNAME_PLACEHOLDER|$meelo_user|" \
-      -e "s|MEELO_PASSWORD_PLACEHOLDER|$meelo_pass|" \
-      -e "s|PLEX_TOKEN_PLACEHOLDER|$plex_token|" \
-      -e "s|JELLYFIN_TOKEN_PLACEHOLDER|$jellyfin_token|" \
-      ${configTemplate} > "$config_dir/config.ini"
-
-    chmod ${cfg.configMode} "$config_dir/config.ini"
-    ${optionalString (cfg.configGroup != null) ''
-      ${pkgs.coreutils}/bin/chgrp ${cfg.configGroup} "$config_dir/config.ini"
-    ''}
+    ${pkgs.coreutils}/bin/install -m 0644 ${configTemplate} "$config_dir/config.ini"
     rm -f "$config_dir/.soularr.lock"
   '';
 
@@ -299,35 +263,6 @@ in {
       type = types.str;
       default = "/var/lib/soularr";
       description = "Runtime state directory (config.ini, lock file).";
-    };
-
-    configMode = mkOption {
-      type = types.str;
-      default = "0600";
-      example = "0640";
-      description = ''
-        File mode for the rendered ${"\${stateDir}/config.ini"}. Defaults to
-        0600 because the file embeds secrets (slskd API key, notifier
-        credentials) — see issue #117 for the planned cleanup.
-
-        Override to 0640 (with `configGroup` set to a group the operator
-        belongs to) so non-root tooling like `pipeline-cli` can read the
-        config when invoked from a user shell. Without group-readable
-        access, force-import / manual-import / quality simulator commands
-        all fail with cryptic "no JSON, rc=2" errors.
-      '';
-    };
-
-    configGroup = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "wheel";
-      description = ''
-        Group ownership for the rendered config.ini. `null` keeps the file
-        in `services.soularr.group` (the default). Set this when raising
-        `configMode` to 0640 so the operator user (which must be in this
-        group) can read the file.
-      '';
     };
 
     timer = {
@@ -673,11 +608,13 @@ in {
       ${cfg.group} = {};
     };
 
-    # When configGroup is set, group-own the stateDir so the configGroup
-    # can traverse into it. Without this, any non-cfg.group user gets EACCES
-    # before the per-file mode on config.ini is even consulted (issue #117).
+    # Since config.ini no longer embeds plaintext secrets (issue #117), the
+    # state directory and the rendered config can both be world-readable. The
+    # secrets themselves live at operator-chosen paths (see slskd.apiKeyFile
+    # / notifiers.*.{username,password,token}File) and retain their own
+    # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
     systemd.tmpfiles.rules = [
-      "d ${cfg.stateDir} 0750 ${cfg.user} ${if cfg.configGroup != null then cfg.configGroup else cfg.group} -"
+      "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
     ];
 
     # Schema migrator. RemainAfterExit=true so soularr / soularr-web can
