@@ -136,7 +136,13 @@ def post_manual_import(h, body: dict) -> None:
 
 
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
-    """List wrong-match rejections with files still on disk."""
+    """Group wrong-match rejections by release (issue #113).
+
+    Each ``album_requests`` row becomes one group; every rejected
+    ``download_log`` entry with an on-disk ``failed_path`` becomes one entry
+    inside its group. Groups with zero surviving entries are dropped so the
+    UI only shows actionable work.
+    """
     srv = _server()
     pdb = srv._db()
     rows = pdb.get_wrong_matches()
@@ -147,22 +153,41 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     ]
     beets_info = srv.check_beets_library_detail(mbids) if mbids else {}
 
-    entries = []
+    groups: dict[int, dict[str, object]] = {}
+    order: list[int] = []
+
     for row in rows:
         vr = _parse_validation_result(row.get("validation_result"))
         failed_path_raw = vr.get("failed_path")
         failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
         resolved_path = resolve_failed_path(failed_path)
-        target = _target_candidate(vr)
+        files_exist = resolved_path is not None
+        if not files_exist:
+            continue
 
-        entries.append({
+        request_id = row["request_id"]
+        assert isinstance(request_id, int)
+        group = groups.get(request_id)
+        if group is None:
+            group = {
+                "request_id": request_id,
+                "artist": row["artist_name"],
+                "album": row["album_title"],
+                "mb_release_id": row.get("mb_release_id"),
+                "in_library": _is_in_beets(row, beets_info),
+                "pending_count": 0,
+                "entries": [],
+            }
+            groups[request_id] = group
+            order.append(request_id)
+
+        target = _target_candidate(vr)
+        entries_list = group["entries"]
+        assert isinstance(entries_list, list)
+        entries_list.append({
             "download_log_id": row["download_log_id"],
-            "request_id": row["request_id"],
-            "artist": row["artist_name"],
-            "album": row["album_title"],
-            "mb_release_id": row.get("mb_release_id"),
             "failed_path": resolved_path or failed_path,
-            "files_exist": resolved_path is not None,
+            "files_exist": files_exist,
             "distance": vr.get("distance"),
             "scenario": vr.get("scenario"),
             "detail": vr.get("detail"),
@@ -170,10 +195,10 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 or vr.get("soulseek_username"),
             "candidate": target,
             "local_items": vr.get("items", []),
-            "in_library": _is_in_beets(row, beets_info),
         })
+        group["pending_count"] = len(entries_list)
 
-    h._json({"entries": entries})
+    h._json({"groups": [groups[rid] for rid in order]})
 
 
 def post_wrong_match_delete(h, body: dict) -> None:

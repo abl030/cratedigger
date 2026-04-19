@@ -14,7 +14,7 @@ import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSou
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove, disambDeleteFromLibrary } from './analysis.js';
 import { loadManualImport, runManualImport } from './manual.js';
-import { loadWrongMatches, toggleWrongMatchDetail, forceImportWrongMatch, deleteWrongMatch } from './wrong-matches.js';
+import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, forceImportWrongMatch, deleteWrongMatch } from './wrong-matches.js';
 import { toast } from './state.js';
 
 // --- Tab management ---
@@ -103,7 +103,8 @@ Object.assign(window, {
   runManualImport,
   showManualSub,
   loadWrongMatches,
-  toggleWrongMatchDetail,
+  toggleWrongMatchGroup,
+  toggleWrongMatchEntry,
   forceImportWrongMatch,
   deleteWrongMatch,
   toast,
