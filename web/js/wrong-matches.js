@@ -136,22 +136,20 @@ function fmtTs(iso) {
 }
 
 /**
- * Render the "Latest activity" header inside an expanded group so the user
- * can see at a glance whether the release is still being actively retried
- * or has already seen a recent success.
+ * Render the "Last import" header inside an expanded group. Shows the most
+ * recent success/force_import/manual_import for the release — i.e. what's
+ * actually on disk — not the newest attempt. A later rejection doesn't
+ * change what beets has.
  * @param {any} d
  * @returns {string}
  */
-function renderLatestDownload(d) {
-  if (!d) return '<div style="color:#555;font-size:0.78em;padding:4px 8px;">No download history.</div>';
-  const outcomeColor = d.outcome === 'success' || d.outcome === 'force_import' || d.outcome === 'manual_import'
-    ? '#6d6'
-    : d.outcome === 'rejected' || d.outcome === 'failed' ? '#f88' : '#da6';
+function renderLatestImport(d) {
+  if (!d) return '<div style="color:#555;font-size:0.78em;padding:4px 8px;">No successful import on disk.</div>';
   const fmtBr = d.actual_filetype ? `${String(d.actual_filetype).toUpperCase()}${d.actual_min_bitrate ? ' ' + d.actual_min_bitrate + 'k' : ''}` : '';
   return `
-    <div style="background:#161616;border-left:3px solid ${outcomeColor};padding:6px 10px;margin:0 0 8px 0;font-size:0.78em;">
+    <div style="background:#161616;border-left:3px solid #6d6;padding:6px 10px;margin:0 0 8px 0;font-size:0.78em;">
       <div style="color:#aaa;">
-        <span style="color:${outcomeColor};font-weight:600;">Latest: ${esc(d.outcome || '?')}</span>
+        <span style="color:#6d6;font-weight:600;">Last import: ${esc(d.outcome || '?')}</span>
         <span style="color:#666;margin-left:8px;">${esc(fmtTs(d.created_at))}</span>
       </div>
       <div style="color:#888;margin-top:2px;">
@@ -195,7 +193,7 @@ function renderGroup(g) {
     </div>`;
 
   const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e)).join('');
-  const latest = renderLatestDownload(g.latest_download);
+  const latest = renderLatestImport(g.latest_import);
 
   // Group-level bulk actions: currently just "Delete All" so the user can
   // clear an entire release's failed_imports without clicking each candidate.
