@@ -2576,13 +2576,19 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     @patch("web.server.check_beets_by_artist_album", return_value=12)
     @patch("web.server.check_beets_library_detail", return_value={})
-    def test_group_blanks_quality_for_mbidless_request_via_fuzzy(
+    def test_group_shows_quality_for_mbidless_request_via_fuzzy(
             self, _mock_detail, _mock_fuzzy):
-        """No MBID → locate cannot produce an exact hit, so quality blanks.
+        """No MBID → fuzzy hit IS the authoritative signal.
 
-        Same rule as the fuzzy-with-MBID case: the badge reflects the
-        fuzzy signal so the user still sees 'something exists', but the
-        quality strip stays honest about how much we actually know.
+        Refinement from Codex round 2: when the request never had an
+        MBID (legacy manual imports, Discogs-flavoured rows with no
+        ID, etc.), there's no multi-pressing disambiguation concern
+        — the pipeline DB's ``min_bitrate`` / ``verified_lossless``
+        came from THIS request's import, and the only on-disk
+        candidate is what fuzzy matches. Blanking it would regress
+        force-import decisions for exactly the rows that depend on
+        fuzzy today. Issue #121's 'blank on fuzzy' rule still fires
+        for the MBID-present-but-doesn't-match case.
         """
         row = self._row(42, 100, "testuser", "/fi/Test", mb_release_id=None)
         row["request_status"] = "imported"
@@ -2595,9 +2601,10 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         group = data["groups"][0]
         self.assertTrue(group["in_library"])
-        self.assertIsNone(group["min_bitrate"])
-        self.assertFalse(group["verified_lossless"])
-        self.assertIsNone(group["current_spectral_grade"])
+        # MBID-less + fuzzy → trust the pipeline DB's on-disk quality.
+        self.assertEqual(group["min_bitrate"], 245)
+        self.assertTrue(group["verified_lossless"])
+        self.assertEqual(group["current_spectral_grade"], "genuine")
 
     def test_group_latest_import_picks_most_recent_success(self):
         """latest_import shows the last successful import, not the newest attempt.

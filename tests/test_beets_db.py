@@ -381,6 +381,75 @@ class TestCheckMbidsDiscogsAware(unittest.TestCase):
         self.assertEqual(found, {"aaa-111", "12856590", "5555555"})
 
 
+class TestBatchLookupAlbumIds(unittest.TestCase):
+    """``_batch_lookup_album_ids`` is the shared batched seam for
+    ``check_mbids`` + ``get_album_ids_by_mbids`` (issue #121 / Codex
+    round 2). Two invariants: same ID shapes as ``locate``, and
+    strictly ≤2 SQL queries regardless of input size — no N+1.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        _insert_album(self.db_path, 1, "aaa-111", [(320000, "/a.mp3")])
+        _insert_album(self.db_path, 2, "bbb-222", [(320000, "/b.mp3")])
+        _insert_album_full(self.db_path, 3, "", [
+            {"bitrate": 1411000, "path": "/m/d/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ], discogs_albumid=12856590)
+        _insert_album_full(self.db_path, 4, "5555555", [
+            {"bitrate": 320000, "path": "/m/l/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ])
+
+    def test_resolves_mixed_batch(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            result = db._batch_lookup_album_ids(
+                ["aaa-111", "bbb-222", "12856590", "5555555", "absent-id"])
+        self.assertEqual(result, {
+            "aaa-111": 1, "bbb-222": 2,
+            "12856590": 3, "5555555": 4,
+        })
+
+    def test_uses_at_most_two_queries(self) -> None:
+        """No N+1: regardless of batch size, at most 2 SQL round-trips
+        (one ``mb_albumid IN (...)``, one ``discogs_albumid IN (...)``).
+
+        This is the Codex round 2 latency guard — the browse overlays
+        call ``check_beets_library`` on whole release-group result sets,
+        so a per-ID loop would add hundreds of round-trips on large
+        artist pages.
+        """
+        calls: list[str] = []
+
+        class _TrackingConn:
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def execute(self, sql: str, *args: object, **kwargs: object):
+                calls.append(sql)
+                return self._real.execute(sql, *args, **kwargs)  # type: ignore[arg-type]
+
+            def close(self) -> None:
+                self._real.close()
+
+        with BeetsDB(self.db_path) as db:
+            db._conn = _TrackingConn(db._conn)  # type: ignore[assignment]
+            db._batch_lookup_album_ids(
+                ["aaa-111", "bbb-222", "12856590", "5555555",
+                 "missing-1", "missing-2", "missing-3"])
+
+        self.assertLessEqual(
+            len(calls), 2,
+            f"_batch_lookup_album_ids must issue at most 2 queries, "
+            f"got {len(calls)}: {calls}")
+
+    def test_empty_input(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db._batch_lookup_album_ids([]), {})
+
+
 class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
     """Regression guard: ``album_exists`` understands Discogs IDs, so the
     postflight lookups called during import (``get_album_info``,
