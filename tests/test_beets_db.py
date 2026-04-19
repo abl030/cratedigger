@@ -173,6 +173,24 @@ class TestAlbumExists(unittest.TestCase):
             self.assertFalse(db.album_exists("999"),
                              "Unmatched numeric ID must return False.")
 
+    def test_discogs_id_matches_legacy_mb_albumid(self) -> None:
+        """Legacy beets libraries (imported before the Discogs plugin started
+        populating ``discogs_albumid``) stored Discogs numeric IDs as
+        TEXT in ``mb_albumid``. ``lib/artist_compare.py`` and the
+        webui-primer explicitly document this duality, so the existence
+        check must fall back to ``mb_albumid`` for numeric IDs too —
+        otherwise ban-source / status-reset skip ``beet remove`` for
+        those albums and the Discogs copy lingers forever.
+        """
+        _insert_album_full(self.db_path, 88, "5555555", [
+            {"bitrate": 1411000, "path": "/m/legacy/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ])
+
+        with BeetsDB(self.db_path) as db:
+            self.assertTrue(db.album_exists("5555555"),
+                            "Legacy numeric mb_albumid must still resolve.")
+
 
 class TestGetAlbumInfo(unittest.TestCase):
     """Test get_album_info (postflight verify + quality gate data)."""
@@ -558,6 +576,25 @@ class TestCheckMbidsDetail(unittest.TestCase):
         self.assertIn("aaa-111", detail)
         self.assertIn("99", detail)
         self.assertEqual(detail["99"]["beets_format"], "MP3")
+
+    def test_legacy_discogs_numeric_in_mb_albumid(self) -> None:
+        """Legacy Discogs imports stored the numeric ID as TEXT in
+        ``mb_albumid``; ``check_mbids_detail`` must still return those
+        rows so the web UI doesn't blank real quality data (and then
+        render "different edition on disk" for a release that's
+        actually the exact pressing on disk).
+        """
+        _insert_album_full(self.db_path, 12, "5555555", [
+            {"bitrate": 1411000, "path": "/m/legacy/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ])
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.check_mbids_detail(["5555555"])
+
+        self.assertIn("5555555", detail)
+        self.assertEqual(detail["5555555"]["beets_format"], "FLAC")
+        self.assertEqual(detail["5555555"]["beets_bitdepth"], 16)
 
 
 class TestSearchAlbums(unittest.TestCase):
