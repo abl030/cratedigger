@@ -719,14 +719,28 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
             audio_check_mode="normal", audio_corrupt=True)
         self.assertEqual(r["preimport_audio"], "reject_corrupt")
         self.assertFalse(r["imported"])
-        # Auto path transitions back to "wanted".
+        # Auto path transitions back to "wanted" and denylists the source
+        # (reject_and_requeue calls db.add_denylist for every username).
         self.assertEqual(r["final_status"], "wanted")
         self.assertTrue(r["keep_searching"])
+        self.assertTrue(r["denylisted"])
         # Later stages must not have run.
         self.assertIsNone(r["stage0_spectral_gate"])
         self.assertIsNone(r["stage1_spectral"])
         self.assertIsNone(r["stage2_import"])
         self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_audio_corrupt_rejects_force_does_not_denylist(self):
+        # Force/manual uses _record_rejection_and_maybe_requeue with
+        # requeue=False; that helper does not denylist (comment: "denylisting
+        # is handled by the caller via action.denylist"). No such action is
+        # set for preimport audio rejects, so denylisted must be False.
+        r = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_check_mode="normal", audio_corrupt=True,
+            import_mode="force")
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["denylisted"])
 
     def test_audio_corrupt_rejects_force_preserves_status(self):
         # Force-import path uses requeue=False — the request's status is not

@@ -56,6 +56,19 @@ def _load_runtime_verified_lossless_target() -> str:
     return read_verified_lossless_target()
 
 
+def _load_runtime_audio_check_mode() -> str:
+    """Load the runtime audio_check_mode from the active config.ini.
+
+    Used by the quality simulator so the preimport audio gate scenario
+    reflects the deployment's `[Beets Validation] audio_check` setting
+    (issue #91). On deployments with `audio_check = off`, the scenario
+    shows `skipped_off` instead of `reject_corrupt`.
+    """
+    from lib.config import read_runtime_config
+
+    return read_runtime_config().audio_check_mode
+
+
 def _quality_preview_target_label(
     target_format: str | None,
     verified_lossless_target: str | None,
@@ -754,18 +767,26 @@ def cmd_quality(db, args):
         ("CBR 192 genuine", dict(
             is_flac=False, min_bitrate=192, is_cbr=True,
             spectral_grade="genuine")),
-        # --- Preimport gate scenarios (issue #91) ---
-        # Audio and nested-layout gates short-circuit before any FLAC/MP3
-        # stage runs. These let operators see the rejection paths that
-        # live in lib.preimport.run_preimport_gates and
-        # lib.import_dispatch.dispatch_import_from_db.
+    ]
+    # --- Preimport gate scenarios (issue #91) ---
+    # Audio and nested-layout gates short-circuit before any FLAC/MP3 stage
+    # runs. These let operators see the rejection paths that live in
+    # lib.preimport.run_preimport_gates and
+    # lib.import_dispatch.dispatch_import_from_db.
+    #
+    # `audio_check_mode` is read from the active runtime config so the
+    # preview matches what the deployment actually does. On a deployment
+    # with `[Beets Validation] audio_check = off` the audio_corrupt scenario
+    # correctly reports `skipped_off` (Codex round 2, P3).
+    runtime_audio_check = _load_runtime_audio_check_mode()
+    scenarios.extend([
         ("PREIMPORT: Audio corrupt (ffmpeg fail)", dict(
             is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_check_mode="normal", audio_corrupt=True)),
+            audio_check_mode=runtime_audio_check, audio_corrupt=True)),
         ("PREIMPORT: Force-import with nested folders", dict(
             is_flac=False, min_bitrate=320, is_cbr=True,
             import_mode="force", has_nested_audio=True)),
-    ]
+    ])
 
     print(f"\n  What would happen if we downloaded:")
     for name, params in scenarios:
