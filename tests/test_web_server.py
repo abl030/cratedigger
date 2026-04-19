@@ -2239,7 +2239,7 @@ class TestWrongMatchesContract(unittest.TestCase):
     def _row(self, download_log_id: int, request_id: int, username: str,
              failed_path: str, artist: str = "Test Artist",
              album: str = "Test Album",
-             mb_release_id: str = "abc-123",
+             mb_release_id: str | None = "abc-123",
              scenario: str = "high_distance") -> dict:
         row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
         row["download_log_id"] = download_log_id
@@ -2434,6 +2434,32 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertFalse(group["verified_lossless"])
         self.assertIsNone(group["quality_label"])
         self.assertIsNone(group["quality_rank"])
+
+    @patch("web.server.check_beets_by_artist_album", return_value=12)
+    @patch("web.server.check_beets_library_detail", return_value={})
+    def test_group_shows_quality_for_mbidless_request_via_fuzzy(
+            self, _mock_detail, _mock_fuzzy):
+        """Requests with no MBID can't be pinpointed to a specific pressing,
+        so fuzzy presence IS the best on-disk signal we have. The quality
+        summary must fall back to the fuzzy result and keep reporting the
+        pipeline DB's quality fields — blanking them would mislabel a real
+        on-disk album as absent and invite duplicate force-imports.
+        """
+        row = self._row(42, 100, "testuser", "/fi/Test", mb_release_id=None)
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 245
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "genuine"
+        self.mock_db.get_wrong_matches.return_value = [row]
+
+        status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        group = data["groups"][0]
+        self.assertTrue(group["in_library"])
+        # MBID absent + fuzzy present → trust the DB's on-disk quality.
+        self.assertEqual(group["min_bitrate"], 245)
+        self.assertTrue(group["verified_lossless"])
+        self.assertEqual(group["current_spectral_grade"], "genuine")
 
     def test_group_latest_import_picks_most_recent_success(self):
         """latest_import shows the last successful import, not the newest attempt.
