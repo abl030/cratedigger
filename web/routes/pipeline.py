@@ -649,15 +649,28 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     # (whether this handler just removed it or a prior ``beet rm``
     # did), clear the pipeline DB's on-disk quality fields in the
     # same call so nothing downstream reasons about ghost state.
+    #
+    # Issue #123 PR B: ``remove_and_reset_release`` now returns a
+    # typed result. ``selector_failures`` surfaces per-selector
+    # problems (timeout, non-zero rc, exception) so the ban-source
+    # handler can tell a user the ban succeeded but the remove was
+    # incomplete, rather than silently reporting success after a
+    # denylist-committed / album-still-on-disk split brain.
     beets_removed = False
+    cleanup_errors: list[dict[str, str]] = []
     b = s._beets_db()
     if mb_release_id and b:
-        beets_removed, _ = remove_and_reset_release(
+        cleanup = remove_and_reset_release(
             beets_db=b,
             pipeline_db=s._db(),
             release_id=mb_release_id,
             request_id=int(req_id),
         )
+        beets_removed = cleanup.beets_removed
+        cleanup_errors = [
+            {"selector": f.selector, "reason": f.reason, "detail": f.detail}
+            for f in cleanup.selector_failures
+        ]
 
     req = s._db().get_request(int(req_id))
     if req:
@@ -676,6 +689,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         "status": "ok",
         "username": username,
         "beets_removed": beets_removed,
+        "cleanup_errors": cleanup_errors,
     })
 
 
