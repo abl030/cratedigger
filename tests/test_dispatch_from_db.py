@@ -66,6 +66,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "mock_gate": mock_gate,
             "mock_meelo": ext.meelo,
             "mock_jellyfin": ext.jellyfin,
+            "mock_cleanup": ext.cleanup,
         }
 
     # --- Success path ---
@@ -159,6 +160,55 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         r = self._dispatch()
         self.assertTrue(hasattr(r["result"], "success"))
         self.assertTrue(hasattr(r["result"], "message"))
+
+    # --- Issue #89: force/manual rejections must NOT delete source files ---
+    #
+    # Auto-import passes a disposable /Incoming staging directory — cleanup
+    # on `downgrade` / `transcode_downgrade` is correct. Force/manual pass
+    # the user's `failed_imports/…` directory, which IS the only copy of
+    # the source material. A cleanup there would delete the user's data
+    # when the harness decides against importing.
+
+    def test_force_downgrade_does_not_delete_source(self):
+        """Issue #89: downgrade decision on force-import must not rmtree
+        the failed_imports source directory."""
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(force=True, ir=ir)
+        r["mock_cleanup"].assert_not_called()
+
+    def test_manual_downgrade_does_not_delete_source(self):
+        """Issue #89: downgrade decision on manual-import must not rmtree
+        the failed_imports source directory."""
+        ir = make_import_result(decision="downgrade",
+                                new_min_bitrate=128, prev_min_bitrate=180)
+        r = self._dispatch(force=False, ir=ir)
+        r["mock_cleanup"].assert_not_called()
+
+    def test_force_transcode_downgrade_does_not_delete_source(self):
+        """Issue #89: transcode_downgrade on force-import must not rmtree."""
+        ir = make_import_result(decision="transcode_downgrade",
+                                new_min_bitrate=190, prev_min_bitrate=320)
+        r = self._dispatch(force=True, ir=ir)
+        r["mock_cleanup"].assert_not_called()
+
+    def test_manual_transcode_downgrade_does_not_delete_source(self):
+        """Issue #89: transcode_downgrade on manual-import must not rmtree."""
+        ir = make_import_result(decision="transcode_downgrade",
+                                new_min_bitrate=190, prev_min_bitrate=320)
+        r = self._dispatch(force=False, ir=ir)
+        r["mock_cleanup"].assert_not_called()
+
+    def test_force_import_success_still_no_cleanup(self):
+        """Issue #89: even on successful force-import, we don't rmtree the
+        source. Beets has moved the files out, leaving an empty folder;
+        the user gets to decide whether to remove it. Predictable behavior
+        (never delete) beats clever behavior (delete-if-empty-after-success)
+        because the latter still surprises users on partial imports.
+        """
+        r = self._dispatch(force=True)  # default decision="import"
+        self.assertTrue(r["result"].success)
+        r["mock_cleanup"].assert_not_called()
 
 
 class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
