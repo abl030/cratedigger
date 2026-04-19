@@ -1437,6 +1437,29 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
 
+    @patch("web.routes.pipeline.apply_transition")
+    def test_ban_source_skips_clear_when_mbid_missing(self, _mock_transition):
+        """Without ``mb_release_id`` we never query beets and never run
+        ``beet remove``, so there's no positive evidence the album is gone.
+        Clearing the on-disk quality fields anyway would erase state for
+        albums that are still in the library.
+        """
+        self.mock_db.clear_on_disk_quality_fields.reset_mock()
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported",
+            min_bitrate=320,
+            current_spectral_grade="genuine",
+            verified_lossless=True,
+        )
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            # No mb_release_id.
+        })
+
+        self.assertEqual(status, 200)
+        self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+
 
 class TestManualImportRouteContracts(_WebServerCase):
     """Contract tests for manual import routes."""
@@ -2377,6 +2400,40 @@ class TestWrongMatchesContract(unittest.TestCase):
                           "current_spectral_bitrate must not leak from stale DB.")
         self.assertFalse(group["verified_lossless"],
                          "verified_lossless must read False when nothing is on disk.")
+
+    @patch("web.server.check_beets_by_artist_album", return_value=20)
+    @patch("web.server.check_beets_library_detail", return_value={})
+    def test_group_hides_stale_quality_when_only_fuzzy_match(
+            self, _mock_detail, _mock_fuzzy):
+        """Multiple pressings of the same album are kept intentionally, so a
+        fuzzy artist/album match in beets does NOT mean *this* exact MB
+        release is on disk. The quality summary describes the specific
+        pressing — if the exact MBID isn't in beets, the fields must still
+        be zeroed even when ``in_library`` reads True from the fallback.
+        """
+        row = self._row(42, 100, "testuser", "/fi/Test",
+                         mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        row["request_status"] = "wanted"
+        row["request_min_bitrate"] = 320
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "genuine"
+        row["request_current_spectral_bitrate"] = None
+        self.mock_db.get_wrong_matches.return_value = [row]
+
+        status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        group = data["groups"][0]
+        # Fuzzy fallback finds *some* edition → in_library badge is correct.
+        self.assertTrue(group["in_library"])
+        # …but this exact pressing isn't on disk, so the quality summary
+        # must blank out every on-disk field. Otherwise the removed
+        # pressing's ghost quality leaks through despite the edge case.
+        self.assertIsNone(group["min_bitrate"])
+        self.assertIsNone(group["current_spectral_grade"])
+        self.assertIsNone(group["current_spectral_bitrate"])
+        self.assertFalse(group["verified_lossless"])
+        self.assertIsNone(group["quality_label"])
+        self.assertIsNone(group["quality_rank"])
 
     def test_group_latest_import_picks_most_recent_success(self):
         """latest_import shows the last successful import, not the newest attempt.

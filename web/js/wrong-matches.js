@@ -89,8 +89,12 @@ function rankColor(rank) {
  * @returns {string}
  */
 function renderQualityBadges(g) {
-  // Nothing in the library yet — tell the user force-import is a fresh add.
-  if (g.status !== 'imported' && !g.quality_label && !g.min_bitrate) {
+  // Drive the 'nothing on disk' badge off data, not the DB status.
+  // A row left at status='imported' after a manual beet rm still has
+  // nothing on disk, so checking status alone would swallow the signal
+  // and leave the badge strip empty. If the backend zeroed every quality
+  // field for this release, there is nothing on disk worth describing.
+  if (!g.quality_label && !g.min_bitrate && !g.current_spectral_grade) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
   }
 

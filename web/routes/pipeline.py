@@ -672,12 +672,16 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         # quality fields (verified_lossless, current_spectral_*) are no
         # longer accurate. Clear them so wrong-matches / library views /
         # the quality gate don't reason about phantom state. Only clear
-        # when we have positive evidence: either we just removed the
-        # album, or beets confirmed it was never there and any lingering
-        # fields are already ghosts. Skip when the remove attempt failed
-        # — the album may still be on disk and the existing state is
-        # still correct.
-        if beets_removed or (b is not None and not album_was_in_beets):
+        # when we have POSITIVE evidence: either we just removed the
+        # album, or we queried beets with a real mbid and it confirmed
+        # the album wasn't there. Skip when the remove attempt failed
+        # — the album may still be on disk. Skip when the caller omitted
+        # mb_release_id — we never checked, so we can't claim the album
+        # is gone.
+        beets_confirmed_absent = (
+            bool(mb_release_id) and b is not None and not album_was_in_beets
+        )
+        if beets_removed or beets_confirmed_absent:
             s._db().clear_on_disk_quality_fields(int(req_id))
 
     h._json({
