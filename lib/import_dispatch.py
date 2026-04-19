@@ -36,6 +36,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("soularr")
 
 
+# Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
+# NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
+# so a ``downgrade`` / ``transcode_downgrade`` decision from the harness
+# can never delete the user's only copy of the source. Auto-import uses
+# bv_result.scenario values like ``strong_match`` / ``weak_match`` /
+# ``auto_import``, none of which appear here — their staging dir under
+# ``/Incoming`` is always safe to remove (see issue #89).
+FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_import"})
+
+
 @dataclass(frozen=True)
 class QualityGateState:
     """Resolved on-disk state for a quality-gate evaluation."""
@@ -674,7 +684,17 @@ def dispatch_import_core(
                 _trigger_meelo(cfg)
                 _trigger_plex(cfg, ir.postflight.imported_path)
                 _trigger_jellyfin(cfg)
-            if action.cleanup:
+            if action.cleanup and scenario not in FORCE_MANUAL_SCENARIOS:
+                # Issue #89: cleanup is only safe for auto-import. The auto
+                # path passes a disposable ``/Incoming`` staging directory;
+                # force/manual paths pass the user's ``failed_imports/…``
+                # folder, which is the only copy of the source. A
+                # ``downgrade`` / ``transcode_downgrade`` decision there
+                # would delete the user's data. On successful force/manual
+                # imports the beets subprocess has already moved files out,
+                # leaving an empty folder — skip that too, predictable
+                # never-delete behavior beats a clever "delete if empty"
+                # rule that still surprises on partial imports.
                 _cleanup_staged_dir(path)
             if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
                 removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
