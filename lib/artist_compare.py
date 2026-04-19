@@ -61,10 +61,45 @@ def annotate_in_library(
         (lowercase rank name from lib.quality.QualityRank, e.g.
         "transparent", "lossless", "poor")
 
-    Match strategies (any one is enough):
-      - mb_releasegroupid (MB rows)
-      - mb_albumid (Discogs rows — beets stores numeric Discogs IDs there)
-      - normalized title fallback (cross-source)
+    Match strategies, tried in order (first hit wins):
+      1. mb_releasegroupid (MB rows ↔ library rows tagged with MB RGID)
+      2. mb_albumid (Discogs rows ↔ library rows where beets stored the
+         numeric Discogs ID in mb_albumid — Discogs plugin convention)
+      3. normalized title fallback — the CROSS-SOURCE bridge
+
+    Why the title fallback is deliberate (not a #123-style smell):
+      MB and Discogs live in two ID namespaces that do not share primary
+      keys. A Discogs-imported library album has no MB release-group-id,
+      so it would never light up the "in library" badge on the MB browse
+      tab (and vice versa) without a second-chance match. The title
+      fallback is the ONLY cross-namespace bridge we have short of a
+      manual MB↔Discogs ID mapping service.
+
+      Risk is narrowed in three ways:
+        - `library_albums` is already artist-scoped by the caller
+          (`srv.get_library_artist(name, mbid)`), so the fallback only
+          searches within one artist's catalog, not the whole library.
+        - Exact-ID matches take primacy (`lib_by_rgid.get(rid) or …`),
+          so title fuzzing only runs when no ID match was found.
+        - The `in_library` badge on browse rows is display-only. The
+          add-to-pipeline action is gated on the row's own MB/Discogs
+          id, not on in_library — so a wrong-match here cannot corrupt
+          pipeline state the way #119's fuzzy match did.
+
+      Known accepted failure mode: within one artist, if two legit
+      different release groups normalize to the same title (self-titled
+      + remaster, EP vs Album of the same name, live vs studio), the
+      first library row wins and another row's quality numbers may
+      attach to a sibling browse row. The overlay badge is wrong; no
+      destructive action follows.
+
+      Revisit (issue #125 left this as by-design): if wrong-badge
+      reports show up in practice, the smallest structural change is
+      to keep `in_library=True` on title-fallback matches but drop the
+      quality fields (`library_format` / `library_min_bitrate` /
+      `library_rank`). That sharpens the invariant "quality numbers
+      attach only to exact-ID matches" without losing the cross-source
+      presence signal.
 
     rank_fn: optional callable(format_str, bitrate_kbps) -> str. Lets the
     caller plug in the codec-aware quality_rank computation without
@@ -74,6 +109,9 @@ def annotate_in_library(
     # quality fields when a row hits.
     lib_by_rgid: dict[str, dict] = {}
     lib_by_mbid: dict[str, dict] = {}
+    # lib_by_title is the cross-source bridge (see docstring). First
+    # library row per normalized title wins — deterministic by input
+    # order, not "best" by any quality heuristic.
     lib_by_title: dict[str, dict] = {}
     for a in library_albums:
         rgid = a.get("mb_releasegroupid")
@@ -100,6 +138,8 @@ def annotate_in_library(
         if rank_fn:
             row["library_rank"] = rank_fn(fmt, kbps)
 
+    # Exact-ID match primary, title fallback secondary. The `or` ordering
+    # is load-bearing — see docstring "Risk is narrowed" notes.
     for rg in mb_groups:
         rid = str(rg.get("id", ""))
         title_norm = normalize_title(rg.get("title", ""))

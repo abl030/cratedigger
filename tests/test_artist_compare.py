@@ -222,6 +222,12 @@ class TestMergeDiscographies(unittest.TestCase):
 
 
 class TestAnnotateInLibrary(unittest.TestCase):
+    # The normalized-title fallback is deliberate — see the docstring on
+    # annotate_in_library for why it is not a #123-style smell (issue #125
+    # closed as by-design). It is the ONLY cross-namespace bridge between
+    # MB RGIDs and Discogs numeric IDs in the browse-tab overlay. These
+    # tests pin the exact-id-first / title-fallback-second ordering so a
+    # future refactor that removes or reorders the fallback is caught.
     def test_mb_row_matched_by_release_group_id(self):
         rg = {"id": "rg-uuid", "title": "OK Computer"}
         lib = [{"mb_releasegroupid": "rg-uuid", "album": "Different Title",
