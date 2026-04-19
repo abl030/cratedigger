@@ -429,6 +429,7 @@ class FakePipelineDB:
         row["verified_lossless"] = False
         row["current_spectral_grade"] = None
         row["current_spectral_bitrate"] = None
+        row["imported_path"] = None
         row["updated_at"] = _utcnow()
 
     def get_downloading(self) -> list[dict[str, Any]]:

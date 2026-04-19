@@ -103,11 +103,32 @@ class BeetsDB:
             return raw.decode("utf-8", errors="replace")
         return str(raw)
 
-    def album_exists(self, mb_release_id: str) -> bool:
-        """Check if an MBID is already in the beets library."""
-        row = self._conn.execute(
-            "SELECT 1 FROM albums WHERE mb_albumid = ?", (mb_release_id,)
-        ).fetchone()
+    def album_exists(self, release_id: str) -> bool:
+        """Check if a release is already in the beets library.
+
+        Dispatches by identifier shape so Discogs requests (numeric IDs
+        stored in ``albums.discogs_albumid``, INTEGER) round-trip as
+        reliably as MusicBrainz ones (UUIDs in ``albums.mb_albumid``,
+        TEXT). The pipeline DB packs both kinds into the same
+        ``mb_release_id`` column for compatibility, and downstream
+        callers like ban-source's ``beet remove -d`` depend on this
+        method returning the right answer for both.
+        """
+        from lib.quality import detect_release_source
+        if detect_release_source(release_id) == "discogs":
+            try:
+                numeric = int(release_id)
+            except ValueError:
+                return False
+            row = self._conn.execute(
+                "SELECT 1 FROM albums WHERE discogs_albumid = ?",
+                (numeric,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT 1 FROM albums WHERE mb_albumid = ?",
+                (release_id,),
+            ).fetchone()
         return row is not None
 
     def get_album_info(

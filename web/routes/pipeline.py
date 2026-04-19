@@ -647,9 +647,17 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     if mb_release_id and b:
         album_was_in_beets = b.album_exists(mb_release_id)
         if album_was_in_beets:
+            # Discogs releases live under ``discogs_albumid`` in beets;
+            # MusicBrainz releases under ``mb_albumid``. Feed ``beet remove``
+            # the right selector so a Discogs ban-source actually targets
+            # the imported album instead of silently no-op-ing.
+            from lib.quality import detect_release_source
+            selector = ("discogs_albumid"
+                        if detect_release_source(mb_release_id) == "discogs"
+                        else "mb_albumid")
             import subprocess as _sp
             result = _sp.run(
-                ["beet", "remove", "-d", f"mb_albumid:{mb_release_id}"],
+                ["beet", "remove", "-d", f"{selector}:{mb_release_id}"],
                 capture_output=True, text=True, timeout=30,
                 env=beets_subprocess_env(),
             )

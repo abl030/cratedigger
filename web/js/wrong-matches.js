@@ -92,14 +92,29 @@ function renderQualityBadges(g) {
   // Drive the 'nothing on disk' badge off data, not the DB status.
   // A row left at status='imported' after a manual beet rm still has
   // nothing on disk, so checking status alone would swallow the signal
-  // and leave the badge strip empty. If the backend zeroed every quality
-  // field for this release, there is nothing on disk worth describing.
-  // Include `format` — it's the fallback badge text below when
-  // bitrate is null (e.g. FLAC with no bitrate metadata), so its
-  // presence means an on-disk badge would render and this early
-  // return must not pre-empt it.
-  if (!g.quality_label && !g.min_bitrate && !g.current_spectral_grade && !g.format) {
+  // and leave the badge strip empty.
+  //
+  // But only when the library is genuinely empty for this album —
+  // `g.in_library` can be true via the fuzzy artist/album fallback
+  // while every quality field is blank because this *exact pressing*
+  // isn't on disk (multi-pressing case). In that scenario the user
+  // already sees the green "in library" badge; pairing it with a red
+  // "nothing on disk" would be self-contradictory and push them
+  // toward unnecessary reimports.
+  //
+  // `format` stays in the guard because it's the fallback badge text
+  // below when bitrate is null (e.g. FLAC with no bitrate metadata),
+  // so its presence means an on-disk badge will render.
+  const hasOnDiskQuality = g.quality_label || g.min_bitrate
+    || g.current_spectral_grade || g.format;
+  if (!hasOnDiskQuality && !g.in_library) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
+  }
+  if (!hasOnDiskQuality) {
+    // Fuzzy library hit, exact pressing missing — signal the
+    // ambiguity without the red alarm that implies the album
+    // is entirely absent.
+    return '<span class="badge" style="background:#2a2a3a;color:#9bf;">different edition on disk</span>';
   }
 
   const parts = [];

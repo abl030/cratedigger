@@ -1437,6 +1437,37 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
 
+    @patch("subprocess.run")
+    @patch("web.routes.pipeline.apply_transition")
+    def test_ban_source_uses_discogs_selector_for_numeric_id(
+            self, _mock_transition, mock_subprocess):
+        """Discogs-backed requests carry a numeric ID. ``beet remove -d``
+        must target ``discogs_albumid:`` for those, otherwise it runs a
+        no-op ``mb_albumid:12345`` query while the Discogs copy stays on
+        disk — the source gets denylisted but the library never loses
+        the album and the pipeline clean-up branch never fires.
+        """
+        self.mock_db.clear_on_disk_quality_fields.reset_mock()
+        mock_subprocess.return_value = MagicMock(
+            returncode=0, stdout="", stderr="")
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id="12856590",
+            min_bitrate=320,
+        )
+        self._beets.album_exists.return_value = True
+
+        status, _data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704, "username": "baduser",
+            "mb_release_id": "12856590",
+        })
+
+        self.assertEqual(status, 200)
+        called_argv = mock_subprocess.call_args.args[0]
+        self.assertIn("discogs_albumid:12856590", called_argv,
+                      "Discogs numeric ID must use the discogs_albumid "
+                      "beets selector, not mb_albumid.")
+        self.assertNotIn("mb_albumid:12856590", called_argv)
+
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_mbid_missing(self, _mock_transition):
         """Without ``mb_release_id`` we never query beets and never run

@@ -155,6 +155,24 @@ class TestAlbumExists(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             self.assertFalse(db.album_exists("xyz-999"))
 
+    def test_discogs_id_matches_discogs_albumid(self) -> None:
+        """Discogs-backed requests pack a numeric ID into ``mb_release_id``
+        that beets actually stores in ``albums.discogs_albumid``. The
+        existence check must dispatch on ID shape, otherwise a
+        Discogs-imported album reads as 'not in beets' and ban-source
+        skips the ``beet remove -d`` altogether.
+        """
+        _insert_album_full(self.db_path, 99, "", [
+            {"bitrate": 1411000, "path": "/m/disc/01.flac", "format": "FLAC",
+             "samplerate": 44100, "bitdepth": 16},
+        ], discogs_albumid=12856590)
+
+        with BeetsDB(self.db_path) as db:
+            self.assertTrue(db.album_exists("12856590"),
+                            "Discogs numeric ID must resolve via discogs_albumid.")
+            self.assertFalse(db.album_exists("999"),
+                             "Unmatched numeric ID must return False.")
+
 
 class TestGetAlbumInfo(unittest.TestCase):
     """Test get_album_info (postflight verify + quality gate data)."""
