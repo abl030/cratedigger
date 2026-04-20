@@ -125,6 +125,27 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(rows, 0)
         self.assertEqual(db.request(19)["imported_path"], "/Beets/Other")
 
+    def test_update_imported_path_discogs_matches_legacy_mb_release_id(self):
+        """Codex R2 P2: beets-side ``discogs_albumid`` must match
+        pipeline rows that stored the Discogs numeric in
+        ``mb_release_id`` (legacy "pipeline compat" layout from
+        CLAUDE.md) OR in ``discogs_release_id``."""
+        db = FakePipelineDB()
+        # Legacy layout: numeric in mb_release_id, discogs_release_id None.
+        db.seed_request(make_request_row(
+            id=21, mb_release_id="12856590",
+            discogs_release_id=None, imported_path="/Beets/Legacy/Old"))
+
+        rows = db.update_imported_path_by_release_id(
+            mb_albumid="",
+            discogs_albumid="12856590",
+            new_path="/Beets/Legacy/New",
+        )
+
+        self.assertEqual(rows, 1)
+        self.assertEqual(
+            db.request(21)["imported_path"], "/Beets/Legacy/New")
+
     def test_update_imported_path_by_release_id_both_empty_is_noop(self):
         """Both release ids empty → rowcount=0, no UPDATE fires at all.
         Mirrors the prod short-circuit that guards against accidentally

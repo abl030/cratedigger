@@ -373,16 +373,27 @@ class PipelineDB:
         clauses: list[str] = []
         params: list[object] = [new_path, now]
         if mb_albumid:
-            # Covers both ``mb_release_id = <UUID>`` (MB-sourced) AND
-            # ``mb_release_id = <numeric>`` (legacy Discogs). ``mb_albumid``
-            # on the beets side carries whichever value beets has for
-            # the row; matching against ``mb_release_id`` here handles
-            # both cases without needing to distinguish on the pipeline
-            # side.
+            # Beets-side ``mb_albumid`` is either a MB UUID (stored
+            # in pipeline's ``mb_release_id``) or a legacy numeric
+            # (also stored in ``mb_release_id`` — the pre-plugin-patch
+            # layout). Either way the single-column match covers it.
             clauses.append("mb_release_id = %s")
             params.append(mb_albumid)
         if discogs_albumid:
-            clauses.append("discogs_release_id = %s")
+            # Beets-side ``discogs_albumid`` is always numeric. The
+            # pipeline side could store the same numeric in EITHER
+            # ``discogs_release_id`` (rows added through the web UI
+            # after the discogs-plugin integration) OR
+            # ``mb_release_id`` (legacy "pipeline compat" convention
+            # documented in CLAUDE.md § "Discogs-sourced albums":
+            # *Numeric IDs stored in ``mb_release_id`` for pipeline
+            # compat*). Match both columns so a sibling whose beets
+            # row carries only ``discogs_albumid`` still finds its
+            # tracked request regardless of which pipeline layout
+            # that request was created under. Codex R2 P2.
+            clauses.append(
+                "(mb_release_id = %s OR discogs_release_id = %s)")
+            params.append(discogs_albumid)
             params.append(discogs_albumid)
         where = " OR ".join(clauses)
         cur = self._execute(

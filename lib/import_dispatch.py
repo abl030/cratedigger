@@ -700,10 +700,24 @@ def dispatch_import_core(
                     req_row = db.get_request(request_id)
                     if req_row and req_row.get("status") == "downloading":
                         _cleanup_staged_dir(path)
+                        # Contention is a deferred retry, not a failed
+                        # attempt — we didn't *try* to download, we
+                        # deferred to a concurrent process. Passing no
+                        # ``attempt_type`` skips the ``record_attempt``
+                        # side effect that would set
+                        # ``next_retry_after = now + backoff`` (30 min
+                        # for attempt #1, doubling each retry, up to
+                        # 24h). That backoff is designed for genuine
+                        # download failures; applying it to contention
+                        # would hold the request in ``wanted`` for
+                        # half an hour while the competing process
+                        # either finishes (we'd re-search, find the
+                        # album already in beets, mark imported via
+                        # the ``preflight_existing`` path) or fails
+                        # (we should retry). Codex R2 P1 caught this.
                         apply_transition(
                             db, request_id, "wanted",
-                            from_status="downloading",
-                            attempt_type="download")
+                            from_status="downloading")
                         logger.info(
                             f"{mode}: reset request {request_id} to "
                             "'wanted' after release-lock contention; "
