@@ -1581,6 +1581,125 @@ class TestReleaseLockContention(unittest.TestCase):
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
 
+class TestHandleValidResultReleaseLock(unittest.TestCase):
+    """Issue #132 P1 + Codex PR #136 R4 P1: release-lock acquisition
+    must happen BEFORE ``stage_to_ai`` so the filesystem stays
+    resumable on contention.
+
+    Pre-R4: ``_handle_valid_result`` called ``stage_to_ai`` first,
+    then invoked ``dispatch_import`` which checked the lock inside
+    ``dispatch_import_core``. On contention, files had already moved
+    from ``slskd_download_dir/<import_folder>/`` →
+    ``beets_staging_dir/``, but ``active_download_state`` still
+    pointed at the original slskd paths. Next cycle's
+    ``process_completed_album`` reconstructed stale source paths and
+    crashed with ``FileNotFoundError``, falling back to
+    ``status='wanted'`` — breaking the contention-retry contract.
+
+    Post-R4: ``_handle_valid_result`` acquires the lock BEFORE
+    ``stage_to_ai``. On contention, return deferred without staging;
+    files stay at ``slskd_download_dir/<import_folder>/`` where
+    ``process_completed_album``'s resume guard (``if os.path.exists(
+    dst_file) and not os.path.exists(src_file): continue``) picks
+    them up idempotently on the next cycle.
+    """
+
+    MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+
+    def test_contention_returns_deferred_without_staging(self):
+        from lib import download as dl_mod
+        from lib.grab_list import GrabListEntry
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                     release_id_to_lock_key)
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID, status="downloading"))
+
+        def lock_result(namespace: int, key: int) -> bool:
+            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                    and key == release_id_to_lock_key(self.MBID)):
+                return False
+            return True
+        db.set_advisory_lock_result(lock_result)
+
+        from tests.helpers import make_ctx_with_fake_db
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_distance_threshold=0.15,
+        )
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+        entry = GrabListEntry(
+            album_id=42, artist="Test Artist", title="Test Album",
+            year="2006", files=[], filetype="mp3",
+            mb_release_id=self.MBID,
+            db_source="request", db_request_id=42)
+
+        bv_result = ValidationResult(
+            valid=True, distance=0.05, scenario="strong_match")
+
+        # stage_to_ai and dispatch_import MUST NOT run on contention.
+        import_folder_fullpath = "/tmp/test-import-folder"
+        with patch.object(dl_mod, "stage_to_ai") as mock_stage, \
+             patch.object(dl_mod, "dispatch_import") as mock_dispatch:
+            outcome = dl_mod._handle_valid_result(
+                entry, bv_result, import_folder_fullpath, ctx)
+
+        assert outcome is not None
+        self.assertTrue(outcome.deferred)
+        self.assertFalse(outcome.success)
+        # **Critical**: staging never ran — files stay at
+        # import_folder_fullpath where process_completed_album's
+        # resume guard can pick them up next cycle.
+        mock_stage.assert_not_called()
+        mock_dispatch.assert_not_called()
+
+    def test_redownload_path_does_not_take_release_lock(self):
+        """Redownload path (source != 'request') must NOT take the
+        release lock — it only stages and marks done, never runs the
+        harness, so no cross-process race applies. Pre-fix this was
+        implicitly true; pinning it so a future refactor doesn't
+        accidentally broaden the lock scope."""
+        from lib import download as dl_mod
+        from lib.grab_list import GrabListEntry
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID, status="downloading"))
+
+        from tests.helpers import make_ctx_with_fake_db
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_distance_threshold=0.15,
+        )
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+        entry = GrabListEntry(
+            album_id=42, artist="Test Artist", title="Test Album",
+            year="2006", files=[], filetype="mp3",
+            mb_release_id=self.MBID,
+            db_source="redownload",  # NOT 'request'
+            db_request_id=42)
+
+        bv_result = ValidationResult(
+            valid=True, distance=0.05, scenario="strong_match")
+
+        with patch.object(dl_mod, "stage_to_ai",
+                          return_value="/tmp/staged"):
+            dl_mod._handle_valid_result(
+                entry, bv_result, "/tmp/import", ctx)
+
+        # No RELEASE-namespace lock call — redownload path skips it.
+        namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
+        self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
+
+
 class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
     """The ``process_completed_album`` 3-way return → state-transition seam.
 
