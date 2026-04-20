@@ -471,6 +471,230 @@ class TestImportResultSerialization(unittest.TestCase):
         self.assertIsNone(r.existing_measurement)
 
 
+class TestImportResultProductionFixtures(unittest.TestCase):
+    """Pin tests: verbatim production ``download_log.import_result`` JSONB rows
+    must round-trip via ``from_dict`` → ``to_json`` → ``from_dict`` and yield
+    an equal ``ImportResult`` each time. These fixtures were captured from
+    the live doc2 database while scoping issue #141 (wire-boundary encoder
+    unification) — they lock down the shapes the refactor MUST preserve.
+    """
+
+    def test_production_v2_current_shape_roundtrip(self):
+        """Current (2026-04) production v2 row from a successful import with
+        moved_siblings=[] and disambiguation_failure=null. Captured verbatim.
+        """
+        prod_row = {
+            "error": None,
+            "version": 2,
+            "decision": "import",
+            "spectral": {
+                "per_track": [
+                    {"grade": "marginal", "cliff_freq_hz": None,
+                     "hf_deficit_db": 57.9, "cliff_detected": False,
+                     "estimated_bitrate_kbps": None},
+                    {"grade": "suspect", "cliff_freq_hz": None,
+                     "hf_deficit_db": 61.6, "cliff_detected": False,
+                     "estimated_bitrate_kbps": None},
+                ],
+                "suspect_pct": 80.0,
+                "cliff_freq_hz": None,
+                "existing_suspect_pct": 100.0,
+            },
+            "beets_log": [],
+            "exit_code": 0,
+            "conversion": {
+                "failed": 0, "converted": 0, "final_format": None,
+                "is_transcode": False, "was_converted": False,
+                "target_filetype": None, "original_filetype": None,
+                "post_conversion_min_bitrate": None,
+            },
+            "postflight": {
+                "beets_id": 10323,
+                "track_count": 5,
+                "disambiguated": False,
+                "imported_path": "/mnt/virtio/Music/Beets/Shearwater/2005 - Thieves",
+                "bad_extensions": [],
+                "disambiguation_failure": None,
+            },
+            "final_format": None,
+            "new_measurement": {
+                "format": "MP3", "is_cbr": False,
+                "spectral_grade": "likely_transcode",
+                "avg_bitrate_kbps": 246, "min_bitrate_kbps": 233,
+                "verified_lossless": False, "was_converted_from": None,
+                "median_bitrate_kbps": 248,
+                "spectral_bitrate_kbps": None,
+            },
+            "already_in_beets": True,
+            "existing_measurement": {
+                "format": "MP3", "is_cbr": False,
+                "spectral_grade": "likely_transcode",
+                "avg_bitrate_kbps": 160, "min_bitrate_kbps": 160,
+                "verified_lossless": False, "was_converted_from": None,
+                "median_bitrate_kbps": 160,
+                "spectral_bitrate_kbps": 160,
+            },
+            "v0_verification_bitrate": None,
+        }
+        r = ImportResult.from_dict(prod_row)
+        self.assertEqual(r.decision, "import")
+        self.assertTrue(r.already_in_beets)
+        self.assertEqual(r.postflight.beets_id, 10323)
+        assert r.new_measurement is not None
+        self.assertEqual(r.new_measurement.avg_bitrate_kbps, 246)
+        self.assertEqual(r.new_measurement.median_bitrate_kbps, 248)
+        self.assertEqual(r.new_measurement.format, "MP3")
+        assert r.existing_measurement is not None
+        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 160)
+        self.assertEqual(len(r.spectral.per_track), 2)
+        self.assertEqual(r.spectral.suspect_pct, 80.0)
+        # Round-trip via to_json preserves everything.
+        r2 = ImportResult.from_json(r.to_json())
+        self.assertEqual(r, r2)
+
+    def test_production_v2_with_moved_siblings_roundtrip(self):
+        """v2 row with populated moved_siblings. Same row schema, but the
+        sibling list carries typed ``MovedSibling`` records — the refactor
+        must preserve both the Python type (strict decode at the wire
+        boundary) AND the on-disk JSON shape."""
+        prod_row = {
+            "error": None, "version": 2, "decision": "import",
+            "spectral": {"per_track": [], "suspect_pct": 0.0,
+                         "cliff_freq_hz": None, "existing_suspect_pct": 0.0},
+            "beets_log": [], "exit_code": 0,
+            "conversion": {
+                "failed": 0, "converted": 10, "final_format": "mp3 v0",
+                "is_transcode": False, "was_converted": True,
+                "target_filetype": "mp3", "original_filetype": "flac",
+                "post_conversion_min_bitrate": 245,
+            },
+            "postflight": {
+                "beets_id": 10325,
+                "track_count": 9,
+                "disambiguated": True,
+                "imported_path": "/Beets/Artist/Album [2007]",
+                "bad_extensions": [],
+                "moved_siblings": [
+                    {"album_id": 10314,
+                     "new_path": "/Beets/Artist/Album [2006]",
+                     "mb_albumid": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                     "discogs_albumid": ""},
+                ],
+                "disambiguation_failure": None,
+            },
+            "final_format": "mp3 v0",
+            "new_measurement": {
+                "format": "mp3 v0", "is_cbr": False,
+                "spectral_grade": "genuine", "avg_bitrate_kbps": 248,
+                "min_bitrate_kbps": 245, "verified_lossless": True,
+                "was_converted_from": "flac", "median_bitrate_kbps": 246,
+                "spectral_bitrate_kbps": None,
+            },
+            "already_in_beets": False,
+            "existing_measurement": None,
+            "v0_verification_bitrate": 245,
+        }
+        r = ImportResult.from_dict(prod_row)
+        self.assertEqual(len(r.postflight.moved_siblings), 1)
+        sib = r.postflight.moved_siblings[0]
+        self.assertEqual(sib.album_id, 10314)
+        self.assertEqual(sib.mb_albumid,
+                         "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
+        assert r.new_measurement is not None
+        self.assertTrue(r.new_measurement.verified_lossless)
+        r2 = ImportResult.from_json(r.to_json())
+        self.assertEqual(r, r2)
+
+    def test_production_v1_row_roundtrip(self):
+        """Verbatim v1 row captured from prod (226 such rows live in
+        download_log on doc2 as of 2026-04-20). The v1→v2 migration must
+        keep working; the Python object is a normalised v2 ``ImportResult``.
+        """
+        v1_row = {
+            "error": None,
+            "quality": {
+                "is_transcode": False,
+                "new_min_bitrate": 320,
+                "prev_min_bitrate": 128,
+                "will_be_verified_lossless": False,
+                "post_conversion_min_bitrate": None,
+            },
+            "version": 1,
+            "decision": "import",
+            "spectral": {
+                "grade": None, "bitrate": None, "per_track": [],
+                "suspect_pct": 0.0, "cliff_freq_hz": None,
+                "existing_grade": None, "existing_bitrate": None,
+                "existing_suspect_pct": 0.0,
+            },
+            "beets_log": [
+                "INFO: pylast: album.getTopTags",
+                "INFO: httpx: HTTP Request: POST https://ws.audioscrobbler.com/2.0/",
+            ],
+            "exit_code": 0,
+            "conversion": {
+                "failed": 0, "converted": 0, "was_converted": False,
+                "target_filetype": None, "original_filetype": None,
+            },
+            "postflight": {
+                "beets_id": 9026, "track_count": 13, "disambiguated": False,
+                "imported_path": "/mnt/virtio/Music/Beets/Ye/2026 - BULLY",
+                "bad_extensions": [],
+            },
+            "already_in_beets": True,
+        }
+        r = ImportResult.from_dict(v1_row)
+        # Migrated to v2 in memory.
+        self.assertEqual(r.version, 2)
+        self.assertEqual(r.decision, "import")
+        assert r.new_measurement is not None
+        self.assertEqual(r.new_measurement.min_bitrate_kbps, 320)
+        assert r.existing_measurement is not None
+        self.assertEqual(r.existing_measurement.min_bitrate_kbps, 128)
+        self.assertEqual(r.postflight.beets_id, 9026)
+        self.assertEqual(r.postflight.track_count, 13)
+        # And v1 migrates cleanly to v2 JSON, which round-trips as v2.
+        r2 = ImportResult.from_json(r.to_json())
+        self.assertEqual(r, r2)
+
+    def test_production_v2_pre_133_disambiguation_failure_roundtrip(self):
+        """Pre-#133 production shape: disambiguation_failure is populated
+        with ``{reason, detail}`` only — no ``selector`` key (the field
+        was added in PR #131). ``BeetsOpFailure.selector`` must default
+        to ``""`` so force-import / web UI reads don't 500 on old rows.
+        """
+        prod_row = {
+            "version": 2,
+            "exit_code": 0,
+            "decision": "import",
+            "postflight": {
+                "beets_id": 42,
+                "track_count": 11,
+                "imported_path": "/Beets/Artist/Album",
+                "disambiguated": False,
+                "bad_extensions": [],
+                "disambiguation_failure": {
+                    "reason": "nonzero_rc",
+                    "detail": "rc=1: ModuleNotFoundError: No module named 'msgspec'",
+                    # NO selector field — this is the pre-#133 shape.
+                },
+            },
+        }
+        r = ImportResult.from_dict(prod_row)
+        df = r.postflight.disambiguation_failure
+        assert df is not None
+        self.assertEqual(df.reason, "nonzero_rc")
+        self.assertIn("ModuleNotFoundError", df.detail)
+        self.assertEqual(df.selector, "")
+        # Round-trip via to_json → from_json — new JSON carries the
+        # default-materialised selector="" but the semantic object is equal.
+        r2 = ImportResult.from_json(r.to_json())
+        assert r2.postflight.disambiguation_failure is not None
+        self.assertEqual(r2.postflight.disambiguation_failure.reason,
+                         "nonzero_rc")
+        self.assertEqual(r2.postflight.disambiguation_failure.selector, "")
+
+
 class TestSentinelLine(unittest.TestCase):
     """Test sentinel line formatting."""
 
