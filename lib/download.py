@@ -20,7 +20,8 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, decide_download_action,
                          extract_usernames,
                          rejection_backfill_override)
-from lib.import_dispatch import (_build_download_info, dispatch_import)
+from lib.import_dispatch import (DispatchOutcome, _build_download_info,
+                                 dispatch_import)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
                       log_validation_result)
@@ -177,8 +178,20 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 # === Download completion processing ===
 
 def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: CratediggerContext) -> bool:
-    """Process a fully-downloaded album: move files, tag, validate, stage/import."""
+                            ctx: CratediggerContext) -> "bool | None":
+    """Process a fully-downloaded album: move files, tag, validate, stage/import.
+
+    Returns three-valued ``bool | None``:
+    - ``True`` — files moved and tagged successfully. Auto-import (if
+      fired) either landed or recorded a rejection; outer caller flips
+      status to ``imported``.
+    - ``False`` — file moves failed; outer caller resets to ``wanted``.
+    - ``None`` — auto-import deferred because another process held the
+      release advisory lock. Files are staged, spectral state is set,
+      and request stays ``downloading``. Outer caller must NOT touch
+      status: the next ``poll_active_downloads`` cycle re-enters this
+      function and retries. Codex PR #136 R3 P2/P3.
+    """
     import_folder_name = sanitize_folder_name(
         f"{album_data.artist} - {album_data.title} ({album_data.year})")
     import_folder_fullpath = os.path.join(ctx.cfg.slskd_download_dir, import_folder_name)
@@ -236,18 +249,31 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
             except Exception:
                 logger.exception(f"Error writing tags for: {file.import_path}")
         if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
-            _process_beets_validation(album_data, import_folder_fullpath, ctx)
+            outcome = _process_beets_validation(
+                album_data, import_folder_fullpath, ctx)
+            if outcome is not None and outcome.deferred:
+                # Release-lock contention. Propagate ``None`` so
+                # ``_run_completed_processing`` leaves the request's
+                # status, active_download_state, and staged files
+                # untouched for the next cycle to retry.
+                return None
         return True
 
 
 def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath: str,
-                              ctx: CratediggerContext) -> None:
+                              ctx: CratediggerContext) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
     After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
     for the shared audio + spectral gates. The force/manual-import path
     (``dispatch_import_from_db``) calls the same function — only the beets
     distance check is path-specific.
+
+    Returns the dispatch outcome when the auto-import path fires,
+    ``None`` when beets validation rejects (``_handle_rejected_result``
+    already handles the state transition) or when the non-auto
+    redownload path takes over in ``_handle_valid_result``. Caller
+    uses the ``deferred`` flag to decide whether to flip status.
     """
     from lib.beets import beets_validate as _bv
     from lib.preimport import run_preimport_gates
@@ -285,15 +311,26 @@ def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath:
                 bv_result.corrupt_files = preimport.corrupt_files
 
     if bv_result.valid:
-        _handle_valid_result(album_data, bv_result, import_folder_fullpath, ctx)
-    else:
-        _handle_rejected_result(album_data, bv_result, import_folder_fullpath, ctx)
+        return _handle_valid_result(
+            album_data, bv_result, import_folder_fullpath, ctx)
+    _handle_rejected_result(
+        album_data, bv_result, import_folder_fullpath, ctx)
+    return None
 
 
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          import_folder_fullpath: str,
-                         ctx: CratediggerContext) -> None:
-    """Handle a valid beets validation result: stage and optionally auto-import."""
+                         ctx: CratediggerContext) -> "DispatchOutcome | None":
+    """Handle a valid beets validation result: stage and optionally auto-import.
+
+    Returns the ``DispatchOutcome`` from ``dispatch_import`` when the
+    auto-import path fires (source='request', distance within
+    threshold), or ``None`` for the redownload path that just stages
+    and marks done. ``_process_beets_validation`` propagates the
+    outcome upward so ``_run_completed_processing`` can distinguish
+    ``deferred`` from ``success`` / ``failure`` on the release-lock
+    contention path (issue #132 P1, Codex PR #136 R3 P2/P3).
+    """
     dest = stage_to_ai(album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
     log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
     logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
@@ -313,10 +350,11 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     dist = bv_result.distance if bv_result.distance is not None else 1.0
     if source_type == "request" and dist <= ctx.cfg.beets_distance_threshold:
         assert request_id is not None, "pipeline request must have db_request_id"
-        dispatch_import(album_data, bv_result, dest, dl_info, request_id, ctx)
-    else:
-        ctx.pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest,
-                                         download_info=dl_info)
+        return dispatch_import(
+            album_data, bv_result, dest, dl_info, request_id, ctx)
+    ctx.pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest,
+                                     download_info=dl_info)
+    return None
 
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
@@ -723,15 +761,32 @@ def _run_completed_processing(
         _persist_updated_download_state(db, request_id, entry, state)
 
     try:
-        success = process_completed_album(entry, [], ctx)
+        outcome = process_completed_album(entry, [], ctx)
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
         return
 
+    # Three-valued return from ``process_completed_album``:
+    # - True  → imported (or auto-import recorded a rejection); flip to
+    #   'imported' if status is still 'downloading'.
+    # - False → file moves failed; reset to 'wanted' (genuine failure
+    #   that DOES deserve a backoff-scored attempt).
+    # - None  → release-lock contention deferred the import. Files are
+    #   staged, spectral state is populated, status stays
+    #   'downloading'. ``poll_active_downloads`` re-enters this
+    #   function on the next cycle and retries — do NOT touch state
+    #   here. Issue #132 P1 / Codex PR #136 R3 P2/P3.
+    if outcome is None:
+        logger.info(
+            f"  process_completed_album deferred (release lock held) — "
+            "leaving state untouched; poll_active_downloads retries "
+            "next cycle")
+        return
+
     refreshed = db.get_request(request_id)
     if refreshed and refreshed["status"] == "downloading":
-        if success:
+        if outcome:
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
             apply_transition(db, request_id, "imported",
