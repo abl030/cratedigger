@@ -306,6 +306,72 @@ class TestLocate(unittest.TestCase):
         self.assertIsNone(loc.album_id)
         self.assertEqual(loc.selectors, ())
 
+    def test_enumerate_all_same_mbid_single_row(self) -> None:
+        """One album → single-element list. The common case.
+
+        Pins the contract used by ``import_one.main`` pre-import: if
+        the release is present exactly once, ``stale_ids = [id]`` and
+        post-import cleanup removes that id by PK.
+        """
+        with BeetsDB(self.db_path) as db:
+            ids = db.get_all_album_ids_for_release(
+                "aaa0bbb0-cccc-dddd-eeee-ffffffffffff")
+        self.assertEqual(ids, [1])
+
+    def test_enumerate_all_same_mbid_multi_row_split_brain(self) -> None:
+        """Two rows with same MBID → both ids returned.
+
+        Regression guard for Codex PR #131 round 3 P2: the earlier
+        ``locate()``-based capture picked up just one row via LIMIT 1,
+        so cleanup deleted the first but left the second behind.
+        ``main`` now enumerates and fails fast if len > 1 — operator
+        must reduce to one row before re-running.
+        """
+        # Insert a second row with the same MBID as album 1.
+        _insert_album_full(self.db_path, 99,
+                           "aaa0bbb0-cccc-dddd-eeee-ffffffffffff", [
+                               {"bitrate": 192000, "path": "/m/dup/01.mp3",
+                                "format": "MP3", "samplerate": 44100,
+                                "bitdepth": 0},
+                           ], album="OK Computer",
+                           albumartist="Radiohead")
+        with BeetsDB(self.db_path) as db:
+            ids = db.get_all_album_ids_for_release(
+                "aaa0bbb0-cccc-dddd-eeee-ffffffffffff")
+        self.assertEqual(sorted(ids), [1, 99])
+
+    def test_enumerate_all_same_mbid_absent(self) -> None:
+        """No match → empty list, not None."""
+        with BeetsDB(self.db_path) as db:
+            ids = db.get_all_album_ids_for_release("zzz-not-present")
+        self.assertEqual(ids, [])
+
+    def test_enumerate_all_same_mbid_discogs_dual_layout(self) -> None:
+        """Discogs numeric → both new-layout and legacy rows returned.
+
+        The enumeration must cover both columns for the same reason
+        ``locate()``'s selector tuple does: a library that has some
+        rows in ``discogs_albumid`` and some in ``mb_albumid`` (mid-
+        migration) is a valid state, and cleanup needs to see every
+        row or silently leaves one behind.
+        """
+        # Insert another Discogs row under the legacy mb_albumid column
+        # with the same numeric id as album 2 (which is under
+        # discogs_albumid).
+        _insert_album_full(self.db_path, 98, "12856590", [
+            {"bitrate": 320000, "path": "/m/disc_legacy/01.mp3",
+             "format": "MP3", "samplerate": 44100, "bitdepth": 0},
+        ], album="New Ritual (legacy press)", albumartist="DICE")
+        with BeetsDB(self.db_path) as db:
+            ids = db.get_all_album_ids_for_release("12856590")
+        self.assertEqual(sorted(ids), [2, 98])
+
+    def test_enumerate_all_same_mbid_empty_release_id(self) -> None:
+        """Empty release_id short-circuits to ``[]`` (caller safety)."""
+        with BeetsDB(self.db_path) as db:
+            ids = db.get_all_album_ids_for_release("")
+        self.assertEqual(ids, [])
+
     def test_locate_rejects_artist_album_kwargs(self) -> None:
         """``locate`` takes only a release_id — no fuzzy escape hatch.
 

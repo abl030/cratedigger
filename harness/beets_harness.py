@@ -276,11 +276,28 @@ class HarnessImportSession(ImportSession):
             return Action.SKIP
 
     def resolve_duplicate(self, task: ImportTask, found_duplicates):
-        """Ask controller how to handle duplicates."""
+        """Ask controller how to handle duplicates.
+
+        Emits two parallel arrays, one entry per duplicate (same index):
+
+        - ``duplicate_mbids``: ``mb_albumid`` for each duplicate.
+          Empty string for Discogs-sourced pressings (their identifier
+          lives in ``discogs_albumid``, and ``mb_albumid`` is empty).
+          Used by the controller to detect same-MBID staleness.
+        - ``duplicate_album_ids``: ``albums.id`` for each duplicate.
+          The beets numeric primary key is unambiguous across MB and
+          Discogs — always present, always unique. Used by the
+          controller for post-import sibling canonicalization via
+          ``beet move -a id:<N>`` (Codex PR #131 round 3 P3: Discogs
+          sibling ids were being dropped because the old payload
+          only carried mb_albumid).
+        """
         dup_mbids = []
+        dup_album_ids = []
         for dup in found_duplicates:
             mbid = getattr(dup, "mb_albumid", None) or ""
             dup_mbids.append(mbid)
+            dup_album_ids.append(getattr(dup, "id", None))
         msg = {
             "type": "resolve_duplicate",
             "path": _path_str(task.paths[0]) if task.paths else "",
@@ -288,6 +305,7 @@ class HarnessImportSession(ImportSession):
             "cur_album": task.cur_album or "",
             "duplicate_count": len(found_duplicates),
             "duplicate_mbids": dup_mbids,
+            "duplicate_album_ids": dup_album_ids,
         }
         _send(msg)
 
