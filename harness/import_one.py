@@ -45,6 +45,8 @@ _bootstrap_import_paths()
 
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
+from lib.release_cleanup import (ReleaseCleanupResult,
+                                 remove_album_by_selectors)
 from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DisambiguationFailure,
@@ -639,21 +641,51 @@ def run_import(path, mb_release_id):
                 proc.stdin.flush()
 
             elif msg_type == "resolve_duplicate":
+                # Always answer "keep". Never "remove".
+                #
+                # Live 2026-04-20 data-loss event (Shearwater "Palo Santo"):
+                # beets' ``find_duplicates()`` returned a cross-MBID sibling
+                # pressing even with ``duplicate_keys: [albumartist, album,
+                # mb_albumid]`` in config. The old "same-MBID → remove" branch
+                # then called beets' ``task.should_remove_duplicates = True``,
+                # which iterates ``duplicate_items()`` and calls
+                # ``util.remove(item.path)`` on every item in every found
+                # duplicate — blast radius is whatever find_duplicates chose,
+                # not what we asked for. The 11-track 2006 sibling (mb=
+                # 157b51f8...) lost every mp3 on disk when the 19-track 2007
+                # reissue (mb=168d7fea...) re-imported.
+                #
+                # Structural fix: the destructive branch is gone. Stale
+                # same-MBID entries are handled by pre-flight via
+                # ``_preflight_remove_stale_mbid`` (a targeted
+                # ``beet remove -d mb_albumid:<mbid>`` that can only match
+                # that one album). By the time this harness starts, the
+                # stale entry is already absent — any duplicates still
+                # visible here are different-MBID siblings we MUST keep.
+                #
+                # ``kept_duplicate = True`` unconditionally so post-import
+                # ``beet move mb_albumid:<target>`` re-runs ``%aunique`` to
+                # fix the new album's path (beets doesn't fully disambiguate
+                # at import time when the disambiguator field starts empty).
                 dup_mbids = msg.get("duplicate_mbids", [])
+                proc.stdin.write(json.dumps({"action": "keep"}) + "\n")
+                proc.stdin.flush()
+                kept_duplicate = True
                 if mb_release_id in dup_mbids:
-                    # Same MBID already in DB — stale/partial entry, replace it.
-                    proc.stdin.write(json.dumps({"action": "remove"}) + "\n")
-                    proc.stdin.flush()
-                    print(f"  [DUP] Same MBID in library, removing stale entry", file=sys.stderr)
+                    # Should be rare: pre-flight failed to remove the stale
+                    # entry, or a race allowed it back. Log loudly so the
+                    # audit trail shows why beets has two albums with the
+                    # same MBID; operator can run the ban-source cleanup.
+                    print(
+                        f"  [DUP] Same MBID in library despite pre-flight "
+                        f"(existing: {dup_mbids}); keeping both — pre-flight "
+                        "targeted remove must have failed",
+                        file=sys.stderr)
                 else:
-                    # Different edition of same album — keep both.
-                    # NOTE: beets %aunique{} does NOT fully disambiguate at
-                    # import time (the new album gets "" if its disambiguator
-                    # field is empty). We run `beet move` post-import to fix.
-                    proc.stdin.write(json.dumps({"action": "keep"}) + "\n")
-                    proc.stdin.flush()
-                    kept_duplicate = True
-                    print(f"  [DUP] Different edition (existing: {dup_mbids}), keeping both", file=sys.stderr)
+                    print(
+                        f"  [DUP] Different edition (existing: {dup_mbids}), "
+                        "keeping both",
+                        file=sys.stderr)
 
             elif msg_type in ("choose_match", "choose_item"):
                 candidates = msg.get("candidates", [])
@@ -791,6 +823,41 @@ def _run_disambiguation_move(mbid: str) -> DisambiguationFailure | None:
         return DisambiguationFailure(reason="nonzero_rc", detail=detail)
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight same-MBID stale removal
+# ---------------------------------------------------------------------------
+
+def _preflight_remove_stale_mbid(
+    mbid: str, beets: BeetsDB) -> ReleaseCleanupResult | None:
+    """Targeted removal of a stale same-MBID album before the beets import.
+
+    This is the structural fix for the Palo Santo data-loss bug (2026-
+    04-20). Beets' own ``find_duplicates()`` drags in cross-MBID
+    sibling pressings and its ``remove_duplicates()`` deletes every
+    item in every match — so asking the interactive harness to
+    "remove" a stale same-MBID entry destroys the siblings too. The
+    primitive here delegates to
+    ``lib.release_cleanup.remove_album_by_selectors`` which can only
+    target the exact MBID via ``beet remove -d mb_albumid:<mbid>``.
+
+    Returns:
+    - ``None`` if the album isn't in beets (nothing to remove) or if
+      ``mbid`` is empty. Caller proceeds straight to the import.
+    - ``ReleaseCleanupResult`` otherwise. Callers that care about
+      partial failure (``absent_after=False``) can bail out of the
+      import rather than run into the cross-MBID blast radius path.
+
+    Does NOT touch the pipeline DB — harness subprocess has no
+    PipelineDB handle. The pipeline-side clear happens in
+    ``dispatch_import`` / the web layer on the parent side.
+    """
+    if not mbid:
+        return None
+    if not beets.album_exists(mbid):
+        return None
+    return remove_album_by_selectors(beets_db=beets, release_id=mbid)
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1299,35 @@ def main():
         _remove_lossless_files(args.path)
         _log(f"  [CLEANUP] Removed lossless originals "
              f"(target skipped or preserve-source approved)")
+
+    # --- Pre-flight: remove stale same-MBID album BEFORE running the
+    # beets interactive import. This is the structural fix for the Palo
+    # Santo data-loss bug (2026-04-20): beets' ``find_duplicates()``
+    # drags cross-MBID sibling pressings into the resolve_duplicate
+    # callback, so if we asked the harness to answer "remove" for the
+    # same-MBID case, beets' ``remove_duplicates()`` would delete every
+    # item in every match — siblings included. The fix scopes the
+    # removal to exactly one MBID via ``beet remove -d mb_albumid:...``
+    # which is selector-scoped and cannot reach siblings. By the time
+    # ``run_import`` starts, the stale entry is absent, and the only
+    # duplicates ``find_duplicates()`` might still see are legitimate
+    # different-MBID editions we want to keep.
+    if already_in_beets:
+        cleanup = _preflight_remove_stale_mbid(mbid, beets)
+        if cleanup is not None:
+            if cleanup.absent_after:
+                _log(f"  [PRE-FLIGHT] Removed stale same-MBID entry "
+                     f"(beet remove -d mb_albumid:{mbid})")
+            else:
+                # Targeted remove failed (timeout/error). Log every
+                # selector failure so the audit trail says what went
+                # wrong. Proceed anyway — the "keep" duplicate response
+                # is still safe (no data loss), it just means beets ends
+                # up with two albums at the same MBID until someone runs
+                # the ban-source cleanup.
+                for f in cleanup.selector_failures:
+                    _log(f"  [PRE-FLIGHT] {f.selector} failed ({f.reason}): "
+                         f"{f.detail}")
 
     # --- Import ---
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")

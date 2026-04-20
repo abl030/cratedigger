@@ -8,21 +8,25 @@ Every Codex round on PR #119 surfaced one of those steps being skipped
 missed a legacy Discogs album, a cleared-but-not-removed race in the
 'already gone' path.
 
-The function below is the only way to couple the two sides. Given a
-``release_id`` (UUID or Discogs numeric) it:
+The module exposes two entry points and the layering between them is
+the point — do not collapse or route around it:
 
-1. Calls ``BeetsDB.locate(release_id)`` to enumerate every selector
-   the ID could live under (one for UUIDs, two for Discogs numerics
-   covering the new + legacy layouts).
-2. If the album is exact-present, runs ``beet remove -d`` for EVERY
-   selector. Hitting a selector that doesn't hold the album is a
-   harmless no-op; skipping the one that does would silently leave
-   the banned copy on disk.
-3. Re-queries ``locate`` to confirm the album is absent.
-4. If absent (whether this call removed it or a prior ``beet rm``
-   did), clears the pipeline DB's on-disk quality fields so stale
-   ``current_spectral_*`` / ``imported_path`` / ``verified_lossless``
-   can't mislead downstream consumers.
+- ``remove_album_by_selectors(beets_db, release_id)`` is the pure
+  beets-only primitive. Given a ``release_id`` it locates the album,
+  iterates every selector, collects per-selector failures, and
+  re-queries to confirm absence. No pipeline DB coupling. Callable
+  from the harness (which runs as a subprocess with no PipelineDB
+  handle) — this is what the pre-flight same-MBID removal in
+  ``harness/import_one.py`` uses to avoid the cross-MBID blast
+  radius of beets' ``task.should_remove_duplicates = True`` path.
+
+- ``remove_and_reset_release(beets_db, pipeline_db, release_id,
+  request_id)`` wraps the primitive and adds one extra step:
+  clearing ``current_spectral_*`` / ``imported_path`` /
+  ``verified_lossless`` via
+  ``PipelineDB.clear_on_disk_quality_fields`` iff the album is
+  absent afterwards. That's what the ban-source web route and other
+  pipeline-aware callers need.
 
 Issue #123 PR B: each ``sp.run`` is now wrapped in a try/except that
 catches ``TimeoutExpired``, non-zero exit codes, and any ``OSError``
@@ -133,15 +137,22 @@ def _run_remove_selector(selector: str) -> SelectorFailure | None:
     return None
 
 
-def remove_and_reset_release(
+def remove_album_by_selectors(
     beets_db: "BeetsDB",
-    pipeline_db: "PipelineDB",
     release_id: str,
-    request_id: int,
 ) -> ReleaseCleanupResult:
-    """Atomically remove a release from beets and clear pipeline ghost state.
+    """Remove a release from beets via its canonical selectors.
 
-    See ``ReleaseCleanupResult`` for the return contract.
+    Pure beets-only primitive — does NOT touch the pipeline DB. See
+    ``ReleaseCleanupResult`` for the return contract.
+
+    Called from:
+    - ``remove_and_reset_release`` (this module) which wraps this and
+      adds pipeline-side ``clear_on_disk_quality_fields``
+    - ``harness/import_one.py`` pre-flight, where a stale same-MBID
+      entry must be removed before the beets interactive import
+      starts — without touching cross-MBID sibling pressings that
+      beets' own ``remove_duplicates()`` would have destroyed
 
     Preconditions: ``release_id`` is non-empty. Callers that may pass
     an empty ID must guard before invoking.
@@ -177,11 +188,38 @@ def remove_and_reset_release(
     absent_after = after.kind != "exact"
     beets_removed = album_was_in_beets and absent_after
 
-    if absent_after:
-        pipeline_db.clear_on_disk_quality_fields(request_id)
-
     return ReleaseCleanupResult(
         beets_removed=beets_removed,
         absent_after=absent_after,
         selector_failures=tuple(failures),
     )
+
+
+def remove_and_reset_release(
+    beets_db: "BeetsDB",
+    pipeline_db: "PipelineDB",
+    release_id: str,
+    request_id: int,
+) -> ReleaseCleanupResult:
+    """Atomically remove a release from beets and clear pipeline ghost state.
+
+    Thin wrapper around ``remove_album_by_selectors`` that adds the
+    pipeline-DB cleanup: iff the album is absent afterwards, clear
+    stale ``current_spectral_*`` / ``imported_path`` /
+    ``verified_lossless`` so downstream consumers don't reason about
+    ghost state left behind by the removed album.
+
+    See ``ReleaseCleanupResult`` for the return contract.
+
+    Preconditions: ``release_id`` is non-empty. Callers that may pass
+    an empty ID must guard before invoking.
+    """
+    if not release_id:
+        raise ValueError("release_id must be non-empty")
+
+    result = remove_album_by_selectors(beets_db, release_id)
+
+    if result.absent_after:
+        pipeline_db.clear_on_disk_quality_fields(request_id)
+
+    return result
