@@ -197,6 +197,48 @@ class BeetsDB:
 
         return ReleaseLocation(kind="absent", album_id=None, selectors=())
 
+    def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
+        """Return every album id whose mb/discogs id matches ``release_id``.
+
+        Unlike ``locate()`` (which returns a single id via ``LIMIT 1``),
+        this enumerates *every* row — needed so post-import stale
+        cleanup can detect the split-brain "multiple same-MBID rows
+        already exist" state and fail-fast rather than delete just
+        one while the others survive (Codex PR #131 round 3 P2).
+
+        Same dispatch as ``locate()``:
+        - Numeric ID → match on ``discogs_albumid`` OR ``mb_albumid``
+          (dual Discogs layout).
+        - UUID → match on ``mb_albumid`` only.
+        - Empty → ``[]``.
+
+        Returns an empty list if the release is absent.
+        """
+        if not release_id:
+            return []
+        source = detect_release_source(release_id)
+        numeric: int | None = None
+        if source == "discogs":
+            try:
+                numeric = int(release_id)
+            except ValueError:
+                numeric = None
+
+        if numeric is not None:
+            rows = self._conn.execute(
+                "SELECT id FROM albums "
+                "WHERE discogs_albumid = ? OR mb_albumid = ? "
+                "ORDER BY id",
+                (numeric, release_id),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id FROM albums WHERE mb_albumid = ? "
+                "ORDER BY id",
+                (release_id,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def _batch_lookup_album_ids(
         self, release_ids: list[str]
     ) -> dict[str, int]:

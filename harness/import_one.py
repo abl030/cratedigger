@@ -587,7 +587,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 def run_import(path, mb_release_id):
     """Drive the beets harness to import one album.
 
-    Returns (exit_code, beets_lines, kept_duplicate, sibling_mbids).
+    Returns (exit_code, beets_lines, kept_duplicate, sibling_album_ids).
 
     - ``kept_duplicate`` is True whenever beets asked us to resolve a
       duplicate during this import — we ALWAYS answer "keep" now
@@ -595,13 +595,15 @@ def run_import(path, mb_release_id):
       flag is really "post-import beet move needed". Triggers the
       ``%aunique`` re-evaluation via ``_apply_disambiguation`` in
       main().
-    - ``sibling_mbids`` is every non-target MBID we saw in
-      ``resolve_duplicate`` callbacks. These are different-edition
-      pressings beets flagged as duplicates; after the new album is
-      in beets, main() re-runs ``beet move`` on each so ``%aunique``
-      re-evaluates their paths too — otherwise one edition gets the
-      ``[YEAR]`` suffix and the other stays unsuffixed, which looks
-      asymmetric in Plex/Meelo.
+    - ``sibling_album_ids`` is the set of beets numeric album ids
+      (``albums.id``) for every non-same-MBID duplicate beets flagged.
+      Keyed by the beets primary key, not ``mb_albumid``, because
+      Discogs-sourced pressings have empty ``mb_albumid`` — Codex
+      (PR #131 round 3 P3) flagged that the earlier MBID-based set
+      silently dropped Discogs siblings, leaving asymmetric folder
+      layouts that this feature was meant to fix. After the new
+      album is in beets, main() runs ``beet move -a id:<N>`` on each
+      so ``%aunique`` re-evaluates their paths too.
     """
     cmd = [HARNESS, "--noincremental", "--search-id", mb_release_id, path]
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
@@ -617,7 +619,7 @@ def run_import(path, mb_release_id):
 
     applied = False
     kept_duplicate = False
-    sibling_mbids: set[str] = set()
+    sibling_album_ids: set[int] = set()
     timeout = HARNESS_TIMEOUT
 
     try:
@@ -688,12 +690,24 @@ def run_import(path, mb_release_id):
                 # ``beet move mb_albumid:<target>`` re-runs ``%aunique`` to
                 # fix the new album's path.
                 dup_mbids = msg.get("duplicate_mbids", [])
+                dup_album_ids = msg.get("duplicate_album_ids", [])
                 proc.stdin.write(json.dumps({"action": "keep"}) + "\n")
                 proc.stdin.flush()
                 kept_duplicate = True
-                for dm in dup_mbids:
-                    if dm and dm != mb_release_id:
-                        sibling_mbids.add(dm)
+                # Collect sibling beets numeric album ids. Paired
+                # index-wise with dup_mbids: skip entries whose MBID
+                # matches our target (those are stale same-MBID rows,
+                # handled by post-import cleanup via id:<N>). Keep
+                # everything else — including Discogs siblings whose
+                # ``mb_albumid`` is empty but whose beets ``album_id``
+                # is always present.
+                for idx, aid in enumerate(dup_album_ids):
+                    if not isinstance(aid, int):
+                        continue
+                    dm = dup_mbids[idx] if idx < len(dup_mbids) else ""
+                    if dm and dm == mb_release_id:
+                        continue  # stale same-MBID — post-import cleanup handles
+                    sibling_album_ids.add(aid)
                 if mb_release_id in dup_mbids:
                     # Rare: happens when an operator ran an upgrade
                     # without going through dispatch (or a race allowed
@@ -723,7 +737,7 @@ def run_import(path, mb_release_id):
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return 4, [], False, frozenset()
+                    return 4, [], False, frozenset([])
 
                 cand = candidates[matched_idx]
                 dist = cand.get("distance", 1.0)
@@ -734,7 +748,7 @@ def run_import(path, mb_release_id):
                     print(f"  [REJECT] distance={dist:.4f} > {MAX_DISTANCE}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return 2, [], False, frozenset()
+                    return 2, [], False, frozenset([])
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()
@@ -756,10 +770,10 @@ def run_import(path, mb_release_id):
                 beets_lines.append(line.strip())
 
     if proc_rc not in (None, 0):
-        return 2, beets_lines, kept_duplicate, frozenset(sibling_mbids)
+        return 2, beets_lines, kept_duplicate, frozenset(sibling_album_ids)
 
     return ((0 if applied else 2), beets_lines, kept_duplicate,
-            frozenset(sibling_mbids))
+            frozenset(sibling_album_ids))
 
 
 def _apply_disambiguation(
@@ -871,33 +885,6 @@ def _run_disambiguation_move(mbid: str) -> DisambiguationFailure | None:
 # hit a sibling pressing.
 
 
-def _capture_stale_beets_id(
-    mbid: str, beets: BeetsDB) -> int | None:
-    """Return the beets numeric id of the stale same-MBID album, or None.
-
-    Called pre-import, before any destructive action. If the album is
-    already present exactly once (true by construction — beets enforces
-    unique insertion at import time, so there's at most one row with a
-    given MBID before our import starts), we remember its id. After
-    the new album imports, both briefly coexist; we then remove the
-    captured id. If the album isn't in beets at all, returns None and
-    the caller simply skips the post-import cleanup.
-
-    Uses ``BeetsDB.locate()`` rather than ``get_album_info()`` because
-    ``get_album_info()`` returns ``None`` for albums with no readable
-    track/bitrate rows — and "partial stale import with broken items"
-    is exactly the pathology this cleanup exists to handle (Codex PR
-    #131 round 2 P2). ``locate()`` only queries ``albums`` so the
-    presence check and id capture don't depend on item-level data.
-    """
-    if not mbid:
-        return None
-    location = beets.locate(mbid)
-    if location.kind != "exact" or location.album_id is None:
-        return None
-    return location.album_id
-
-
 def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
     """Post-import cleanup: delete the stale same-MBID album by beets id.
 
@@ -906,7 +893,7 @@ def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
     shows exactly which beets row was removed and why.
     """
     _log(f"[POST-IMPORT CLEANUP] Removing stale same-MBID entry "
-         f"(beet remove -d id:{stale_id})")
+         f"(beet remove -a -d id:{stale_id})")
     failure = remove_album_by_beets_id(stale_id)
     if failure is None:
         _log(f"  [POST-IMPORT CLEANUP] OK — id:{stale_id} removed")
@@ -918,8 +905,51 @@ def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
     return failure
 
 
-def _canonicalize_siblings(sibling_mbids: frozenset[str]) -> None:
-    """Re-run ``beet move`` on each sibling MBID after a kept-duplicate import.
+def _run_album_move_by_id(album_id: int) -> DisambiguationFailure | None:
+    """Run ``beet move -a id:<album_id>`` once, never raise.
+
+    Album-mode, primary-key-scoped variant of
+    ``_run_disambiguation_move``. Used for sibling canonicalization
+    where the identifier has to be source-agnostic: beets' numeric
+    ``albums.id`` is always populated (it's the PK), unlike
+    ``mb_albumid`` (empty for Discogs pressings) or
+    ``discogs_albumid`` (empty for MB pressings). Codex (PR #131
+    round 3 P3) flagged that the earlier MBID-only sibling move
+    silently dropped Discogs duplicates.
+
+    ``-a`` is mandatory — without it ``id:<N>`` would be interpreted
+    against ``items.id`` (a different auto-increment namespace) and
+    match a track row instead of the album.
+
+    Same error classification as ``_run_disambiguation_move``:
+    ``TimeoutExpired`` → ``timeout``, non-zero rc → ``nonzero_rc``,
+    ``OSError`` → ``exception``. Returns ``None`` on clean exit.
+    """
+    try:
+        proc = subprocess.run(
+            [BEET_BIN, "move", "-a", f"id:{album_id}"],
+            capture_output=True, text=True, timeout=120,
+            env=beets_subprocess_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return DisambiguationFailure(
+            reason="timeout", detail=f"timeout after {exc.timeout}s")
+    except OSError as exc:
+        return DisambiguationFailure(
+            reason="exception", detail=f"{type(exc).__name__}: {exc}")
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip().splitlines()
+        last = stderr[-1] if stderr else ""
+        detail = (f"rc={proc.returncode}: {last}"
+                  if last else f"rc={proc.returncode}")
+        return DisambiguationFailure(reason="nonzero_rc", detail=detail)
+
+    return None
+
+
+def _canonicalize_siblings(sibling_album_ids: frozenset[int]) -> None:
+    """Re-run ``beet move`` on each sibling album id after a kept-duplicate import.
 
     When beets' ``%aunique`` disambiguates the new album (adding a
     ``[YEAR]`` suffix because a different-edition sibling exists), the
@@ -928,26 +958,31 @@ def _canonicalize_siblings(sibling_mbids: frozenset[str]) -> None:
     end up with an asymmetric library like
     ``/Shearwater/2006 - Palo Santo/`` (plain, old) vs
     ``/Shearwater/2007 - Palo Santo [2007]/`` (disambiguated, new).
-    Running ``beet move mb_albumid:<sibling>`` on each sibling here
-    re-evaluates ``%aunique`` for its path too, so both editions end
-    up shaped consistently.
+    Running ``beet move -a id:<N>`` on each sibling here re-evaluates
+    ``%aunique`` for its path too, so both editions end up shaped
+    consistently.
 
-    Never raises — delegates to ``_run_disambiguation_move`` which
+    Takes beets numeric album ids (not MBIDs) so Discogs-sourced
+    siblings are covered — ``mb_albumid`` is empty for those,
+    ``albums.id`` is always populated.
+
+    Never raises — delegates to ``_run_album_move_by_id`` which
     returns a typed ``DisambiguationFailure`` on any subprocess
     error. Per-sibling failures are logged but do not abort the
     remaining moves; the import itself is already on disk and any
     failed sibling move just means that sibling stays at its old
     path until something re-runs ``beet move`` on it.
     """
-    if not sibling_mbids:
+    if not sibling_album_ids:
         return
-    _log(f"[CANONICALIZE] Re-running beet move for "
-         f"{len(sibling_mbids)} sibling MBID(s) so %aunique stays symmetric")
-    for sibling in sibling_mbids:
-        _log(f"  [CANONICALIZE] beet move mb_albumid:{sibling}")
-        failure = _run_disambiguation_move(sibling)
+    _log(f"[CANONICALIZE] Re-running beet move -a for "
+         f"{len(sibling_album_ids)} sibling album id(s) so %aunique "
+         "stays symmetric")
+    for aid in sibling_album_ids:
+        _log(f"  [CANONICALIZE] beet move -a id:{aid}")
+        failure = _run_album_move_by_id(aid)
         if failure is not None:
-            _log(f"  [CANONICALIZE] sibling {sibling} move failed "
+            _log(f"  [CANONICALIZE] sibling id:{aid} move failed "
                  f"({failure.reason}): {failure.detail} — sibling stays "
                  "at its current path, re-run `beet move` manually later")
 
@@ -1407,15 +1442,36 @@ def main():
     # with no album at all. Capture-then-import-then-remove preserves
     # the invariant that the existing copy survives until the
     # replacement is confirmed on disk.
-    stale_beets_id = (_capture_stale_beets_id(mbid, beets)
-                      if already_in_beets else None)
+    #
+    # Codex (PR #131 round 3 P2): ``locate()`` only returns a single
+    # id via LIMIT 1. If beets somehow has MULTIPLE same-MBID rows
+    # before this import (prior cleanup timeout, manual duplicate
+    # insertion, etc.), capturing just one and removing just that
+    # one leaves the others intact — silent split-brain after a
+    # "successful" import. Enumerate all matches and fail-fast if
+    # count > 1 so the operator is forced to clean up first.
+    stale_ids: list[int] = (
+        beets.get_all_album_ids_for_release(mbid)
+        if already_in_beets else [])
+    if len(stale_ids) > 1:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Beets already has {len(stale_ids)} rows for "
+                   f"mbid={mbid} before import: {stale_ids}. "
+                   "Cannot safely run an upgrade against a split-brain "
+                   "state — operator must reduce to at most one row "
+                   "(e.g. via ban-source cleanup) before retrying.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+    stale_beets_id: int | None = stale_ids[0] if stale_ids else None
     if stale_beets_id is not None:
         _log(f"[PRE-FLIGHT] Captured stale beets id:{stale_beets_id} for "
              f"post-import cleanup (will remove after upgrade lands)")
 
     # --- Import ---
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
-    rc, beets_lines, kept_duplicate, sibling_mbids = run_import(
+    rc, beets_lines, kept_duplicate, sibling_album_ids = run_import(
         args.path, mbid)
     r.beets_log = beets_lines
 
@@ -1502,8 +1558,10 @@ def main():
         # Also canonicalize the sibling editions beets flagged as
         # duplicates — without this, the new album gets the ``[YEAR]``
         # suffix while the sibling stays un-suffixed (asymmetric
-        # folder layout in Plex/Meelo).
-        _canonicalize_siblings(sibling_mbids)
+        # folder layout in Plex/Meelo). Takes beets numeric album ids
+        # so Discogs siblings are covered too (their mb_albumid is
+        # empty but albums.id is always present).
+        _canonicalize_siblings(sibling_album_ids)
 
     # --- Post-import extension check ---
     # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)
