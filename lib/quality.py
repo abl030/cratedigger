@@ -1335,6 +1335,20 @@ class MovedSibling:
     gets updated so the UI stops pointing at the pre-move directory.
     Untracked siblings (no matching pipeline row) are no-ops at the
     dispatcher — propagation is best-effort.
+
+    **Wire-boundary policy.** This dataclass is decoded from harness
+    stdout JSON AND re-decoded from ``download_log.import_result`` JSONB
+    on every web API read. Per ``.claude/rules/code-quality.md`` §
+    "Wire-boundary types" the decoder at ``_postflight_from_dict`` uses
+    ``msgspec.convert(list, type=list[MovedSibling])`` which validates
+    every field against the declared types at the boundary —
+    ``msgspec.ValidationError`` raises if a future harness change emits
+    ``album_id`` as a string or drops a required field, instead of
+    silently corrupting downstream state (the PR #98 / issue #99
+    lesson). ``@dataclass`` rather than ``msgspec.Struct`` is kept here
+    so ``ImportResult.to_json()``'s ``dataclasses.asdict`` traversal
+    still sees the fields (msgspec.Struct is opaque to ``asdict``);
+    strict validation happens on the inbound edge.
     """
     album_id: int
     new_path: str
@@ -1372,6 +1386,15 @@ def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
     from issue #132 P2 / #133). Old rows missing a field default per
     the dataclass — ``disambiguation_failure=None``,
     ``moved_siblings=[]``.
+
+    ``moved_siblings`` is decoded via ``msgspec.convert`` because
+    ``MovedSibling`` is a ``msgspec.Struct`` (wire-boundary type per
+    ``.claude/rules/code-quality.md``). Strict type validation catches
+    int/str drift (e.g. harness emitting ``album_id`` as string) at
+    the boundary — ``msgspec.ValidationError`` raises here instead of
+    silently corrupting downstream state. Non-list values (malformed
+    legacy JSONB) fall back to the dataclass default ``[]`` without
+    raising, preserving backwards compatibility.
     """
     if not d:
         return PostflightInfo()
@@ -1381,10 +1404,8 @@ def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
         pf_d["disambiguation_failure"] = DisambiguationFailure(**df_d)
     ms_list = pf_d.pop("moved_siblings", None)
     if isinstance(ms_list, list):
-        pf_d["moved_siblings"] = [
-            MovedSibling(**s) if isinstance(s, dict) else s
-            for s in ms_list
-        ]
+        pf_d["moved_siblings"] = msgspec.convert(
+            ms_list, type=list[MovedSibling])
     return PostflightInfo(**pf_d)
 
 

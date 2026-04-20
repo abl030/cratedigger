@@ -374,10 +374,30 @@ def _propagate_moved_siblings(
     whose ``beet move`` succeeded, carrying the beets album id, the
     new path, and the pre-resolved ``(mb_albumid, discogs_albumid)``
     columns from beets. This function translates each record into a
-    ``PipelineDB.update_imported_path_by_release_id`` call. Updates
-    are best-effort: a sibling not tracked in the pipeline DB is a
-    silent no-op (rowcount=0); a DB exception on one sibling is
-    logged and does not abort the rest.
+    ``PipelineDB.update_imported_path_by_release_id`` call.
+
+    Three log paths worth noticing in operations:
+
+    - ``rows == 1`` (expected happy case): INFO log with the new path
+      and the request id count. Cross-reference with the harness's
+      ``[CANONICALIZE]`` stderr for a full post-move audit trail.
+    - ``rows > 1``: WARN — should be at most one tracked request per
+      release, but ``discogs_release_id`` has no UNIQUE constraint
+      (``migrations/001_initial.sql``), so a duplicate could sneak in.
+      Flag it so an operator can reconcile.
+    - ``rows == 0`` AND both release IDs empty: WARN — the sibling
+      moved on disk but we had no beets release-id columns to key the
+      SQL on. Usually means beets didn't tag the row (no mb_albumid
+      AND no discogs_albumid), which is itself worth investigating.
+    - ``rows == 0`` AND at least one ID populated: INFO at DEBUG level
+      — sibling wasn't tracked in the pipeline DB. Silent no-op is
+      the common case for multi-edition libraries where only some
+      editions are pipeline requests.
+
+    Per-sibling DB exceptions are logged with full traceback and do
+    NOT abort the loop — a sibling's update failure is cosmetic
+    (wrong UI path) not structural, and other siblings should still
+    propagate.
 
     No-op when ``moved_siblings`` is empty — the common case
     (non-kept-duplicate imports).
@@ -400,12 +420,36 @@ def _propagate_moved_siblings(
                 "pipeline DB row will show pre-move path until next "
                 "upgrade or manual re-tag")
             continue
-        if rows:
-            logger.info(
+        if rows > 1:
+            # More than one pipeline row matched. mb_release_id is
+            # UNIQUE so the MB column alone can't cause this — only a
+            # duplicate discogs_release_id can, which is a pipeline DB
+            # inconsistency worth investigating.
+            logger.warning(
                 f"{label}: propagated imported_path → "
                 f"{sib.new_path} for sibling album_id={sib.album_id} "
-                f"({rows} pipeline row(s) updated)")
-        # rows == 0 is the common case (sibling not tracked) — silent.
+                f"— {rows} pipeline rows updated "
+                f"(mb={sib.mb_albumid or '∅'}, "
+                f"discogs={sib.discogs_albumid or '∅'}); expected "
+                "at most one, check for duplicate pipeline requests")
+        elif rows == 1:
+            logger.info(
+                f"{label}: propagated imported_path → "
+                f"{sib.new_path} for sibling album_id={sib.album_id}")
+        elif not sib.mb_albumid and not sib.discogs_albumid:
+            # Sibling moved on disk, but beets had no release ids for
+            # it (neither mb_albumid nor discogs_albumid) — we cannot
+            # key the UPDATE. Not a pipeline bug per se, but the fact
+            # that an album in beets has no release identifier at all
+            # is worth surfacing.
+            logger.warning(
+                f"{label}: sibling album_id={sib.album_id} moved to "
+                f"{sib.new_path} but has NO release id in beets "
+                "(neither mb_albumid nor discogs_albumid); pipeline "
+                "DB cannot propagate imported_path without a release "
+                "id key")
+        # rows == 0 with at least one id populated: common case
+        # (sibling not tracked in pipeline DB). Silent.
 
 
 def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
@@ -729,6 +773,16 @@ def dispatch_import_core(
                 outcome_message = f"No JSON result (rc={result.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
+                # Propagate sibling path updates BEFORE dispatch
+                # branches. Rationale: the sibling files are already
+                # moved on disk by the time the harness returns —
+                # delaying the pipeline DB update to after
+                # ``_do_mark_done`` (atomic-success semantics) would
+                # mean that if ``_do_mark_done`` throws, the sibling's
+                # pipeline row stays stale even though the disk state
+                # is new. Running propagation here (best-effort,
+                # never raises) keeps the pipeline DB consistent with
+                # disk regardless of the main import's outcome.
                 _propagate_moved_siblings(db, ir, label=label)
                 decision = ir.decision or "unknown"
                 action = dispatch_action(decision)
