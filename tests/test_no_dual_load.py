@@ -103,12 +103,12 @@ class TestNoDualLoad(unittest.TestCase):
             "contains the repo root, and every import uses its prefixed form."
         )
 
-    def test_soularr_main_no_dual_load(self):
-        """Booting soularr.py must not load any module twice."""
+    def test_cratedigger_main_no_dual_load(self):
+        """Booting cratedigger.py must not load any module twice."""
         bootstrap = (
             "import sys, os\n"
             "sys.path.insert(0, os.path.abspath('.'))\n"
-            "import soularr  # noqa: F401\n"
+            "import cratedigger  # noqa: F401\n"
         )
         modules = _run_entrypoint_and_dump_modules(bootstrap)
         offenders = _dual_loaded(modules)

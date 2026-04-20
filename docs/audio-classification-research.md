@@ -1,6 +1,6 @@
 # Toward a Trustworthy Audio Classification System
 
-This document captures the April 12-13, 2026 research pass on Soularr's
+This document captures the April 12-13, 2026 research pass on Cratedigger's
 audio classification system: what the current classifier does, what the
 corpus work found, where the current rules are weak, and what existing prior
 art already exists outside this repo.
@@ -18,12 +18,12 @@ This write-up is only about the audio classification component:
 
 - detecting bad MP3 / fake-lossless / lossy-origin audio
 - deciding when a download should be auto-rejected, auto-imported, or staged
-- evaluating whether Soularr's current detector is too trigger-happy
+- evaluating whether Cratedigger's current detector is too trigger-happy
 
-It is not about the wider Soularr pipeline, web UI, or beets integration
+It is not about the wider Cratedigger pipeline, web UI, or beets integration
 except where those systems affect classifier inputs or policy decisions.
 
-## Current Soularr Classifier
+## Current Cratedigger Classifier
 
 The current detector lives primarily in:
 
@@ -73,7 +73,7 @@ For MP3 imports, Stage 1 is a pre-import spectral gate:
 - if the new download looks no better than what already exists, it can be
   hard-rejected as `spectral_reject`
 
-This is important because Soularr is not currently trying to solve
+This is important because Cratedigger is not currently trying to solve
 "classification in the abstract." It is solving "should this download replace
 what I already have?"
 
@@ -352,12 +352,12 @@ Important traits:
 - based on published research
 - explicitly warns that it is useful but not perfect
 
-For Soularr, this makes it a good shadow-mode baseline detector even if it
+For Cratedigger, this makes it a good shadow-mode baseline detector even if it
 turns out to be awkward to embed directly.
 
 #### 2. `audiocheckr`
 
-This is the closest conceptual overlap with what Soularr needs as a headless
+This is the closest conceptual overlap with what Cratedigger needs as a headless
 CLI / library-style system.
 
 Two ideas from it stand out as immediately relevant:
@@ -372,7 +372,7 @@ That maps directly to the biggest weakness observed locally:
 
 The licensing note matters:
 
-- Soularr is GPL-3.0
+- Cratedigger is GPL-3.0
 - `audiocheckr` is AGPL-3.0
 - borrowing concepts is fine
 - vendoring code should be a deliberate licensing decision, not an accidental
@@ -381,7 +381,7 @@ The licensing note matters:
 #### 3. `AudioAuditor`
 
 This project matters less as a dependency and more as proof that heuristic
-cutoff-based systems can be built out much further than Soularr currently has.
+cutoff-based systems can be built out much further than Cratedigger currently has.
 
 Useful ideas:
 
@@ -405,7 +405,7 @@ In other words:
 
 The right target is not "one magic model that never makes mistakes."
 
-A trustworthy classifier in Soularr should mean:
+A trustworthy classifier in Cratedigger should mean:
 
 1. We understand what kinds of bad files it catches.
 2. We understand what kinds of bad files it misses.
@@ -431,12 +431,12 @@ It should become the long-term foundation for classifier work:
 
 ### 2. Add external detectors in shadow mode before trusting them in policy
 
-The safest next step is not "replace Soularr's classifier."
+The safest next step is not "replace Cratedigger's classifier."
 
 It is:
 
 - run an external detector in shadow mode
-- record agreement / disagreement against Soularr's current detector
+- record agreement / disagreement against Cratedigger's current detector
 - inspect the disagreement set manually
 
 The best candidate for this is `vamp-lossy-encoding-detector`.
@@ -451,7 +451,7 @@ If the integration friction is acceptable, it should be used as:
 The single biggest idea worth stealing from prior art is profile-aware
 sensitivity.
 
-Soularr should likely distinguish between at least:
+Cratedigger should likely distinguish between at least:
 
 - standard modern pop / rock / electronic
 - ambient / drone / noise
@@ -503,7 +503,7 @@ The second is not.
 ### High priority
 
 - add a shadow backend for `vamp-lossy-encoding-detector`
-- extend `scripts/spectral_corpus.py` to compare Soularr vs. external detectors
+- extend `scripts/spectral_corpus.py` to compare Cratedigger vs. external detectors
 - record disagreement sets in machine-readable output
 - keep building a labeled edge corpus from:
   - failed imports
@@ -529,7 +529,7 @@ The second is not.
 
 The main conclusions from this chat and research pass are:
 
-1. The current Soularr audio classifier is useful, but narrow.
+1. The current Cratedigger audio classifier is useful, but narrow.
 2. It catches obvious transcodes better than subtle modern lossy-origin files.
 3. Soulseek really does contain a lot of bad high-bitrate files.
 4. The current raw reject counts overstate the number of distinct bad cases.

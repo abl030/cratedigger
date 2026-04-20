@@ -2,7 +2,7 @@
 
 ## Overview
 
-Replace the blocking `monitor_downloads()` loop with a poll-based approach. Each 5-minute soularr run will:
+Replace the blocking `monitor_downloads()` loop with a poll-based approach. Each 5-minute cratedigger run will:
 
 1. Poll slskd for status of albums currently downloading (from previous runs)
 2. Process any completions/timeouts
@@ -381,7 +381,7 @@ def _timeout_album(
     entry: GrabListEntry,
     request_id: int,
     reason: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> None:
     """Handle download timeout: cancel, log, reset to wanted.
 
@@ -411,7 +411,7 @@ def _timeout_album(
     _reset_to_wanted(db, request_id)
 
 
-def poll_active_downloads(ctx: SoularrContext) -> None:
+def poll_active_downloads(ctx: CratediggerContext) -> None:
     """Poll slskd for status of all downloading albums.
 
     For each album with status='downloading':
@@ -659,7 +659,7 @@ prevents stale state from accumulating.
 
 ### Commit 7: Build ActiveDownloadState from GrabListEntry at enqueue time
 
-**Files**: `lib/download.py`, `soularr.py`
+**Files**: `lib/download.py`, `cratedigger.py`
 
 **Tests first** (RED): `tests/test_download.py`
 - `test_build_active_download_state`: GrabListEntry → ActiveDownloadState with correct fields
@@ -696,7 +696,7 @@ def build_active_download_state(entry: GrabListEntry) -> ActiveDownloadState:
 
 ### Commit 8: Refactor `grab_most_wanted()` — enqueue-only, no blocking monitor
 
-**Files**: `lib/download.py`, `soularr.py`
+**Files**: `lib/download.py`, `cratedigger.py`
 
 This is the core behavior change. `grab_most_wanted()` currently calls `search_and_queue()` then blocks in `monitor_downloads()`. The new version calls `search_and_queue()`, persists download state to DB, and returns immediately.
 
@@ -713,7 +713,7 @@ Replace the body of `grab_most_wanted()` in `lib/download.py`:
 ```python
 def grab_most_wanted(albums: list[Any],
                      search_and_queue: Callable[..., tuple[dict, list, list]],
-                     ctx: SoularrContext) -> int:
+                     ctx: CratediggerContext) -> int:
     """Search, enqueue, persist download state, return immediately.
 
     Does NOT block waiting for downloads. Download monitoring happens
@@ -762,7 +762,7 @@ def grab_most_wanted(albums: list[Any],
 
 ### Commit 9: Refactor `main()` — new flow with poll-first
 
-**Files**: `soularr.py`
+**Files**: `cratedigger.py`
 
 **Tests**: No new unit tests — this is orchestration. Verify via integration test / manual run.
 
@@ -804,7 +804,7 @@ Replace the relevant section of `main()` (lines ~1136-1162):
                     os.remove(lock_file_path)
                 sys.exit(0)
             if failed == 0:
-                logger.info("Soularr finished. Exiting...")
+                logger.info("Cratedigger finished. Exiting...")
             else:
                 logger.info(f"{failed}: releases failed to find a match.")
         else:
@@ -820,7 +820,7 @@ Replace the relevant section of `main()` (lines ~1136-1162):
 - `remove_completed_downloads()` always runs at the end (not conditional on failed count)
 - `_make_ctx()` called once — currently it's called inside `grab_most_wanted()` wrapper, which rebuilds it each time. Now we build it once at the top.
 
-**Wait — `_make_ctx()` issue**: The wrapper functions in soularr.py (`cancel_and_delete`, `slskd_do_enqueue`, `grab_most_wanted`) each call `_make_ctx()`. The search functions called by `search_and_queue` use module globals directly (not ctx). So the poll phase needs a ctx but the search phase uses globals. This is fine — we build ctx once for the poll, and the existing wrappers build it again for the search/enqueue phase. No change needed to the wrapper pattern.
+**Wait — `_make_ctx()` issue**: The wrapper functions in cratedigger.py (`cancel_and_delete`, `slskd_do_enqueue`, `grab_most_wanted`) each call `_make_ctx()`. The search functions called by `search_and_queue` use module globals directly (not ctx). So the poll phase needs a ctx but the search phase uses globals. This is fine — we build ctx once for the poll, and the existing wrappers build it again for the search/enqueue phase. No change needed to the wrapper pattern.
 
 Actually, we need to make sure `pipeline_db_source` is initialized before calling `_poll_impl`. Looking at the current flow:
 
@@ -843,16 +843,16 @@ The order is already correct: `pipeline_db_source` is set before `slskd`, and we
 - `monitor_downloads()` (lines 402-466)
 - `_handle_download_problems()` (lines 468-557)
 
-Also remove the import of `monitor_downloads` in `soularr.py` if it exists. Check:
+Also remove the import of `monitor_downloads` in `cratedigger.py` if it exists. Check:
 
 ```python
-# soularr.py line 1002-1004
+# cratedigger.py line 1002-1004
 from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
                           slskd_do_enqueue as _slskd_do_enqueue_impl,
                           grab_most_wanted as _grab_most_wanted_impl)
 ```
 
-`monitor_downloads` is not imported into soularr.py — it's only called from within `grab_most_wanted` in download.py. After commit 7, it's dead code.
+`monitor_downloads` is not imported into cratedigger.py — it's only called from within `grab_most_wanted` in download.py. After commit 7, it's dead code.
 
 **Tests**: Verify existing tests still pass. Some tests in `test_download.py` or `test_integration.py` may test `monitor_downloads` directly — these should be removed or updated to test `poll_active_downloads` instead.
 
@@ -912,7 +912,7 @@ Transfer IDs are ephemeral. We persist filenames in `ActiveDownloadState` and re
 
 ## What's Deferred
 
-1. **Orphan file reconciliation**: If soularr crashes after enqueue but before DB write, slskd has downloads nobody tracks. These accumulate silently. Could add a reconciliation step later.
+1. **Orphan file reconciliation**: If cratedigger crashes after enqueue but before DB write, slskd has downloads nobody tracks. These accumulate silently. Could add a reconciliation step later.
 
 2. **Per-file retry persistence across runs**: Retry counters reset to 0 each run because `GrabListEntry` is reconstructed from DB with `retry=None`. A file that errors on run N gets retry=1, but on run N+1 the counter resets — so a file could retry up to 5 times per run, indefinitely across runs. The absolute timeout (stalled_timeout) is the only protection. Cross-run retry tracking would need JSONB state updates on each poll, adding complexity.
 
@@ -942,21 +942,21 @@ Transfer IDs are ephemeral. We persist filenames in `ActiveDownloadState` and re
 3. **Verify**: 
    ```bash
    # Check schema
-   ssh doc2 'psql -h 192.168.100.11 -U soularr soularr -c "
+   ssh doc2 'psql -h 192.168.100.11 -U cratedigger cratedigger -c "
      SELECT column_name, data_type FROM information_schema.columns 
      WHERE table_name = '\''album_requests'\'' AND column_name = '\''active_download_state'\''
    "'
 
    # Watch first run with new code
-   ssh doc2 'sudo systemctl start soularr --no-block'
-   ssh doc2 'sudo journalctl -u soularr -f --since "5 sec ago"'
+   ssh doc2 'sudo systemctl start cratedigger --no-block'
+   ssh doc2 'sudo journalctl -u cratedigger -f --since "5 sec ago"'
 
    # Verify downloading albums exist after search phase
    ssh doc2 'pipeline-cli list downloading'
 
    # Verify completions processed on next run
    # (wait for timer or start manually)
-   ssh doc2 'sudo journalctl -u soularr --since "5 min ago" | grep -i "poll\|complete\|timeout"'
+   ssh doc2 'sudo journalctl -u cratedigger --since "5 min ago" | grep -i "poll\|complete\|timeout"'
    ```
 
 ---

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Soularr Web UI — album request manager at music.ablz.au.
+"""Cratedigger Web UI — album request manager at music.ablz.au.
 
 Browse MusicBrainz, add releases to the pipeline DB, view status.
 
 Usage:
-    python3 web/server.py --port 8085 --dsn postgresql://soularr@192.168.100.11/soularr
+    python3 web/server.py --port 8085 --dsn postgresql://cratedigger@192.168.100.11/cratedigger
 """
 
 import argparse
@@ -23,7 +23,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
 )
-log = logging.getLogger("soularr-web")
+log = logging.getLogger("cratedigger-web")
 
 # Ensure repo root is importable when run as __main__ so `from lib.X` /
 # `from web.X` resolve without relying on PYTHONPATH.
@@ -156,7 +156,7 @@ def _rank_cfg():
 
     Falls back to defaults if the ini can't be read (e.g. tests / first-
     boot). The cache is module-scoped — a deploy restart picks up any
-    [Quality Ranks] changes via the soularr-web service restart that
+    [Quality Ranks] changes via the cratedigger-web service restart that
     deploy.md guarantees.
     """
     global _rank_cfg_cache
@@ -177,7 +177,7 @@ def compute_library_rank(format_str: str | None, bitrate_kbps: int | None) -> st
     the import gate uses, so what you see in the badge matches what the
     pipeline's quality decisions act on. Returns lowercase rank name
     ('lossless', 'transparent', 'excellent', 'good', 'acceptable',
-    'poor', 'unknown'). Treats MP3 as VBR — soularr's pipeline only
+    'poor', 'unknown'). Treats MP3 as VBR — cratedigger's pipeline only
     produces VBR-V0 MP3, and for the bitrate buckets the badge cares
     about the VBR-vs-CBR distinction barely matters at the display level.
     """
@@ -272,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
     # Routing-level response cache was removed by issue #101 — it used to
     # cache the full HTTP response under `web:<url>`, which baked in
     # per-request overlay state (pipeline_status, in_library, …) and
-    # leaked stale badges for up to 5 min after soularr-the-pipeline
+    # leaked stale badges for up to 5 min after cratedigger-the-pipeline
     # wrote to Postgres outside the web UI's POST paths.
     #
     # The pure MB/Discogs metadata that this cache used to cover is now
@@ -282,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
     # lookups that no longer need caching.
     #
     # `cache.invalidate_groups()` is still callable for backwards
-    # compatibility with soularr's main loop POSTing to
+    # compatibility with cratedigger's main loop POSTing to
     # /api/cache/invalidate, but it's a no-op for any fresh deploy
     # (no `web:` keys exist).
 
@@ -324,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             # Cache invalidation endpoint — kept for backwards compat with
-            # soularr's main-loop POST at end of every cycle. Post-#101
+            # cratedigger's main-loop POST at end of every cycle. Post-#101
             # there's nothing to invalidate at the `web:` namespace, so
             # this is a best-effort no-op.
             if path == "/api/cache/invalidate":
@@ -363,9 +363,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global db, beets_db_path, _beets
 
-    parser = argparse.ArgumentParser(description="Soularr Web UI")
+    parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument("--port", type=int, default=8085)
-    parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr"))
+    parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
     parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db")
     parser.add_argument("--mb-api", default=None, help="MusicBrainz API base URL")
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
@@ -396,7 +396,7 @@ def main():
         _beets = BeetsDB(beets_db_path)
 
     server = HTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"Soularr Web UI listening on http://0.0.0.0:{args.port}")
+    print(f"Cratedigger Web UI listening on http://0.0.0.0:{args.port}")
     print(f"  Pipeline DB: {args.dsn}")
     print(f"  Beets DB: {beets_db_path}")
     print(f"  MB API: {mb_api.MB_API_BASE}")

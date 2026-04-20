@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from lib.config import SoularrConfig
+from lib.config import CratediggerConfig
 from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 from tests.fakes import FakePipelineDB
 
@@ -44,7 +44,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
-                       return_value=SoularrConfig(
+                       return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )):
@@ -260,7 +260,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
-                       return_value=SoularrConfig(
+                       return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )):
@@ -308,7 +308,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             with patch("lib.import_dispatch.run_preimport_gates") as mock_gates, \
                  patch("lib.import_dispatch.inspect_local_files") as mock_inspect, \
                  patch("lib.config.read_runtime_config",
-                       return_value=SoularrConfig(
+                       return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )):
@@ -337,7 +337,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
             album_title="Album",
         ))
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
             pipeline_db_enabled=True,
         )

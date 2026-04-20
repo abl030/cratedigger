@@ -6,7 +6,7 @@ connect over the network — no more SQLite file locking issues on virtiofs.
 
 Usage:
     from lib.pipeline_db import PipelineDB
-    db = PipelineDB("postgresql://soularr@192.168.1.35/soularr")
+    db = PipelineDB("postgresql://cratedigger@192.168.1.35/cratedigger")
     db.add_request(mb_release_id="...", artist_name="...", album_title="...", source="redownload")
 """
 
@@ -21,7 +21,7 @@ import psycopg2.extras
 
 from lib.quality import CooldownConfig, SpectralMeasurement, should_cooldown
 
-DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
+DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
 
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
@@ -35,7 +35,7 @@ ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
 
 # Schema is managed by lib/migrator.py via numbered files in migrations/.
 # PipelineDB itself never runs DDL — see scripts/migrate_db.py and the
-# soularr-db-migrate.service systemd unit (Nix module).
+# cratedigger-db-migrate.service systemd unit (Nix module).
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class PipelineDB:
 
     Schema migrations are NOT this class's responsibility. They live in
     ``migrations/*.sql`` and are applied by ``lib.migrator.apply_migrations``,
-    which the deploy systemd unit ``soularr-db-migrate.service`` runs on every
+    which the deploy systemd unit ``cratedigger-db-migrate.service`` runs on every
     ``nixos-rebuild switch``. Construct this class against an already-migrated
     database.
     """

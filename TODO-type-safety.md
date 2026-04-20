@@ -16,7 +16,7 @@ This applies to every remaining untyped boundary below.
 
 ### 1. ~~`AlbumRecord.from_db_row()` returns `dict`~~ ✅ DONE
 
-Replaced with typed `AlbumRecord`, `ReleaseRecord`, `MediaRecord` dataclasses. All ~50 access sites in soularr.py and lib/download.py updated. `_get_request_id()` deleted. Tests fixed to use real constructors.
+Replaced with typed `AlbumRecord`, `ReleaseRecord`, `MediaRecord` dataclasses. All ~50 access sites in cratedigger.py and lib/download.py updated. `_get_request_id()` deleted. Tests fixed to use real constructors.
 
 ### 2. `PipelineDB.get_request()` returns `dict[str, Any]` — INTENTIONALLY LEFT AS DICT
 
@@ -32,5 +32,5 @@ Audited all tests. Fixed `test_download.py` (2 tests passing dicts → `AlbumRec
 
 ### 5. ~~Stale comments~~ ✅ DONE
 
-- Fixed "bridge during migration" → removed from soularr.py
+- Fixed "bridge during migration" → removed from cratedigger.py
 - Fixed "Lidarr bridge" → clarified as legacy columns in pipeline_db.py

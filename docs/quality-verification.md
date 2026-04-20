@@ -187,7 +187,7 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 
 ## TODO
 
-- [ ] Integrate spectral gradient check into pipeline (import_one.py or soularr.py)
+- [ ] Integrate spectral gradient check into pipeline (import_one.py or cratedigger.py)
 - [ ] Add spectral quality score to pipeline DB (new column) and web UI display
 - [ ] Run spectral check on CBR 320 MP3 downloads post-download
 - [ ] Run spectral check on FLACs pre-conversion to catch transcodes early

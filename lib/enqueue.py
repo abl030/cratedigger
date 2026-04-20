@@ -1,4 +1,4 @@
-"""Release selection and enqueue helpers extracted from soularr.py."""
+"""Release selection and enqueue helpers extracted from cratedigger.py."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from lib.grab_list import GrabListEntry
 from lib.matching import check_for_match, get_album_by_id
 
 if TYPE_CHECKING:
-    from soularr import SlskdDirectory, TrackRecord
-    from lib.config import SoularrConfig
-    from lib.context import SoularrContext
+    from cratedigger import SlskdDirectory, TrackRecord
+    from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
 
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ def release_trackcount_mode(releases: list[Any]) -> Any:
 def choose_release(
     artist_name: str,
     releases: list[Any],
-    release_cfg: SoularrConfig,
+    release_cfg: CratediggerConfig,
 ) -> Any:
     """Choose the best release candidate to try first."""
     most_common_trackcount = release_trackcount_mode(releases)
@@ -127,7 +127,7 @@ def choose_release(
     return releases[0]
 
 
-def _get_denied_users(album_id: int, ctx: SoularrContext) -> set[str]:
+def _get_denied_users(album_id: int, ctx: CratediggerContext) -> set[str]:
     """Get denied users from the pipeline DB source_denylist."""
     request_id = abs(album_id)
     if request_id in ctx.denied_users_cache:
@@ -172,7 +172,7 @@ def _prefixed_directory_files(
     ]
 
 
-def get_album_tracks(album: Any, ctx: SoularrContext) -> list[TrackRecord]:
+def get_album_tracks(album: Any, ctx: CratediggerContext) -> list[TrackRecord]:
     """Get tracks for an album from the pipeline DB source."""
     return cast("list[TrackRecord]", ctx.pipeline_db_source.get_tracks(album))
 
@@ -181,7 +181,7 @@ def try_enqueue(
     all_tracks: Sequence[TrackRecord],
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> EnqueueAttempt:
     """Single album match and enqueue."""
     album_id = all_tracks[0]["albumId"]
@@ -248,7 +248,7 @@ def try_multi_enqueue(
     all_tracks: Sequence[TrackRecord],
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> EnqueueAttempt:
     """Locate and enqueue a multi-disc album."""
     split_release: list[dict[str, Any]] = []
@@ -347,7 +347,7 @@ def _try_filetype(
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
     grab_list: dict[int, GrabListEntry],
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> FindDownloadResult:
     """Try to match and enqueue an album at a specific filetype quality."""
     album_id = album.id
@@ -413,7 +413,7 @@ def _try_filetype(
 def find_download(
     album: Any,
     grab_list: dict[int, GrabListEntry],
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> FindDownloadResult:
     """Walk search results and enqueue the best matching download."""
     album_id = album.id

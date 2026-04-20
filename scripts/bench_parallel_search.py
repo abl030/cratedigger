@@ -30,7 +30,7 @@ import slskd_api
 
 
 # Diverse queries: mix of popular (guaranteed results) and less common artists.
-# All use the wildcarded-first-char format that soularr uses in production.
+# All use the wildcarded-first-char format that cratedigger uses in production.
 QUERIES = [
     "*eatles abbey road",
     "*ink *loyd dark side moon",
@@ -66,7 +66,7 @@ def run_single_search(client: slskd_api.SlskdClient, query: str,
         return SingleSearchResult(query=query, result_count=0,
                                   elapsed_s=time.time() - t0, error=str(e))
 
-    # Wait for completion (same pattern as soularr.py)
+    # Wait for completion (same pattern as cratedigger.py)
     time.sleep(5)
     deadline = time.time() + (search_timeout / 1000) + 10
     while time.time() < deadline:

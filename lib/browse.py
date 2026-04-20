@@ -1,4 +1,4 @@
-"""Directory browsing and file filtering helpers for Soularr."""
+"""Directory browsing and file filtering helpers for Cratedigger."""
 
 from __future__ import annotations
 
@@ -6,17 +6,17 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
-    from soularr import SlskdDirectory
+    from lib.config import CratediggerConfig
+    from cratedigger import SlskdDirectory
 
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 def download_filter(
     allowed_filetype: str,
     directory: SlskdDirectory,
-    download_cfg: SoularrConfig,
+    download_cfg: CratediggerConfig,
 ) -> SlskdDirectory:
     """Return a filtered directory listing without mutating the input."""
     logging.debug("download_filtering")

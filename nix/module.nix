@@ -1,12 +1,12 @@
-# Upstream NixOS module for Soularr / Cratedigger.
+# Upstream NixOS module for Cratedigger.
 #
 # Generic, paths-as-options, no sops/homelab/nspawn assumptions. Downstream
 # wrappers (e.g. ~/nixosconfig) layer their secrets backend, DB host, and
 # reverse-proxy on top via standard NixOS option merging.
 #
-# Identity defaults to root because slskd downloads land outside the soularr
+# Identity defaults to root because slskd downloads land outside the cratedigger
 # user's home and beets needs broad filesystem access. Override with
-# `services.soularr.user` / `services.soularr.group` if you're hardened.
+# `services.cratedigger.user` / `services.cratedigger.group` if you're hardened.
 {
   config,
   lib,
@@ -15,7 +15,7 @@
 }: let
   inherit (lib) mkOption mkEnableOption mkIf optionalString types concatStringsSep;
 
-  cfg = config.services.soularr;
+  cfg = config.services.cratedigger;
   src = cfg.src;
 
   # Same python env the dev shell uses — single source of truth.
@@ -36,9 +36,9 @@
   ];
 
   # CLI wrappers — the only place PYTHONPATH is set.
-  soularrPkg = pkgs.writeShellScriptBin "soularr" ''
+  cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${pythonEnv}/bin/python ${src}/soularr.py "$@"
+    exec ${pythonEnv}/bin/python ${src}/cratedigger.py "$@"
   '';
 
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
@@ -55,7 +55,7 @@
       --migrations-dir "${src}/migrations" "$@"
   '';
 
-  webPkg = pkgs.writeShellScriptBin "soularr-web" ''
+  webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:${src}/lib:${src}/web:''${PYTHONPATH:-}"
     exec ${pythonEnv}/bin/python ${src}/web/server.py \
@@ -89,11 +89,11 @@
       ${bandSection "aac" qr.bands.aac}
     '';
 
-  # Issue #117: secrets live at the *File paths referenced here. The soularr
-  # Python code reads them on demand via SoularrConfig.resolved_*() accessors,
+  # Issue #117: secrets live at the *File paths referenced here. The cratedigger
+  # Python code reads them on demand via CratediggerConfig.resolved_*() accessors,
   # so nothing sensitive is ever embedded in config.ini and the file can be
   # world-readable (see absence of chmod/chgrp in preStartScript).
-  configTemplate = pkgs.writeText "soularr-config.ini" ''
+  configTemplate = pkgs.writeText "cratedigger-config.ini" ''
     [Slskd]
     api_key_file = ${cfg.slskd.apiKeyFile}
     host_url = ${cfg.slskd.hostUrl}
@@ -170,17 +170,17 @@
   # no chmod dance, no sed substitution, and no group-ownership hack. The
   # secrets themselves still need to be readable by cfg.user at whatever paths
   # slskd.apiKeyFile / notifiers.*.{username,password,token}File point to.
-  preStartScript = pkgs.writeShellScript "soularr-prestart" ''
+  preStartScript = pkgs.writeShellScript "cratedigger-prestart" ''
     set -euo pipefail
     config_dir="${cfg.stateDir}"
     mkdir -p "$config_dir"
     ${pkgs.coreutils}/bin/install -m 0644 ${configTemplate} "$config_dir/config.ini"
-    rm -f "$config_dir/.soularr.lock"
+    rm -f "$config_dir/.cratedigger.lock"
   '';
 
   # Optional health check for a stuck slskd reconnect loop. Generic — the
   # restart command is configurable so non-systemd slskd setups still work.
-  slskdHealthCheck = pkgs.writeShellScript "soularr-slskd-healthcheck" ''
+  slskdHealthCheck = pkgs.writeShellScript "cratedigger-slskd-healthcheck" ''
     set -euo pipefail
     api_key=$(${pkgs.coreutils}/bin/cat "${cfg.slskd.apiKeyFile}")
     status=$(${pkgs.curl}/bin/curl -sf -H "X-API-Key: $api_key" "${cfg.slskd.hostUrl}/api/v0/server" 2>/dev/null || echo '{}')
@@ -189,21 +189,21 @@
     if [ "$connected" = "true" ] && [ "$logged_in" = "true" ]; then
       exit 0
     fi
-    echo "soularr: slskd not connected (connected=$connected, loggedIn=$logged_in)" >&2
+    echo "cratedigger: slskd not connected (connected=$connected, loggedIn=$logged_in)" >&2
     ${optionalString (cfg.healthCheck.onFailureCommand != "") ''
-      echo "soularr: running onFailureCommand to recover slskd..." >&2
+      echo "cratedigger: running onFailureCommand to recover slskd..." >&2
       ${cfg.healthCheck.onFailureCommand}
       for i in $(${pkgs.coreutils}/bin/seq 1 12); do
         ${pkgs.coreutils}/bin/sleep 5
         status=$(${pkgs.curl}/bin/curl -sf -H "X-API-Key: $api_key" "${cfg.slskd.hostUrl}/api/v0/server" 2>/dev/null || echo '{}')
         logged_in=$(echo "$status" | ${pkgs.jq}/bin/jq -r '.isLoggedIn // false')
         if [ "$logged_in" = "true" ]; then
-          echo "soularr: slskd reconnected after recovery" >&2
+          echo "cratedigger: slskd reconnected after recovery" >&2
           exit 0
         fi
       done
     ''}
-    echo "soularr: slskd unhealthy, skipping run" >&2
+    echo "cratedigger: slskd unhealthy, skipping run" >&2
     exit 1
   '';
 
@@ -231,23 +231,23 @@
     };
   };
 in {
-  options.services.soularr = {
-    enable = mkEnableOption "Soularr — Soulseek download pipeline";
+  options.services.cratedigger = {
+    enable = mkEnableOption "Cratedigger — Soulseek download pipeline";
 
     src = mkOption {
       type = types.path;
       default = ../.;
       defaultText = lib.literalExpression "../.";
-      description = "Path to the soularr source tree. Defaults to this flake's repo root.";
+      description = "Path to the cratedigger source tree. Defaults to this flake's repo root.";
     };
 
     user = mkOption {
       type = types.str;
       default = "root";
       description = ''
-        UNIX user to run soularr as. Defaults to root because slskd downloads
+        UNIX user to run cratedigger as. Defaults to root because slskd downloads
         and the beets library typically live outside any service-user home and
-        soularr needs broad read/write access. Override only if you've set up
+        cratedigger needs broad read/write access. Override only if you've set up
         the surrounding permissions (slskd group membership, beets DB
         ownership, /Incoming write access, etc.) for an unprivileged user.
       '';
@@ -256,12 +256,12 @@ in {
     group = mkOption {
       type = types.str;
       default = "root";
-      description = "UNIX group to run soularr as. See `user` for context.";
+      description = "UNIX group to run cratedigger as. See `user` for context.";
     };
 
     stateDir = mkOption {
       type = types.str;
-      default = "/var/lib/soularr";
+      default = "/var/lib/cratedigger";
       description = "Runtime state directory (config.ini, lock file).";
     };
 
@@ -269,7 +269,7 @@ in {
       enable = mkOption {
         type = types.bool;
         default = true;
-        description = "Run soularr periodically via systemd timer.";
+        description = "Run cratedigger periodically via systemd timer.";
       };
       onBootSec = mkOption {
         type = types.str;
@@ -288,7 +288,7 @@ in {
         type = types.path;
         description = ''
           Path to a file containing the slskd API key (raw, no envvar prefix).
-          Must be readable by services.soularr.user. Use sops/agenix or any
+          Must be readable by services.cratedigger.user. Use sops/agenix or any
           out-of-band mechanism — the module just reads the file at runtime.
 
           Since issue #117 this path is written directly into config.ini and
@@ -337,7 +337,7 @@ in {
       };
       dsn = mkOption {
         type = types.str;
-        example = "postgresql://soularr@localhost/soularr";
+        example = "postgresql://cratedigger@localhost/cratedigger";
         description = "PostgreSQL connection string for the pipeline DB.";
       };
     };
@@ -403,8 +403,8 @@ in {
 
     # Notifier credential *File options follow the same contract as
     # slskd.apiKeyFile (issue #117): paths written into config.ini, read on
-    # demand by SoularrConfig.resolved_*(). They must be readable by
-    # services.soularr.user. If the operator also triggers imports via
+    # demand by CratediggerConfig.resolved_*(). They must be readable by
+    # services.cratedigger.user. If the operator also triggers imports via
     # pipeline-cli from a non-root shell, the same files must be readable
     # by that user too, otherwise notifier scans silently no-op after
     # CLI-triggered imports (the import itself still succeeds).
@@ -473,7 +473,7 @@ in {
         example = "systemctl restart slskd.service";
         description = ''
           Shell command to run when the health check fails. Empty = log and skip
-          the run. The command is invoked as root (or services.soularr.user) and
+          the run. The command is invoked as root (or services.cratedigger.user) and
           retries are attempted for up to a minute after it returns.
         '';
       };
@@ -597,15 +597,15 @@ in {
     assertions = [
       {
         assertion = !cfg.notifiers.meelo.enable || (cfg.notifiers.meelo.usernameFile != null && cfg.notifiers.meelo.passwordFile != null && cfg.notifiers.meelo.url != "");
-        message = "services.soularr.notifiers.meelo: enable requires url, usernameFile, and passwordFile";
+        message = "services.cratedigger.notifiers.meelo: enable requires url, usernameFile, and passwordFile";
       }
       {
         assertion = !cfg.notifiers.plex.enable || (cfg.notifiers.plex.tokenFile != null && cfg.notifiers.plex.url != "");
-        message = "services.soularr.notifiers.plex: enable requires url and tokenFile";
+        message = "services.cratedigger.notifiers.plex: enable requires url and tokenFile";
       }
       {
         assertion = !cfg.notifiers.jellyfin.enable || (cfg.notifiers.jellyfin.tokenFile != null && cfg.notifiers.jellyfin.url != "");
-        message = "services.soularr.notifiers.jellyfin: enable requires url and tokenFile";
+        message = "services.cratedigger.notifiers.jellyfin: enable requires url and tokenFile";
       }
     ];
 
@@ -615,7 +615,7 @@ in {
       ${cfg.user} = {
         isSystemUser = true;
         group = cfg.group;
-        description = "Soularr service user";
+        description = "Cratedigger service user";
       };
     };
     users.groups = mkIf (cfg.group != "root") {
@@ -631,11 +631,11 @@ in {
       "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
     ];
 
-    # Schema migrator. RemainAfterExit=true so soularr / soularr-web can
+    # Schema migrator. RemainAfterExit=true so cratedigger / cratedigger-web can
     # require us without re-running on every cycle. Idempotent — fast no-op
     # when schema is already current.
-    systemd.services.soularr-db-migrate = {
-      description = "Apply Soularr pipeline DB schema migrations";
+    systemd.services.cratedigger-db-migrate = {
+      description = "Apply Cratedigger pipeline DB schema migrations";
       wantedBy = ["multi-user.target"];
       restartIfChanged = true;
       serviceConfig = {
@@ -648,16 +648,16 @@ in {
       };
     };
 
-    systemd.services.soularr = {
-      description = "Soularr — Soulseek download pipeline";
-      after = ["soularr-db-migrate.service"];
-      requires = ["soularr-db-migrate.service"];
+    systemd.services.cratedigger = {
+      description = "Cratedigger — Soulseek download pipeline";
+      after = ["cratedigger-db-migrate.service"];
+      requires = ["cratedigger-db-migrate.service"];
       restartIfChanged = false;
       # Deliberately exclude pythonEnv: it ships a `beet` binary (because
       # `pkgs.beets` is in pythonEnv for the dev shell + tests), and putting
       # it on PATH shadows whatever `beet` the consumer has provisioned for
       # the harness wrapper to find. The python interpreter is invoked via
-      # absolute path inside soularrPkg / pipelineCli, so it doesn't need
+      # absolute path inside cratediggerPkg / pipelineCli, so it doesn't need
       # to be on PATH. The harness wrapper at harness/run_beets_harness.sh
       # uses `command -v beet` to find a beets installation that already
       # has the consumer's plugins/config (e.g. home-manager).
@@ -669,13 +669,13 @@ in {
         UMask = "0000";
         ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
-        ExecStart = "${soularrPkg}/bin/soularr";
+        ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
       };
     };
 
-    systemd.timers.soularr = mkIf cfg.timer.enable {
-      description = "Soularr periodic run timer";
+    systemd.timers.cratedigger = mkIf cfg.timer.enable {
+      description = "Cratedigger periodic run timer";
       wantedBy = ["timers.target"];
       timerConfig = {
         OnBootSec = cfg.timer.onBootSec;
@@ -684,16 +684,16 @@ in {
       };
     };
 
-    systemd.services.soularr-web = mkIf cfg.web.enable {
-      description = "Soularr web UI";
-      after = ["soularr-db-migrate.service"];
-      requires = ["soularr-db-migrate.service"];
+    systemd.services.cratedigger-web = mkIf cfg.web.enable {
+      description = "Cratedigger web UI";
+      after = ["cratedigger-db-migrate.service"];
+      requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${webPkg}/bin/soularr-web";
+        ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";
         RestartSec = 5;
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";

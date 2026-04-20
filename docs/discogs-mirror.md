@@ -2,7 +2,7 @@
 
 ## What It Is
 
-A self-hosted mirror of the Discogs music database, serving a JSON API at `https://discogs.ablz.au`. Built in Rust, imports monthly CC0 XML dumps (~19M releases) into PostgreSQL, provides full-text search and entity lookups. Intended as the Discogs counterpart to the MusicBrainz mirror for release disambiguation in soularr-web.
+A self-hosted mirror of the Discogs music database, serving a JSON API at `https://discogs.ablz.au`. Built in Rust, imports monthly CC0 XML dumps (~19M releases) into PostgreSQL, provides full-text search and entity lookups. Intended as the Discogs counterpart to the MusicBrainz mirror for release disambiguation in cratedigger-web.
 
 - **Source repo**: https://github.com/abl030/discogs-api
 - **Live API**: https://discogs.ablz.au

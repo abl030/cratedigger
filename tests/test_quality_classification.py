@@ -8,7 +8,7 @@ classification.
 
 Fixture generation: tests/fixtures/generate_fixtures.sh
 
-The quality gate decision tree (from soularr.py _check_quality_gate):
+The quality gate decision tree (from cratedigger.py _check_quality_gate):
 
   1. verified_lossless=TRUE + any bitrate  → ACCEPT
   2. gate_bitrate < 210kbps                → REQUEUE_UPGRADE
@@ -232,7 +232,7 @@ def load_or_analyze_all():
 
 
 def _call_quality_gate(min_bitrate, is_cbr, verified_lossless, spectral_bitrate=None):
-    """Wrapper: call the real quality_gate_decision() from soularr.py
+    """Wrapper: call the real quality_gate_decision() from cratedigger.py
     and convert its string return to a QualityDecision enum for test assertions."""
     from lib.quality import AudioQualityMeasurement
     m = AudioQualityMeasurement(min_bitrate_kbps=min_bitrate, is_cbr=is_cbr,
@@ -597,7 +597,7 @@ class TestLiveBugReproductions(unittest.TestCase):
         grade=="suspect", missing "likely_transcode". Also, spectral said
         new=160 <= existing=160, so it should have been rejected.
 
-        Root cause: soularr.py line 1426 checked `== "suspect"` not
+        Root cause: cratedigger.py line 1426 checked `== "suspect"` not
         `in ("suspect", "likely_transcode")`.
         """
         r = full_pipeline_decision(

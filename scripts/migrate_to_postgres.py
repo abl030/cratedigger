@@ -5,8 +5,8 @@ Reads all data from the SQLite database and inserts it into PostgreSQL.
 All non-imported/non-manual statuses are mapped to 'wanted'.
 
 Usage:
-    python3 scripts/migrate_to_postgres.py /mnt/virtio/Music/pipeline.db postgresql://soularr@localhost/soularr
-    python3 scripts/migrate_to_postgres.py /mnt/virtio/Music/pipeline.db postgresql://soularr@localhost/soularr --dry-run
+    python3 scripts/migrate_to_postgres.py /mnt/virtio/Music/pipeline.db postgresql://cratedigger@localhost/cratedigger
+    python3 scripts/migrate_to_postgres.py /mnt/virtio/Music/pipeline.db postgresql://cratedigger@localhost/cratedigger --dry-run
 """
 
 import argparse

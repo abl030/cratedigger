@@ -1,6 +1,6 @@
 """Album source — Pipeline DB as the source of wanted albums.
 
-Provides the interface soularr.py uses to get wanted albums, fetch tracks,
+Provides the interface cratedigger.py uses to get wanted albums, fetch tracks,
 and report completion. AlbumRecord is a typed dataclass returned by from_db_row().
 """
 
@@ -12,7 +12,7 @@ import os
 import urllib.request
 from dataclasses import dataclass
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 from lib.quality import detect_release_source
@@ -306,7 +306,7 @@ class DatabaseSource:
         try:
             url = f"{MB_API_BASE}/release/{mb_id}?inc=recordings&fmt=json"
             req = urllib.request.Request(url)
-            req.add_header("User-Agent", "soularr-db/1.0")
+            req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
         except Exception:
@@ -337,7 +337,7 @@ class DatabaseSource:
         try:
             url = f"{DISCOGS_API_BASE}/api/releases/{discogs_id}"
             req = urllib.request.Request(url)
-            req.add_header("User-Agent", "soularr-db/1.0")
+            req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
         except Exception:

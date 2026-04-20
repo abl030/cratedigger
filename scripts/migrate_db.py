@@ -8,7 +8,7 @@ recorded in the ``schema_migrations`` table.
 Idempotent: running it on an already-up-to-date database is a no-op.
 
 Usage:
-    migrate_db.py --dsn postgresql://soularr@host/db
+    migrate_db.py --dsn postgresql://cratedigger@host/db
     PIPELINE_DB_DSN=... migrate_db.py
     migrate_db.py --migrations-dir /path/to/migrations
 """
@@ -26,7 +26,7 @@ from lib.migrator import DEFAULT_MIGRATIONS_DIR, apply_migrations
 
 DEFAULT_DSN = os.environ.get(
     "PIPELINE_DB_DSN",
-    "postgresql://soularr@192.168.100.11:5432/soularr",
+    "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
 )
 
 

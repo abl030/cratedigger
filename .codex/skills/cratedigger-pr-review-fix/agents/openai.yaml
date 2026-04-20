@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cratedigger PR Review"
+  short_description: "Review a Cratedigger PR, fix it, and publish"
+  default_prompt: "Use $cratedigger-pr-review-fix to review PR 44 in this repo, fix the issues, push the branch, and leave a PR comment."

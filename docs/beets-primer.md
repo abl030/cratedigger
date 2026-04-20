@@ -1,6 +1,6 @@
-# Beets Primer for Soularr
+# Beets Primer for Cratedigger
 
-This document describes how beets is set up, configured, and used in the music pipeline. It's written for the Soularr fork's Claude context — if you're modifying anything that touches beets imports, validation, or the harness, read this first.
+This document describes how beets is set up, configured, and used in the music pipeline. It's written for the Cratedigger fork's Claude context — if you're modifying anything that touches beets imports, validation, or the harness, read this first.
 
 ## What is Beets?
 
@@ -13,7 +13,7 @@ Beets is the canonical source of truth for the tagged music library at `/Beets`.
 - **Lyrics** — fetching synced lyrics from a local LRCLIB mirror
 - **Library DB** — SQLite database tracking every album and track
 
-When Soularr downloads an album and it passes validation, beets is what actually imports it into the library.
+When Cratedigger downloads an album and it passes validation, beets is what actually imports it into the library.
 
 ## Version & Installation
 
@@ -126,7 +126,7 @@ fetchart:
 | `/mnt/virtio/Music/beets-library.db` | SQLite database — the DB source of truth |
 | `/mnt/virtio/Music/beets-import.log` | Import log |
 | `/mnt/virtio/Music/AI` | Staging area — raw copies from `/Me`, pre-import |
-| `/mnt/virtio/Music/Incoming` | Re-download staging — Soularr-validated downloads awaiting conversion and import |
+| `/mnt/virtio/Music/Incoming` | Re-download staging — Cratedigger-validated downloads awaiting conversion and import |
 | `/mnt/virtio/Music/Re-download` | Re-download queue — each album has a README.md explaining why |
 
 ### File Organization
@@ -161,7 +161,7 @@ Some legacy imports are m4a, ogg, opus, wma, or even ape — these came from the
 
 ## The Beets Harness
 
-The harness (`harness/beets_harness.py`) is a custom `ImportSession` subclass that replaces beets' interactive terminal prompts with a JSON protocol over stdin/stdout. This is how Soularr (and all automated imports) communicate with beets.
+The harness (`harness/beets_harness.py`) is a custom `ImportSession` subclass that replaces beets' interactive terminal prompts with a JSON protocol over stdin/stdout. This is how Cratedigger (and all automated imports) communicate with beets.
 
 ### Why the Harness Exists
 
@@ -247,7 +247,7 @@ Added 2026-03-24 to fix the "silent import" problem. Previously, a successful im
 
 ## import_one.py
 
-The one-shot import script used by Soularr for auto-importing `source='request'` albums. Lives at `harness/import_one.py`.
+The one-shot import script used by Cratedigger for auto-importing `source='request'` albums. Lives at `harness/import_one.py`.
 
 ### Flow
 
@@ -472,7 +472,7 @@ Beets has a built-in `badfiles` plugin that provides:
 - `beet bad [QUERY]` — on-demand file corruption check
 - `check_on_import: yes` — validate files before importing (interactive prompt: abort/skip/continue)
 
-Currently NOT enabled. The `check_on_import` option triggers interactive prompts that break the JSON harness. See GitHub issue #2 for the plan to integrate audio validation into Soularr's post-download pipeline instead.
+Currently NOT enabled. The `check_on_import` option triggers interactive prompts that break the JSON harness. See GitHub issue #2 for the plan to integrate audio validation into Cratedigger's post-download pipeline instead.
 
 ## Deploying Beets Config Changes
 
@@ -497,7 +497,7 @@ beet ls -a | head -5                 # Quick smoke test
 
 ## Deploying to doc2
 
-doc2 runs Soularr but needs access to beets via the harness. The harness shell wrapper (`run_beets_harness.sh`) bootstraps from doc1's Nix beets environment. Since both machines share `/mnt/virtio`, the harness files are accessible from doc2 without copying.
+doc2 runs Cratedigger but needs access to beets via the harness. The harness shell wrapper (`run_beets_harness.sh`) bootstraps from doc1's Nix beets environment. Since both machines share `/mnt/virtio`, the harness files are accessible from doc2 without copying.
 
 **NEVER cross-build from doc1** (`--target-host doc2` is slow). Always:
 ```bash

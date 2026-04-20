@@ -19,7 +19,7 @@
  * Acquire decision tree (highest priority first):
  *   1. pipeline_status in ('wanted', 'downloading') → "Remove request"
  *      enabled. Backend's /api/pipeline/delete handles any status —
- *      it removes the row and soularr's next poll cycle ignores the
+ *      it removes the row and cratedigger's next poll cycle ignores the
  *      orphaned slskd transfer. User's mental model: "if it's in the
  *      pipeline, I can remove it".
  *   2. in_library OR pipeline_status === 'imported' → "Upgrade" enabled
@@ -83,7 +83,7 @@ export function renderActionToolbar(item, opts = {}) {
   let acquireBtn;
   if ((pStatus === 'wanted' || pStatus === 'downloading') && pId) {
     // Cancellable. Backend deletes the row regardless of status; if a
-    // download is in flight, soularr's next poll ignores the orphan
+    // download is in flight, cratedigger's next poll ignores the orphan
     // slskd transfer. Covers fresh add-requests, queued upgrades, and
     // mid-download cancels.
     acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;

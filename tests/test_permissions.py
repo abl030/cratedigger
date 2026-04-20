@@ -70,7 +70,7 @@ class TestFixLibraryModes(unittest.TestCase):
                                  f"{p}: file mode must not be modified")
 
     def test_nonexistent_path_is_noop(self):
-        fix_library_modes("/tmp/soularr-does-not-exist-xyz")
+        fix_library_modes("/tmp/cratedigger-does-not-exist-xyz")
 
     def test_file_path_is_noop(self):
         """Passing a file path should not chmod anything — the helper is

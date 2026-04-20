@@ -13,4 +13,4 @@ paths:
 - Redis cache: MB data 24h TTL, beets/pipeline 5min TTL, explicit invalidation on POST mutations
 - Static JS served at `/js/*.js` — `node --check` validates syntax in CI
 - The web UI reads download_log JSONB columns (import_result, validation_result) — use the typed field names from the dataclasses, not arbitrary strings
-- After changes: `ssh doc2 'sudo systemctl restart soularr-web'`
+- After changes: `ssh doc2 'sudo systemctl restart cratedigger-web'`

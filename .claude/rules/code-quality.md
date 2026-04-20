@@ -12,7 +12,7 @@
 Any type whose **input comes from outside our Python code** (harness stdout, an HTTP response, a JSONB blob coming back from the DB, a subprocess's stdout) must be a `msgspec.Struct` so the deserializer validates the typed contract at the boundary. Pyright does not see inside `dict.get()` — only runtime validation catches int-vs-str drift, mis-typed fields, or missing required data. This is the lesson of issue #99 / PR #98 (every Discogs validation silently logged `mbid_not_found` because a dataclass said `str` but the wire carried `int`).
 
 - **Use `msgspec.Struct`** for: harness/subprocess JSON messages, external API responses, DB JSONB rows we read back and type-check, any other "decode this blob into a typed object" site.
-- **Keep `@dataclass`** for: types we construct entirely from our own typed Python code (`ImportResult`, `QualityRankConfig`, `SoularrConfig`, `ActiveDownloadState` when we're the only writer). Their inputs are already typed — the strict boundary buys nothing.
+- **Keep `@dataclass`** for: types we construct entirely from our own typed Python code (`ImportResult`, `QualityRankConfig`, `CratediggerConfig`, `ActiveDownloadState` when we're the only writer). Their inputs are already typed — the strict boundary buys nothing.
 - **Decode at exactly one site.** The wire boundary is the one place the untyped blob becomes a typed object. After that, every downstream consumer works with the Struct directly — no defensive coercion, no `dict.get()`, no re-validation. If you find yourself writing a `_coerce_x` helper on the consumer side, the boundary is in the wrong place.
 - **Strict ≠ coerce.** Declare fields as the type you want (`str`, not `str | int`). `msgspec.ValidationError` at the boundary is the detector. Do not use `strict=False` to silently coerce away real type drift.
 - **Normalise early if the external source is untidy.** Harness-side `_id_str` in `harness/beets_harness.py` coerces int IDs to str *before* emitting — so the wire is always clean, and the downstream Struct validation never trips in the happy path. Keep normalisation at the source, not at the consumer.
@@ -23,7 +23,7 @@ Any type whose **input comes from outside our Python code** (harness stdout, an 
 - Write tests FIRST (RED), then implement (GREEN)
 - Every new function, dataclass, and decision branch needs test coverage
 - Use `nix-shell --run "bash scripts/run_tests.sh"` for full suite
-- Read `/tmp/soularr-test-output.txt` instead of re-running the 2-minute suite
+- Read `/tmp/cratedigger-test-output.txt` instead of re-running the 2-minute suite
 - For single modules during dev: `nix-shell --run "python3 -m unittest tests.<module> -v"`
 
 ## API Contract Tests
@@ -43,7 +43,7 @@ Any type whose **input comes from outside our Python code** (harness stdout, an 
 
 ## Decision Logic
 - All quality/import decisions must be pure functions in `lib/quality.py`
-- No decision logic inline in soularr.py — call the pure function, branch on result
+- No decision logic inline in cratedigger.py — call the pure function, branch on result
 - Every pure function must have direct unit tests (not just tested through integration)
 
 ## Pipeline Decision Debugging — Simulator-First TDD
@@ -83,7 +83,7 @@ Any type whose **input comes from outside our Python code** (harness stdout, an 
 
 ## No Parallel Code Paths
 - Never create a second function that calls the same subprocess (import_one.py, beets_harness.py, etc.). If a new entry point needs the pipeline, write an adapter that constructs the existing function's inputs and delegates. If the interface makes this painful, fix the interface — don't route around it.
-- Never construct `SoularrConfig` with positional/keyword args for a subset of fields. Always use `SoularrConfig.from_ini()` with the runtime config file. Partial configs silently diverge when new config fields are added.
+- Never construct `CratediggerConfig` with positional/keyword args for a subset of fields. Always use `CratediggerConfig.from_ini()` with the runtime config file. Partial configs silently diverge when new config fields are added.
 - Before adding a new function that "does roughly what X does but simpler," check if X can be called with an adapter. The adapter may be ugly — that's a signal to improve X's interface, not to duplicate X.
 
 ## New Work Checklist (read this first)
@@ -130,7 +130,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
 - Mocking is allowed for external edges (subprocess, meelo, plex), but the assertion target must be domain state.
 - **Use `FakePipelineDB` from `tests/fakes.py` for stateful collaborators instead of MagicMock.** It records request rows, download_logs, denylist entries, cooldowns, status history, spectral state updates. See `tests/test_fakes.py` for the full API.
 - **Use `FakeSlskdAPI` from `tests/fakes.py` for slskd interactions.** Stateful `transfers` and `users` fakes with `add_transfer()`, `queue_download_snapshots()`, `set_directory()`, `set_directory_error()`, configurable errors, and call recording.
-- Use `make_ctx_with_fake_db(fake_db)` from `tests/helpers.py` to wire `FakePipelineDB` into a `SoularrContext`.
+- Use `make_ctx_with_fake_db(fake_db)` from `tests/helpers.py` to wire `FakePipelineDB` into a `CratediggerContext`.
 - Use builders from `tests/helpers.py` — never hand-roll 20-field dicts.
 
 ### 4. Integration slice tests
@@ -155,7 +155,7 @@ Always use these instead of inventing parallel scaffolding:
 - `make_download_file(...)` — real `DownloadFile` (not MagicMock)
 - `make_grab_list_entry(...)` — real `GrabListEntry`
 - `make_spectral_context(...)` — `SpectralContext`
-- `make_ctx_with_fake_db(fake_db)` — `SoularrContext` wired to a fake
+- `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
 - `patch_dispatch_externals()` — context manager for the 6 dispatch external patches
 
 **`tests/fakes.py`** — stateful fakes:

@@ -1,19 +1,19 @@
-"""Tests for lib/context.py — SoularrContext dataclass."""
+"""Tests for lib/context.py — CratediggerContext dataclass."""
 
 import unittest
 from unittest.mock import MagicMock
 
 
-class TestSoularrContext(unittest.TestCase):
-    """Test SoularrContext construction and cache isolation."""
+class TestCratediggerContext(unittest.TestCase):
+    """Test CratediggerContext construction and cache isolation."""
 
     def test_context_construction(self):
-        from lib.context import SoularrContext
+        from lib.context import CratediggerContext
         mock_cfg = MagicMock()
         mock_slskd = MagicMock()
         mock_db_source = MagicMock()
 
-        ctx = SoularrContext(
+        ctx = CratediggerContext(
             cfg=mock_cfg,
             slskd=mock_slskd,
             pipeline_db_source=mock_db_source,
@@ -30,17 +30,17 @@ class TestSoularrContext(unittest.TestCase):
         self.assertEqual(len(ctx.broken_user), 0)
 
     def test_context_cache_isolation(self):
-        from lib.context import SoularrContext
+        from lib.context import CratediggerContext
         mock_cfg = MagicMock()
         mock_slskd = MagicMock()
         mock_db_source = MagicMock()
 
-        ctx1 = SoularrContext(
+        ctx1 = CratediggerContext(
             cfg=mock_cfg,
             slskd=mock_slskd,
             pipeline_db_source=mock_db_source,
         )
-        ctx2 = SoularrContext(
+        ctx2 = CratediggerContext(
             cfg=mock_cfg,
             slskd=mock_slskd,
             pipeline_db_source=mock_db_source,

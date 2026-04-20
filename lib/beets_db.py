@@ -1,7 +1,7 @@
 """Beets library database queries.
 
 Read-only access to the beets SQLite DB. Centralizes all scattered
-sqlite3.connect() calls from soularr.py and import_one.py.
+sqlite3.connect() calls from cratedigger.py and import_one.py.
 
 Usage:
     with BeetsDB() as db:

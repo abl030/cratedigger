@@ -1,6 +1,6 @@
 """Import dispatch — auto-import decision tree.
 
-Extracted from soularr.py process_completed_album(). Contains the logic
+Extracted from cratedigger.py process_completed_album(). Contains the logic
 that runs import_one.py and dispatches on the ImportResult decision.
 """
 
@@ -26,13 +26,13 @@ from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
 from lib.preimport import inspect_local_files, run_preimport_gates
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
-    from lib.context import SoularrContext
+    from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
     from lib.grab_list import GrabListEntry
     from lib.pipeline_db import PipelineDB
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
@@ -490,7 +490,7 @@ def dispatch_import_core(
     distance: float = 0.0,
     scenario: str = "auto_import",
     files: Sequence[object] | None = None,
-    cfg: "SoularrConfig | None" = None,
+    cfg: "CratediggerConfig | None" = None,
     outcome_label: str = "success",
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
@@ -770,7 +770,7 @@ def dispatch_import_core(
 
 def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, dest: str,
                     dl_info: DownloadInfo, request_id: int,
-                    ctx: "SoularrContext", *, force: bool = False) -> None:
+                    ctx: "CratediggerContext", *, force: bool = False) -> None:
     """Import decision tree — thin adapter extracting plain params for the core.
 
     Called from process_completed_album() for auto-import.

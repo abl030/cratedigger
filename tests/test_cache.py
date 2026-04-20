@@ -8,15 +8,15 @@ import unittest
 
 from unittest.mock import MagicMock
 
-from lib.context import SoularrContext
+from lib.context import CratediggerContext
 
 
-def _make_ctx() -> SoularrContext:
-    """Build a minimal SoularrContext for cache tests."""
+def _make_ctx() -> CratediggerContext:
+    """Build a minimal CratediggerContext for cache tests."""
     cfg = MagicMock()
     slskd = MagicMock()
     pipeline_db_source = MagicMock()
-    return SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
+    return CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 
 
 class TestCachePersistence(unittest.TestCase):

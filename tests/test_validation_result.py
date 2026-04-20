@@ -377,7 +377,7 @@ class TestValidationResultConstruction(unittest.TestCase):
         self.assertIsNotNone(vr.failed_path)
 
     def test_source_info(self) -> None:
-        """Source info populated by soularr.py after beets_validate returns."""
+        """Source info populated by cratedigger.py after beets_validate returns."""
         vr = ValidationResult(
             valid=False, scenario="high_distance",
             soulseek_username="baduser123",

@@ -19,6 +19,6 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    echo "soularr dev shell — run: python3 -m unittest discover tests -v"
+    echo "cratedigger dev shell — run: python3 -m unittest discover tests -v"
   '';
 }

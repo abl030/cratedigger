@@ -2,7 +2,7 @@
 
 ## Run 1 (14:21-14:28, PID 1654705, old code — no spectral CBR 320 check yet)
 
-First run with spectral check in import_one.py (FLAC path) and quality gate spectral awareness. CBR 320 spectral check in soularr.py was deployed mid-run so didn't apply.
+First run with spectral check in import_one.py (FLAC path) and quality gate spectral awareness. CBR 320 spectral check in cratedigger.py was deployed mid-run so didn't apply.
 
 ### Results:
 | Album | Source | Type | Spectral New | Spectral Existing | Outcome |
@@ -17,7 +17,7 @@ First run with spectral check in import_one.py (FLAC path) and quality gate spec
 
 ### Bugs found:
 1. **BUG: FLAC→V0 downgrade blocked by fake CBR 320 on disk** — Aquarium Drunkard: genuine FLAC→V0 at 227kbps blocked because beets says existing is 320kbps, but that 320 is upsampled garbage. `import_one.py` reads beets directly, doesn't know pipeline DB set `min_bitrate=0`.
-   - **Fix**: Add `--override-min-bitrate` arg to import_one.py, soularr.py passes pipeline DB `min_bitrate` value
+   - **Fix**: Add `--override-min-bitrate` arg to import_one.py, cratedigger.py passes pipeline DB `min_bitrate` value
    - **Status**: Fixed and deployed (commit d3e50ff)
 
 ### Cleanup:
@@ -28,7 +28,7 @@ First run with spectral check in import_one.py (FLAC path) and quality gate spec
 
 ## Run 2 (14:29-15:00, PID 1674348, CBR 320 spectral check deployed but --override fix ran on OLD Nix store)
 
-Mountain Goats only (non-MG deferred). Had CBR 320 spectral check in soularr.py but import_one.py was still old code (no --override-min-bitrate) because soularr was started before the deploy finished.
+Mountain Goats only (non-MG deferred). Had CBR 320 spectral check in cratedigger.py but import_one.py was still old code (no --override-min-bitrate) because cratedigger was started before the deploy finished.
 
 ### Results:
 | Album | Source | Type | Spectral New | Spectral Existing | Outcome |
@@ -48,8 +48,8 @@ Mountain Goats only (non-MG deferred). Had CBR 320 spectral check in soularr.py 
    - **Fix**: Only set album `estimated_bitrate` when album grade is `suspect` or `likely_transcode`
    - **Status**: Fixed and deployed (commit 0d888b4)
 
-3. **BUG: --override-min-bitrate not applied** — Aquarium Drunkard still blocked because soularr process loaded old Nix store code before deploy completed
-   - **Root cause**: Operational — started soularr before deploy finished
+3. **BUG: --override-min-bitrate not applied** — Aquarium Drunkard still blocked because cratedigger process loaded old Nix store code before deploy completed
+   - **Root cause**: Operational — started cratedigger before deploy finished
    - **Fix**: No code change needed, just need fresh process after deploy
    - **Status**: Next run will use correct code
 
@@ -89,7 +89,7 @@ Mountain Goats only. Both fixes deployed:
 
 1. **VBR MP3 downloads skip spectral check** — VBR bitrate IS the quality signal. A V0 file at 240kbps from genuine lossless can't be faked. Only CBR 320 and FLAC need spectral verification.
 
-2. **CBR 320 spectral check runs in soularr.py, not import_one.py** — Because CBR 320 downloads don't go through FLAC→V0 conversion, they need spectral checking at the soularr level before staging/import.
+2. **CBR 320 spectral check runs in cratedigger.py, not import_one.py** — Because CBR 320 downloads don't go through FLAC→V0 conversion, they need spectral checking at the cratedigger level before staging/import.
 
 3. **FLAC spectral check runs in import_one.py** — Informational alongside the V0 conversion. The V0 bitrate is still the primary gate for FLACs. Spectral on existing beets files reveals the "truth" about what's on disk for comparison.
 

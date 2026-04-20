@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch, PropertyMock
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
+    from lib.config import CratediggerConfig
 
-# Mock heavy deps before importing soularr
+# Mock heavy deps before importing cratedigger
 sys.modules["music_tag"] = MagicMock()
 sys.modules["slskd_api"] = MagicMock()
 sys.modules["slskd_api.apis"] = MagicMock()
@@ -25,20 +25,20 @@ sys.modules["slskd_api.apis.users"] = MagicMock()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import soularr
+import cratedigger
 from lib import enqueue as enqueue_module
 from lib.grab_list import DownloadFile
 from lib.download import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.import_dispatch import _build_download_info
-from lib.context import SoularrContext
+from lib.context import CratediggerContext
 from tests.fakes import FakeSlskdAPI
 from tests.helpers import make_download_file, make_grab_list_entry
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
-    """Build a test SoularrContext."""
-    return SoularrContext(
+    """Build a test CratediggerContext."""
+    return CratediggerContext(
         cfg=cfg or MagicMock(),
         slskd=slskd or MagicMock(),
         pipeline_db_source=pipeline_db_source or MagicMock(),
@@ -55,14 +55,14 @@ def _make_matching_cfg(
     use_extension_whitelist: bool = False,
     extensions_whitelist: tuple[str, ...] = (),
     **extra,
-) -> "SoularrConfig":
-    """Build a SoularrConfig with matching-friendly defaults.
+) -> "CratediggerConfig":
+    """Build a CratediggerConfig with matching-friendly defaults.
 
     Uses the real frozen dataclass so tests break immediately when new
     required fields are added, rather than silently passing via MagicMock.
     """
-    from lib.config import SoularrConfig
-    return SoularrConfig(
+    from lib.config import CratediggerConfig
+    return CratediggerConfig(
         allowed_filetypes=allowed_filetypes,
         minimum_match_ratio=minimum_match_ratio,
         ignored_users=ignored_users,
@@ -137,12 +137,12 @@ def make_search_result(username, files, upload_speed=1048576):
     }
 
 
-def make_tracks(*track_defs: tuple[int, str, int]) -> list["soularr.TrackRecord"]:
+def make_tracks(*track_defs: tuple[int, str, int]) -> list["cratedigger.TrackRecord"]:
     """Build a list of TrackRecord dicts from (albumId, title, mediumNumber) tuples."""
     return [{"albumId": a, "title": t, "mediumNumber": m} for a, t, m in track_defs]  # type: ignore[misc]
 
 
-def make_directory(dir_path: str, files: list[dict[str, object]]) -> "soularr.SlskdDirectory":
+def make_directory(dir_path: str, files: list[dict[str, object]]) -> "cratedigger.SlskdDirectory":
     """Build a directory dict as slskd.users.directory() returns it."""
     return {
         "directory": dir_path,
@@ -171,7 +171,7 @@ class TestBuildSearchCache(unittest.TestCase):
             {"filename": "Music\\Album\\01.flac", "size": 100},
             {"filename": "Music\\Album\\02.flac", "size": 100},
         ])]
-        entries, speeds, counts = soularr._build_search_cache(results, self._specs("flac"))
+        entries, speeds, counts = cratedigger._build_search_cache(results, self._specs("flac"))
         self.assertIn("user1", entries)
         self.assertIn("flac", entries["user1"])
         self.assertEqual(entries["user1"]["flac"], ["Music\\Album"])
@@ -187,7 +187,7 @@ class TestBuildSearchCache(unittest.TestCase):
                 {"filename": "B\\01.flac", "size": 100},
             ], upload_speed=5000),
         ]
-        _, speeds, _ = soularr._build_search_cache(results, self._specs("flac"))
+        _, speeds, _ = cratedigger._build_search_cache(results, self._specs("flac"))
         self.assertEqual(speeds["user1"], 5000)
 
     def test_multiple_filetypes(self):
@@ -198,7 +198,7 @@ class TestBuildSearchCache(unittest.TestCase):
             {"filename": "A\\01.mp3", "size": 50, "bitRate": 245,
              "sampleRate": 44100, "bitDepth": 0, "isVariableBitRate": True},
         ])]
-        entries, _, _ = soularr._build_search_cache(
+        entries, _, _ = cratedigger._build_search_cache(
             results, self._specs("flac", "mp3 v0")
         )
         self.assertIn("flac", entries["user1"])
@@ -209,13 +209,13 @@ class TestBuildSearchCache(unittest.TestCase):
         results = [make_search_result("user1", [
             {"filename": "A\\cover.jpg", "size": 50},
         ])]
-        entries, _, counts = soularr._build_search_cache(results, self._specs("flac"))
+        entries, _, counts = cratedigger._build_search_cache(results, self._specs("flac"))
         # User entry created but no filetypes
         self.assertEqual(entries.get("user1", {}), {})
 
     def test_empty_results(self):
         """Empty search results should return empty dicts."""
-        entries, speeds, counts = soularr._build_search_cache([], self._specs("flac"))
+        entries, speeds, counts = cratedigger._build_search_cache([], self._specs("flac"))
         self.assertEqual(entries, {})
         self.assertEqual(speeds, {})
         self.assertEqual(counts, {})
@@ -227,7 +227,7 @@ class TestBuildSearchCache(unittest.TestCase):
             {"filename": "A\\02.flac", "size": 100},
             {"filename": "A\\03.flac", "size": 100},
         ])]
-        entries, _, counts = soularr._build_search_cache(results, self._specs("flac"))
+        entries, _, counts = cratedigger._build_search_cache(results, self._specs("flac"))
         self.assertEqual(entries["user1"]["flac"], ["A"])
         self.assertEqual(counts["user1"]["A"], 3)
 
@@ -238,28 +238,28 @@ class TestGetUserDirs(unittest.TestCase):
     def test_specific_filetype(self):
         """Should return dirs for the exact filetype requested."""
         results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir3"]}
-        self.assertEqual(soularr._get_user_dirs(results, "flac"), ["Dir1", "Dir2"])
+        self.assertEqual(cratedigger._get_user_dirs(results, "flac"), ["Dir1", "Dir2"])
 
     def test_missing_filetype_returns_none(self):
         """Should return None when the user has no dirs for that filetype."""
         results = {"flac": ["Dir1"]}
-        self.assertIsNone(soularr._get_user_dirs(results, "mp3 v0"))
+        self.assertIsNone(cratedigger._get_user_dirs(results, "mp3 v0"))
 
     def test_catch_all_merges_all(self):
         """Catch-all '*' should merge dirs from all filetypes, deduped."""
         results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir2", "Dir3"]}
-        dirs = soularr._get_user_dirs(results, "*")
+        dirs = cratedigger._get_user_dirs(results, "*")
         self.assertEqual(dirs, ["Dir1", "Dir2", "Dir3"])
 
     def test_catch_all_empty_returns_none(self):
         """Catch-all with no dirs should return None."""
         results = {"flac": [], "mp3 v0": []}
-        self.assertIsNone(soularr._get_user_dirs(results, "*"))
+        self.assertIsNone(cratedigger._get_user_dirs(results, "*"))
 
     def test_catch_all_single_filetype(self):
         """Catch-all with one filetype should return those dirs."""
         results = {"flac": ["Dir1"]}
-        self.assertEqual(soularr._get_user_dirs(results, "*"), ["Dir1"])
+        self.assertEqual(cratedigger._get_user_dirs(results, "*"), ["Dir1"])
 
 
 class TestRawDictBoundary(unittest.TestCase):
@@ -293,24 +293,24 @@ class TestRawDictBoundary(unittest.TestCase):
 
     def test_album_track_num_with_raw_dicts(self):
         """album_track_num receives raw directory dicts."""
-        orig_cfg = soularr.cfg
-        soularr.cfg = _make_matching_cfg(allowed_filetypes=("flac", "mp3"))
+        orig_cfg = cratedigger.cfg
+        cratedigger.cfg = _make_matching_cfg(allowed_filetypes=("flac", "mp3"))
         try:
             directory = make_directory("Music\\Album", [
                 {"filename": "01 - Track.flac", "size": 100},
                 {"filename": "02 - Track.flac", "size": 100},
                 {"filename": "cover.jpg", "size": 50},
             ])
-            result = soularr.album_track_num(directory, soularr.cfg)
+            result = cratedigger.album_track_num(directory, cratedigger.cfg)
             self.assertEqual(result["count"], 2)
             self.assertEqual(result["filetype"], "flac")
         finally:
-            soularr.cfg = orig_cfg
+            cratedigger.cfg = orig_cfg
 
     def test_download_filter_with_raw_dicts(self):
         """download_filter returns a new dict without mutating the input."""
-        orig_cfg = soularr.cfg
-        soularr.cfg = _make_matching_cfg(
+        orig_cfg = cratedigger.cfg
+        cratedigger.cfg = _make_matching_cfg(
             download_filtering=True,
             use_extension_whitelist=True,
             extensions_whitelist=("jpg", "txt"),
@@ -321,7 +321,7 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "cover.jpg", "size": 50},
                 {"filename": "info.nfo", "size": 10},
             ])
-            filtered = soularr.download_filter("flac", directory, soularr.cfg)
+            filtered = cratedigger.download_filter("flac", directory, cratedigger.cfg)
             filenames = [f["filename"] for f in filtered["files"]]
             self.assertIn("01 - Track.flac", filenames)
             self.assertIn("cover.jpg", filenames)
@@ -329,23 +329,23 @@ class TestRawDictBoundary(unittest.TestCase):
             # Original should be unchanged
             self.assertEqual(len(directory["files"]), 3)
         finally:
-            soularr.cfg = orig_cfg
+            cratedigger.cfg = orig_cfg
 
 
 class TestContextDependencyPropagation(unittest.TestCase):
     """Verify matching/enqueue helpers use ctx dependencies, not module globals."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_pdb = cratedigger.pipeline_db_source
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_check_for_match_uses_ctx_cfg(self):
         """Matching should read config from ctx, not the module-level cfg."""
-        soularr.cfg = _make_matching_cfg(
+        cratedigger.cfg = _make_matching_cfg(
             allowed_filetypes=("mp3",),
             minimum_match_ratio=0.99,
             ignored_users=("user1",),
@@ -363,7 +363,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
         }
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        found, _, _ = soularr.check_for_match(
+        found, _, _ = cratedigger.check_for_match(
             make_tracks((1, "Track One", 1)),
             "flac",
             ["Music\\Album"],
@@ -385,9 +385,9 @@ class TestContextDependencyPropagation(unittest.TestCase):
         global_db = MagicMock()
         global_db.get_denylisted_users.return_value = [{"username": "wrong"}]
         global_source._get_db.return_value = global_db
-        soularr.pipeline_db_source = global_source
+        cratedigger.pipeline_db_source = global_source
 
-        denied = soularr._get_denied_users(12, ctx)
+        denied = cratedigger._get_denied_users(12, ctx)
 
         self.assertEqual(denied, {"baduser"})
         ctx_source._get_db.assert_called_once()
@@ -403,9 +403,9 @@ class TestContextDependencyPropagation(unittest.TestCase):
 
         global_source = MagicMock()
         global_source.get_tracks.return_value = []
-        soularr.pipeline_db_source = global_source
+        cratedigger.pipeline_db_source = global_source
 
-        tracks = soularr.get_album_tracks(album, ctx)
+        tracks = cratedigger.get_album_tracks(album, ctx)
 
         self.assertEqual(tracks, expected_tracks)
         ctx_source.get_tracks.assert_called_once_with(album)
@@ -668,12 +668,12 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
     """Verify try_multi_enqueue works without deepcopy on results."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_slskd = soularr.slskd
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
 
         mock_cfg = _make_matching_cfg()
-        soularr.cfg = mock_cfg
+        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
         slskd.users.set_directory("user1", "Music\\Disc1", [
@@ -682,18 +682,18 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             ])
         ])
         self.slskd = slskd
-        soularr.slskd = slskd
+        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        soularr.pipeline_db_source = mock_pdb
+        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.slskd = self._orig_slskd
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.slskd = self._orig_slskd
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_results_dict_not_mutated(self):
         """try_multi_enqueue should not mutate the results dict."""
@@ -743,7 +743,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 (True, dir2, "Music\\Disc2"),
             ],
         ), patch("time.sleep"):
-            soularr.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
+            cratedigger.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
 
         self.assertEqual(results, original_results)
 
@@ -789,7 +789,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 (True, dir2, "Music\\Disc2"),
             ],
         ), patch("time.sleep"):
-            attempt = soularr.try_multi_enqueue(
+            attempt = cratedigger.try_multi_enqueue(
                 release, tracks, results, "flac", self.ctx
             )
 
@@ -814,30 +814,30 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
     """Verify successful matches do not corrupt cached directory data."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_slskd = soularr.slskd
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
 
         mock_cfg = _make_matching_cfg(
             download_filtering=True,
             use_extension_whitelist=True,
             extensions_whitelist=("jpg",),
         )
-        soularr.cfg = mock_cfg
+        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
-        soularr.slskd = slskd
+        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        soularr.pipeline_db_source = mock_pdb
+        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.slskd = self._orig_slskd
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.slskd = self._orig_slskd
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_folder_cache_not_corrupted_after_download_filter(self):
         """download_filter returns a new dict — folder_cache should be intact."""
@@ -855,13 +855,13 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
 
         # First call: match with 1 track, 1 audio file
         tracks = make_tracks((1, "Track One", 1))
-        found, directory, file_dir = soularr.check_for_match(
+        found, directory, file_dir = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found)
 
         # Mutate the returned directory via download_filter (as try_enqueue does)
-        soularr.download_filter("flac", directory, self.ctx.cfg)
+        cratedigger.download_filter("flac", directory, self.ctx.cfg)
 
         # folder_cache should still have ALL 3 files (including .nfo)
         cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
@@ -883,16 +883,16 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         tracks = make_tracks((1, "Track One", 1))
 
         # First match
-        found1, dir1, _ = soularr.check_for_match(
+        found1, dir1, _ = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found1)
 
         # Mutate it
-        soularr.download_filter("flac", dir1, self.ctx.cfg)
+        cratedigger.download_filter("flac", dir1, self.ctx.cfg)
 
         # Second match on the same cached dir should still succeed
-        found2, dir2, _ = soularr.check_for_match(
+        found2, dir2, _ = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(found2)
@@ -913,7 +913,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
             "deepcopy",
             side_effect=AssertionError("deepcopy should not be used"),
         ):
-            found, directory, file_dir = soularr.check_for_match(
+            found, directory, file_dir = cratedigger.check_for_match(
                 make_tracks((1, "Track One", 1)),
                 "flac",
                 ["Music\\Album"],
@@ -930,15 +930,15 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
     """Verify try_enqueue prefixes file paths without mutating the source directory."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        soularr.cfg = _make_matching_cfg()
+        self._orig_cfg = cratedigger.cfg
+        cratedigger.cfg = _make_matching_cfg()
         source = MagicMock()
         db = MagicMock()
         db.get_denylisted_users.return_value = []
         source._get_db.return_value = db
         self.slskd = FakeSlskdAPI()
         self.ctx = _make_ctx(
-            cfg=soularr.cfg,
+            cfg=cratedigger.cfg,
             slskd=self.slskd,
             pipeline_db_source=source,
         )
@@ -946,7 +946,7 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
         self.ctx.user_upload_speed["user1"] = 10
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
+        cratedigger.cfg = self._orig_cfg
 
     def test_try_enqueue_builds_prefixed_file_copies(self):
         directory = make_directory("Music\\Album", [
@@ -967,7 +967,7 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
             "check_for_match",
             return_value=(True, directory, "Music\\Album"),
         ), patch("time.sleep"):
-            attempt = soularr.try_enqueue(
+            attempt = cratedigger.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
                 "flac",
@@ -989,12 +989,12 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
     """Search logging should preserve telemetry semantics across failures."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        soularr.cfg = MagicMock()
-        soularr.cfg.parallel_searches = 1
+        self._orig_cfg = cratedigger.cfg
+        cratedigger.cfg = MagicMock()
+        cratedigger.cfg.parallel_searches = 1
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
+        cratedigger.cfg = self._orig_cfg
 
     def test_log_search_result_preserves_unknown_result_count(self):
         db = MagicMock()
@@ -1005,7 +1005,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
 
         from lib.search import SearchResult
 
-        soularr._log_search_result(
+        cratedigger._log_search_result(
             album,
             SearchResult(album_id=1, success=False, query="Artist Album", outcome="error"),
             ctx,
@@ -1033,7 +1033,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             result_count=7,
             elapsed_s=1.5,
         )
-        soularr._apply_find_download_result(
+        cratedigger._apply_find_download_result(
             album,
             result,
             enqueue_module.FindDownloadResult(outcome="enqueue_failed"),
@@ -1050,7 +1050,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         source._get_db.return_value = db
         slskd = FakeSlskdAPI()
         slskd.transfers.enqueue_result = False
-        ctx = _make_ctx(cfg=soularr.cfg, slskd=slskd, pipeline_db_source=source)
+        ctx = _make_ctx(cfg=cratedigger.cfg, slskd=slskd, pipeline_db_source=source)
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         ctx.user_upload_speed["user1"] = 10
 
@@ -1064,7 +1064,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             "check_for_match",
             return_value=(True, directory, "Music\\Album"),
         ):
-            attempt = soularr.try_enqueue(
+            attempt = cratedigger.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
                 "flac",
@@ -1084,26 +1084,26 @@ class TestNegativeMatchCache(unittest.TestCase):
     """Verify negative match cache prevents re-evaluating known mismatches."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_slskd = soularr.slskd
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
 
         mock_cfg = _make_matching_cfg()
-        soularr.cfg = mock_cfg
+        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
-        soularr.slskd = slskd
+        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        soularr.pipeline_db_source = mock_pdb
+        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.slskd = self._orig_slskd
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.slskd = self._orig_slskd
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_same_dir_same_track_count_skipped(self):
         """A dir that failed matching should be skipped on retry with same track count."""
@@ -1120,7 +1120,7 @@ class TestNegativeMatchCache(unittest.TestCase):
         )
 
         # First call — misses (1 file vs 3 tracks)
-        found1, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        found1, _, _ = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertFalse(found1)
 
         # Negative cache should contain (user1, Music\Album, 3, flac)
@@ -1128,7 +1128,7 @@ class TestNegativeMatchCache(unittest.TestCase):
 
         # Second call with same track count — should skip (no album_track_num re-eval)
         # We verify by checking that the negative cache hit prevents redundant work
-        found2, _, _ = soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        found2, _, _ = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertFalse(found2)
 
     def test_same_dir_different_filetype_not_skipped(self):
@@ -1143,7 +1143,7 @@ class TestNegativeMatchCache(unittest.TestCase):
         tracks = make_tracks((1, "Track One", 1))
 
         # Fails for "flac" (file is .mp3, album_track_num won't count it as flac)
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertIn(("user1", "Music\\Album", 1, "flac"), self.ctx.negative_matches)
 
         # Should NOT be skipped for "*" (different filetype key)
@@ -1163,11 +1163,11 @@ class TestNegativeMatchCache(unittest.TestCase):
             (1, "Track Two", 1),
             (1, "Track Three", 1),
         )
-        soularr.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1", self.ctx)
+        cratedigger.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Now try with 1 track — should NOT be skipped (different track count)
         tracks_1 = make_tracks((1, "Track One", 1))
-        found, _, _ = soularr.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
+        found, _, _ = cratedigger.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
         self.assertTrue(found)  # 1 file matches 1 track
 
 
@@ -1175,26 +1175,26 @@ class TestSearchResultPreFiltering(unittest.TestCase):
     """Verify directories with wrong audio file count are skipped before browsing."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_slskd = soularr.slskd
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
 
         mock_cfg = _make_matching_cfg()
-        soularr.cfg = mock_cfg
+        cratedigger.cfg = mock_cfg
 
         self.slskd = FakeSlskdAPI()
-        soularr.slskd = self.slskd
+        cratedigger.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        soularr.pipeline_db_source = mock_pdb
+        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.slskd = self._orig_slskd
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.slskd = self._orig_slskd
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_dir_with_wrong_count_skipped_before_browse(self):
         """Directory with 3 audio files should be skipped when we need 12 tracks."""
@@ -1204,8 +1204,8 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should NOT have called slskd.users.directory — skipped before browse
         self.assertEqual(self.slskd.users.directory_calls, [])
@@ -1223,8 +1223,8 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # SHOULD have browsed — count is close enough
         self.assertEqual(
@@ -1240,8 +1240,8 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[soularr.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        soularr.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # Should browse — no metadata to pre-filter
         self.assertEqual(
@@ -1259,7 +1259,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\The Album Name",
             "Music\\Other\\Random",
         ]
-        ranked = soularr.rank_candidate_dirs(dirs, "The Album Name", "Artist")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "The Album Name", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\The Album Name")
 
     def test_artist_name_in_path_promoted(self):
@@ -1267,7 +1267,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Other\\Album",
             "Music\\Artist\\Album",
         ]
-        ranked = soularr.rank_candidate_dirs(dirs, "Album", "Artist")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\Album")
 
     def test_penalty_keywords_demoted(self):
@@ -1276,7 +1276,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\The Real Album",
             "Music\\Artist\\Greatest Hits",
         ]
-        ranked = soularr.rank_candidate_dirs(dirs, "The Real Album", "Artist")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "The Real Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\The Real Album")
         # Best Of and Greatest Hits should be last
         penalty_dirs = ranked[1:]
@@ -1290,7 +1290,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\Discography\\Album",
             "Music\\Artist\\Album",
         ]
-        ranked = soularr.rank_candidate_dirs(dirs, "Album", "Artist")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\Album")
 
     def test_case_insensitive(self):
@@ -1298,13 +1298,13 @@ class TestRankCandidateDirs(unittest.TestCase):
             "music\\other\\random",
             "MUSIC\\ARTIST\\THE ALBUM",
         ]
-        ranked = soularr.rank_candidate_dirs(dirs, "The Album", "Artist")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "The Album", "Artist")
         self.assertEqual(ranked[0], "MUSIC\\ARTIST\\THE ALBUM")
 
     def test_preserves_order_for_equal_scores(self):
         """Dirs with equal scores should preserve original order."""
         dirs = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
-        ranked = soularr.rank_candidate_dirs(dirs, "Unrelated", "Nobody")
+        ranked = cratedigger.rank_candidate_dirs(dirs, "Unrelated", "Nobody")
         self.assertEqual(ranked, dirs)
 
 
@@ -1312,26 +1312,26 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
     """Verify parallel directory browsing populates folder_cache correctly."""
 
     def setUp(self):
-        self._orig_cfg = soularr.cfg
-        self._orig_slskd = soularr.slskd
-        self._orig_pdb = soularr.pipeline_db_source
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
 
         mock_cfg = _make_matching_cfg()
-        soularr.cfg = mock_cfg
+        cratedigger.cfg = mock_cfg
 
         self.slskd = FakeSlskdAPI()
-        soularr.slskd = self.slskd
+        cratedigger.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        soularr.pipeline_db_source = mock_pdb
+        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
 
     def tearDown(self):
-        soularr.cfg = self._orig_cfg
-        soularr.slskd = self._orig_slskd
-        soularr.pipeline_db_source = self._orig_pdb
+        cratedigger.cfg = self._orig_cfg
+        cratedigger.slskd = self._orig_slskd
+        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_parallel_browse_populates_cache(self):
         """_browse_directories should populate folder_cache for all dirs."""
@@ -1343,7 +1343,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
                 ])
             ])
 
-        results = soularr._browse_directories(
+        results = cratedigger._browse_directories(
             dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
@@ -1372,7 +1372,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
             Exception("Peer offline"),
         )
 
-        results = soularr._browse_directories(
+        results = cratedigger._browse_directories(
             dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
@@ -1394,7 +1394,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = make_tracks((1, "Track One", 1))
 
-        found, _, _ = soularr.check_for_match(
+        found, _, _ = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1", self.ctx
         )
         self.assertFalse(found)

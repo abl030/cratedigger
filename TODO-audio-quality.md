@@ -15,7 +15,7 @@ Created 2026-04-03. Tracks the AudioFileSpec refactoring and planned extensions.
 ### ALAC/m4a fix
 - `.m4a` files now match `alac` config (was broken: `"m4a" != "alac"`)
 - `album_track_num()`, `album_match()`, `download_filter()` all use `spec.extension`
-- `SoularrConfig.allowed_specs` property added
+- `CratediggerConfig.allowed_specs` property added
 
 ### Consolidated AUDIO_EXTENSIONS
 - Replaced 8 duplicate `_AUDIO_EXTS` sets across the codebase with imports from `lib/quality.py`

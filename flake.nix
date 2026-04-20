@@ -1,5 +1,5 @@
 {
-  description = "Cratedigger / Soularr — quality-obsessed music acquisition pipeline";
+  description = "Cratedigger — quality-obsessed music acquisition pipeline";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -32,11 +32,11 @@
       checks = forLinux ({ pkgs, system }: {
         # Boots a NixOS VM with the upstream module enabled against an
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
-        # config.ini is rendered correctly, soularr-web responds.
+        # config.ini is rendered correctly, cratedigger-web responds.
         moduleVm = import ./nix/tests/module-vm.nix {
           inherit pkgs system;
-          soularrModule = ./nix/module.nix;
-          soularrSrc = ./.;
+          cratediggerModule = ./nix/module.nix;
+          cratediggerSrc = ./.;
         };
       });
     };

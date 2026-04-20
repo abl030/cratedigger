@@ -291,15 +291,15 @@ def make_ctx_with_fake_db(
     cfg: Any = None,
     slskd: Any = None,
 ) -> Any:
-    """Build a SoularrContext wired to a FakePipelineDB.
+    """Build a CratediggerContext wired to a FakePipelineDB.
 
     The fake is wired via pipeline_db_source._get_db() so production code
     that calls ctx.pipeline_db_source._get_db() gets the fake.
     """
-    from lib.context import SoularrContext
+    from lib.context import CratediggerContext
     mock_source = MagicMock()
     mock_source._get_db.return_value = fake_db
-    return SoularrContext(
+    return CratediggerContext(
         cfg=cfg if cfg is not None else MagicMock(),
         slskd=slskd if slskd is not None else MagicMock(),
         pipeline_db_source=mock_source,

@@ -3,7 +3,7 @@
 let
   slskd-api = pkgs.callPackage ./slskd-api.nix { };
 
-  # Production python deps. Deliberately does NOT include beets — soularr
+  # Production python deps. Deliberately does NOT include beets — cratedigger
   # invokes beets out-of-process via harness/run_beets_harness.sh, which
   # uses whatever `beet` the deployment environment provides (so the
   # consumer's plugins + MB host config + library DB all just work).

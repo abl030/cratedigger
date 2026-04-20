@@ -22,7 +22,7 @@ import urllib.error
 from web import cache as _cache
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
-USER_AGENT = "soularr-web/1.0"
+USER_AGENT = "cratedigger-web/1.0"
 
 
 def _get(url):

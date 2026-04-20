@@ -3,7 +3,7 @@
 # Usage: nix-shell --run "bash scripts/run_tests.sh"
 set -euo pipefail
 
-OUT="/tmp/soularr-test-output.txt"
+OUT="/tmp/cratedigger-test-output.txt"
 
 # JS syntax check
 echo "=== JS syntax check ==="

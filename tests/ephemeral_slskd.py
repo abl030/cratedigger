@@ -72,10 +72,10 @@ class EphemeralSlskd:
 
         username = creds["username"]
         password = creds["password"]
-        self.api_key = creds.get("api_key", "soularr-test-key")
+        self.api_key = creds.get("api_key", "cratedigger-test-key")
 
         self.port = _find_free_port()
-        self._tmpdir = tempfile.mkdtemp(prefix="soularr_test_slskd_")
+        self._tmpdir = tempfile.mkdtemp(prefix="cratedigger_test_slskd_")
         self.download_dir = os.path.join(self._tmpdir, "downloads")
         os.makedirs(self.download_dir)
 
@@ -89,13 +89,13 @@ class EphemeralSlskd:
             f.write(f"""soulseek:
   username: {username}
   password: {password}
-  description: soularr integration test
+  description: cratedigger integration test
 web:
   port: 5030
   authentication:
     disabled: false
     api_keys:
-      soularr_test:
+      cratedigger_test:
         key: {self.api_key}
         role: administrator
         cidr: 0.0.0.0/0,::/0

@@ -12,7 +12,7 @@ Migration filename format: ``NNN_short_name.sql``, e.g.::
 Adding a schema change is a single PR step:
 
     1. Create the next-numbered ``.sql`` file in ``migrations/``.
-    2. The deploy systemd unit (``soularr-db-migrate.service``) will run it
+    2. The deploy systemd unit (``cratedigger-db-migrate.service``) will run it
        on the next ``nixos-rebuild switch`` via :func:`apply_migrations`.
 
 The migrator never edits or re-runs an applied migration. If you need to

@@ -4,9 +4,9 @@ import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
-from lib.context import SoularrContext
+from lib.context import CratediggerContext
 from lib.quality import CooldownConfig, should_cooldown
-from soularr import TrackRecord
+from cratedigger import TrackRecord
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_ctx_with_fake_db,
@@ -73,14 +73,14 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
     """Cooled-down users should be skipped during enqueue with distinct log messages."""
 
     def _make_ctx(self, cooled_down_users: set[str] | None = None,
-                  denied_users: list[str] | None = None) -> SoularrContext:
+                  denied_users: list[str] | None = None) -> CratediggerContext:
         source = MagicMock()
         db = MagicMock()
         db.get_denylisted_users.return_value = [
             {"username": u} for u in (denied_users or [])
         ]
         source._get_db.return_value = db
-        ctx = SoularrContext(
+        ctx = CratediggerContext(
             cfg=MagicMock(),
             slskd=MagicMock(),
             pipeline_db_source=source,
@@ -138,7 +138,7 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         ]
         results = {"deaduser": {"flac": ["Music\\Album"]}}
 
-        with self.assertLogs("soularr", level=logging.INFO) as cm:
+        with self.assertLogs("cratedigger", level=logging.INFO) as cm:
             try_enqueue(tracks, results, "flac", ctx)
 
         cooldown_msgs = [m for m in cm.output if "cooldown" in m.lower()]

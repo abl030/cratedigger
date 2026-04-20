@@ -1,4 +1,4 @@
-"""Utility functions for the Soularr pipeline.
+"""Utility functions for the Cratedigger pipeline.
 
 Pure utilities with no dependency on module-level globals.
 Functions that need config receive it as a parameter.
@@ -19,11 +19,11 @@ from datetime import datetime
 from typing import Any, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
+    from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
     from lib.quality import ValidationResult
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 @dataclass
@@ -63,7 +63,7 @@ def beets_subprocess_env() -> dict[str, str]:
     and import_one.py). Single source of truth for the HOME override.
 
     Beets resolves its config from `$HOME/.config/beets/config.yaml`. The
-    soularr systemd service runs as root with HOME=/root; the Nix Home
+    cratedigger systemd service runs as root with HOME=/root; the Nix Home
     Manager beets config (including the Discogs plugin token and the patched
     base URL for the local Discogs mirror) lives at /home/abl030/.config/.
     Without the override, the Discogs plugin silently returns 0 candidates
@@ -412,7 +412,7 @@ def _meelo_scanner_post(url: str, jwt: str, path: str) -> None:
         resp.read()
 
 
-def trigger_meelo_scan(cfg: SoularrConfig) -> None:
+def trigger_meelo_scan(cfg: CratediggerConfig) -> None:
     """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
     if not cfg.meelo_url:
         return
@@ -428,7 +428,7 @@ def trigger_meelo_scan(cfg: SoularrConfig) -> None:
         logger.warning(f"MEELO: scan trigger failed: {e}")
 
 
-def trigger_meelo_clean(cfg: SoularrConfig) -> None:
+def trigger_meelo_clean(cfg: CratediggerConfig) -> None:
     """Trigger a Meelo library clean to remove orphaned entries. Best-effort."""
     if not cfg.meelo_url:
         return
@@ -447,7 +447,7 @@ def trigger_meelo_clean(cfg: SoularrConfig) -> None:
 # === Plex integration ===
 
 
-def trigger_plex_scan(cfg: SoularrConfig, imported_path: str | None = None) -> None:
+def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) -> None:
     """Trigger a Plex library scan after import. Best-effort — failures don't block.
 
     If imported_path is provided, does a targeted partial scan of just that folder.
@@ -490,7 +490,7 @@ def trigger_plex_scan(cfg: SoularrConfig, imported_path: str | None = None) -> N
 # === Jellyfin integration ===
 
 
-def trigger_jellyfin_scan(cfg: SoularrConfig) -> None:
+def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
     """Trigger a Jellyfin library scan after import. Best-effort — failures don't block.
 
     If jellyfin_library_id is set, refreshes just that library item.
@@ -526,7 +526,7 @@ def trigger_jellyfin_scan(cfg: SoularrConfig) -> None:
 # === Validation logging ===
 
 def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
-                          cfg: SoularrConfig,
+                          cfg: CratediggerConfig,
                           dest_path: str | None = None) -> None:
     """Append beets validation result to tracking JSONL."""
     entry = {

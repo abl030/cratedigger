@@ -19,7 +19,7 @@ import urllib.request
 from web import cache as _cache
 
 DISCOGS_API_BASE = "https://discogs.ablz.au"
-USER_AGENT = "soularr-web/1.0"
+USER_AGENT = "cratedigger-web/1.0"
 
 
 def _get(url: str) -> dict:

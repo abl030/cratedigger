@@ -32,7 +32,7 @@ LIBRARY_DIR_MODE = 0o777
 def reset_umask() -> None:
     """Set the process umask to 0, matching the systemd unit's UMask=0000.
 
-    Call this at every pipeline entry point (soularr.py main(), import_one.py
+    Call this at every pipeline entry point (cratedigger.py main(), import_one.py
     main(), beets_harness.py main()) so subprocesses further down the chain
     inherit it. Do NOT call this at module-import time — the umask is
     process-wide and would leak into any code that imports the module.
