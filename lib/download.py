@@ -330,31 +330,90 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     outcome upward so ``_run_completed_processing`` can distinguish
     ``deferred`` from ``success`` / ``failure`` on the release-lock
     contention path (issue #132 P1, Codex PR #136 R3 P2/P3).
-    """
-    dest = stage_to_ai(album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
-    log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
-    logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
-                f"(scenario={bv_result.scenario}, "
-                f"distance={bv_result.distance:.4f}) → {dest}")
 
-    dl_info = _build_download_info(album_data)
-    dl_info.validation_result = bv_result.to_json()
-    if album_data.download_spectral is not None:
-        dl_info.download_spectral = album_data.download_spectral
-        dl_info.current_spectral = album_data.current_spectral
-        dl_info.existing_min_bitrate = album_data.current_min_bitrate
-        dl_info.slskd_filetype = dl_info.filetype
-        dl_info.actual_filetype = dl_info.filetype
+    **Release-lock acquisition is at this level, not inside
+    ``dispatch_import``.** Codex PR #136 R4 P1: moving files via
+    ``stage_to_ai`` mutates filesystem state
+    (``slskd_download_dir/<import_folder>/`` → ``beets_staging_dir/``)
+    that is NOT reflected in ``active_download_state``. If contention
+    is detected AFTER staging, the next cycle's
+    ``process_completed_album`` reconstructs the entry from
+    ``active_download_state``, finds the source paths empty, and
+    fails with ``FileNotFoundError``. Fix: acquire the lock BEFORE
+    ``stage_to_ai``. On contention, return deferred without staging
+    so files stay at ``slskd_download_dir/<import_folder>/`` where
+    the resume guard in ``process_completed_album`` (line 201:
+    ``if os.path.exists(dst_file) and not os.path.exists(src_file):
+    continue``) can idempotently re-enter next cycle.
+
+    The lock is session-reentrant (PostgreSQL semantics), so
+    ``dispatch_import_core``'s inner acquisition of the same key is a
+    no-op acquire + extra release. Force/manual paths — which don't
+    go through this function — still acquire inside
+    ``dispatch_import_core`` where they need it.
+
+    Redownload paths (``source != 'request'`` or distance above
+    threshold) don't take the lock — they just stage-and-mark-done
+    without running the harness, so no cross-process race applies.
+    """
+    from contextlib import nullcontext
+    from lib.import_dispatch import DispatchOutcome
+    from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                 release_id_to_lock_key)
+
     source_type = album_data.db_source or "redownload"
     request_id = album_data.db_request_id
     dist = bv_result.distance if bv_result.distance is not None else 1.0
-    if source_type == "request" and dist <= ctx.cfg.beets_distance_threshold:
-        assert request_id is not None, "pipeline request must have db_request_id"
-        return dispatch_import(
-            album_data, bv_result, dest, dl_info, request_id, ctx)
-    ctx.pipeline_db_source.mark_done(album_data, bv_result, dest_path=dest,
-                                     download_info=dl_info)
-    return None
+    will_auto_import = (
+        source_type == "request"
+        and dist <= ctx.cfg.beets_distance_threshold)
+
+    if will_auto_import and album_data.mb_release_id:
+        pdb = ctx.pipeline_db_source._get_db()
+        lock_ctx = pdb.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key(album_data.mb_release_id))
+    else:
+        lock_ctx = nullcontext(True)
+
+    with lock_ctx as got_release_lock:
+        if not got_release_lock:
+            logger.warning(
+                f"AUTO-IMPORT DEFERRED: {album_data.artist} - "
+                f"{album_data.title} — release lock held by another "
+                f"process (mbid={album_data.mb_release_id}); skipping "
+                "stage_to_ai and dispatch. Files stay at "
+                f"{import_folder_fullpath} so the next cycle can "
+                "idempotently resume from process_completed_album.")
+            return DispatchOutcome(
+                success=False,
+                message=("Another import is already in progress for "
+                         f"this release ({album_data.mb_release_id})"),
+                deferred=True,
+            )
+
+        dest = stage_to_ai(
+            album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
+        log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
+        logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
+                    f"(scenario={bv_result.scenario}, "
+                    f"distance={bv_result.distance:.4f}) → {dest}")
+
+        dl_info = _build_download_info(album_data)
+        dl_info.validation_result = bv_result.to_json()
+        if album_data.download_spectral is not None:
+            dl_info.download_spectral = album_data.download_spectral
+            dl_info.current_spectral = album_data.current_spectral
+            dl_info.existing_min_bitrate = album_data.current_min_bitrate
+            dl_info.slskd_filetype = dl_info.filetype
+            dl_info.actual_filetype = dl_info.filetype
+        if will_auto_import:
+            assert request_id is not None, "pipeline request must have db_request_id"
+            return dispatch_import(
+                album_data, bv_result, dest, dl_info, request_id, ctx)
+        ctx.pipeline_db_source.mark_done(
+            album_data, bv_result, dest_path=dest, download_info=dl_info)
+        return None
 
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
