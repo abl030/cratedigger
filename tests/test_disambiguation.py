@@ -330,20 +330,23 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
 
 
 # ``TestDisambiguateBeetMove`` and ``TestRunDisambiguationMoveHelper``
-# were removed in issue #133: both classes tested helper functions or
-# inline-reconstructed logic that no longer exist in production code.
+# were removed in issue #133.
 #
-# - ``_run_disambiguation_move(mbid)`` (mb_albumid-based) was superseded
-#   by ``_run_album_move_by_id(album_id)`` in PR #131 and by
-#   ``lib.beets_album_op.move_album`` in this PR. Argv-shape and
-#   subprocess-failure-classification coverage moved to
-#   ``tests/test_beets_album_op.py::TestMoveAlbum`` and
-#   ``TestRemoveBySelector``.
+# - ``_run_disambiguation_move(mbid)`` was the mb_albumid-based helper
+#   superseded by ``_run_album_move_by_id(album_id)`` in PR #131, which
+#   in turn is now ``lib.beets_album_op.move_album``. The argv-shape +
+#   subprocess-failure-classification coverage that ``_run_disambiguation_move``
+#   carried lives in ``tests/test_beets_album_op.py::TestMoveAlbum`` for
+#   the id-based move shape. NOTE: no test explicitly covers a
+#   ``beet move mb_albumid:<uuid>`` argv any more — production doesn't
+#   construct that shape (PR #131 moved every caller to the id-based
+#   form), and the grep guard in ``TestBeetOpArgvIsCentralised`` now
+#   forbids new callsites from reintroducing it outside the op module.
 # - ``TestDisambiguateBeetMove`` reconstructed the disambiguation
 #   control flow inline inside the test (never called the production
-#   helper), so it didn't guard any real code path. Equivalent coverage
-#   lives in ``TestApplyDisambiguationCallsiteContract`` below, which
-#   does call ``import_one._apply_disambiguation``.
+#   helper), so it guarded nothing. Equivalent coverage of the real
+#   path lives in ``TestApplyDisambiguationCallsiteContract`` below,
+#   which calls ``import_one._apply_disambiguation`` directly.
 
 
 class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
@@ -404,7 +407,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
 
         # Must NOT raise.
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         # Property (4): path unchanged on failure.
         self.assertEqual(new_path, self.ORIGINAL_PATH)
@@ -432,7 +435,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         r, beets = self._make_result_and_beets()
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertFalse(r.postflight.disambiguated)
@@ -449,7 +452,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         r, beets = self._make_result_and_beets()
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertFalse(r.postflight.disambiguated)
@@ -479,7 +482,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         beets.get_album_path_by_id.return_value = self.ORIGINAL_PATH
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertTrue(r.postflight.disambiguated)
@@ -504,7 +507,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         beets.get_album_path_by_id.return_value = None
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertEqual(r.postflight.imported_path, self.ORIGINAL_PATH)
@@ -527,7 +530,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         beets.get_album_path_by_id.return_value = renamed
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
+            42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, renamed)
         self.assertEqual(r.postflight.imported_path, renamed)

@@ -773,7 +773,6 @@ def run_import(path, mb_release_id):
 
 
 def _apply_disambiguation(
-    mbid: str,
     album_id: int,
     beets: BeetsDB,
     album_path: str,
@@ -805,10 +804,6 @@ def _apply_disambiguation(
     and ``r.exit_code`` / ``r.decision`` are never touched by a
     disambiguation failure.
     """
-    # ``mbid`` is unused now that ``move_album`` reads the post-move
-    # path by album_id, but the signature is kept as-is so external
-    # callers in tests don't have to re-wire their fixtures.
-    del mbid
     result = move_album(BeetsAlbumHandle(album_id=album_id), beets)
     if not result.success:
         assert result.failure is not None
@@ -934,8 +929,14 @@ def _canonicalize_siblings(
                  "manually later")
             continue
         if result.new_path:
+            # ``move_album`` already ran ``fix_library_modes`` (issue
+            # #84) — log it explicitly so the cratedigger journal trail
+            # still shows per-sibling perm repair. Operators greppable
+            # for 'fix_library_modes' and for 'beet move' can
+            # cross-reference the two in post-hoc debugging.
             _log(f"  [CANONICALIZE] moved sibling id:{aid} → "
-                 f"{result.new_path} (perms repaired)")
+                 f"{result.new_path}; fix_library_modes(...) ran "
+                 "inside move_album")
 
 
 # ---------------------------------------------------------------------------
@@ -1539,7 +1540,7 @@ def main():
     if kept_duplicate:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
         album_path = _apply_disambiguation(
-            mbid, pf_info.album_id, beets, album_path, r)
+            pf_info.album_id, beets, album_path, r)
         # Also canonicalize the sibling editions beets flagged as
         # duplicates — without this, the new album gets the ``[YEAR]``
         # suffix while the sibling stays un-suffixed (asymmetric
