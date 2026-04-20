@@ -743,6 +743,57 @@ class TestImportResultProductionFixtures(unittest.TestCase):
                          "nonzero_rc")
         self.assertEqual(r2.postflight.disambiguation_failure.selector, "")
 
+    def test_all_observed_production_null_shapes_decode(self):
+        """Issue #141 codex round 3 documented-equivalence.
+
+        Codex R3 P2 flagged that after the migration, malformed
+        legacy shapes like ``new_measurement: []`` or
+        ``disambiguation_failure: "some string"`` would raise
+        ``ValidationError`` instead of degrading to defaults. Live
+        probe of 1726 production ``download_log.import_result`` rows
+        on doc2 (2026-04-21) shows the only non-object shapes that
+        actually occur are JSONB ``null`` values for three optional
+        fields:
+
+            new_measurement:         null (27 rows) / missing (236 v1)
+            existing_measurement:    null (225 rows) / missing (236 v1)
+            postflight.disambiguation_failure: null (56 rows)
+
+        msgspec handles ``null`` for ``Optional[Struct]`` natively —
+        no hedge needed. The hypothetical shapes codex worries about
+        (empty list / empty string / non-dict non-null) have never
+        been written: we encode via ``msgspec.json.encode`` which
+        emits ``null`` for ``None`` and ``object`` for ``Struct``,
+        never a scalar for an ``Optional[Struct]`` slot. Per
+        CLAUDE.md "don't add validation for scenarios that can't
+        happen", we prefer strict decode so a future actual writer
+        bug surfaces loudly instead of being silently coerced.
+
+        This pin test locks the observed-prod contract: every shape
+        the current data contains decodes cleanly with no hedge.
+        """
+        for desc, d in [
+            ("new_measurement=null",
+             {"version": 2, "exit_code": 0, "decision": "import",
+              "new_measurement": None}),
+            ("existing_measurement=null",
+             {"version": 2, "exit_code": 0, "decision": "import",
+              "existing_measurement": None}),
+            ("disambiguation_failure=null",
+             {"version": 2, "exit_code": 0, "decision": "import",
+              "postflight": {"disambiguation_failure": None}}),
+            ("all three null",
+             {"version": 2, "exit_code": 0, "decision": "import",
+              "new_measurement": None, "existing_measurement": None,
+              "postflight": {"disambiguation_failure": None}}),
+        ]:
+            with self.subTest(desc=desc):
+                r = ImportResult.from_dict(d)
+                self.assertEqual(r.decision, "import")
+                self.assertIsNone(r.new_measurement)
+                self.assertIsNone(r.existing_measurement)
+                self.assertIsNone(r.postflight.disambiguation_failure)
+
 
 class TestSentinelLine(unittest.TestCase):
     """Test sentinel line formatting."""
