@@ -56,7 +56,7 @@ class TestRemoveStaleByIdLogged(unittest.TestCase):
     cannot match any other album, so the blast radius is exactly one
     row."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_clean_exit_returns_none(self, mock_run: MagicMock) -> None:
         from harness import import_one
         mock_run.return_value = _ok()
@@ -73,7 +73,7 @@ class TestRemoveStaleByIdLogged(unittest.TestCase):
         # and match a track PK or nothing (Codex PR #131 round 2 P1).
         self.assertEqual(argv[1:5], ["remove", "-a", "-d", "id:10319"])
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_timeout_surfaces_typed_failure(self, mock_run: MagicMock) -> None:
         from harness import import_one
         mock_run.side_effect = sp.TimeoutExpired(
@@ -85,7 +85,7 @@ class TestRemoveStaleByIdLogged(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.reason, "timeout")
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_nonzero_rc_surfaces_typed_failure(
             self, mock_run: MagicMock) -> None:
         from harness import import_one
@@ -115,7 +115,7 @@ class TestCanonicalizeSiblings(unittest.TestCase):
     ``albums.id`` is always populated (Codex PR #131 round 3 P3).
     """
 
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_noop_when_no_siblings(self, mock_run: MagicMock) -> None:
         from harness import import_one
         beets = MagicMock()
@@ -123,8 +123,8 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         mock_run.assert_not_called()
         beets.get_album_path_by_id.assert_not_called()
 
-    @patch("harness.import_one.fix_library_modes")
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.permissions.fix_library_modes")
+    @patch("lib.beets_album_op.sp.run")
     def test_runs_beet_move_album_mode_id_selector(
             self, mock_run: MagicMock,
             mock_fix: MagicMock) -> None:
@@ -152,8 +152,8 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         mock_fix.assert_called_once_with(
             "/Beets/Shearwater/2006 - Palo Santo [2006]")
 
-    @patch("harness.import_one.fix_library_modes")
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.permissions.fix_library_modes")
+    @patch("lib.beets_album_op.sp.run")
     def test_handles_discogs_sibling_via_album_id(
             self, mock_run: MagicMock,
             mock_fix: MagicMock) -> None:
@@ -180,8 +180,8 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         mock_fix.assert_called_once_with(
             "/Beets/Discogs/Artist/Album [12856590]")
 
-    @patch("harness.import_one.fix_library_modes")
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.permissions.fix_library_modes")
+    @patch("lib.beets_album_op.sp.run")
     def test_continues_past_per_sibling_failure(
             self, mock_run: MagicMock,
             mock_fix: MagicMock) -> None:
@@ -210,8 +210,8 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         # Exactly one of the two moves succeeded → exactly one perm repair.
         self.assertEqual(mock_fix.call_count, 1)
 
-    @patch("harness.import_one.fix_library_modes")
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.permissions.fix_library_modes")
+    @patch("lib.beets_album_op.sp.run")
     def test_skips_fix_library_modes_when_path_missing(
             self, mock_run: MagicMock,
             mock_fix: MagicMock) -> None:

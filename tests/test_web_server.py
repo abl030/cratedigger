@@ -1455,7 +1455,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_clears_on_disk_quality_fields(
             self, _mock_transition, mock_subprocess):
@@ -1493,7 +1493,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_skips_clear_when_beet_remove_failed(
             self, _mock_transition, mock_subprocess):
@@ -1536,7 +1536,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(data["cleanup_errors"][0]["reason"], "nonzero_rc")
         self.assertFalse(data["beets_removed"])
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_uses_discogs_selector_for_numeric_id(
             self, _mock_transition, mock_subprocess):
@@ -1576,7 +1576,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
                       "Must also attempt the legacy mb_albumid selector "
                       "so older beets libraries don't regress.")
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.apply_transition")
     def test_ban_source_clears_stale_state_when_album_already_gone(
             self, _mock_transition, mock_subprocess):

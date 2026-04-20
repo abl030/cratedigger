@@ -1306,21 +1306,15 @@ class SpectralDetail:
     existing_suspect_pct: float = 0.0
 
 
-DisambiguationFailureReason = Literal["timeout", "nonzero_rc", "exception"]
-
-
-@dataclass(frozen=True)
-class DisambiguationFailure:
-    """Why the post-import ``beet move`` did not exit cleanly (issue #127).
-
-    Mirrors ``lib/release_cleanup.py::SelectorFailure`` shape:
-    ``reason`` is a coarse Literal tag so callers (and the future web
-    UI Recents tab) can classify failures at a glance without parsing
-    ``detail`` strings; ``detail`` is a short human-readable string for
-    logs and the JSONB audit trail (do not parse it).
-    """
-    reason: DisambiguationFailureReason
-    detail: str
+# Issue #133: ``DisambiguationFailure`` / ``SelectorFailure`` were two
+# @dataclass classes with identical shape, scattered across lib.quality
+# and lib.release_cleanup. They are now a single
+# ``lib.beets_album_op.BeetsOpFailure``; these aliases preserve existing
+# imports (``from lib.quality import DisambiguationFailure`` in the
+# harness, tests/helpers.py, etc). The unified type added a ``selector``
+# field (default ``""``) so old JSON rows with only ``{reason, detail}``
+# still deserialize cleanly via ``DisambiguationFailure(**d)``.
+from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 
 @dataclass
