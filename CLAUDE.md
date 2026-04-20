@@ -356,8 +356,8 @@ WHERE id = <id>;
 
 All types in `lib/quality.py`, fully typed with pyright, JSON round-trip serialization:
 
-- **Import path**: `ImportResult` → `AudioQualityMeasurement` (new/existing), `ConversionInfo`, `SpectralDetail`, `PostflightInfo`
-- **Validation path**: `ValidationResult` → `CandidateSummary` → `HarnessTrackInfo`, `HarnessItem`, `TrackMapping`. The four harness wire-boundary types plus `ChooseMatchMessage` are `msgspec.Struct`, not `@dataclass` — the strict-typed decoder at `lib/beets.py::beets_validate` catches int/null/type drift on the wire (issue #99). See `.claude/rules/code-quality.md` § "Wire-boundary types".
+- **Import path**: `ImportResult` → `AudioQualityMeasurement` (new/existing), `ConversionInfo`, `SpectralDetail`, `PostflightInfo` → `MovedSibling`, `DisambiguationFailure` (aliased from `BeetsOpFailure`). Every type in this tree is a `msgspec.Struct` (issue #141): encode via `msgspec.json.encode`, decode via `msgspec.convert` — symmetric at the wire boundary.
+- **Validation path**: `ValidationResult` → `CandidateSummary` → `HarnessTrackInfo`, `HarnessItem`, `TrackMapping`. The four harness wire-boundary types plus `ChooseMatchMessage` are `msgspec.Struct` — the strict-typed decoder at `lib/beets.py::beets_validate` catches int/null/type drift on the wire (issue #99). See `.claude/rules/code-quality.md` § "Wire-boundary types".
 - **Dispatch path**: `DispatchAction` (action flags from `dispatch_action()`), `StageResult` (in `import_one.py` — pure stage decisions)
 - **Async download path**: `ActiveDownloadState` → `ActiveDownloadFileState` (persisted to `album_requests.active_download_state` JSONB)
 - **Spectral state**: `SpectralMeasurement` (grade + bitrate pair), `RequestSpectralStateUpdate` (typed DB write for last_download + current spectral)
