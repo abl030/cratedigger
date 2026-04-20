@@ -1318,13 +1318,15 @@ class SpectralDetail(msgspec.Struct):
 
 
 # Issue #133: ``DisambiguationFailure`` / ``SelectorFailure`` were two
-# @dataclass classes with identical shape, scattered across lib.quality
+# duplicated types with identical shape, scattered across lib.quality
 # and lib.release_cleanup. They are now a single
 # ``lib.beets_album_op.BeetsOpFailure``; these aliases preserve existing
 # imports (``from lib.quality import DisambiguationFailure`` in the
 # harness, tests/helpers.py, etc). The unified type added a ``selector``
 # field (default ``""``) so old JSON rows with only ``{reason, detail}``
-# still deserialize cleanly via ``DisambiguationFailure(**d)``.
+# still decode cleanly via ``msgspec.convert(..., type=PostflightInfo)``
+# inside ``_postflight_from_dict`` — msgspec defaults fill in any
+# missing key.
 from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 

@@ -20,7 +20,7 @@ from lib.quality import (
 
 
 class TestImportResultConstruction(unittest.TestCase):
-    """Test dataclass construction and field defaults."""
+    """Test Struct construction and field defaults."""
 
     def test_default_construction(self):
         r = ImportResult()

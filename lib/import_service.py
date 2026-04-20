@@ -103,7 +103,7 @@ def extract_import_update_fields(import_result_json: str | None) -> dict[str, ob
 
 
 def extract_import_log_fields(import_result_json: str | None) -> dict[str, object]:
-    """Extract download_log fields from ImportResult JSON via typed dataclass."""
+    """Extract download_log fields from ImportResult JSON via typed Struct."""
     if not import_result_json:
         return {}
     try:
