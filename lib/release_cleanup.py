@@ -28,25 +28,35 @@ the point — do not collapse or route around it:
   absent afterwards. That's what the ban-source web route and other
   pipeline-aware callers need.
 
-Issue #123 PR B: each ``sp.run`` is now wrapped in a try/except that
-catches ``TimeoutExpired``, non-zero exit codes, and any ``OSError``
-(e.g. ``beet`` missing from PATH). The loop always attempts every
-selector, and per-selector failures are surfaced via
+Issue #123 PR B: each ``beet remove`` invocation is wrapped in a
+try/except that catches ``TimeoutExpired``, non-zero exit codes, and
+any ``OSError`` (e.g. ``beet`` missing from PATH). The loop always
+attempts every selector, and per-selector failures are surfaced via
 ``ReleaseCleanupResult.selector_failures`` so the caller can tell
 partial failure from a clean run. Before this change, a
 ``TimeoutExpired`` on selector 1 escaped the loop and left selector 2
 untried — *after* the ban-source caller had already committed the
 denylist row, leaving the banned copy on disk with no recovery path.
+
+Issue #133: the subprocess primitive now lives in
+``lib.beets_album_op`` (``remove_by_selector`` / ``remove_album``)
+as part of the ``BeetsAlbumOp`` extraction. ``SelectorFailure`` is a
+kept-name alias for ``BeetsOpFailure``; ``SelectorFailureReason`` is
+the kept-name alias for ``BeetsOpFailureReason``. Existing callers
+(web routes, tests) continue to import from this module unchanged.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess as sp
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from lib.util import beet_bin, beets_subprocess_env
+from lib.beets_album_op import (BeetsOpFailure as SelectorFailure,
+                                BeetsOpFailureReason as SelectorFailureReason,
+                                remove_album as _remove_album_op,
+                                remove_by_selector)
+from lib.beets_album_op import BeetsAlbumHandle
 
 if TYPE_CHECKING:
     from lib.beets_db import BeetsDB
@@ -55,22 +65,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("cratedigger")
 
-
-SelectorFailureReason = Literal["timeout", "nonzero_rc", "exception"]
-
-
-@dataclass(frozen=True)
-class SelectorFailure:
-    """One ``beet remove -d`` attempt that didn't cleanly exit.
-
-    ``reason`` is a coarse tag so callers (including the web UI) can
-    classify at a glance without parsing ``detail`` strings. Keep the
-    set closed — see ``SelectorFailureReason``. ``detail`` is a short
-    human-readable string for logs and debugging; do not parse it.
-    """
-    selector: str
-    reason: SelectorFailureReason
-    detail: str
+# Re-export for historical call sites (web/routes/pipeline.py, tests,
+# harness/import_one.py) that import these names from this module.
+__all__ = [
+    "SelectorFailure",
+    "SelectorFailureReason",
+    "ReleaseCleanupResult",
+    "remove_album_by_beets_id",
+    "remove_album_by_selectors",
+    "remove_and_reset_release",
+]
 
 
 @dataclass(frozen=True)
@@ -95,63 +99,6 @@ class ReleaseCleanupResult:
     selector_failures: tuple[SelectorFailure, ...]
 
 
-def _run_remove_selector(selector: str) -> SelectorFailure | None:
-    """Run ``beet remove -a -d <selector>`` once, never raise.
-
-    The ``-a`` flag is **mandatory**. Without it, ``beet remove`` runs
-    in ITEM mode: queries ``items`` (tracks), not ``albums``. That has
-    two hazards:
-
-    - ``id:<N>`` in item mode is ``items.id = N`` — matches ONE TRACK,
-      not one album. Since ``items.id`` and ``albums.id`` are separate
-      autoincrement PKs, an album id passed to item-mode ``id:`` would
-      either match an unrelated track or nothing at all, leaving the
-      stale album fully intact. Codex (PR #131 round 2 P1) flagged
-      this against ``remove_album_by_beets_id``.
-    - ``mb_albumid:<X>`` in item mode happens to work "by accident"
-      because ``mb_albumid`` is also a per-item column inherited from
-      the album, and deleting all matching items garbage-collects the
-      empty album row. But that's fragile correctness — album-mode is
-      what we actually mean.
-
-    Every selector this module hands off is album-scoped conceptually
-    (``mb_albumid:``, ``discogs_albumid:``, ``id:`` where id is from
-    ``albums.id``), so ``-a`` is always the right flag. Returns
-    ``None`` on clean exit (rc=0), otherwise a ``SelectorFailure``.
-    """
-    try:
-        proc = sp.run(
-            [beet_bin(), "remove", "-a", "-d", selector],
-            capture_output=True, text=True, timeout=30,
-            env=beets_subprocess_env(),
-        )
-    except sp.TimeoutExpired as exc:
-        msg = f"timed out after {exc.timeout}s"
-        log.warning(
-            "release_cleanup: beet remove -a -d %s %s", selector, msg)
-        return SelectorFailure(
-            selector=selector, reason="timeout", detail=msg)
-    except OSError as exc:
-        msg = f"{type(exc).__name__}: {exc}"
-        log.warning(
-            "release_cleanup: beet remove -a -d %s raised %s",
-            selector, msg)
-        return SelectorFailure(
-            selector=selector, reason="exception", detail=msg)
-
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip().splitlines()
-        msg = stderr[-1] if stderr else f"rc={proc.returncode}"
-        log.warning(
-            "release_cleanup: beet remove -a -d %s exited %d: %s",
-            selector, proc.returncode, msg)
-        return SelectorFailure(
-            selector=selector, reason="nonzero_rc",
-            detail=f"rc={proc.returncode}: {msg}")
-
-    return None
-
-
 def remove_album_by_beets_id(album_id: int) -> SelectorFailure | None:
     """Remove a single album by its beets numeric primary key.
 
@@ -166,11 +113,13 @@ def remove_album_by_beets_id(album_id: int) -> SelectorFailure | None:
     narrow enough to be safe — ``mb_albumid:<uuid>`` would match
     both.
 
-    Returns ``None`` on clean exit, or a typed ``SelectorFailure``.
-    Caller decides how to surface a failure (log + proceed, or
-    escalate). No pipeline-DB coupling.
+    Issue #133: now a thin adapter over ``beets_album_op.remove_album``
+    — returns the underlying ``BeetsOpFailure`` (aliased as
+    ``SelectorFailure`` for historical callers) or ``None`` on clean
+    exit. Argv construction is centralised in ``lib.beets_album_op``.
     """
-    return _run_remove_selector(f"id:{album_id}")
+    result = _remove_album_op(BeetsAlbumHandle(album_id=album_id))
+    return result.failure
 
 
 def remove_album_by_selectors(
@@ -202,12 +151,12 @@ def remove_album_by_selectors(
     failures: list[SelectorFailure] = []
     if album_was_in_beets:
         # ``before.selectors`` is every selector the ID could live
-        # under (one for UUIDs, two for Discogs numerics). We iterate
-        # EVERY selector unconditionally — catching per-selector
-        # failures in ``_run_remove_selector`` — so a timeout on one
-        # never leaves the others untried. That's the PR #123B bug:
-        # the raw loop raised out on the first ``TimeoutExpired``,
-        # after the ban-source caller had committed the denylist row.
+        # under (one for UUIDs, two for Discogs numerics). Iterate
+        # EVERY selector unconditionally — ``remove_by_selector``
+        # catches per-selector failures so a timeout on one never
+        # leaves the others untried. That's the PR #123B bug: the raw
+        # loop raised out on the first ``TimeoutExpired``, after the
+        # ban-source caller had committed the denylist row.
         # NB: when selector N times out, Python kills the child process
         # before moving on. Beets uses a file-backed SQLite DB, so a
         # killed-mid-transaction remove can leave the WAL in a state
@@ -216,7 +165,7 @@ def remove_album_by_selectors(
         # can't exercise it, but if production logs show lock contention
         # the fix is to increase the timeout or serialize retries.
         for selector in before.selectors:
-            failure = _run_remove_selector(selector)
+            failure = remove_by_selector(selector)
             if failure is not None:
                 failures.append(failure)
 

@@ -14,7 +14,7 @@ The pure-function tests here use a lightweight stub ``BeetsDB`` + a
 touches is exactly one method (``clear_on_disk_quality_fields``), and
 the assertion we care about is "was it called, with what argument",
 which MagicMock makes direct. Subprocess behavior is mocked via
-``patch('lib.release_cleanup.sp.run', ...)``.
+``patch('lib.beets_album_op.sp.run', ...)``.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ class TestReleaseCleanupResult(unittest.TestCase):
 class TestAllSelectorsSucceed(unittest.TestCase):
     """Baseline: when every selector exits 0, no failures, album gone."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_uuid_single_selector_clean_exit(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _ok()
         beets = _StubBeetsDB([
@@ -125,7 +125,7 @@ class TestAllSelectorsSucceed(unittest.TestCase):
         # Pipeline DB clear fires on absent_after=True.
         pdb.clear_on_disk_quality_fields.assert_called_once_with(42)
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_argv_uses_album_mode_flag(
             self, mock_run: MagicMock) -> None:
         """Every ``beet remove`` invocation MUST include ``-a`` (album
@@ -152,7 +152,7 @@ class TestAllSelectorsSucceed(unittest.TestCase):
         self.assertEqual(argv[1:4], ["remove", "-a", "-d"])
         self.assertEqual(argv[4], f"mb_albumid:{RELEASE_UUID}")
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_discogs_pair_of_selectors_both_run(
             self, mock_run: MagicMock) -> None:
         """Discogs numeric → two selectors; both run on the happy path."""
@@ -177,7 +177,7 @@ class TestAllSelectorsSucceed(unittest.TestCase):
 class TestTimeoutOnOneSelector(unittest.TestCase):
     """The bug report: timeout on selector A must not abort the loop."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_timeout_on_first_selector_still_runs_second(
             self, mock_run: MagicMock) -> None:
         """``TimeoutExpired`` on selector 1 must not prevent selector 2.
@@ -214,7 +214,7 @@ class TestTimeoutOnOneSelector(unittest.TestCase):
         self.assertEqual(result.selector_failures[0].selector, selectors[0])
         self.assertEqual(result.selector_failures[0].reason, "timeout")
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_timeout_on_both_selectors_returns_partial_failure(
             self, mock_run: MagicMock) -> None:
         """All selectors time out → two failures recorded, no clear."""
@@ -248,7 +248,7 @@ class TestTimeoutOnOneSelector(unittest.TestCase):
 class TestNonZeroExitCodeLoopContinues(unittest.TestCase):
     """``beet remove`` exits non-zero → record, keep looping."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_nonzero_rc_on_first_still_runs_second(
             self, mock_run: MagicMock) -> None:
         selectors = (f"discogs_albumid:{DISCOGS_ID}", f"mb_albumid:{DISCOGS_ID}")
@@ -276,7 +276,7 @@ class TestNonZeroExitCodeLoopContinues(unittest.TestCase):
 class TestMissingBeetBinary(unittest.TestCase):
     """``FileNotFoundError`` (beet not on PATH) is caught gracefully."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_filenotfounderror_does_not_propagate(
             self, mock_run: MagicMock) -> None:
         """Beet missing from PATH must not crash the ban-source handler.
@@ -310,7 +310,7 @@ class TestMissingBeetBinary(unittest.TestCase):
 class TestAlreadyGoneBeforeCall(unittest.TestCase):
     """Pre-gone: no subprocess runs, pipeline DB still cleared."""
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_no_sp_run_when_locate_already_absent(
             self, mock_run: MagicMock) -> None:
         beets = _StubBeetsDB([
@@ -355,7 +355,7 @@ class TestRemoveAlbumBySelectorsSeam(unittest.TestCase):
     fields.
     """
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_returns_release_cleanup_result_without_pipeline_db(
             self, mock_run: MagicMock) -> None:
         """The seam accepts (beets_db, release_id) only — no pipeline_db.
@@ -377,7 +377,7 @@ class TestRemoveAlbumBySelectorsSeam(unittest.TestCase):
         self.assertTrue(result.absent_after)
         self.assertEqual(result.selector_failures, ())
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_absent_before_call_no_subprocess(
             self, mock_run: MagicMock) -> None:
         """No album present → no subprocess run, absent_after=True."""
@@ -393,7 +393,7 @@ class TestRemoveAlbumBySelectorsSeam(unittest.TestCase):
         self.assertFalse(result.beets_removed)
         self.assertTrue(result.absent_after)
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_per_selector_iteration_preserved(
             self, mock_run: MagicMock) -> None:
         """Timeout on selector 1 must not skip selector 2 (PR #123 guarantee).
@@ -437,7 +437,7 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
     tracing the implementation.
     """
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_clears_pipeline_db_only_when_absent_after(
             self, mock_run: MagicMock) -> None:
         """Wrapper fires ``clear_on_disk_quality_fields`` iff seam reports
@@ -456,7 +456,7 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
         self.assertTrue(result.absent_after)
         pdb.clear_on_disk_quality_fields.assert_called_once_with(7)
 
-    @patch("lib.release_cleanup.sp.run")
+    @patch("lib.beets_album_op.sp.run")
     def test_skips_pipeline_db_clear_when_album_still_present(
             self, mock_run: MagicMock) -> None:
         """If every selector failed, album still on disk → no pipeline

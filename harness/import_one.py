@@ -42,21 +42,17 @@ def _bootstrap_import_paths() -> None:
 
 _bootstrap_import_paths()
 
+from lib.beets_album_op import (BeetsAlbumHandle, BeetsOpFailure,
+                                move_album, remove_album)
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
-from lib.release_cleanup import (SelectorFailure,
-                                 remove_album_by_beets_id)
-from lib.util import beet_bin, beets_subprocess_env
+from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, DisambiguationFailure,
-                         ImportResult, PostflightInfo, QualityRankConfig,
-                         comparison_format_hint,
+                         AudioQualityMeasurement, ImportResult, PostflightInfo,
+                         QualityRankConfig, comparison_format_hint,
                          determine_verified_lossless,
                          import_quality_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
-# Back-compat alias; new callsites should prefer ``beet_bin()`` from
-# ``lib.util`` so subprocess resolution stays in one place.
-BEET_BIN = beet_bin()
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
@@ -788,21 +784,20 @@ def _apply_disambiguation(
     Never raises. Returns the (possibly updated) album path. On clean
     exit, sets ``r.postflight.disambiguated = True`` and re-reads the
     path from beets DB. On any failure mode (timeout, OSError,
-    non-zero rc), records a typed ``DisambiguationFailure`` on
+    non-zero rc), records a typed ``BeetsOpFailure`` (aliased as
+    ``DisambiguationFailure`` for JSON/test back-compat) on
     ``r.postflight.disambiguation_failure`` and returns the original
     ``album_path`` unchanged.
 
-    Uses ``beet move -a id:<album_id>`` rather than
-    ``beet move mb_albumid:<mbid>`` so Discogs-sourced albums are
-    handled too — their ``mb_albumid`` is empty, their identifier
-    lives in ``discogs_albumid``, but the beets numeric primary key
-    is always populated. Codex (PR #131 round 4 P3) flagged that the
-    earlier mb_albumid-based move silently no-op'd for Discogs
-    re-imports, leaving the new album stuck at the temporary
-    disambiguated path. Caller passes ``album_id`` from the postflight
-    lookup so we don't need a second DB read here (and so failure
-    tests can still assert ``beets.get_album_info`` is only hit on
-    success to refresh the path).
+    Delegates the subprocess + ``fix_library_modes`` mechanics to
+    ``beets_album_op.move_album`` (issue #133): ``beet move -a
+    id:<album_id>`` is source-agnostic — works for both MusicBrainz
+    (``mb_albumid`` populated) and Discogs (``discogs_albumid``
+    populated) rows since the beets numeric PK is always present.
+    Codex (PR #131 round 4 P3) flagged the earlier MBID-based move
+    silently no-op'ing for Discogs re-imports; PR #131 round 5 P3
+    flagged the missing ``fix_library_modes`` on the main album's
+    disambiguated path. ``move_album`` covers both.
 
     Extracting this from ``main()`` makes the call-site contract
     testable in isolation: the album-on-disk state is decoupled from
@@ -810,71 +805,31 @@ def _apply_disambiguation(
     and ``r.exit_code`` / ``r.decision`` are never touched by a
     disambiguation failure.
     """
-    move_failure = _run_album_move_by_id(album_id)
-    if move_failure is not None:
+    # ``mbid`` is unused now that ``move_album`` reads the post-move
+    # path by album_id, but the signature is kept as-is so external
+    # callers in tests don't have to re-wire their fixtures.
+    del mbid
+    result = move_album(BeetsAlbumHandle(album_id=album_id), beets)
+    if not result.success:
+        assert result.failure is not None
         # Album is already imported to beets — only the post-import
         # path-disambiguation move did not exit cleanly. Surface the
         # typed reason so the audit trail in download_log shows *why*
         # without lying that disambiguation succeeded.
         _log(f"  [DISAMBIGUATE] beet move failed "
-             f"({move_failure.reason}): {move_failure.detail}")
-        r.postflight.disambiguation_failure = move_failure
+             f"({result.failure.reason}): {result.failure.detail}")
+        r.postflight.disambiguation_failure = result.failure
         return album_path
 
-    pf_info_after = beets.get_album_info(mbid, _rank_cfg)
-    if pf_info_after:
-        new_path = pf_info_after.album_path
-        if new_path != album_path:
-            _log(f"  [DISAMBIGUATE] Path changed: {album_path} → {new_path}")
-            album_path = new_path
-            r.postflight.imported_path = new_path
-        else:
-            _log(f"  [DISAMBIGUATE] Path unchanged (already unique)")
+    new_path = result.new_path
+    if new_path and new_path != album_path:
+        _log(f"  [DISAMBIGUATE] Path changed: {album_path} → {new_path}")
+        album_path = new_path
+        r.postflight.imported_path = new_path
+    else:
+        _log(f"  [DISAMBIGUATE] Path unchanged (already unique)")
     r.postflight.disambiguated = True
     return album_path
-
-
-def _run_disambiguation_move(mbid: str) -> DisambiguationFailure | None:
-    """Run ``beet move mb_albumid:<mbid>`` once, never raise (issue #127).
-
-    Mirrors ``lib/release_cleanup.py::_run_remove_selector``: one place
-    owns the subprocess invocation, catches every fragile failure mode
-    (``TimeoutExpired``, ``OSError`` from a missing ``beet`` binary,
-    non-zero rc), and returns a typed ``DisambiguationFailure`` (with a
-    ``Literal["timeout","nonzero_rc","exception"]`` reason tag) so the
-    caller and downstream consumers can classify failures without
-    parsing the ``detail`` string. Returns ``None`` on a clean rc=0
-    exit.
-
-    Why this is its own function: the call site fires *after* beets
-    has already imported the album to disk. An uncaught exception here
-    would crash ``import_one.py`` before it could emit the
-    ``__IMPORT_RESULT__`` sentinel — the caller would treat the import
-    as failed even though the album is on disk, leaving a "semi-lie"
-    that can trigger duplicate force-import attempts (the bug PR #126
-    flagged as out-of-scope follow-up to #123).
-    """
-    try:
-        proc = subprocess.run(
-            [BEET_BIN, "move", f"mb_albumid:{mbid}"],
-            capture_output=True, text=True, timeout=120,
-            env=beets_subprocess_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        return DisambiguationFailure(
-            reason="timeout", detail=f"timeout after {exc.timeout}s")
-    except OSError as exc:
-        return DisambiguationFailure(
-            reason="exception", detail=f"{type(exc).__name__}: {exc}")
-
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip().splitlines()
-        last = stderr[-1] if stderr else ""
-        detail = (f"rc={proc.returncode}: {last}"
-                  if last else f"rc={proc.returncode}")
-        return DisambiguationFailure(reason="nonzero_rc", detail=detail)
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -898,67 +853,25 @@ def _run_disambiguation_move(mbid: str) -> DisambiguationFailure | None:
 # hit a sibling pressing.
 
 
-def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
+def _remove_stale_by_id_logged(stale_id: int) -> BeetsOpFailure | None:
     """Post-import cleanup: delete the stale same-MBID album by beets id.
 
-    Thin logger around ``remove_album_by_beets_id``. Always logs the
+    Thin logger around ``beets_album_op.remove_album``. Always logs the
     outcome so the import audit trail (stderr → cratedigger journal)
     shows exactly which beets row was removed and why.
     """
     _log(f"[POST-IMPORT CLEANUP] Removing stale same-MBID entry "
          f"(beet remove -a -d id:{stale_id})")
-    failure = remove_album_by_beets_id(stale_id)
-    if failure is None:
+    result = remove_album(BeetsAlbumHandle(album_id=stale_id))
+    if result.success:
         _log(f"  [POST-IMPORT CLEANUP] OK — id:{stale_id} removed")
-    else:
-        _log(f"  [POST-IMPORT CLEANUP] FAILED id:{stale_id} "
-             f"({failure.reason}): {failure.detail}. "
-             "Two albums with same MBID now in beets; "
-             "operator should run ban-source cleanup.")
-    return failure
-
-
-def _run_album_move_by_id(album_id: int) -> DisambiguationFailure | None:
-    """Run ``beet move -a id:<album_id>`` once, never raise.
-
-    Album-mode, primary-key-scoped variant of
-    ``_run_disambiguation_move``. Used for sibling canonicalization
-    where the identifier has to be source-agnostic: beets' numeric
-    ``albums.id`` is always populated (it's the PK), unlike
-    ``mb_albumid`` (empty for Discogs pressings) or
-    ``discogs_albumid`` (empty for MB pressings). Codex (PR #131
-    round 3 P3) flagged that the earlier MBID-only sibling move
-    silently dropped Discogs duplicates.
-
-    ``-a`` is mandatory — without it ``id:<N>`` would be interpreted
-    against ``items.id`` (a different auto-increment namespace) and
-    match a track row instead of the album.
-
-    Same error classification as ``_run_disambiguation_move``:
-    ``TimeoutExpired`` → ``timeout``, non-zero rc → ``nonzero_rc``,
-    ``OSError`` → ``exception``. Returns ``None`` on clean exit.
-    """
-    try:
-        proc = subprocess.run(
-            [BEET_BIN, "move", "-a", f"id:{album_id}"],
-            capture_output=True, text=True, timeout=120,
-            env=beets_subprocess_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        return DisambiguationFailure(
-            reason="timeout", detail=f"timeout after {exc.timeout}s")
-    except OSError as exc:
-        return DisambiguationFailure(
-            reason="exception", detail=f"{type(exc).__name__}: {exc}")
-
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip().splitlines()
-        last = stderr[-1] if stderr else ""
-        detail = (f"rc={proc.returncode}: {last}"
-                  if last else f"rc={proc.returncode}")
-        return DisambiguationFailure(reason="nonzero_rc", detail=detail)
-
-    return None
+        return None
+    assert result.failure is not None
+    _log(f"  [POST-IMPORT CLEANUP] FAILED id:{stale_id} "
+         f"({result.failure.reason}): {result.failure.detail}. "
+         "Two albums with same MBID now in beets; "
+         "operator should run ban-source cleanup.")
+    return result.failure
 
 
 def _canonicalize_siblings(
@@ -972,21 +885,20 @@ def _canonicalize_siblings(
     end up with an asymmetric library like
     ``/Shearwater/2006 - Palo Santo/`` (plain, old) vs
     ``/Shearwater/2007 - Palo Santo [2007]/`` (disambiguated, new).
-    Running ``beet move -a id:<N>`` on each sibling here re-evaluates
-    ``%aunique`` for its path too, so both editions end up shaped
-    consistently.
+    Running ``beet move -a id:<N>`` on each sibling via
+    ``beets_album_op.move_album`` re-evaluates ``%aunique`` for its
+    path too, so both editions end up shaped consistently.
 
     Takes beets numeric album ids (not MBIDs) so Discogs-sourced
     siblings are covered — ``mb_albumid`` is empty for those,
     ``albums.id`` is always populated.
 
-    After a successful per-sibling move, runs ``fix_library_modes``
-    against the sibling's new path (Codex PR #131 round 5 P3): issue
-    #84 shows that ``beet move`` can create fresh disambiguated
-    directories at 0o755 despite systemd's ``UMask=0000``, which
-    locks out the non-service user. The main-album path gets this
-    repair at the end of ``main()``; without mirroring it here, moved
-    siblings ship with stricter perms than they started with.
+    ``fix_library_modes`` runs inside ``move_album`` unconditionally
+    on success (issue #84, Codex PR #131 round 5 P3): ``beet move``
+    can create fresh disambiguated directories at 0o755 despite
+    systemd's ``UMask=0000``. The repair is part of the op since
+    every caller needs it — this function used to call
+    ``fix_library_modes`` itself, issue #133 moved it into the op.
 
     KNOWN LIMITATION (Codex PR #131 round 6 P2): this helper moves
     sibling files on disk but does NOT update
@@ -1000,12 +912,11 @@ def _canonicalize_siblings(
     pipeline DB for arbitrary request ids — and is tracked as a
     follow-up separate from the Palo Santo blast-radius fix.
 
-    Never raises — delegates to ``_run_album_move_by_id`` which
-    returns a typed ``DisambiguationFailure`` on any subprocess
-    error. Per-sibling failures are logged but do not abort the
-    remaining moves; the import itself is already on disk and any
-    failed sibling move just means that sibling stays at its old
-    path until something re-runs ``beet move`` on it.
+    Never raises — ``move_album`` returns a typed ``BeetsOpFailure``
+    on any subprocess error. Per-sibling failures are logged but do
+    not abort the remaining moves; the import itself is already on
+    disk and any failed sibling move just means that sibling stays
+    at its old path until something re-runs ``beet move`` on it.
     """
     if not sibling_album_ids:
         return
@@ -1014,19 +925,17 @@ def _canonicalize_siblings(
          "stays symmetric")
     for aid in sibling_album_ids:
         _log(f"  [CANONICALIZE] beet move -a id:{aid}")
-        failure = _run_album_move_by_id(aid)
-        if failure is not None:
+        result = move_album(BeetsAlbumHandle(album_id=aid), beets)
+        if not result.success:
+            assert result.failure is not None
             _log(f"  [CANONICALIZE] sibling id:{aid} move failed "
-                 f"({failure.reason}): {failure.detail} — sibling stays "
-                 "at its current path, re-run `beet move` manually later")
+                 f"({result.failure.reason}): {result.failure.detail} — "
+                 "sibling stays at its current path, re-run `beet move` "
+                 "manually later")
             continue
-        # Move succeeded — repair perms on the sibling's new location.
-        # ``get_album_path_by_id`` returns the sibling's current path;
-        # missing (deleted out of band) returns None — no-op.
-        sibling_path = beets.get_album_path_by_id(aid)
-        if sibling_path:
-            _log(f"  [CANONICALIZE] fix_library_modes({sibling_path})")
-            fix_library_modes(sibling_path)
+        if result.new_path:
+            _log(f"  [CANONICALIZE] moved sibling id:{aid} → "
+                 f"{result.new_path} (perms repaired)")
 
 
 # ---------------------------------------------------------------------------
