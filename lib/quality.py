@@ -1543,13 +1543,18 @@ def parse_import_result(stdout_text: str) -> Optional[ImportResult]:
     """Extract ImportResult from import_one.py stdout.
 
     Scans from the last line backward for the sentinel prefix.
-    Returns None if no result found (crash, old version, etc).
+    Returns None if no result found (crash, old version, etc) —
+    including when the payload fails strict typed decode post-#141
+    (``msgspec.ValidationError``). The callers treat a None here the
+    same as "no sentinel line", degrading gracefully instead of
+    crashing the whole cycle on a single bad harness emission.
     """
     for line in reversed(stdout_text.strip().split("\n")):
         if line.startswith(IMPORT_RESULT_SENTINEL):
             try:
                 return ImportResult.from_json(line[len(IMPORT_RESULT_SENTINEL):])
-            except (json.JSONDecodeError, TypeError, KeyError):
+            except (json.JSONDecodeError, TypeError, KeyError,
+                    msgspec.ValidationError):
                 return None
     return None
 

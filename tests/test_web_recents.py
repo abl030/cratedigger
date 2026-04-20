@@ -12,7 +12,8 @@ from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from web.classify import classify_log_entry, quality_label, LogEntry, ClassifiedEntry
+from web.classify import (classify_log_entry, quality_label, LogEntry,
+                          ClassifiedEntry, _parse_import_result)
 
 
 # ---------------------------------------------------------------------------
@@ -1025,6 +1026,35 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                     alien, result.downloaded_label,
                     f"{desc}: downloaded_label leaked current album state: "
                     f"{result.downloaded_label!r}")
+
+
+class TestParseImportResultTolerantOfMsgspecValidationError(unittest.TestCase):
+    """Issue #141 regression guard.
+
+    Post-migration, strict ``msgspec.Struct`` decode raises
+    ``msgspec.ValidationError`` on type drift. ``_parse_import_result``
+    is called from the Recents tab rendering path for every row in
+    ``/api/pipeline/log`` — a single malformed historical row must
+    degrade to ``None`` (shown as unclassified) rather than 500 the
+    whole route.
+    """
+
+    def test_malformed_dict_returns_none(self):
+        entry = _entry(import_result={
+            "version": 2,
+            "exit_code": "not-an-int",  # declared int → ValidationError
+            "decision": "import",
+        })
+        self.assertIsNone(_parse_import_result(entry))
+
+    def test_malformed_json_string_returns_none(self):
+        import json as _json
+        entry = _entry(import_result=_json.dumps({
+            "version": 2,
+            "exit_code": "not-an-int",
+            "decision": "import",
+        }))
+        self.assertIsNone(_parse_import_result(entry))
 
 
 if __name__ == "__main__":

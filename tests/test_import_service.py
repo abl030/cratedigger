@@ -85,6 +85,22 @@ class TestExtractImportLogFields(unittest.TestCase):
     def test_none_returns_empty(self):
         self.assertEqual(extract_import_log_fields(None), {})
 
+    def test_wrong_typed_field_returns_empty(self):
+        """Issue #141 regression: strict ``msgspec`` decode now raises
+        ``msgspec.ValidationError`` on type drift in a JSONB row, not the
+        legacy ``TypeError``/``KeyError``. ``extract_import_log_fields``
+        must still degrade to ``{}`` — historical download_log rows may
+        carry stale shapes and the backfill path treats "can't extract"
+        as "leave denormalised columns null", not "500 the caller".
+        """
+        import json as _json
+        malformed = _json.dumps({
+            "version": 2,
+            "exit_code": "not-an-int",  # declared int → ValidationError
+            "decision": "import",
+        })
+        self.assertEqual(extract_import_log_fields(malformed), {})
+
 
 if __name__ == "__main__":
     unittest.main()
