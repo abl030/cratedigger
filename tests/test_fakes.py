@@ -73,6 +73,73 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertIsNone(row["current_spectral_bitrate"])
 
+    def test_update_imported_path_by_release_id_matches_mb_albumid(self):
+        """Issue #132 P2 / #133: sibling ``imported_path`` propagation.
+        MB-sourced match on ``mb_release_id``."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=17, mb_release_id="mbid-sibling",
+            imported_path="/Beets/Old/Path"))
+
+        rows = db.update_imported_path_by_release_id(
+            mb_albumid="mbid-sibling",
+            discogs_albumid="",
+            new_path="/Beets/New/Path [2006]",
+        )
+
+        self.assertEqual(rows, 1)
+        self.assertEqual(
+            db.request(17)["imported_path"], "/Beets/New/Path [2006]")
+
+    def test_update_imported_path_by_release_id_matches_discogs(self):
+        """Discogs-sourced match on ``discogs_release_id``."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=18, mb_release_id=None,
+            discogs_release_id="12856590",
+            imported_path="/Beets/Old/Discogs"))
+
+        rows = db.update_imported_path_by_release_id(
+            mb_albumid="",
+            discogs_albumid="12856590",
+            new_path="/Beets/New/Discogs [2006]",
+        )
+
+        self.assertEqual(rows, 1)
+        self.assertEqual(
+            db.request(18)["imported_path"], "/Beets/New/Discogs [2006]")
+
+    def test_update_imported_path_by_release_id_untracked_returns_zero(self):
+        """No matching request → rowcount=0, no rows touched."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=19, mb_release_id="other-mbid",
+            imported_path="/Beets/Other"))
+
+        rows = db.update_imported_path_by_release_id(
+            mb_albumid="unknown-mbid",
+            discogs_albumid="",
+            new_path="/Beets/Ignored",
+        )
+
+        self.assertEqual(rows, 0)
+        self.assertEqual(db.request(19)["imported_path"], "/Beets/Other")
+
+    def test_update_imported_path_by_release_id_both_empty_is_noop(self):
+        """Both release ids empty → rowcount=0, no UPDATE fires at all.
+        Mirrors the prod short-circuit that guards against accidentally
+        matching every row where a column is NULL/empty."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=20, mb_release_id="some-mbid",
+            imported_path="/Beets/Keep"))
+
+        rows = db.update_imported_path_by_release_id(
+            mb_albumid="", discogs_albumid="", new_path="/Beets/Bogus")
+
+        self.assertEqual(rows, 0)
+        self.assertEqual(db.request(20)["imported_path"], "/Beets/Keep")
+
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
         zero the on-disk spectral + verified_lossless + imported_path,

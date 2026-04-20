@@ -67,17 +67,13 @@ class TestTypedReturnContract(unittest.TestCase):
             # FrozenInstanceError subclasses AttributeError
             f.detail = "y"  # type: ignore[misc]
 
-    def test_handle_fields(self) -> None:
-        """``BeetsAlbumHandle`` is the typed (album_id, release_id) pair."""
-        h = BeetsAlbumHandle(album_id=42, release_id="abc-uuid")
+    def test_handle_wraps_album_id(self) -> None:
+        """``BeetsAlbumHandle`` is a typed wrapper for the beets numeric
+        primary key. The class exists (vs. a bare int) so callsites
+        are self-documenting and future field additions don't break
+        callsite signatures."""
+        h = BeetsAlbumHandle(album_id=42)
         self.assertEqual(h.album_id, 42)
-        self.assertEqual(h.release_id, "abc-uuid")
-
-    def test_handle_release_id_default_empty(self) -> None:
-        """Callsites like sibling canonicalization don't always have the
-        release_id — default of ``""`` is supported and informational-only."""
-        h = BeetsAlbumHandle(album_id=7)
-        self.assertEqual(h.release_id, "")
 
     def test_result_ok(self) -> None:
         r = BeetsOpResult(success=True, new_path="/Beets/Artist/Album")

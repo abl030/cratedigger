@@ -1388,13 +1388,18 @@ def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
     ``moved_siblings=[]``.
 
     ``moved_siblings`` is decoded via ``msgspec.convert`` because
-    ``MovedSibling`` is a ``msgspec.Struct`` (wire-boundary type per
-    ``.claude/rules/code-quality.md``). Strict type validation catches
-    int/str drift (e.g. harness emitting ``album_id`` as string) at
-    the boundary — ``msgspec.ValidationError`` raises here instead of
-    silently corrupting downstream state. Non-list values (malformed
-    legacy JSONB) fall back to the dataclass default ``[]`` without
-    raising, preserving backwards compatibility.
+    ``MovedSibling`` is a wire-boundary type per
+    ``.claude/rules/code-quality.md``. ``msgspec.convert`` accepts a
+    ``@dataclass`` target and validates each declared field strictly
+    — so int/str drift (a future harness change emitting ``album_id``
+    as string, say) raises ``msgspec.ValidationError`` here instead
+    of silently corrupting downstream state. ``MovedSibling`` stays a
+    ``@dataclass`` (not ``msgspec.Struct``) because ``ImportResult.to_json()``
+    serialises via ``dataclasses.asdict`` on the outbound edge, and
+    ``asdict`` is opaque to ``msgspec.Struct``. Asymmetric by design:
+    strict inbound validation, structural outbound serialisation.
+    Non-list values (malformed legacy JSONB) fall back to the dataclass
+    default ``[]`` without raising, preserving backwards compatibility.
     """
     if not d:
         return PostflightInfo()
