@@ -197,6 +197,40 @@ class TestImportResultConstruction(unittest.TestCase):
         r = ImportResult.from_dict(d)
         self.assertEqual(r.postflight.moved_siblings, [])
 
+    def test_postflight_falsy_non_dict_falls_back_to_defaults(self):
+        """Issue #141 codex round 2: pre-#141 ``_postflight_from_dict``
+        had an ``if not d: return PostflightInfo()`` guard that
+        tolerated ``null``, empty list, empty string as the
+        ``postflight`` value on malformed legacy JSONB rows. Strict
+        ``msgspec.convert`` raises ``ValidationError`` on those — and
+        the ``_parse_import_result`` / ``extract_import_log_fields``
+        fallbacks we added in the P2 fix would then drop the whole
+        ``ImportResult``, silently losing every OTHER field
+        (decision, measurements, conversion) on the row.
+
+        ``ImportResult.from_dict`` coerces a falsy non-dict
+        ``postflight`` to ``{}`` so the Struct's defaults apply.
+        The rest of the row decodes normally.
+        """
+        for bad in (None, [], ""):
+            with self.subTest(bad_postflight=bad):
+                d = {
+                    "version": 2,
+                    "exit_code": 0,
+                    "decision": "import",
+                    "new_measurement": {"min_bitrate_kbps": 245},
+                    "postflight": bad,
+                }
+                r = ImportResult.from_dict(d)
+                # Falsy postflight → defaults.
+                self.assertIsNone(r.postflight.beets_id)
+                self.assertIsNone(r.postflight.imported_path)
+                self.assertEqual(r.postflight.moved_siblings, [])
+                # Every other field still decoded.
+                self.assertEqual(r.decision, "import")
+                assert r.new_measurement is not None
+                self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
+
     def test_postflight_moved_siblings_malformed_value_falls_back_to_empty(self):
         """Wire-boundary robustness: if ``moved_siblings`` arrives as
         a non-list (corrupt legacy JSONB row, future bug), the loader
