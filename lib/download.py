@@ -329,35 +329,20 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     and marks done. ``_process_beets_validation`` propagates the
     outcome upward so ``_run_completed_processing`` can distinguish
     ``deferred`` from ``success`` / ``failure`` on the release-lock
-    contention path (issue #132 P1, Codex PR #136 R3 P2/P3).
+    contention path.
 
-    **Release-lock acquisition is at this level, not inside
-    ``dispatch_import``.** Codex PR #136 R4 P1: moving files via
-    ``stage_to_ai`` mutates filesystem state
-    (``slskd_download_dir/<import_folder>/`` → ``beets_staging_dir/``)
-    that is NOT reflected in ``active_download_state``. If contention
-    is detected AFTER staging, the next cycle's
-    ``process_completed_album`` reconstructs the entry from
-    ``active_download_state``, finds the source paths empty, and
-    fails with ``FileNotFoundError``. Fix: acquire the lock BEFORE
-    ``stage_to_ai``. On contention, return deferred without staging
-    so files stay at ``slskd_download_dir/<import_folder>/`` where
-    the resume guard in ``process_completed_album`` (line 201:
-    ``if os.path.exists(dst_file) and not os.path.exists(src_file):
-    continue``) can idempotently re-enter next cycle.
+    This function acquires the RELEASE advisory lock outer for the
+    auto-import path *before* ``stage_to_ai`` runs, so contention
+    leaves files in their slskd-download location and the next
+    cycle's resume guard in ``process_completed_album`` can
+    idempotently re-enter. Redownload paths don't take the lock —
+    they stage-and-mark-done without running the harness, so no
+    cross-process race applies.
 
-    The lock is session-reentrant (PostgreSQL semantics), so
-    ``dispatch_import_core``'s inner acquisition of the same key is a
-    no-op acquire + extra release. Force/manual paths — which don't
-    go through this function — still acquire inside
-    ``dispatch_import_core`` where they need it.
-
-    Redownload paths (``source != 'request'`` or distance above
-    threshold) don't take the lock — they just stage-and-mark-done
-    without running the harness, so no cross-process race applies.
-
-    See ``docs/advisory-locks.md`` for the namespace table, key
-    derivation, ordering rules, and the call-site index.
+    See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
+    and contention behaviour (including the ``stage_to_ai`` rationale
+    for acquiring at this level rather than inside
+    ``dispatch_import_core``).
     """
     from contextlib import nullcontext
     from lib.import_dispatch import DispatchOutcome
