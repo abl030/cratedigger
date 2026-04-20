@@ -11,6 +11,7 @@ Usage:
 """
 
 import os
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,45 @@ BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 # arg is a per-feature namespace constant, the second is the request_id.
 # 0x46494D50 = ASCII "FIMP" — recognisable in pg_locks during debugging.
 ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
+
+# Advisory-lock namespace for same-release concurrency protection
+# (issue #132 P1, issue #133). ``ADVISORY_LOCK_NAMESPACE_IMPORT`` above
+# serialises operations on the same *request_id* — it prevents a
+# double-click on force-import from running the pipeline twice for the
+# same album row. That is NOT enough to close the Palo Santo blast
+# radius: the auto-import cycle and the web force-import path can each
+# hold its own per-request lock while both targeting the same MBID
+# (different request_id, same release). In that race,
+# ``import_one.py``'s post-import ``max(post_import_ids)`` query can
+# pick up the OTHER process's newly-inserted row as "the newest" and
+# delete the row this process just imported. The fix is to serialise
+# at the release level too: every ``dispatch_import_core`` invocation
+# acquires this lock keyed on a stable hash of ``mb_release_id``.
+#
+# 0x52454C45 = ASCII "RELE" — recognisable alongside FIMP in pg_locks.
+ADVISORY_LOCK_NAMESPACE_RELEASE = 0x52454C45
+
+
+def release_id_to_lock_key(mb_release_id: str) -> int:
+    """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
+
+    PostgreSQL's two-arg ``pg_advisory_lock(int4, int4)`` takes signed
+    int32 keys. ``mb_release_id`` is a str — either a MusicBrainz UUID
+    (36 chars) or a Discogs numeric release id. ``zlib.crc32`` is
+    stable across processes (Python's builtin ``hash`` is salted per
+    interpreter — unusable for cross-process locking), fast, and its
+    32-bit output fits once we mask to 31 bits to keep the value
+    non-negative (simpler to display in ``pg_locks`` rows).
+
+    Collision behaviour: 2^31 distinct keys. With N concurrent
+    same-release contenders, collision probability is ~N²/2^31 — a
+    false-collision would serialise two unrelated releases, delaying
+    the second by at most one import cycle (~minutes). Acceptable:
+    losing a cycle of parallelism is cheap, whereas a missed lock on
+    the real race is how the Palo Santo 11-track edition lost every
+    mp3 on disk.
+    """
+    return zlib.crc32(mb_release_id.encode("utf-8")) & 0x7FFFFFFF
 
 # Schema is managed by lib/migrator.py via numbered files in migrations/.
 # PipelineDB itself never runs DDL — see scripts/migrate_db.py and the

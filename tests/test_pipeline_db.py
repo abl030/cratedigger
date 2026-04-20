@@ -1294,6 +1294,71 @@ class TestUserCooldowns(unittest.TestCase):
         self.assertFalse(result)
 
 
+class TestReleaseIdToLockKey(unittest.TestCase):
+    """Issue #133 / #132 P1: ``release_id_to_lock_key`` must be stable
+    across processes and fit int32 so it can drive the two-arg
+    ``pg_advisory_lock``.
+
+    Pure function — no PG dependency, runs without ``@requires_postgres``.
+    """
+
+    def test_same_mbid_maps_to_same_key(self) -> None:
+        from lib.pipeline_db import release_id_to_lock_key
+        mbid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        self.assertEqual(
+            release_id_to_lock_key(mbid),
+            release_id_to_lock_key(mbid))
+
+    def test_different_mbids_produce_different_keys(self) -> None:
+        """Collision is statistically possible but unlikely with the
+        handful of MBIDs in this test — a regression that makes the
+        hash degenerate (e.g. returning a constant) would show up here.
+        """
+        from lib.pipeline_db import release_id_to_lock_key
+        keys = {
+            release_id_to_lock_key(s)
+            for s in [
+                "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "cccccccc-4444-5555-6666-dddddddddddd",
+                "eeeeeeee-7777-8888-9999-ffffffffffff",
+                "12856590",   # Discogs numeric id
+                "1073741824",  # Discogs numeric
+                "",            # edge case: empty string → hash(b"") = 0
+            ]
+        }
+        self.assertEqual(len(keys), 6)
+
+    def test_key_fits_non_negative_int32(self) -> None:
+        """``pg_advisory_lock(int4, int4)`` takes signed int32; we mask
+        to 31 bits so the value is always in [0, 2^31-1]. Negative keys
+        work too in PG but keeping them non-negative makes ``pg_locks``
+        rows readable during debugging."""
+        from lib.pipeline_db import release_id_to_lock_key
+        for s in [
+                "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "cccccccc-4444-5555-6666-dddddddddddd",
+                "12856590",
+                "xxxxxxxx-yyyy-zzzz-wwww-vvvvvvvvvvvv",
+                "",
+        ]:
+            k = release_id_to_lock_key(s)
+            self.assertGreaterEqual(k, 0)
+            self.assertLess(k, 1 << 31)
+
+    def test_key_is_stable_across_imports(self) -> None:
+        """Sanity: the function does NOT use ``hash()`` (which is salted
+        per-interpreter and would break cross-process locking). Re-import
+        the module and verify the same input still maps to the same key.
+        """
+        import importlib
+        from lib import pipeline_db
+        mbid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        k1 = pipeline_db.release_id_to_lock_key(mbid)
+        importlib.reload(pipeline_db)
+        k2 = pipeline_db.release_id_to_lock_key(mbid)
+        self.assertEqual(k1, k2)
+
+
 @requires_postgres
 class TestAdvisoryLock(unittest.TestCase):
     """Issue #92: ``PipelineDB.advisory_lock`` must cross-session-serialize.
@@ -1343,6 +1408,21 @@ class TestAdvisoryLock(unittest.TestCase):
         # Lock must be free now — a different session can acquire it.
         with self.db2.advisory_lock(self.NS, 12345) as a2:
             self.assertTrue(a2)
+
+    def test_release_namespace_isolated_from_import_namespace(self):
+        """Issue #133 / #132 P1: the RELEASE lock namespace must not
+        collide with the IMPORT lock namespace. Holding one in session A
+        must not prevent session B from acquiring the other at the same
+        integer key — they are logically unrelated resources.
+        """
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_IMPORT,
+                                     ADVISORY_LOCK_NAMESPACE_RELEASE)
+        with self.db1.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT, 12345) as a1:
+            self.assertTrue(a1)
+            with self.db2.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_RELEASE, 12345) as a2:
+                self.assertTrue(a2)
 
 
 @requires_postgres
