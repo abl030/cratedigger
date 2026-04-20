@@ -197,6 +197,58 @@ class TestImportResultConstruction(unittest.TestCase):
         r = ImportResult.from_dict(d)
         self.assertEqual(r.postflight.moved_siblings, [])
 
+    def test_postflight_moved_siblings_malformed_value_falls_back_to_empty(self):
+        """Wire-boundary robustness: if ``moved_siblings`` arrives as
+        a non-list (corrupt legacy JSONB row, future bug), the loader
+        silently drops it and defaults to ``[]``. We prefer "silent
+        empty" over "crash whole row" — the row's other fields are
+        still useful for the web UI, and moved_siblings being wrong
+        is already a data-quality issue somewhere upstream."""
+        for bad in ("not-a-list", 42, {}, None):
+            with self.subTest(bad_value=bad):
+                d = {
+                    "version": 2,
+                    "exit_code": 0,
+                    "decision": "import",
+                    "postflight": {
+                        "beets_id": 42,
+                        "imported_path": "/Beets/Artist/Album",
+                        "moved_siblings": bad,
+                    },
+                }
+                r = ImportResult.from_dict(d)
+                self.assertEqual(r.postflight.moved_siblings, [])
+
+    def test_postflight_moved_siblings_wrong_element_type_raises(self):
+        """Issue #99 wire-boundary contract: if a harness change ever
+        emits a ``MovedSibling`` with a wrong-typed field (e.g.
+        ``album_id`` as string, which beets COULD theoretically
+        return as a string in some future patch), the loader must
+        raise ``msgspec.ValidationError`` at the boundary rather than
+        silently propagating bad data downstream.
+
+        Guards against the PR #98 bug pattern where a dataclass
+        declared ``album_id: str`` but the wire carried ``int`` and
+        every decode silently succeeded with a type mismatch.
+        """
+        import msgspec
+        d = {
+            "version": 2,
+            "exit_code": 0,
+            "decision": "import",
+            "postflight": {
+                "beets_id": 42,
+                "imported_path": "/Beets/Artist/Album",
+                # album_id is declared ``int`` on MovedSibling —
+                # feeding a string must raise.
+                "moved_siblings": [
+                    {"album_id": "10314", "new_path": "/p"},
+                ],
+            },
+        }
+        with self.assertRaises(msgspec.ValidationError):
+            ImportResult.from_dict(d)
+
     def test_postflight_pre_133_failure_row_without_selector_field(self):
         """Issue #133 back-compat: old download_log rows serialized
         AFTER #127 but BEFORE #133 have ``disambiguation_failure``

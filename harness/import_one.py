@@ -946,8 +946,23 @@ def _canonicalize_siblings(
             # still shows per-sibling perm repair. Operators greppable
             # for 'fix_library_modes' and for 'beet move' can
             # cross-reference the two in post-hoc debugging.
-            mb_albumid, discogs_albumid = (
-                beets.get_release_ids_by_album_id(aid))
+            #
+            # Defensive lookup: a beets DB lock (rare but possible if
+            # a parallel ``beet`` invocation is mid-write) would raise
+            # here and kill the rest of the canonicalization loop.
+            # Emit the sibling with empty release ids instead — the
+            # move's still been recorded; only pipeline-DB
+            # propagation is skipped (dispatcher WARN-logs the
+            # empty-ids case).
+            try:
+                mb_albumid, discogs_albumid = (
+                    beets.get_release_ids_by_album_id(aid))
+            except Exception as exc:
+                _log(f"  [CANONICALIZE] release-id lookup for id:{aid} "
+                     f"raised {type(exc).__name__}: {exc} — emitting "
+                     "sibling record with empty ids; pipeline DB "
+                     "propagation will skip this row (dispatcher WARN)")
+                mb_albumid, discogs_albumid = "", ""
             moved.append(MovedSibling(
                 album_id=aid,
                 new_path=result.new_path,
