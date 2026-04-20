@@ -1522,17 +1522,34 @@ class ImportResult(msgspec.Struct):
         Handles both old (v1 with quality/spectral sub-objects) and new
         (v2 with measurements) formats for backward compat with existing
         download_log JSONB rows. The v2 path uses ``msgspec.convert`` for
-        strict-typed decode; one pre-convert hedge coerces a non-list
-        ``postflight.moved_siblings`` to ``[]`` so malformed legacy
-        rows still decode the rest of the payload.
+        strict-typed decode; two pre-convert hedges preserve the
+        pre-#141 ``_postflight_from_dict`` tolerance:
+
+        1. A falsy non-object ``postflight`` (``null``, ``[]``, ``""``) —
+           observed on very old malformed rows — is coerced to ``{}``
+           so the PostflightInfo defaults materialise. Pre-#141 the
+           loader's ``if not d: return PostflightInfo()`` guard treated
+           these as absent; strict ``msgspec.convert`` would raise
+           ``ValidationError`` and the callers we patched in the codex
+           P2 fix would swallow it and drop the whole ``ImportResult``,
+           silently losing every other field.
+        2. A non-list ``postflight.moved_siblings`` (malformed legacy
+           JSONB) falls back to ``[]``.
+
+        Both hedges fire only for data shapes we've actually seen in
+        production; genuine type drift on a declared field still raises
+        ``msgspec.ValidationError`` at the boundary.
         """
         # Old format: has "quality" key, no "new_measurement"
         if "quality" in d and "new_measurement" not in d:
             return cls._migrate_v1(d)
-        pf = d.get("postflight")
-        if (isinstance(pf, dict) and "moved_siblings" in pf
-                and not isinstance(pf["moved_siblings"], list)):
-            d = {**d, "postflight": {**pf, "moved_siblings": []}}
+        if "postflight" in d:
+            pf = d["postflight"]
+            if not isinstance(pf, dict):
+                d = {**d, "postflight": {}}
+            elif ("moved_siblings" in pf
+                  and not isinstance(pf["moved_siblings"], list)):
+                d = {**d, "postflight": {**pf, "moved_siblings": []}}
         return msgspec.convert(d, type=cls)
 
     @classmethod
