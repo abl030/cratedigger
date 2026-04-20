@@ -141,8 +141,8 @@ class TestGetReleaseIdsByAlbumId(unittest.TestCase):
     """Codex round-1 P1 on PR #136: beets' ``albums.discogs_albumid``
     is ``INTEGER`` in SQLite, so SQLite returns a Python ``int`` for
     that column — not a ``str``. ``MovedSibling.discogs_albumid`` is
-    typed ``str`` and the ``_postflight_from_dict`` decoder uses
-    ``msgspec.convert`` which validates types strictly.
+    typed ``str`` and ``ImportResult.from_dict``'s
+    ``msgspec.convert`` decoder validates types strictly.
 
     Without coercion, every Discogs-sourced kept-duplicate import
     raised ``msgspec.ValidationError`` at the wire boundary AFTER
