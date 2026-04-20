@@ -343,11 +343,19 @@ class FakePipelineDB:
     ) -> int:
         """Stand-in for ``PipelineDB.update_imported_path_by_release_id``.
 
-        Mirrors the prod behaviour: find every ``album_requests`` row
-        where ``mb_release_id == mb_albumid`` OR
-        ``discogs_release_id == discogs_albumid`` (ignoring empty
-        inputs), set ``imported_path``, and return the number of rows
-        updated. No-op when both inputs are empty.
+        Mirrors the prod cross-layout matching (Codex R2 P2 fix):
+
+        - ``mb_albumid`` matches ONLY the pipeline's ``mb_release_id``
+          column (MB UUIDs and legacy numerics both live there).
+        - ``discogs_albumid`` matches EITHER the pipeline's
+          ``discogs_release_id`` OR ``mb_release_id`` column, because
+          the pipeline DB stores Discogs numerics in either column
+          depending on when/how the request was created (CLAUDE.md §
+          "Discogs-sourced albums": numeric IDs stored in
+          ``mb_release_id`` for pipeline compat).
+
+        Returns the number of rows updated. No-op when both inputs
+        are empty.
         """
         if not mb_albumid and not discogs_albumid:
             return 0
@@ -357,7 +365,8 @@ class FakePipelineDB:
                 mb_albumid and row.get("mb_release_id") == mb_albumid)
             discogs_hit = bool(
                 discogs_albumid
-                and row.get("discogs_release_id") == discogs_albumid)
+                and (row.get("discogs_release_id") == discogs_albumid
+                     or row.get("mb_release_id") == discogs_albumid))
             if mb_hit or discogs_hit:
                 row["imported_path"] = new_path
                 row["updated_at"] = _utcnow()

@@ -1375,6 +1375,17 @@ class TestReleaseLockContention(unittest.TestCase):
         # to 'imported' based on process_completed_album's True return,
         # and the album is marked done without importing.
         self.assertEqual(db.request(42)["status"], "wanted")
+        # Codex R2 P1: contention must NOT set ``next_retry_after``.
+        # That field would hold the request for the full backoff
+        # window (30min+ doubling up to 24h) before the next cycle
+        # could re-try — unacceptable for a contention-driven reset
+        # where the competing process might already have finished.
+        # ``reset_to_wanted`` clears it to NULL; if a future refactor
+        # re-introduces ``attempt_type="download"`` here, the
+        # ``record_attempt`` side effect would set it again and this
+        # assertion fails.
+        self.assertIsNone(db.request(42).get("next_retry_after"))
+        self.assertIsNone(db.request(42).get("last_attempt_at"))
         # Staged dir cleanup ran (so the next cycle can re-mkdir).
         ext.cleanup.assert_called_once_with(tmpdir)
         # Outcome still carries the "try again shortly" signal.
@@ -1707,6 +1718,82 @@ class TestSiblingImportedPathPropagation(unittest.TestCase):
         # Discogs sibling's imported_path updated.
         self.assertEqual(
             db.request(18)["imported_path"], self.POST_MOVE_PATH)
+
+    def test_discogs_sibling_matches_legacy_pipeline_layout(self):
+        """Codex R2 P2 regression: beets-side ``discogs_albumid`` must
+        match pipeline-DB rows that store the Discogs numeric in
+        EITHER ``discogs_release_id`` (new layout) OR ``mb_release_id``
+        (legacy "pipeline compat" layout from CLAUDE.md).
+
+        Scenario: a request was added pre-plugin-patch, so pipeline DB
+        has ``mb_release_id="12856590"`` and ``discogs_release_id=None``.
+        Beets has the same album with ``discogs_albumid=12856590`` and
+        ``mb_albumid=""`` (new-layout beets, post-plugin-patch). Before
+        the R2 P2 fix, the harness emitted ``(mb="", discogs="12856590")``
+        and the SQL matched ``discogs_release_id="12856590"`` only —
+        which misses the legacy row. After the fix, the numeric id
+        matches against BOTH pipeline columns and the legacy row's
+        ``imported_path`` updates correctly.
+        """
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import MovedSibling
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID_NEW, status="downloading"))
+        # Legacy pipeline layout: Discogs numeric stored in
+        # mb_release_id (not discogs_release_id).
+        db.seed_request(make_request_row(
+            id=99,
+            mb_release_id=self.DISCOGS_SIBLING,
+            discogs_release_id=None,
+            status="imported",
+            imported_path=self.PRE_MOVE_PATH))
+
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        # Beets-side: new-layout row, discogs_albumid populated,
+        # mb_albumid empty.
+        ir.postflight.moved_siblings = [
+            MovedSibling(
+                album_id=10315,
+                new_path=self.POST_MOVE_PATH,
+                mb_albumid="",
+                discogs_albumid=self.DISCOGS_SIBLING),
+        ]
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID_NEW,
+                    request_id=42,
+                    label="Shearwater - Palo Santo (2007)",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Legacy pipeline row's imported_path got updated — Codex R2
+        # P2 regression fix verified. Pre-fix this was silently missed.
+        self.assertEqual(
+            db.request(99)["imported_path"], self.POST_MOVE_PATH)
 
     def test_untracked_sibling_is_silently_skipped(self):
         """Sibling that beets knows about but the pipeline DB does not:
