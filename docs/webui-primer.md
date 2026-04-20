@@ -99,7 +99,7 @@ What this creates on doc2:
 Code changes in `web/` deploy via the normal cratedigger flake update:
 
 ```bash
-cd ~/soularr && git add web/ && git commit -m "..." && git push
+cd ~/cratedigger && git add web/ && git commit -m "..." && git push
 cd ~/nixosconfig && nix flake update cratedigger-src && nix fmt
 git add flake.lock && git commit -m "..." && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
