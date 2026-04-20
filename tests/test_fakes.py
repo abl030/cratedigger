@@ -727,6 +727,37 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "in the new-work checklist.",
         )
 
+    def test_fake_only_methods_stay_on_the_allowlist(self) -> None:
+        """Methods on ``FakePipelineDB`` that don't mirror ``PipelineDB``
+        must be intentional test helpers on an explicit allowlist.
+
+        Catches typos in new stub names
+        (``update_importred_path_by_release_id`` would pass the
+        ``real - fake`` check because the method isn't on real, but
+        the sigcheck never exercises it). Without this inverse
+        enforcement, a typo'd stub would compile and tests against it
+        would crash with ``AttributeError`` — the exact silent-drift
+        vector this contract is meant to prevent.
+        """
+        allowed_fake_only = {
+            "seed_request",
+            "request",
+            "assert_log",
+            "set_advisory_lock_result",
+            "set_cooldown_result",
+        }
+        real = _public_methods(PipelineDB)
+        fake = _public_methods(FakePipelineDB)
+        unexpected = fake - real - allowed_fake_only
+        self.assertEqual(
+            unexpected, set(),
+            f"FakePipelineDB has methods not on PipelineDB and not on "
+            f"the allowlist: {sorted(unexpected)}. If these are "
+            "intentional test helpers, add them to "
+            "``allowed_fake_only``. If they're typo'd stubs meant to "
+            "mirror a real method, rename them.",
+        )
+
     def test_fake_signatures_compatible_with_real(self) -> None:
         """For every shared method, each named parameter on the real
         method must be declared by name on the fake with a compatible
@@ -801,7 +832,7 @@ def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
         mismatches.extend(_diff_positional_layout(name, real_sig, fake_sig))
         mismatches.extend(_diff_named_params(name, real_sig, fake_sig))
         mismatches.extend(_diff_variadic(name, real_sig, fake_sig))
-        mismatches.extend(_diff_fake_extras(name, real_sig, fake_sig))
+        mismatches.extend(_diff_fake_only_required(name, real_sig, fake_sig))
     return mismatches
 
 
@@ -893,7 +924,7 @@ def _diff_named_params(
     return out
 
 
-def _diff_fake_extras(
+def _diff_fake_only_required(
     method: str,
     real_sig: inspect.Signature,
     fake_sig: inspect.Signature,
