@@ -76,6 +76,8 @@ lib/
                            Schema is NOT this class's responsibility — see lib/migrator.py.
                            Search logging: log_search(), get_search_history(), get_search_history_batch()
                            User cooldowns: add_cooldown(), get_cooled_down_users(), check_and_apply_cooldown()
+                           Advisory locks: advisory_lock() + ADVISORY_LOCK_NAMESPACE_{IMPORT,RELEASE}.
+                           Namespaces, keys, ordering, contention semantics: docs/advisory-locks.md.
                            RequestSpectralStateUpdate (typed spectral state writes)
   migrator.py           — Versioned SQL migrator. discover_migrations() parses
                            migrations/NNN_name.sql files; apply_migrations() runs unapplied
