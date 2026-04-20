@@ -778,6 +778,7 @@ def run_import(path, mb_release_id):
 
 def _apply_disambiguation(
     mbid: str,
+    album_id: int,
     beets: BeetsDB,
     album_path: str,
     r: ImportResult,
@@ -791,13 +792,25 @@ def _apply_disambiguation(
     ``r.postflight.disambiguation_failure`` and returns the original
     ``album_path`` unchanged.
 
+    Uses ``beet move -a id:<album_id>`` rather than
+    ``beet move mb_albumid:<mbid>`` so Discogs-sourced albums are
+    handled too — their ``mb_albumid`` is empty, their identifier
+    lives in ``discogs_albumid``, but the beets numeric primary key
+    is always populated. Codex (PR #131 round 4 P3) flagged that the
+    earlier mb_albumid-based move silently no-op'd for Discogs
+    re-imports, leaving the new album stuck at the temporary
+    disambiguated path. Caller passes ``album_id`` from the postflight
+    lookup so we don't need a second DB read here (and so failure
+    tests can still assert ``beets.get_album_info`` is only hit on
+    success to refresh the path).
+
     Extracting this from ``main()`` makes the call-site contract
     testable in isolation: the album-on-disk state is decoupled from
     disambiguation success, ImportResult JSON always emits cleanly,
     and ``r.exit_code`` / ``r.decision`` are never touched by a
     disambiguation failure.
     """
-    move_failure = _run_disambiguation_move(mbid)
+    move_failure = _run_album_move_by_id(album_id)
     if move_failure is not None:
         # Album is already imported to beets — only the post-import
         # path-disambiguation move did not exit cleanly. Surface the
@@ -1094,6 +1107,41 @@ def main():
     r.already_in_beets = already_in_beets
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
+
+    # --- Enumerate stale same-MBID rows + fail-fast on split-brain ---
+    #
+    # Runs BEFORE any destructive pre-import work (Codex PR #131 round
+    # 4 P2). If we bail with ``import_failed`` because beets already
+    # has more than one same-MBID row, the staged download must still
+    # be intact so the operator can re-run the pipeline after cleanup.
+    # Later stages — spectral analysis, ``convert_lossless``,
+    # ``_remove_lossless_files`` — mutate ``args.path`` in place, so a
+    # guard placed after them would leave operators without the
+    # original files to retry with.
+    #
+    # ``locate()`` uses ``LIMIT 1`` and would miss siblings in the
+    # split-brain case (Codex PR #131 round 3 P2). The enumerate
+    # helper scans every ``albums.id`` matching the release id across
+    # both layouts (mb_albumid + discogs_albumid).
+    stale_ids: list[int] = (
+        beets.get_all_album_ids_for_release(mbid)
+        if already_in_beets else [])
+    if len(stale_ids) > 1:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Beets already has {len(stale_ids)} rows for "
+                   f"mbid={mbid} before import: {stale_ids}. "
+                   "Cannot safely run an upgrade against a split-brain "
+                   "state — operator must reduce to at most one row "
+                   "(e.g. via ban-source cleanup) before retrying. "
+                   "Staged download is untouched.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+    stale_beets_id: int | None = stale_ids[0] if stale_ids else None
+    if stale_beets_id is not None:
+        _log(f"[PRE-FLIGHT] Captured stale beets id:{stale_beets_id} for "
+             f"post-import cleanup (will remove after upgrade lands)")
 
     # --- Path check (pure decision) ---
     pf = preflight_decision(already_in_beets, os.path.isdir(args.path))
@@ -1427,52 +1475,25 @@ def main():
         _log(f"  [CLEANUP] Removed lossless originals "
              f"(target skipped or preserve-source approved)")
 
-    # --- Capture stale beets id BEFORE the import ---
-    #
-    # The 2026-04-20 Palo Santo data-loss event trained us off the
-    # mid-import "remove" path entirely (see run_import). Instead we
-    # capture the stale row's beets numeric id here and remove it
-    # AFTER the import succeeds, by its exact primary-key selector
-    # ``id:<N>`` — the narrowest possible scope (cannot match siblings
-    # by construction — SQLite autoincrement PKs are unique).
-    #
-    # Codex (PR #131 round 1 P1) flagged the alternative design where
-    # pre-flight deleted the stale row before ``run_import``: if the
-    # harness times out / crashes / rejects the candidate, we're left
-    # with no album at all. Capture-then-import-then-remove preserves
-    # the invariant that the existing copy survives until the
-    # replacement is confirmed on disk.
-    #
-    # Codex (PR #131 round 3 P2): ``locate()`` only returns a single
-    # id via LIMIT 1. If beets somehow has MULTIPLE same-MBID rows
-    # before this import (prior cleanup timeout, manual duplicate
-    # insertion, etc.), capturing just one and removing just that
-    # one leaves the others intact — silent split-brain after a
-    # "successful" import. Enumerate all matches and fail-fast if
-    # count > 1 so the operator is forced to clean up first.
-    stale_ids: list[int] = (
-        beets.get_all_album_ids_for_release(mbid)
-        if already_in_beets else [])
-    if len(stale_ids) > 1:
-        r.exit_code = 2
-        r.decision = "import_failed"
-        r.error = (f"Beets already has {len(stale_ids)} rows for "
-                   f"mbid={mbid} before import: {stale_ids}. "
-                   "Cannot safely run an upgrade against a split-brain "
-                   "state — operator must reduce to at most one row "
-                   "(e.g. via ban-source cleanup) before retrying.")
-        _log(f"[ERROR] {r.error}")
-        beets.close()
-        _emit_and_exit(r)
-    stale_beets_id: int | None = stale_ids[0] if stale_ids else None
-    if stale_beets_id is not None:
-        _log(f"[PRE-FLIGHT] Captured stale beets id:{stale_beets_id} for "
-             f"post-import cleanup (will remove after upgrade lands)")
-
     # --- Import ---
+    #
+    # ``stale_beets_id`` and ``stale_ids`` were captured/validated
+    # earlier in main() — before any destructive pre-import work on
+    # the staged download — so the bail-out for split-brain has
+    # already happened (Codex PR #131 round 4 P2).
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     rc, beets_lines, kept_duplicate, sibling_album_ids = run_import(
         args.path, mbid)
+
+    # Exclude the stale row's album id from sibling canonicalization
+    # — it will be removed by ``_remove_stale_by_id_logged`` below,
+    # so re-running ``beet move`` on it wastes a subprocess call and
+    # more importantly covers the Discogs re-import case (Codex PR
+    # #131 round 4 P3) where ``run_import``'s inner filter — keyed by
+    # ``mb_albumid`` — cannot detect that an empty-mbid Discogs row
+    # is actually the same release.
+    if stale_beets_id is not None:
+        sibling_album_ids = sibling_album_ids - frozenset([stale_beets_id])
     r.beets_log = beets_lines
 
     if rc != 0:
@@ -1554,7 +1575,8 @@ def main():
     # `beet move` re-evaluates all editions and fixes the paths.
     if kept_duplicate:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
-        album_path = _apply_disambiguation(mbid, beets, album_path, r)
+        album_path = _apply_disambiguation(
+            mbid, pf_info.album_id, beets, album_path, r)
         # Also canonicalize the sibling editions beets flagged as
         # duplicates — without this, the new album gets the ``[YEAR]``
         # suffix while the sibling stays un-suffixed (asymmetric
