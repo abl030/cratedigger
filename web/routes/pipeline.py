@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import asdict
+import msgspec
 
 from web.classify import classify_log_entry, LogEntry
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
@@ -668,11 +668,13 @@ def post_pipeline_ban_source(h, body: dict) -> None:
             request_id=int(req_id),
         )
         beets_removed = cleanup.beets_removed
-        # ``asdict`` so future fields on ``SelectorFailure`` (e.g. a
-        # timestamp) propagate to the route response without anyone
-        # having to remember to update the literal here (issue #123
-        # PR B review feedback).
-        cleanup_errors = [asdict(f) for f in cleanup.selector_failures]
+        # ``msgspec.to_builtins`` so future fields on ``SelectorFailure``
+        # (e.g. a timestamp) propagate to the route response without
+        # anyone having to remember to update the literal here (issue
+        # #123 PR B review feedback; ``SelectorFailure`` is a
+        # ``msgspec.Struct`` post-issue #141).
+        cleanup_errors = [msgspec.to_builtins(f)
+                          for f in cleanup.selector_failures]
 
     req = s._db().get_request(int(req_id))
     if req:

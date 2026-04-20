@@ -63,6 +63,8 @@ import subprocess as sp
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
+import msgspec
+
 if TYPE_CHECKING:
     from lib.beets_db import BeetsDB
 
@@ -79,8 +81,7 @@ DEFAULT_MOVE_TIMEOUT = 120  # seconds
 BeetsOpFailureReason = Literal["timeout", "nonzero_rc", "exception"]
 
 
-@dataclass(frozen=True)
-class BeetsOpFailure:
+class BeetsOpFailure(msgspec.Struct, frozen=True):
     """Why a single ``beet remove`` or ``beet move`` invocation did not
     exit cleanly.
 
@@ -99,6 +100,13 @@ class BeetsOpFailure:
     compatible with old ``PostflightInfo.disambiguation_failure`` rows
     that predate the field (written before this module collapsed
     ``DisambiguationFailure`` into ``BeetsOpFailure``).
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` §
+    "Wire-boundary types" — crosses JSONB as a nested value inside
+    ``PostflightInfo.disambiguation_failure`` and as route response
+    payload in ``web/routes/pipeline.py``. Encoded via
+    ``msgspec.json.encode`` / ``msgspec.to_builtins``; decoded via
+    ``msgspec.convert`` — symmetric.
     """
     reason: BeetsOpFailureReason
     detail: str
