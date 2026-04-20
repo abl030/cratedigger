@@ -806,25 +806,24 @@ def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
                     "**kwargs does not count)")
                 continue
             fp = fake_params[pname]
-            # Allowed kind transitions: same kind, or
-            # real=positional-or-keyword → fake=keyword-only
-            # (fake is stricter but still callable via keyword).
-            allowed = (
-                fp.kind == param.kind
-                or (param.kind
-                    == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                    and fp.kind
-                    == inspect.Parameter.KEYWORD_ONLY)
-            )
-            if not allowed:
+            # Kind must match exactly. A fake that narrows
+            # positional-or-keyword to keyword-only breaks any caller
+            # passing it positionally (``add_request("Artist",
+            # "Album", source="request")``) — fake-backed tests would
+            # raise ``TypeError`` while this contract stayed green
+            # (codex R3).
+            if fp.kind != param.kind:
                 mismatches.append(
                     f"{name}({pname}): kind mismatch — "
                     f"real={param.kind.name}, "
                     f"fake={fp.kind.name}")
                 continue
-            # Requiredness: a real param without default must have
-            # no default on the fake either — otherwise the fake
-            # silently makes the arg optional.
+            # Requiredness drift in both directions:
+            # - real required → fake optional: silently makes the arg
+            #   optional on the fake so callers can omit it.
+            # - real optional → fake required: production calls that
+            #   omit the arg work against real but raise ``TypeError``
+            #   against the fake. Codex R3.
             real_required = param.default is inspect.Parameter.empty
             fake_required = fp.default is inspect.Parameter.empty
             if real_required and not fake_required:
@@ -832,6 +831,11 @@ def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
                     f"{name}({pname}): real requires this param but "
                     "fake gives it a default (silently makes it "
                     "optional)")
+            elif fake_required and not real_required:
+                mismatches.append(
+                    f"{name}({pname}): real has a default but fake "
+                    "requires this param (production calls that omit "
+                    "it would crash against the fake)")
     return mismatches
 
 
@@ -900,3 +904,33 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
         self.assertTrue(
             any("**extra" in m for m in diff),
             f"Expected drift when fake drops **kwargs, got: {diff}")
+
+    def test_positional_or_keyword_narrowed_to_keyword_only_is_caught(self):
+        """Codex R3: a fake that narrows pos-or-keyword to keyword-only
+        would break every caller using positional args — must fail the
+        contract so fake-backed tests cannot silently green."""
+        class Real:
+            def m(self, artist_name: str, album_title: str) -> None:
+                ...
+        class Fake:
+            def m(self, *, artist_name: str, album_title: str) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("kind mismatch" in m for m in diff),
+            f"Expected drift for narrowed kind, got: {diff}")
+
+    def test_optional_becoming_required_on_fake_is_caught(self):
+        """Codex R3: a fake that drops a default would force production
+        callers to pass the arg — production calls that omit it would
+        work against real but crash the fake."""
+        class Real:
+            def m(self, flag: bool = False) -> None:
+                ...
+        class Fake:
+            def m(self, flag: bool) -> None:  # no default
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("fake requires this param" in m for m in diff),
+            f"Expected drift for tightened requiredness, got: {diff}")
