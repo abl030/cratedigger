@@ -33,8 +33,12 @@ class DownloadLogRow:
     beets_detail: str | None = None
     staged_path: str | None = None
     error_message: str | None = None
-    validation_result: str | None = None
-    import_result: str | None = None
+    validation_result: Any = None
+    import_result: Any = None
+    # Auto-assigned monotonic id matching PostgreSQL serial behaviour.
+    id: int = 0
+    # Auto-populated timestamp matching download_log.created_at.
+    created_at: datetime = field(default_factory=_utcnow)
     # Catch-all for less commonly asserted fields
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -45,6 +49,27 @@ class DenylistEntry:
     request_id: int
     username: str
     reason: str | None = None
+
+
+@dataclass
+class SearchLogRow:
+    """One row in search_log, captured by FakePipelineDB.log_search."""
+    request_id: int
+    query: str | None = None
+    result_count: int | None = None
+    elapsed_s: float | None = None
+    outcome: str = "error"
+    id: int = 0
+    created_at: datetime = field(default_factory=_utcnow)
+
+
+@dataclass
+class UserCooldownRow:
+    """One row in user_cooldowns, captured by FakePipelineDB.add_cooldown."""
+    username: str
+    cooldown_until: datetime
+    reason: str | None = None
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -245,7 +270,10 @@ class FakePipelineDB:
 
     def __init__(self) -> None:
         self._requests: dict[int, dict[str, Any]] = {}
+        self._tracks: dict[int, list[dict[str, Any]]] = {}
         self.download_logs: list[DownloadLogRow] = []
+        self.search_logs: list[SearchLogRow] = []
+        self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
@@ -253,6 +281,10 @@ class FakePipelineDB:
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.clear_download_state_calls: list[int] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
+        self.closed = False
+        self._next_request_id = 0
+        self._next_download_log_id = 0
+        self._next_search_log_id = 0
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
             bool | Callable[[int, int], bool]) = True
@@ -263,6 +295,8 @@ class FakePipelineDB:
         """Add a request row to the fake DB. Must include 'id'."""
         rid = row["id"]
         self._requests[rid] = copy.deepcopy(row)
+        if rid > self._next_request_id:
+            self._next_request_id = rid
 
     def request(self, request_id: int) -> dict[str, Any]:
         """Get a request row (for test assertions). Raises KeyError if missing."""
@@ -431,10 +465,23 @@ class FakePipelineDB:
             "staged_path", "error_message", "validation_result",
             "import_result",
         }
-        entry_kwargs = {k: kwargs.get(k) for k in named}
         extra = {k: v for k, v in kwargs.items() if k not in named}
+        self._next_download_log_id += 1
         self.download_logs.append(DownloadLogRow(
-            request_id=request_id, **entry_kwargs, extra=extra))
+            request_id=request_id,
+            outcome=kwargs.get("outcome"),
+            soulseek_username=kwargs.get("soulseek_username"),
+            filetype=kwargs.get("filetype"),
+            beets_distance=kwargs.get("beets_distance"),
+            beets_scenario=kwargs.get("beets_scenario"),
+            beets_detail=kwargs.get("beets_detail"),
+            staged_path=kwargs.get("staged_path"),
+            error_message=kwargs.get("error_message"),
+            validation_result=kwargs.get("validation_result"),
+            import_result=kwargs.get("import_result"),
+            id=self._next_download_log_id,
+            extra=extra,
+        ))
 
     def add_denylist(self, request_id: int, username: str,
                      reason: str | None = None) -> None:
@@ -495,6 +542,377 @@ class FakePipelineDB:
         if row:
             row.update(fields)
             row["updated_at"] = _utcnow()
+
+    # --- Session lifecycle ---
+
+    def close(self) -> None:
+        """Record that the fake connection was closed. No-op otherwise."""
+        self.closed = True
+
+    # --- album_requests write + query ---
+
+    def add_request(self, artist_name: str, album_title: str, source: str,
+                    mb_release_id: str | None = None,
+                    mb_release_group_id: str | None = None,
+                    mb_artist_id: str | None = None,
+                    discogs_release_id: str | None = None,
+                    year: int | None = None, country: str | None = None,
+                    format: str | None = None,
+                    source_path: str | None = None,
+                    reasoning: str | None = None,
+                    status: str = "wanted") -> int:
+        self._next_request_id += 1
+        rid = self._next_request_id
+        now = _utcnow()
+        self._requests[rid] = {
+            "id": rid,
+            "artist_name": artist_name,
+            "album_title": album_title,
+            "source": source,
+            "mb_release_id": mb_release_id,
+            "mb_release_group_id": mb_release_group_id,
+            "mb_artist_id": mb_artist_id,
+            "discogs_release_id": discogs_release_id,
+            "year": year,
+            "country": country,
+            "format": format,
+            "source_path": source_path,
+            "reasoning": reasoning,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+        }
+        return rid
+
+    def delete_request(self, request_id: int) -> None:
+        self._requests.pop(request_id, None)
+        self._tracks.pop(request_id, None)
+
+    def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Return wanted requests past their retry gate, new ones first."""
+        now = _utcnow()
+        eligible = [
+            r for r in self._requests.values()
+            if r.get("status") == "wanted"
+            and (r.get("next_retry_after") is None
+                 or r["next_retry_after"] <= now)
+        ]
+        # Mirrors the real ORDER BY: search_attempts=0 first, then
+        # random — the fake uses insertion order for determinism.
+        eligible.sort(
+            key=lambda r: 0 if (r.get("search_attempts") or 0) == 0 else 1)
+        if limit is not None:
+            eligible = eligible[:int(limit)]
+        return [copy.deepcopy(r) for r in eligible]
+
+    def get_log(self, limit: int = 50,
+                outcome_filter: str | None = None,
+                ) -> list[dict[str, object]]:
+        imported = {"success", "force_import"}
+        rejected = {"rejected", "failed", "timeout"}
+        rows: list[dict[str, object]] = []
+        # Newest-first to match the real ORDER BY dl.created_at DESC.
+        for entry in reversed(self.download_logs):
+            if outcome_filter == "imported" and entry.outcome not in imported:
+                continue
+            if outcome_filter == "rejected" and entry.outcome not in rejected:
+                continue
+            req = self._requests.get(entry.request_id, {})
+            joined: dict[str, object] = {
+                "id": entry.id,
+                "request_id": entry.request_id,
+                "outcome": entry.outcome,
+                "soulseek_username": entry.soulseek_username,
+                "filetype": entry.filetype,
+                "beets_distance": entry.beets_distance,
+                "beets_scenario": entry.beets_scenario,
+                "beets_detail": entry.beets_detail,
+                "staged_path": entry.staged_path,
+                "error_message": entry.error_message,
+                "validation_result": entry.validation_result,
+                "import_result": entry.import_result,
+                "created_at": entry.created_at,
+                # Joined request columns.
+                "album_title": req.get("album_title"),
+                "artist_name": req.get("artist_name"),
+                "mb_release_id": req.get("mb_release_id"),
+                "year": req.get("year"),
+                "country": req.get("country"),
+                "request_status": req.get("status"),
+                "request_min_bitrate": req.get("min_bitrate"),
+                "prev_min_bitrate": req.get("prev_min_bitrate"),
+                "search_filetype_override": req.get(
+                    "search_filetype_override"),
+                "source": req.get("source"),
+            }
+            rows.append(joined)
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def get_by_status(self, status: str) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(r) for r in sorted(
+                (r for r in self._requests.values()
+                 if r.get("status") == status),
+                key=lambda r: r.get("created_at") or _utcnow())
+        ]
+
+    def get_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return requests that have at least one download_log row."""
+        with_history = {row.request_id for row in self.download_logs}
+        rows = [
+            r for r in self._requests.values() if r["id"] in with_history]
+        rows.sort(
+            key=lambda r: r.get("updated_at") or _utcnow(), reverse=True)
+        return [copy.deepcopy(r) for r in rows[:limit]]
+
+    def count_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for r in self._requests.values():
+            status = r.get("status") or ""
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    # --- Track management ---
+
+    def set_tracks(self, request_id: int,
+                   tracks: list[dict[str, Any]]) -> None:
+        self._tracks[request_id] = [
+            {
+                "disc_number": t.get("disc_number", 1),
+                "track_number": t["track_number"],
+                "title": t["title"],
+                "length_seconds": t.get("length_seconds"),
+            }
+            for t in tracks
+        ]
+
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]:
+        rows = list(self._tracks.get(request_id, []))
+        rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
+        return [copy.deepcopy(t) for t in rows]
+
+    def get_track_counts(self,
+                         request_ids: list[int]) -> dict[int, int]:
+        return {
+            rid: len(self._tracks[rid])
+            for rid in request_ids
+            if rid in self._tracks and self._tracks[rid]
+        }
+
+    # --- Download history queries ---
+
+    def get_download_log_entry(self,
+                               log_id: int) -> dict[str, Any] | None:
+        for entry in self.download_logs:
+            if entry.id == log_id:
+                return self._download_log_to_dict(entry)
+        return None
+
+    def get_download_history(self,
+                             request_id: int) -> list[dict[str, Any]]:
+        return [
+            self._download_log_to_dict(e)
+            for e in reversed(self.download_logs)
+            if e.request_id == request_id
+        ]
+
+    def get_download_history_batch(
+        self, request_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        wanted = set(request_ids)
+        result: dict[int, list[dict[str, Any]]] = {}
+        for entry in reversed(self.download_logs):
+            if entry.request_id not in wanted:
+                continue
+            result.setdefault(entry.request_id, []).append(
+                self._download_log_to_dict(entry))
+        return result
+
+    def _download_log_to_dict(self,
+                              entry: DownloadLogRow) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "id": entry.id,
+            "request_id": entry.request_id,
+            "outcome": entry.outcome,
+            "soulseek_username": entry.soulseek_username,
+            "filetype": entry.filetype,
+            "beets_distance": entry.beets_distance,
+            "beets_scenario": entry.beets_scenario,
+            "beets_detail": entry.beets_detail,
+            "staged_path": entry.staged_path,
+            "error_message": entry.error_message,
+            "validation_result": entry.validation_result,
+            "import_result": entry.import_result,
+            "created_at": entry.created_at,
+        }
+        row.update(entry.extra)
+        return row
+
+    # --- Wrong-match review queue ---
+
+    def get_wrong_matches(self) -> list[dict[str, object]]:
+        """Rejected downloads whose ``validation_result.failed_path`` is set.
+
+        Mirrors the real ``DISTINCT ON (request_id, failed_path)`` —
+        collapse to newest per ``(request_id, failed_path)``, then sort
+        newest-first within each request.
+        """
+        skip_scenarios = {"audio_corrupt", "spectral_reject"}
+        collapsed: dict[tuple[int, str], DownloadLogRow] = {}
+        for entry in self.download_logs:
+            if entry.outcome != "rejected":
+                continue
+            vr = self._validation_result_dict(entry.validation_result)
+            failed_path = vr.get("failed_path") if vr else None
+            if not failed_path:
+                continue
+            if vr and vr.get("scenario") in skip_scenarios:
+                continue
+            key = (entry.request_id, str(failed_path))
+            prev = collapsed.get(key)
+            if prev is None or entry.id > prev.id:
+                collapsed[key] = entry
+        rows: list[dict[str, object]] = []
+        for entry in collapsed.values():
+            req = self._requests.get(entry.request_id, {})
+            rows.append({
+                "download_log_id": entry.id,
+                "request_id": entry.request_id,
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "mb_release_id": req.get("mb_release_id"),
+                "soulseek_username": entry.soulseek_username,
+                "validation_result": entry.validation_result,
+                "request_status": req.get("status"),
+                "request_min_bitrate": req.get("min_bitrate"),
+                "request_verified_lossless": req.get("verified_lossless"),
+                "request_current_spectral_grade": req.get(
+                    "current_spectral_grade"),
+                "request_current_spectral_bitrate": req.get(
+                    "current_spectral_bitrate"),
+                "request_imported_path": req.get("imported_path"),
+            })
+        rows.sort(key=lambda r: (
+            r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]
+        return rows
+
+    def clear_wrong_match_path(self, log_id: int) -> bool:
+        """Strip ``failed_path`` from a download_log row's validation_result.
+
+        Returns True when the entry was found and carried a failed_path.
+        """
+        for entry in self.download_logs:
+            if entry.id != log_id:
+                continue
+            vr = self._validation_result_dict(entry.validation_result)
+            if not vr or "failed_path" not in vr:
+                return False
+            new_vr = {k: v for k, v in vr.items() if k != "failed_path"}
+            if isinstance(entry.validation_result, str):
+                entry.validation_result = json.dumps(new_vr)
+            else:
+                entry.validation_result = new_vr
+            return True
+        return False
+
+    @staticmethod
+    def _validation_result_dict(vr: Any) -> dict[str, Any] | None:
+        if isinstance(vr, dict):
+            return vr
+        if isinstance(vr, str):
+            try:
+                parsed = json.loads(vr)
+            except (json.JSONDecodeError, ValueError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return None
+
+    # --- Search log ---
+
+    def log_search(self, request_id: int, query: str | None = None,
+                   result_count: int | None = None,
+                   elapsed_s: float | None = None,
+                   outcome: str = "error") -> None:
+        self._next_search_log_id += 1
+        self.search_logs.append(SearchLogRow(
+            request_id=request_id,
+            query=query,
+            result_count=result_count,
+            elapsed_s=elapsed_s,
+            outcome=outcome,
+            id=self._next_search_log_id,
+        ))
+
+    def get_search_history(self,
+                           request_id: int) -> list[dict[str, object]]:
+        return [
+            self._search_log_to_dict(e)
+            for e in reversed(self.search_logs)
+            if e.request_id == request_id
+        ]
+
+    def get_search_history_batch(
+        self, request_ids: list[int],
+    ) -> dict[int, list[dict[str, object]]]:
+        wanted = set(request_ids)
+        result: dict[int, list[dict[str, object]]] = {}
+        for entry in reversed(self.search_logs):
+            if entry.request_id not in wanted:
+                continue
+            result.setdefault(entry.request_id, []).append(
+                self._search_log_to_dict(entry))
+        return result
+
+    @staticmethod
+    def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
+        return {
+            "id": entry.id,
+            "request_id": entry.request_id,
+            "query": entry.query,
+            "result_count": entry.result_count,
+            "elapsed_s": entry.elapsed_s,
+            "outcome": entry.outcome,
+            "created_at": entry.created_at,
+        }
+
+    # --- User cooldowns ---
+
+    def add_cooldown(self, username: str, cooldown_until: datetime,
+                     reason: str | None = None) -> None:
+        """Upsert a cooldown keyed by username."""
+        existing = self.user_cooldowns.get(username)
+        created_at = existing.created_at if existing is not None else _utcnow()
+        self.user_cooldowns[username] = UserCooldownRow(
+            username=username,
+            cooldown_until=cooldown_until,
+            reason=reason,
+            created_at=created_at,
+        )
+
+    def get_cooled_down_users(self) -> list[str]:
+        now = _utcnow()
+        return [
+            c.username for c in self.user_cooldowns.values()
+            if c.cooldown_until > now
+        ]
+
+    def get_user_cooldowns(self) -> list[dict[str, Any]]:
+        rows = sorted(
+            self.user_cooldowns.values(),
+            key=lambda c: c.cooldown_until,
+            reverse=True,
+        )
+        return [
+            {
+                "username": c.username,
+                "cooldown_until": c.cooldown_until,
+                "reason": c.reason,
+                "created_at": c.created_at,
+            }
+            for c in rows
+        ]
 
     def assert_log(self, test: Any, index: int, **expected: Any) -> None:
         """Assert fields on a download_log entry at the given index.
