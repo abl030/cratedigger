@@ -569,7 +569,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
 
         # Must NOT raise.
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         # Property (4): path unchanged on failure.
         self.assertEqual(new_path, self.ORIGINAL_PATH)
@@ -597,7 +597,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         r, beets = self._make_result_and_beets()
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertFalse(r.postflight.disambiguated)
@@ -614,7 +614,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         r, beets = self._make_result_and_beets()
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertFalse(r.postflight.disambiguated)
@@ -642,7 +642,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
             album_path=self.ORIGINAL_PATH)
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertTrue(r.postflight.disambiguated)
@@ -666,7 +666,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
         beets.get_album_info.return_value = None
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, self.ORIGINAL_PATH)
         self.assertEqual(r.postflight.imported_path, self.ORIGINAL_PATH)
@@ -693,7 +693,7 @@ class TestApplyDisambiguationCallsiteContract(unittest.TestCase):
             album_path=renamed)
 
         new_path = import_one._apply_disambiguation(
-            self.MBID, beets, self.ORIGINAL_PATH, r)
+            self.MBID, 42, beets, self.ORIGINAL_PATH, r)
 
         self.assertEqual(new_path, renamed)
         self.assertEqual(r.postflight.imported_path, renamed)
