@@ -637,24 +637,52 @@ class FakePipelineDB:
                     source_path: str | None = None,
                     reasoning: str | None = None,
                     status: str = "wanted") -> int:
+        """Insert an album_requests row.
+
+        Seeds the full ``album_requests`` column set (matching
+        ``make_request_row`` in ``tests/helpers.py``) so fake-backed
+        tests that then read DB-defaulted fields like ``beets_distance``
+        or ``*_attempts`` see the same NULL/0 defaults production
+        callers get from PostgreSQL. Codex R7.
+        """
         self._next_request_id += 1
         rid = self._next_request_id
         now = _utcnow()
         self._requests[rid] = {
             "id": rid,
-            "artist_name": artist_name,
-            "album_title": album_title,
-            "source": source,
             "mb_release_id": mb_release_id,
             "mb_release_group_id": mb_release_group_id,
             "mb_artist_id": mb_artist_id,
             "discogs_release_id": discogs_release_id,
+            "artist_name": artist_name,
+            "album_title": album_title,
             "year": year,
             "country": country,
             "format": format,
+            "source": source,
             "source_path": source_path,
             "reasoning": reasoning,
             "status": status,
+            "search_attempts": 0,
+            "download_attempts": 0,
+            "validation_attempts": 0,
+            "last_attempt_at": None,
+            "next_retry_after": None,
+            "beets_distance": None,
+            "beets_scenario": None,
+            "imported_path": None,
+            "search_filetype_override": None,
+            "target_format": None,
+            "min_bitrate": None,
+            "prev_min_bitrate": None,
+            "lidarr_album_id": None,
+            "lidarr_artist_id": None,
+            "last_download_spectral_bitrate": None,
+            "last_download_spectral_grade": None,
+            "verified_lossless": False,
+            "current_spectral_grade": None,
+            "current_spectral_bitrate": None,
+            "active_download_state": None,
             "created_at": now,
             "updated_at": now,
         }

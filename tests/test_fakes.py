@@ -401,6 +401,31 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(db.request(rid1)["artist_name"], "Artist A")
         self.assertEqual(db.request(rid2)["status"], "wanted")
 
+    def test_add_request_seeds_full_row_shape(self):
+        """Codex R7: rows must carry the DB-defaulted columns
+        production readers index directly (``beets_distance``,
+        ``imported_path``, ``*_attempts``, spectral + verified_lossless)
+        so fake-backed tests don't raise ``KeyError`` where Postgres
+        would return NULL/0."""
+        db = FakePipelineDB()
+        rid = db.add_request("X", "Y", source="request")
+        row = db.request(rid)
+        for key in (
+            "beets_distance", "beets_scenario", "imported_path",
+            "search_attempts", "download_attempts", "validation_attempts",
+            "last_download_spectral_grade", "current_spectral_grade",
+            "verified_lossless", "min_bitrate", "prev_min_bitrate",
+            "search_filetype_override", "target_format",
+            "active_download_state",
+        ):
+            self.assertIn(key, row,
+                          f"add_request row missing '{key}' — "
+                          "production readers index it directly")
+        self.assertEqual(row["search_attempts"], 0)
+        self.assertEqual(row["download_attempts"], 0)
+        self.assertEqual(row["validation_attempts"], 0)
+        self.assertFalse(row["verified_lossless"])
+
     def test_add_request_coexists_with_seeded_ids(self):
         """Seeded ids must advance the auto-increment cursor so
         ``add_request`` cannot collide."""
