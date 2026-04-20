@@ -1,9 +1,11 @@
 """Tests for lightweight fakes and shared builders."""
 
+import inspect
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.pipeline_db import RequestSpectralStateUpdate
+from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralContext, SpectralMeasurement, ValidationResult
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
@@ -373,3 +375,334 @@ class TestFakePipelineDBDiscogs(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, discogs_release_id="12345"))
         self.assertIsNone(db.get_request_by_discogs_release_id("99999"))
+
+
+class TestFakePipelineDBNewStubs(unittest.TestCase):
+    """Self-tests for fake methods retroactively added under issue #140.
+
+    These cover behaviour that tests relying on the fake may start
+    exercising. Matches the rule in ``.claude/rules/code-quality.md``:
+    "every new PipelineDB method needs an equivalent stub on
+    FakePipelineDB with a self-test in tests/test_fakes.py."
+    """
+
+    def test_close_marks_flag(self):
+        db = FakePipelineDB()
+        self.assertFalse(db.closed)
+        db.close()
+        self.assertTrue(db.closed)
+
+    def test_add_request_assigns_monotonic_id(self):
+        db = FakePipelineDB()
+        rid1 = db.add_request("Artist A", "Album A", source="request")
+        rid2 = db.add_request("Artist B", "Album B", source="request")
+        self.assertEqual((rid1, rid2), (1, 2))
+        self.assertEqual(db.request(rid1)["artist_name"], "Artist A")
+        self.assertEqual(db.request(rid2)["status"], "wanted")
+
+    def test_add_request_coexists_with_seeded_ids(self):
+        """Seeded ids must advance the auto-increment cursor so
+        ``add_request`` cannot collide."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        rid = db.add_request("X", "Y", source="request")
+        self.assertEqual(rid, 43)
+
+    def test_delete_request_removes_row_and_tracks(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.set_tracks(1, [{"track_number": 1, "title": "T"}])
+        db.delete_request(1)
+        self.assertNotIn(1, db._requests)  # type: ignore[attr-defined]
+        self.assertEqual(db.get_tracks(1), [])
+
+    def test_get_wanted_prioritizes_new_and_respects_limit(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted",
+                                          search_attempts=0))
+        db.seed_request(make_request_row(id=2, status="wanted",
+                                          search_attempts=5))
+        db.seed_request(make_request_row(id=3, status="imported"))
+        rows = db.get_wanted()
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+        self.assertEqual(
+            [r["id"] for r in db.get_wanted(limit=1)], [1])
+
+    def test_get_wanted_skips_albums_inside_retry_window(self):
+        db = FakePipelineDB()
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        db.seed_request(make_request_row(
+            id=1, status="wanted", next_retry_after=future))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        rows = db.get_wanted()
+        self.assertEqual([r["id"] for r in rows], [2])
+
+    def test_get_log_filters_and_orders_newest_first(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, album_title="Album A"))
+        db.log_download(1, outcome="success")
+        db.log_download(1, outcome="failed")
+        db.log_download(1, outcome="rejected")
+        all_rows = db.get_log()
+        self.assertEqual([r["outcome"] for r in all_rows],
+                         ["rejected", "failed", "success"])
+        imported = db.get_log(outcome_filter="imported")
+        self.assertEqual([r["outcome"] for r in imported], ["success"])
+        rejected = db.get_log(outcome_filter="rejected")
+        self.assertEqual([r["outcome"] for r in rejected],
+                         ["rejected", "failed"])
+        # Joined request columns present.
+        self.assertEqual(all_rows[0]["album_title"], "Album A")
+
+    def test_get_by_status_sorts_by_created_at(self):
+        db = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        db.seed_request(make_request_row(
+            id=1, status="wanted", created_at=now + timedelta(seconds=2)))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", created_at=now))
+        rows = db.get_by_status("wanted")
+        self.assertEqual([r["id"] for r in rows], [2, 1])
+
+    def test_get_recent_requires_download_history(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.log_download(1, outcome="success")
+        rows = db.get_recent()
+        self.assertEqual([r["id"] for r in rows], [1])
+
+    def test_count_by_status(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        db.seed_request(make_request_row(id=3, status="imported"))
+        self.assertEqual(
+            db.count_by_status(), {"wanted": 2, "imported": 1})
+
+    def test_tracks_round_trip_and_count(self):
+        db = FakePipelineDB()
+        db.set_tracks(1, [
+            {"track_number": 2, "title": "Second"},
+            {"track_number": 1, "title": "First"},
+        ])
+        rows = db.get_tracks(1)
+        self.assertEqual([t["track_number"] for t in rows], [1, 2])
+        self.assertEqual(db.get_track_counts([1, 99]), {1: 2})
+
+    def test_download_log_history_and_lookup_by_id(self):
+        db = FakePipelineDB()
+        db.log_download(1, outcome="success")
+        db.log_download(1, outcome="failed")
+        db.log_download(2, outcome="rejected")
+
+        history_1 = db.get_download_history(1)
+        self.assertEqual([r["outcome"] for r in history_1],
+                         ["failed", "success"])
+        batch = db.get_download_history_batch([1, 2])
+        self.assertEqual({k: [r["outcome"] for r in v]
+                          for k, v in batch.items()},
+                         {1: ["failed", "success"], 2: ["rejected"]})
+
+        first_id = db.download_logs[0].id
+        entry = db.get_download_log_entry(first_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "success")
+        self.assertIsNone(db.get_download_log_entry(99999))
+
+    def test_get_wrong_matches_collapses_per_request_and_path(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, artist_name="A", album_title="B"))
+        # Two rejections on the same (request, failed_path) — keep newest.
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/p1"})
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/p1"})
+        # Different path — separate row.
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/p2"})
+        # Scenario filtered out.
+        db.log_download(1, outcome="rejected", validation_result={
+            "failed_path": "/p3", "scenario": "audio_corrupt"})
+        # Non-rejected — ignored.
+        db.log_download(1, outcome="success",
+                        validation_result={"failed_path": "/p4"})
+
+        rows = db.get_wrong_matches()
+        paths = sorted([
+            (r["validation_result"] or {}).get("failed_path")  # type: ignore[union-attr]
+            for r in rows])
+        self.assertEqual(paths, ["/p1", "/p2"])
+
+    def test_clear_wrong_match_path_strips_key(self):
+        db = FakePipelineDB()
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/p1",
+                                           "scenario": "wrong_match"})
+        log_id = db.download_logs[0].id
+        self.assertTrue(db.clear_wrong_match_path(log_id))
+        vr = db.download_logs[0].validation_result
+        assert isinstance(vr, dict)
+        self.assertNotIn("failed_path", vr)
+        self.assertEqual(vr["scenario"], "wrong_match")
+        # Second call returns False (already stripped).
+        self.assertFalse(db.clear_wrong_match_path(log_id))
+
+    def test_clear_wrong_match_path_handles_json_string(self):
+        """Real ``validation_result`` is JSONB — fakes also accept JSON
+        strings so tests can pass either shape."""
+        import json as _json
+        db = FakePipelineDB()
+        db.log_download(1, outcome="rejected",
+                        validation_result=_json.dumps(
+                            {"failed_path": "/p", "x": 1}))
+        self.assertTrue(
+            db.clear_wrong_match_path(db.download_logs[0].id))
+        stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
+        self.assertNotIn("failed_path", stored)
+
+    def test_search_log_history_and_batch(self):
+        db = FakePipelineDB()
+        db.log_search(1, query="a b", outcome="found", result_count=10,
+                      elapsed_s=0.5)
+        db.log_search(1, query="c d", outcome="no_match")
+        db.log_search(2, query="e f", outcome="error")
+
+        history_1 = db.get_search_history(1)
+        self.assertEqual([r["outcome"] for r in history_1],
+                         ["no_match", "found"])
+        batch = db.get_search_history_batch([1, 2])
+        self.assertEqual(
+            {k: [r["outcome"] for r in v] for k, v in batch.items()},
+            {1: ["no_match", "found"], 2: ["error"]})
+
+    def test_user_cooldowns_upsert_and_filter(self):
+        db = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        db.add_cooldown("alice", now + timedelta(days=3), reason="x")
+        db.add_cooldown("bob", now - timedelta(days=1), reason="expired")
+        # Upsert — second call on alice replaces cooldown_until/reason.
+        db.add_cooldown("alice", now + timedelta(days=7), reason="y")
+
+        active = db.get_cooled_down_users()
+        self.assertEqual(active, ["alice"])
+
+        rows = db.get_user_cooldowns()
+        # Newest cooldown_until first.
+        self.assertEqual([r["username"] for r in rows], ["alice", "bob"])
+        self.assertEqual(rows[0]["reason"], "y")
+
+
+def _public_methods(cls: type) -> set[str]:
+    """Return the set of non-underscore method names defined on ``cls``."""
+    return {
+        name for name, obj in vars(cls).items()
+        if callable(obj) and not name.startswith("_")
+    }
+
+
+class TestPipelineDBFakeContract(unittest.TestCase):
+    """Enforce FakePipelineDB stays in lockstep with PipelineDB.
+
+    Models ``TestRouteContractAudit`` (tests/test_web_server.py): the
+    convention in ``.claude/rules/code-quality.md`` — "every new
+    PipelineDB method must have a matching stub on FakePipelineDB with
+    a self-test in tests/test_fakes.py" — is enforced at test time, not
+    at review time.
+
+    Silent drift was possible before this test existed. In PR #136
+    ``update_imported_path_by_release_id`` only got its direct self-test
+    after the final-review agent flagged it; any orchestration test
+    that tried to call the method via a fake that lacked it would have
+    crashed with ``AttributeError``. A new kwarg on a real method would
+    be silently swallowed if the fake accepted ``**kwargs``.
+    """
+
+    def test_fake_exposes_every_public_method_of_real(self) -> None:
+        """Every non-underscore method on ``PipelineDB`` must exist on
+        ``FakePipelineDB``."""
+        real = _public_methods(PipelineDB)
+        fake = _public_methods(FakePipelineDB)
+        missing = real - fake
+        self.assertEqual(
+            missing, set(),
+            f"FakePipelineDB is missing stubs for: {sorted(missing)}. "
+            "See .claude/rules/code-quality.md 'New PipelineDB method' "
+            "in the new-work checklist.",
+        )
+
+    def test_fake_signatures_compatible_with_real(self) -> None:
+        """For every shared method, each named parameter on the real
+        method must exist (or be accepted via ``**kwargs``) on the fake,
+        with a compatible kind.
+
+        This catches the "real added a new kwarg; fake silently
+        ignored it" drift. Return types and type annotations are not
+        checked — the fake is free to use ``Any`` for brevity.
+        """
+        real_methods = _public_methods(PipelineDB)
+        fake_methods = _public_methods(FakePipelineDB)
+        shared = real_methods & fake_methods
+
+        mismatches: list[str] = []
+        for name in sorted(shared):
+            real_sig = inspect.signature(getattr(PipelineDB, name))
+            fake_sig = inspect.signature(getattr(FakePipelineDB, name))
+
+            fake_params = fake_sig.parameters
+            fake_accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in fake_params.values()
+            )
+            fake_accepts_varargs = any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL
+                for p in fake_params.values()
+            )
+
+            for pname, param in real_sig.parameters.items():
+                if pname == "self":
+                    continue
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    if not fake_accepts_varargs:
+                        mismatches.append(
+                            f"{name}: real has *{pname} but fake does "
+                            "not accept variable positional args")
+                    continue
+                if param.kind == inspect.Parameter.VAR_KEYWORD:
+                    if not fake_accepts_kwargs:
+                        mismatches.append(
+                            f"{name}: real has **{pname} but fake does "
+                            "not accept variable keyword args")
+                    continue
+                # Regular named parameter (positional-or-keyword or
+                # keyword-only).
+                if pname in fake_params:
+                    fp = fake_params[pname]
+                    # Allowed kind transitions: same kind, or
+                    # real=positional-or-keyword → fake=keyword-only
+                    # (fake is stricter but still callable via keyword).
+                    allowed = (
+                        fp.kind == param.kind
+                        or (param.kind
+                            == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                            and fp.kind
+                            == inspect.Parameter.KEYWORD_ONLY)
+                    )
+                    if not allowed:
+                        mismatches.append(
+                            f"{name}({pname}): kind mismatch — "
+                            f"real={param.kind.name}, "
+                            f"fake={fp.kind.name}")
+                elif not fake_accepts_kwargs:
+                    mismatches.append(
+                        f"{name}: param '{pname}' present on real but "
+                        "missing on fake and no **kwargs")
+
+        self.assertEqual(
+            mismatches, [],
+            "FakePipelineDB signatures drifted from PipelineDB. "
+            "Update the fake so every real parameter is either named "
+            "explicitly or absorbed by **kwargs. Mismatches:\n  "
+            + "\n  ".join(mismatches),
+        )
