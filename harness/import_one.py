@@ -961,7 +961,8 @@ def _run_album_move_by_id(album_id: int) -> DisambiguationFailure | None:
     return None
 
 
-def _canonicalize_siblings(sibling_album_ids: frozenset[int]) -> None:
+def _canonicalize_siblings(
+    sibling_album_ids: frozenset[int], beets: BeetsDB) -> None:
     """Re-run ``beet move`` on each sibling album id after a kept-duplicate import.
 
     When beets' ``%aunique`` disambiguates the new album (adding a
@@ -978,6 +979,14 @@ def _canonicalize_siblings(sibling_album_ids: frozenset[int]) -> None:
     Takes beets numeric album ids (not MBIDs) so Discogs-sourced
     siblings are covered — ``mb_albumid`` is empty for those,
     ``albums.id`` is always populated.
+
+    After a successful per-sibling move, runs ``fix_library_modes``
+    against the sibling's new path (Codex PR #131 round 5 P3): issue
+    #84 shows that ``beet move`` can create fresh disambiguated
+    directories at 0o755 despite systemd's ``UMask=0000``, which
+    locks out the non-service user. The main-album path gets this
+    repair at the end of ``main()``; without mirroring it here, moved
+    siblings ship with stricter perms than they started with.
 
     Never raises — delegates to ``_run_album_move_by_id`` which
     returns a typed ``DisambiguationFailure`` on any subprocess
@@ -998,6 +1007,14 @@ def _canonicalize_siblings(sibling_album_ids: frozenset[int]) -> None:
             _log(f"  [CANONICALIZE] sibling id:{aid} move failed "
                  f"({failure.reason}): {failure.detail} — sibling stays "
                  "at its current path, re-run `beet move` manually later")
+            continue
+        # Move succeeded — repair perms on the sibling's new location.
+        # ``get_album_path_by_id`` returns the sibling's current path;
+        # missing (deleted out of band) returns None — no-op.
+        sibling_path = beets.get_album_path_by_id(aid)
+        if sibling_path:
+            _log(f"  [CANONICALIZE] fix_library_modes({sibling_path})")
+            fix_library_modes(sibling_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1477,23 +1494,12 @@ def main():
 
     # --- Import ---
     #
-    # ``stale_beets_id`` and ``stale_ids`` were captured/validated
-    # earlier in main() — before any destructive pre-import work on
-    # the staged download — so the bail-out for split-brain has
-    # already happened (Codex PR #131 round 4 P2).
+    # ``stale_ids`` was validated earlier in main() — split-brain
+    # fail-fast already happened before any destructive pre-import
+    # work (Codex PR #131 round 4 P2). Here we just run the import.
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     rc, beets_lines, kept_duplicate, sibling_album_ids = run_import(
         args.path, mbid)
-
-    # Exclude the stale row's album id from sibling canonicalization
-    # — it will be removed by ``_remove_stale_by_id_logged`` below,
-    # so re-running ``beet move`` on it wastes a subprocess call and
-    # more importantly covers the Discogs re-import case (Codex PR
-    # #131 round 4 P3) where ``run_import``'s inner filter — keyed by
-    # ``mb_albumid`` — cannot detect that an empty-mbid Discogs row
-    # is actually the same release.
-    if stale_beets_id is not None:
-        sibling_album_ids = sibling_album_ids - frozenset([stale_beets_id])
     r.beets_log = beets_lines
 
     if rc != 0:
@@ -1504,38 +1510,60 @@ def main():
         _log(f"[ERROR] Import failed (rc={rc})")
         _emit_and_exit(r)
 
-    # --- Post-import cleanup: remove stale same-MBID row by beets id ---
+    # --- Post-import cleanup: remove EVERY same-MBID row except the new one ---
     #
-    # If the album was already in beets when we started (stale_beets_id
-    # captured above), there are now TWO rows with the target MBID —
-    # the stale one and the fresh import (beets' ``%aunique`` placed
-    # the new album at a disambiguated path, so both coexist on disk).
-    # Remove the stale one by its exact album-mode numeric primary
-    # key. ``beet remove -a -d id:<N>`` runs in album mode and matches
-    # ``albums.id = N`` exactly — cannot match any other row.
+    # Beets' ``album.id`` is SQLite AUTOINCREMENT — the row we just
+    # imported has the highest id of every same-MBID row. Any other
+    # same-MBID rows are stale (whether they existed at pre-flight
+    # enumerate, or were inserted by a racing process between that
+    # check and ``resolve_duplicate`` firing — Codex PR #131 round 5
+    # P2). Enumerate again, remove everything but the newest.
     #
-    # Codex (PR #131 round 2 P3): treat any cleanup failure as
-    # ``import_failed``. The new album IS on disk at this point, but
-    # leaving the stale row in beets silently leads to a split-brain
-    # library where subsequent upgrades may capture the wrong id or
-    # reason about the stale row's paths/bitrates. Failing explicitly
-    # surfaces the problem so the operator's ban-source cleanup can
-    # run before the request is considered complete.
-    if stale_beets_id is not None:
-        failure = _remove_stale_by_id_logged(stale_beets_id)
+    # This supersedes the round-3/4 ``stale_beets_id`` approach: by
+    # deriving the set-to-remove from the post-import state directly,
+    # we no longer depend on the pre-flight capture matching what
+    # ``resolve_duplicate`` sees. The race is closed.
+    #
+    # Each removal uses ``beet remove -a -d id:<N>`` — primary-key
+    # scoped, cannot reach cross-MBID siblings. Any removal failure
+    # is an ``import_failed`` (same as round-2 P3 contract): the new
+    # album is on disk but leaving stale rows corrupts future upgrade
+    # captures. Operator must run ban-source before the request can
+    # be marked complete.
+    post_import_ids = beets.get_all_album_ids_for_release(mbid)
+    if not post_import_ids:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Post-import: MBID {mbid} NOT in beets DB after "
+                   "import — the harness reported success but no row "
+                   "survives.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+    new_album_id = max(post_import_ids)  # highest id = freshest row
+    stale_to_remove = [aid for aid in post_import_ids
+                       if aid != new_album_id]
+    for aid in stale_to_remove:
+        failure = _remove_stale_by_id_logged(aid)
         if failure is not None:
             r.exit_code = 2
             r.decision = "import_failed"
-            r.error = (f"Stale beets album id:{stale_beets_id} "
+            r.error = (f"Stale beets album id:{aid} "
                        f"(mbid={mbid}) could not be removed: "
                        f"{failure.reason}: {failure.detail}. The new "
-                       "album is on disk but two same-MBID rows now "
-                       "exist in beets. Operator must clean up via "
-                       "ban-source before the request can be marked "
-                       "complete.")
+                       "album is on disk but multiple same-MBID rows "
+                       "still exist in beets. Operator must clean up "
+                       "via ban-source before the request can be "
+                       "marked complete.")
             _log(f"[ERROR] {r.error}")
             beets.close()
             _emit_and_exit(r)
+
+    # Sibling canonicalization should never try to move a row we just
+    # removed. Post-import cleanup above covered the Discogs re-import
+    # case (where ``run_import``'s inner filter couldn't see that an
+    # empty-mbid row matched our target).
+    sibling_album_ids = sibling_album_ids - frozenset(stale_to_remove)
 
     # --- Post-flight verification ---
     pf_info = beets.get_album_info(mbid, _rank_cfg)
@@ -1547,16 +1575,17 @@ def main():
         beets.close()
         _emit_and_exit(r)
 
-    # Extra guard: if pf_info still resolves to the stale id, something
-    # is seriously wrong (cleanup claimed success but beets still holds
-    # the row). Fail loudly rather than quality-gate against the stale.
-    if stale_beets_id is not None and pf_info.album_id == stale_beets_id:
+    # Extra guard: pf_info must resolve to the new album id. After the
+    # cleanup loop above there should be exactly one same-MBID row —
+    # if ``get_album_info``'s LIMIT 1 pulled something else, beets is
+    # in an inconsistent state.
+    if pf_info.album_id != new_album_id:
         r.exit_code = 2
         r.decision = "import_failed"
-        r.error = (f"Post-flight resolved to stale beets_id={stale_beets_id} "
-                   f"for mbid={mbid} despite cleanup reporting success — "
-                   "beets DB is in an inconsistent state. Operator must "
-                   "clean up via ban-source.")
+        r.error = (f"Post-flight resolved to beets_id={pf_info.album_id} "
+                   f"but new album id was {new_album_id}; cleanup left "
+                   "beets in an inconsistent state. Operator must clean "
+                   "up via ban-source.")
         _log(f"[ERROR] {r.error}")
         beets.close()
         _emit_and_exit(r)
@@ -1582,8 +1611,10 @@ def main():
         # suffix while the sibling stays un-suffixed (asymmetric
         # folder layout in Plex/Meelo). Takes beets numeric album ids
         # so Discogs siblings are covered too (their mb_albumid is
-        # empty but albums.id is always present).
-        _canonicalize_siblings(sibling_album_ids)
+        # empty but albums.id is always present). Per-sibling
+        # ``fix_library_modes`` runs inside the helper on any row
+        # whose path changed (issue #84, Codex PR #131 round 5 P3).
+        _canonicalize_siblings(sibling_album_ids, beets)
 
     # --- Post-import extension check ---
     # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)
