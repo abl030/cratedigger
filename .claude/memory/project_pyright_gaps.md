@@ -1,10 +1,10 @@
 ---
 name: Pyright third-party gaps
-description: 21 remaining pyright errors in soularr.py — all from third-party type stubs, not our code
+description: 21 remaining pyright errors in cratedigger.py — all from third-party type stubs, not our code
 type: reference
 ---
 
-All 21 remaining pyright errors in soularr.py are at third-party library boundaries:
+All 21 remaining pyright errors in cratedigger.py are at third-party library boundaries:
 
 **slskd_api (6 errors)**: `directory["files"]` typed as slice access instead of dict. The slskd_api package (0.2.3) has incomplete/wrong type stubs for API response objects. Lines 399-400, 621-624.
 

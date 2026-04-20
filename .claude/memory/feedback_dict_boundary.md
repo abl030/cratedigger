@@ -1,10 +1,10 @@
 ---
 name: Dict boundary lesson
-description: Critical lesson from production crashes — two dict shapes flow through soularr.py, only one is DownloadFile
+description: Critical lesson from production crashes — two dict shapes flow through cratedigger.py, only one is DownloadFile
 type: feedback
 ---
 
-There are TWO dict-shaped things in soularr.py — converting the wrong one crashes production:
+There are TWO dict-shaped things in cratedigger.py — converting the wrong one crashes production:
 
 1. **Raw slskd API dicts** — search results, directory["files"] items. Plain dicts with keys like filename, size, bitRate. Used in: verify_filetype(), download_filter(), album_track_num(), album_match(), check_ratio(), try_enqueue() (before slskd_do_enqueue).
 

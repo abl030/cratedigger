@@ -1,0 +1,13 @@
+- [User profile](user_profile.md) — Senior dev running a curated music pipeline on NixOS; prefers TDD and incremental refactoring
+- [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
+- [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
+- [Finish the job](feedback_finish_the_job.md) — Wire up new functionality end-to-end — don't leave infrastructure disconnected
+- [Migration before deploy](feedback_migration_before_deploy.md) — Always ALTER TABLE on prod BEFORE committing code that uses new columns
+- [Dict boundary lesson](feedback_dict_boundary.md) — Two dict shapes flow through cratedigger.py; only one is DownloadFile — converting the wrong one crashed prod
+- [Playwright test artists](feedback_playwright_test_artists.md) — Brief the playwright agent to use small/obscure artists, not Radiohead — 15s mirror timeout
+- [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
+- [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
+- [Audio quality type system](project_audio_quality_types.md) — AudioFileSpec + AudioQualityMeasurement deployed; AudioQualityState deferred
+- [Refactoring phases](project_refactoring_phases.md) — Status of the multi-phase refactoring of cratedigger.py through pyright cleanup
+- [Renamed to cratedigger](project_cratedigger_rename.md) — Project is cratedigger now across the board (repo, DB, systemd, working dir, memory dir)
+- [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
