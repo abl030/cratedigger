@@ -447,6 +447,23 @@ class BeetsDB:
         the UI doesn't keep pointing at a pre-move directory. Returning
         both columns lets the caller match across every layout combo.
 
+        **Type coercion at the boundary.** Beets' ``albums`` table
+        declares ``discogs_albumid INTEGER`` in SQLite, so SQLite
+        returns a Python ``int`` for that column (not a ``str``).
+        ``mb_albumid`` is ``TEXT`` so it arrives as ``str``. The
+        downstream ``MovedSibling`` dataclass types both fields as
+        ``str``, so the harness-side ``msgspec.convert`` strict
+        validation in ``_postflight_from_dict`` WILL reject an int —
+        the exception bubbles up through ``parse_import_result`` and
+        the dispatcher would treat a successful kept-duplicate import
+        as a generic exception AFTER beets already moved the album
+        (a "semi-lie" that can trigger duplicate force-import
+        attempts, the same hazard PR #131 documented for earlier
+        missing-sentinel cases). Coerce both columns to ``str`` here
+        so the wire stays clean at the emit site — matches the
+        ``.claude/rules/code-quality.md`` § "Wire-boundary types"
+        "normalise early" directive.
+
         Returns ``("", "")`` if the album id is not present.
         """
         row = self._conn.execute(
@@ -456,7 +473,8 @@ class BeetsDB:
         ).fetchone()
         if not row:
             return ("", "")
-        return (row[0] or "", row[1] or "")
+        return (str(row[0]) if row[0] else "",
+                str(row[1]) if row[1] else "")
 
     # ── Web UI query methods ────────────────────────────────────────
 

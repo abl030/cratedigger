@@ -137,6 +137,76 @@ class TestBeetsDBConnection(unittest.TestCase):
             self.assertIsNotNone(db)
 
 
+class TestGetReleaseIdsByAlbumId(unittest.TestCase):
+    """Codex round-1 P1 on PR #136: beets' ``albums.discogs_albumid``
+    is ``INTEGER`` in SQLite, so SQLite returns a Python ``int`` for
+    that column — not a ``str``. ``MovedSibling.discogs_albumid`` is
+    typed ``str`` and the ``_postflight_from_dict`` decoder uses
+    ``msgspec.convert`` which validates types strictly.
+
+    Without coercion, every Discogs-sourced kept-duplicate import
+    raised ``msgspec.ValidationError`` at the wire boundary AFTER
+    beets had already moved the sibling files — the dispatcher then
+    recorded the whole import as an exception. This is the same
+    "subprocess side effect done, sentinel emission broken" hazard
+    PR #131 documented for earlier missing-sentinel cases.
+
+    ``get_release_ids_by_album_id`` now coerces both columns to ``str``
+    at the emit site. These tests pin the contract.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_discogs_albumid_coerced_from_int_to_str(self) -> None:
+        """``discogs_albumid INTEGER`` in SQLite → Python ``int``.
+        The getter must coerce to ``str`` so the wire contract holds."""
+        _insert_album_full(self.db_path, 42, "", [
+            {"bitrate": 320000, "path": "/m/x.mp3", "format": "MP3"},
+        ], discogs_albumid=12856590)
+        with BeetsDB(self.db_path) as db:
+            mb, discogs = db.get_release_ids_by_album_id(42)
+        self.assertEqual(mb, "")
+        self.assertEqual(discogs, "12856590")
+        self.assertIsInstance(discogs, str,
+                              "discogs_albumid must be str at the wire "
+                              "boundary — msgspec.convert will reject int.")
+
+    def test_mb_albumid_returned_as_str(self) -> None:
+        """``mb_albumid`` is ``TEXT`` so already arrives as ``str`` —
+        the getter still string-wraps defensively."""
+        _insert_album(self.db_path, 43, "abc-uuid-1234",
+                      [(320000, "/m/y.mp3")])
+        with BeetsDB(self.db_path) as db:
+            mb, discogs = db.get_release_ids_by_album_id(43)
+        self.assertEqual(mb, "abc-uuid-1234")
+        self.assertIsInstance(mb, str)
+        self.assertEqual(discogs, "")
+
+    def test_both_empty_when_album_not_found(self) -> None:
+        """Missing album → ``("", "")``, never raises."""
+        with BeetsDB(self.db_path) as db:
+            mb, discogs = db.get_release_ids_by_album_id(99999)
+        self.assertEqual((mb, discogs), ("", ""))
+
+    def test_null_columns_map_to_empty_strings(self) -> None:
+        """A row where both columns are NULL (unlikely but possible
+        for partially-tagged imports) must still return ``("", "")``
+        without raising."""
+        _insert_album_full(self.db_path, 44, "", [
+            {"bitrate": 320000, "path": "/m/z.mp3", "format": "MP3"},
+        ])
+        with BeetsDB(self.db_path) as db:
+            mb, discogs = db.get_release_ids_by_album_id(44)
+        self.assertEqual((mb, discogs), ("", ""))
+
+
 class TestAlbumExists(unittest.TestCase):
     """Test album_exists (preflight check)."""
 
