@@ -458,29 +458,78 @@ class FakePipelineDB:
                 row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
 
-    def log_download(self, request_id: int, **kwargs: Any) -> None:
-        named = {
-            "outcome", "soulseek_username", "filetype",
-            "beets_distance", "beets_scenario", "beets_detail",
-            "staged_path", "error_message", "validation_result",
-            "import_result",
-        }
-        extra = {k: v for k, v in kwargs.items() if k not in named}
+    def log_download(self, request_id: int,
+                     soulseek_username: str | None = None,
+                     filetype: str | None = None,
+                     download_path: str | None = None,
+                     beets_distance: float | None = None,
+                     beets_scenario: str | None = None,
+                     beets_detail: str | None = None,
+                     valid: bool | None = None,
+                     outcome: str | None = None,
+                     staged_path: str | None = None,
+                     error_message: str | None = None,
+                     bitrate: int | None = None,
+                     sample_rate: int | None = None,
+                     bit_depth: int | None = None,
+                     is_vbr: bool | None = None,
+                     was_converted: bool | None = None,
+                     original_filetype: str | None = None,
+                     slskd_filetype: str | None = None,
+                     slskd_bitrate: int | None = None,
+                     actual_filetype: str | None = None,
+                     actual_min_bitrate: int | None = None,
+                     spectral_grade: str | None = None,
+                     spectral_bitrate: int | None = None,
+                     existing_min_bitrate: int | None = None,
+                     existing_spectral_bitrate: int | None = None,
+                     import_result: Any = None,
+                     validation_result: Any = None,
+                     final_format: str | None = None,
+                     **extra: Any) -> None:
+        """Record a download_log row.
+
+        Every parameter name matches ``PipelineDB.log_download`` exactly
+        — the contract test in ``test_fakes.py`` enforces this. Only
+        the 11 "first-class" fields land on ``DownloadLogRow``; the
+        remaining named fields plus any test-only ``**extra`` merge into
+        ``.extra`` so ``assert_log`` can still introspect them.
+        """
         self._next_download_log_id += 1
+        auxiliary: dict[str, Any] = {
+            "download_path": download_path,
+            "valid": valid,
+            "bitrate": bitrate,
+            "sample_rate": sample_rate,
+            "bit_depth": bit_depth,
+            "is_vbr": is_vbr,
+            "was_converted": was_converted,
+            "original_filetype": original_filetype,
+            "slskd_filetype": slskd_filetype,
+            "slskd_bitrate": slskd_bitrate,
+            "actual_filetype": actual_filetype,
+            "actual_min_bitrate": actual_min_bitrate,
+            "spectral_grade": spectral_grade,
+            "spectral_bitrate": spectral_bitrate,
+            "existing_min_bitrate": existing_min_bitrate,
+            "existing_spectral_bitrate": existing_spectral_bitrate,
+            "final_format": final_format,
+        }
+        auxiliary.update(extra)
         self.download_logs.append(DownloadLogRow(
             request_id=request_id,
-            outcome=kwargs.get("outcome"),
-            soulseek_username=kwargs.get("soulseek_username"),
-            filetype=kwargs.get("filetype"),
-            beets_distance=kwargs.get("beets_distance"),
-            beets_scenario=kwargs.get("beets_scenario"),
-            beets_detail=kwargs.get("beets_detail"),
-            staged_path=kwargs.get("staged_path"),
-            error_message=kwargs.get("error_message"),
-            validation_result=kwargs.get("validation_result"),
-            import_result=kwargs.get("import_result"),
+            outcome=outcome,
+            soulseek_username=soulseek_username,
+            filetype=filetype,
+            beets_distance=beets_distance,
+            beets_scenario=beets_scenario,
+            beets_detail=beets_detail,
+            staged_path=staged_path,
+            error_message=error_message,
+            validation_result=validation_result,
+            import_result=import_result,
             id=self._next_download_log_id,
-            extra=extra,
+            extra=auxiliary,
         ))
 
     def add_denylist(self, request_id: int, username: str,
@@ -589,7 +638,15 @@ class FakePipelineDB:
         self._tracks.pop(request_id, None)
 
     def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """Return wanted requests past their retry gate, new ones first."""
+        """Return wanted requests past their retry gate, new ones first.
+
+        Mirrors the real ORDER BY (``search_attempts=0`` ahead of the
+        rest) but breaks ties in insertion order rather than with
+        ``RANDOM()`` so tests are deterministic. Callers that care
+        about specific rows within a priority bucket should assert on
+        set membership rather than list order — the real DB randomises
+        ties every cycle.
+        """
         now = _utcnow()
         eligible = [
             r for r in self._requests.values()
@@ -597,8 +654,6 @@ class FakePipelineDB:
             and (r.get("next_retry_after") is None
                  or r["next_retry_after"] <= now)
         ]
-        # Mirrors the real ORDER BY: search_attempts=0 first, then
-        # random — the fake uses insertion order for determinism.
         eligible.sort(
             key=lambda r: 0 if (r.get("search_attempts") or 0) == 0 else 1)
         if limit is not None:
@@ -663,14 +718,20 @@ class FakePipelineDB:
         with_history = {row.request_id for row in self.download_logs}
         rows = [
             r for r in self._requests.values() if r["id"] in with_history]
+        # Use a sentinel for missing ``updated_at`` so Python's stable
+        # sort is deterministic (computing ``_utcnow()`` per key call
+        # would produce a fresh timestamp each comparison and make
+        # ordering non-deterministic when multiple rows share the
+        # sentinel).
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
         rows.sort(
-            key=lambda r: r.get("updated_at") or _utcnow(), reverse=True)
+            key=lambda r: r.get("updated_at") or epoch, reverse=True)
         return [copy.deepcopy(r) for r in rows[:limit]]
 
-    def count_by_status(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
+    def count_by_status(self) -> dict[str | None, int]:
+        counts: dict[str | None, int] = {}
         for r in self._requests.values():
-            status = r.get("status") or ""
+            status = r.get("status")
             counts[status] = counts.get(status, 0) + 1
         return counts
 

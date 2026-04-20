@@ -3,6 +3,7 @@
 import inspect
 import unittest
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
@@ -437,6 +438,19 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         rows = db.get_wanted()
         self.assertEqual([r["id"] for r in rows], [2])
 
+    def test_get_wanted_tie_break_is_set_not_order(self):
+        """Within a priority bucket the real DB randomises order —
+        callers must assert on set membership, not list position."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", search_attempts=0))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", search_attempts=0))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", search_attempts=0))
+        rows = db.get_wanted()
+        self.assertEqual({r["id"] for r in rows}, {1, 2, 3})
+
     def test_get_log_filters_and_orders_newest_first(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, album_title="Album A"))
@@ -472,6 +486,20 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         rows = db.get_recent()
         self.assertEqual([r["id"] for r in rows], [1])
 
+    def test_get_recent_deterministic_with_missing_updated_at(self):
+        """Sort key must not call ``_utcnow()`` per comparison —
+        multiple rows with no ``updated_at`` must fall into a stable
+        insertion order so tests cannot flake."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, updated_at=None))
+        db.seed_request(make_request_row(id=2, updated_at=None))
+        db.seed_request(make_request_row(id=3, updated_at=None))
+        db.log_download(1, outcome="success")
+        db.log_download(2, outcome="success")
+        db.log_download(3, outcome="success")
+        rows = db.get_recent()
+        self.assertEqual({r["id"] for r in rows}, {1, 2, 3})
+
     def test_count_by_status(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
@@ -479,6 +507,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         db.seed_request(make_request_row(id=3, status="imported"))
         self.assertEqual(
             db.count_by_status(), {"wanted": 2, "imported": 1})
+
+    def test_count_by_status_preserves_none_bucket(self):
+        """Real SQL ``GROUP BY status`` keeps NULL as its own key; the
+        fake must not collapse it to an empty string."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status=None))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        self.assertEqual(db.count_by_status(), {None: 1, "wanted": 1})
 
     def test_tracks_round_trip_and_count(self):
         db = FakePipelineDB()
@@ -634,75 +670,174 @@ class TestPipelineDBFakeContract(unittest.TestCase):
 
     def test_fake_signatures_compatible_with_real(self) -> None:
         """For every shared method, each named parameter on the real
-        method must exist (or be accepted via ``**kwargs``) on the fake,
-        with a compatible kind.
+        method must be declared by name on the fake with a compatible
+        kind and no stricter requiredness.
 
-        This catches the "real added a new kwarg; fake silently
-        ignored it" drift. Return types and type annotations are not
-        checked — the fake is free to use ``Any`` for brevity.
+        This catches "real added a new kwarg; fake silently ignored it"
+        drift. Crucially, a bare ``**kwargs`` on the fake is NOT allowed
+        to absorb a named real parameter — otherwise a fake that
+        accepts ``**kwargs`` would pass this check for any real
+        signature, reproducing the exact silent-drift failure mode the
+        contract is meant to prevent.
+
+        ``**kwargs`` on the fake may still absorb test-only extras and
+        matches the real's own ``**kwargs`` when present. Return types
+        and type annotations are not checked — the fake is free to use
+        ``Any`` for brevity.
         """
-        real_methods = _public_methods(PipelineDB)
-        fake_methods = _public_methods(FakePipelineDB)
-        shared = real_methods & fake_methods
-
-        mismatches: list[str] = []
-        for name in sorted(shared):
-            real_sig = inspect.signature(getattr(PipelineDB, name))
-            fake_sig = inspect.signature(getattr(FakePipelineDB, name))
-
-            fake_params = fake_sig.parameters
-            fake_accepts_kwargs = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in fake_params.values()
-            )
-            fake_accepts_varargs = any(
-                p.kind == inspect.Parameter.VAR_POSITIONAL
-                for p in fake_params.values()
-            )
-
-            for pname, param in real_sig.parameters.items():
-                if pname == "self":
-                    continue
-                if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    if not fake_accepts_varargs:
-                        mismatches.append(
-                            f"{name}: real has *{pname} but fake does "
-                            "not accept variable positional args")
-                    continue
-                if param.kind == inspect.Parameter.VAR_KEYWORD:
-                    if not fake_accepts_kwargs:
-                        mismatches.append(
-                            f"{name}: real has **{pname} but fake does "
-                            "not accept variable keyword args")
-                    continue
-                # Regular named parameter (positional-or-keyword or
-                # keyword-only).
-                if pname in fake_params:
-                    fp = fake_params[pname]
-                    # Allowed kind transitions: same kind, or
-                    # real=positional-or-keyword → fake=keyword-only
-                    # (fake is stricter but still callable via keyword).
-                    allowed = (
-                        fp.kind == param.kind
-                        or (param.kind
-                            == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                            and fp.kind
-                            == inspect.Parameter.KEYWORD_ONLY)
-                    )
-                    if not allowed:
-                        mismatches.append(
-                            f"{name}({pname}): kind mismatch — "
-                            f"real={param.kind.name}, "
-                            f"fake={fp.kind.name}")
-                elif not fake_accepts_kwargs:
-                    mismatches.append(
-                        f"{name}: param '{pname}' present on real but "
-                        "missing on fake and no **kwargs")
-
+        mismatches = _diff_signatures(PipelineDB, FakePipelineDB)
         self.assertEqual(
             mismatches, [],
             "FakePipelineDB signatures drifted from PipelineDB. "
-            "Update the fake so every real parameter is either named "
-            "explicitly or absorbed by **kwargs. Mismatches:\n  "
+            "Every real parameter must be named explicitly on the fake "
+            "(bare **kwargs does NOT satisfy the contract). "
+            "Mismatches:\n  "
             + "\n  ".join(mismatches),
         )
+
+
+def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
+    """Return a list of signature drift messages between two classes.
+
+    Extracted so ``TestPipelineDBFakeContractInternals`` can directly
+    exercise the drift detector against synthetic classes without
+    mutating the real fake.
+    """
+    real_methods = _public_methods(real_cls)
+    fake_methods = _public_methods(fake_cls)
+    shared = real_methods & fake_methods
+
+    mismatches: list[str] = []
+    for name in sorted(shared):
+        real_sig = inspect.signature(getattr(real_cls, name))
+        fake_sig = inspect.signature(getattr(fake_cls, name))
+
+        fake_params = fake_sig.parameters
+        fake_accepts_varargs = any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL
+            for p in fake_params.values()
+        )
+        fake_accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in fake_params.values()
+        )
+
+        for pname, param in real_sig.parameters.items():
+            if pname == "self":
+                continue
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                if not fake_accepts_varargs:
+                    mismatches.append(
+                        f"{name}: real has *{pname} but fake does "
+                        "not accept variable positional args")
+                continue
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                if not fake_accepts_kwargs:
+                    mismatches.append(
+                        f"{name}: real has **{pname} but fake does "
+                        "not accept variable keyword args")
+                continue
+            # Regular named parameter (positional-or-keyword or
+            # keyword-only). MUST be declared on the fake —
+            # **kwargs absorption is not sufficient.
+            if pname not in fake_params:
+                mismatches.append(
+                    f"{name}: param '{pname}' present on real but "
+                    "not declared on fake (declare it explicitly — "
+                    "**kwargs does not count)")
+                continue
+            fp = fake_params[pname]
+            # Allowed kind transitions: same kind, or
+            # real=positional-or-keyword → fake=keyword-only
+            # (fake is stricter but still callable via keyword).
+            allowed = (
+                fp.kind == param.kind
+                or (param.kind
+                    == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                    and fp.kind
+                    == inspect.Parameter.KEYWORD_ONLY)
+            )
+            if not allowed:
+                mismatches.append(
+                    f"{name}({pname}): kind mismatch — "
+                    f"real={param.kind.name}, "
+                    f"fake={fp.kind.name}")
+                continue
+            # Requiredness: a real param without default must have
+            # no default on the fake either — otherwise the fake
+            # silently makes the arg optional.
+            real_required = param.default is inspect.Parameter.empty
+            fake_required = fp.default is inspect.Parameter.empty
+            if real_required and not fake_required:
+                mismatches.append(
+                    f"{name}({pname}): real requires this param but "
+                    "fake gives it a default (silently makes it "
+                    "optional)")
+    return mismatches
+
+
+class TestPipelineDBFakeContractInternals(unittest.TestCase):
+    """Regression tests for the drift detector itself.
+
+    The detector must fail when real and fake disagree, otherwise the
+    outer contract test is a silent no-op. Exercise the drift cases
+    directly.
+    """
+
+    def test_kwargs_does_not_absorb_named_param(self):
+        """Bare **kwargs on fake must NOT satisfy a named real param."""
+        class Real:
+            def m(self, request_id: int, flag: bool = False) -> None:
+                ...
+        class Fake:
+            def m(self, request_id: int, **kwargs: Any) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("'flag'" in m for m in diff),
+            f"Expected drift for named param 'flag', got: {diff}")
+
+    def test_renamed_param_is_caught(self):
+        class Real:
+            def m(self, spectral_grade: str | None = None) -> None:
+                ...
+        class Fake:
+            def m(self, grade: str | None = None) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("'spectral_grade'" in m for m in diff),
+            f"Expected drift for renamed param, got: {diff}")
+
+    def test_required_becoming_optional_is_caught(self):
+        class Real:
+            def m(self, release_id: str) -> None:
+                ...
+        class Fake:
+            def m(self, release_id: str = "") -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("release_id" in m and "optional" in m for m in diff),
+            f"Expected requiredness drift, got: {diff}")
+
+    def test_clean_signature_yields_no_diff(self):
+        class Real:
+            def m(self, request_id: int, flag: bool = False) -> None:
+                ...
+        class Fake:
+            def m(self, request_id: int, flag: bool = False) -> None:
+                ...
+        self.assertEqual(_diff_signatures(Real, Fake), [])
+
+    def test_star_kwargs_on_real_still_requires_fake_kwargs(self):
+        class Real:
+            def m(self, **extra: Any) -> None:
+                ...
+        class Fake:
+            def m(self) -> None:  # no **kwargs
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("**extra" in m for m in diff),
+            f"Expected drift when fake drops **kwargs, got: {diff}")
