@@ -409,6 +409,18 @@ class BeetsDB:
         album_id = self._lookup_album_id(mb_release_id)
         if album_id is None:
             return None
+        return self.get_album_path_by_id(album_id)
+
+    def get_album_path_by_id(self, album_id: int) -> Optional[str]:
+        """Get an album's directory by beets numeric id. Returns None if not found.
+
+        Used for post-move path lookups where the caller has the
+        album's PK but not its MBID — sibling canonicalization in
+        ``harness/import_one.py::_canonicalize_siblings`` uses this
+        to resolve each sibling's new path so ``fix_library_modes``
+        can repair permissions on any freshly-created disambiguated
+        directory (issue #84, Codex PR #131 round 5 P3).
+        """
         row = self._conn.execute(
             "SELECT path FROM items WHERE album_id = ? LIMIT 1",
             (album_id,)

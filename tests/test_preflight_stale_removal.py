@@ -118,12 +118,16 @@ class TestCanonicalizeSiblings(unittest.TestCase):
     @patch("harness.import_one.subprocess.run")
     def test_noop_when_no_siblings(self, mock_run: MagicMock) -> None:
         from harness import import_one
-        import_one._canonicalize_siblings(frozenset([]))
+        beets = MagicMock()
+        import_one._canonicalize_siblings(frozenset([]), beets)
         mock_run.assert_not_called()
+        beets.get_album_path_by_id.assert_not_called()
 
+    @patch("harness.import_one.fix_library_modes")
     @patch("harness.import_one.subprocess.run")
     def test_runs_beet_move_album_mode_id_selector(
-            self, mock_run: MagicMock) -> None:
+            self, mock_run: MagicMock,
+            mock_fix: MagicMock) -> None:
         """Each sibling move MUST use ``beet move -a id:<N>``.
 
         ``-a`` puts beets in album mode so ``id:<N>`` matches
@@ -133,16 +137,26 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         """
         from harness import import_one
         mock_run.return_value = MagicMock(returncode=0, stderr="")
+        beets = MagicMock()
+        beets.get_album_path_by_id.return_value = (
+            "/Beets/Shearwater/2006 - Palo Santo [2006]")
 
-        import_one._canonicalize_siblings(frozenset([10314]))
+        import_one._canonicalize_siblings(frozenset([10314]), beets)
 
         mock_run.assert_called_once()
         argv = mock_run.call_args.args[0]
         self.assertEqual(argv[1:], ["move", "-a", "id:10314"])
+        # P3 round 5: post-move perm repair on the sibling's new
+        # path — issue #84 ``beet move`` can create fresh
+        # disambiguated dirs at 0o755 even with UMask=0000.
+        mock_fix.assert_called_once_with(
+            "/Beets/Shearwater/2006 - Palo Santo [2006]")
 
+    @patch("harness.import_one.fix_library_modes")
     @patch("harness.import_one.subprocess.run")
     def test_handles_discogs_sibling_via_album_id(
-            self, mock_run: MagicMock) -> None:
+            self, mock_run: MagicMock,
+            mock_fix: MagicMock) -> None:
         """Regression for Codex PR #131 round 3 P3.
 
         Pre-fix, siblings were identified by ``mb_albumid`` — empty
@@ -154,20 +168,29 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         """
         from harness import import_one
         mock_run.return_value = MagicMock(returncode=0, stderr="")
+        beets = MagicMock()
+        beets.get_album_path_by_id.return_value = (
+            "/Beets/Discogs/Artist/Album [12856590]")
 
-        import_one._canonicalize_siblings(frozenset([12856590]))
+        import_one._canonicalize_siblings(frozenset([12856590]), beets)
 
         mock_run.assert_called_once()
         argv = mock_run.call_args.args[0]
         self.assertEqual(argv[1:], ["move", "-a", "id:12856590"])
+        mock_fix.assert_called_once_with(
+            "/Beets/Discogs/Artist/Album [12856590]")
 
+    @patch("harness.import_one.fix_library_modes")
     @patch("harness.import_one.subprocess.run")
     def test_continues_past_per_sibling_failure(
-            self, mock_run: MagicMock) -> None:
+            self, mock_run: MagicMock,
+            mock_fix: MagicMock) -> None:
         """Timeout on sibling 1 must not stop sibling 2 moving.
 
         Import is already on disk — per-sibling failures only affect
-        that sibling's cosmetic path. Keep going.
+        that sibling's cosmetic path. Keep going. ``fix_library_modes``
+        only runs on the sibling that moved cleanly — we don't repair
+        perms for a failed move (the sibling's path didn't change).
         """
         from harness import import_one
         # Sibling 1 times out, sibling 2 exits clean.
@@ -175,10 +198,34 @@ class TestCanonicalizeSiblings(unittest.TestCase):
             sp.TimeoutExpired(cmd=["beet", "move"], timeout=120),
             MagicMock(returncode=0, stderr=""),
         ]
+        beets = MagicMock()
+        # Any valid path for the sibling that moved clean.
+        beets.get_album_path_by_id.return_value = "/Beets/X/Y [2006]"
 
-        import_one._canonicalize_siblings(frozenset([10314, 10315]))
+        # frozenset ordering isn't deterministic; test by asserting
+        # counts, not which specific id got which outcome.
+        import_one._canonicalize_siblings(frozenset([10314, 10315]), beets)
 
         self.assertEqual(mock_run.call_count, 2)
+        # Exactly one of the two moves succeeded → exactly one perm repair.
+        self.assertEqual(mock_fix.call_count, 1)
+
+    @patch("harness.import_one.fix_library_modes")
+    @patch("harness.import_one.subprocess.run")
+    def test_skips_fix_library_modes_when_path_missing(
+            self, mock_run: MagicMock,
+            mock_fix: MagicMock) -> None:
+        """If the sibling was deleted out-of-band between move and
+        path lookup, ``get_album_path_by_id`` returns None — the
+        perm repair call is skipped (no path to chmod)."""
+        from harness import import_one
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        beets = MagicMock()
+        beets.get_album_path_by_id.return_value = None
+
+        import_one._canonicalize_siblings(frozenset([10314]), beets)
+
+        mock_fix.assert_not_called()
 
 
 if __name__ == "__main__":
