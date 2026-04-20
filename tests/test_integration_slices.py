@@ -1317,18 +1317,26 @@ class TestReleaseLockContention(unittest.TestCase):
             id=42, mb_release_id=self.MBID, status="downloading"))
         return db
 
-    def test_contention_returns_early_without_spawning_subprocess(self):
+    def test_auto_contention_resets_request_to_wanted(self):
+        """Regression for review-round C1 on this commit. Auto path
+        contention MUST NOT leave the request at ``status='downloading'``:
+        the outer ``_run_completed_processing`` (lib/download.py) would
+        observe ``status=='downloading'`` + ``process_completed_album``
+        returning True and flip the request to ``imported`` even though
+        the subprocess never ran. That's a silent data-inconsistency
+        bug — the album is marked done while still sitting in /Incoming.
+
+        Fix: on contention in the auto path (scenario not in
+        FORCE_MANUAL_SCENARIOS), ``dispatch_import_core`` transitions
+        the request back to ``wanted`` (so the outer flip-check fails)
+        and cleans the staged dir (so next cycle can re-mkdir it).
+        """
         from lib.import_dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
         db = self._make_db()
-        # Simulate: another session already holds the RELEASE lock for
-        # this MBID. The REQUEST lock (not taken at this seam — it lives
-        # in dispatch_import_from_db) would still be free if we asked,
-        # but here dispatch_import_core only touches the release one.
         def lock_result(namespace: int, key: int) -> bool:
-            # ``False`` exactly for the release lock on this MBID.
             if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
                     and key == release_id_to_lock_key(self.MBID)):
                 return False
@@ -1348,6 +1356,7 @@ class TestReleaseLockContention(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
                     distance=0.05,
+                    # Auto-import scenario — NOT FORCE_MANUAL_SCENARIOS.
                     scenario="strong_match",
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
@@ -1359,20 +1368,85 @@ class TestReleaseLockContention(unittest.TestCase):
 
         # Subprocess NEVER fires.
         ext.run.assert_not_called()
-        # No rejection or success row — deferred retry, untouched state.
+        # No download_log row — deferred retry, not a failure.
         self.assertEqual(db.download_logs, [])
-        # Request status unchanged.
-        self.assertEqual(db.request(42)["status"], "downloading")
-        # Outcome carries the "try again shortly" signal to the caller.
+        # **Critical**: request was reset to 'wanted'. Without this,
+        # the outer _run_completed_processing in lib/download.py flips
+        # to 'imported' based on process_completed_album's True return,
+        # and the album is marked done without importing.
+        self.assertEqual(db.request(42)["status"], "wanted")
+        # Staged dir cleanup ran (so the next cycle can re-mkdir).
+        ext.cleanup.assert_called_once_with(tmpdir)
+        # Outcome still carries the "try again shortly" signal.
         self.assertFalse(outcome.success)
         self.assertIn("Another import is already in progress",
                       outcome.message)
-        # Lock was attempted exactly once, on the RELEASE namespace at
-        # the hashed MBID key.
+        # Lock was attempted on the RELEASE namespace at the hashed
+        # MBID key.
         self.assertIn(
             (ADVISORY_LOCK_NAMESPACE_RELEASE,
              release_id_to_lock_key(self.MBID)),
             db.advisory_lock_calls)
+
+    def test_force_import_contention_preserves_request_status(self):
+        """Force/manual path contention must NOT reset status to 'wanted'
+        — the caller (web UI, CLI) surfaces the "try again shortly"
+        message and the request stays in whatever status it was in
+        (typically 'imported' for force-import, since force-import runs
+        on albums that were rejected from beets but have files on disk).
+
+        This is the complement of ``test_auto_contention_resets_request_to_wanted``:
+        the status-reset branch is gated on scenario NOT in
+        FORCE_MANUAL_SCENARIOS, so force/manual leave the row alone.
+        """
+        from lib.import_dispatch import dispatch_import_core
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                     release_id_to_lock_key)
+
+        db = FakePipelineDB()
+        # Force-import typically runs against an 'imported' or 'manual'
+        # row; pick 'imported' as the representative starting state.
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID, status="imported"))
+        def lock_result(namespace: int, key: int) -> bool:
+            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                    and key == release_id_to_lock_key(self.MBID)):
+                return False
+            return True
+        db.set_advisory_lock_result(lock_result)
+
+        dl_info = DownloadInfo(username="user1")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext:
+                outcome = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID,
+                    request_id=42,
+                    label="Test Artist - Force Import",
+                    force=True,
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="force_import",
+                    files=[],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Status untouched — force/manual caller surfaces the message.
+        self.assertEqual(db.request(42)["status"], "imported")
+        # Staging cleanup MUST NOT run for force/manual — the path is
+        # the user's failed_imports/ copy of the source, not a
+        # disposable /Incoming dir. Deleting it would destroy the
+        # user's only copy (issue #89 equivalent).
+        ext.cleanup.assert_not_called()
+        self.assertFalse(outcome.success)
+        self.assertIn("Another import is already in progress",
+                      outcome.message)
 
     def test_happy_path_acquires_lock_keyed_on_mbid_and_runs_import(self):
         from lib.import_dispatch import dispatch_import_core

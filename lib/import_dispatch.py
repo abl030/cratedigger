@@ -574,8 +574,46 @@ def dispatch_import_core(
             logger.warning(
                 f"{mode} SKIPPED: {label} — release lock held by "
                 f"another process (mbid={mb_release_id})")
-            # No rejection row: this is a deferred retry, not a
-            # failure. The caller's state is untouched.
+            # Auto-path contention trap: ``_run_completed_processing``
+            # (lib/download.py) observes status=='downloading' +
+            # ``process_completed_album`` returning True → transitions
+            # the request to 'imported' even though no import ran.
+            # Adversarial-review finding C1 on this commit. The fix:
+            # when the request is 'downloading' (auto path; force/
+            # manual never hits this column's active-download branch),
+            # reset it to 'wanted' so the outer transition check sees
+            # a non-downloading row and skips the flip. The other
+            # process holding the release lock will finish the import;
+            # the next cycle re-searches, finds the album already in
+            # beets, and the request gets marked imported via the
+            # ``preflight_existing`` path — no re-download needed.
+            #
+            # Clean up the staged dir so the next cycle's
+            # ``process_completed_album`` can re-create
+            # ``import_folder_fullpath`` without ``FileExistsError`` on
+            # the ``os.mkdir`` at download.py:188.
+            #
+            # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
+            # do NOT reset — their caller receives the DispatchOutcome
+            # message and surfaces "try again shortly" to the user.
+            if scenario not in FORCE_MANUAL_SCENARIOS:
+                try:
+                    req_row = db.get_request(request_id)
+                    if req_row and req_row.get("status") == "downloading":
+                        _cleanup_staged_dir(path)
+                        apply_transition(
+                            db, request_id, "wanted",
+                            from_status="downloading",
+                            attempt_type="download")
+                        logger.info(
+                            f"{mode}: reset request {request_id} to "
+                            "'wanted' after release-lock contention; "
+                            "next cycle will re-search (the other "
+                            "process should have finished by then)")
+                except Exception:
+                    logger.exception(
+                        f"{mode}: failed to reset deferred request "
+                        f"{request_id} after release-lock contention")
             return DispatchOutcome(
                 success=False,
                 message=("Another import is already in progress for "

@@ -1358,6 +1358,24 @@ class TestReleaseIdToLockKey(unittest.TestCase):
         k2 = pipeline_db.release_id_to_lock_key(mbid)
         self.assertEqual(k1, k2)
 
+    def test_whitespace_is_stripped_before_hashing(self) -> None:
+        """Legacy DB rows sometimes carry stray leading/trailing
+        whitespace on ``mb_release_id``. Two processes that normalise
+        differently would otherwise hash to different keys and the
+        advisory lock would silently fail to serialise them. ``.strip()``
+        before hashing closes that gap."""
+        from lib.pipeline_db import release_id_to_lock_key
+        mbid = "12856590"
+        self.assertEqual(
+            release_id_to_lock_key(mbid),
+            release_id_to_lock_key(f" {mbid}"))
+        self.assertEqual(
+            release_id_to_lock_key(mbid),
+            release_id_to_lock_key(f"{mbid}\t"))
+        self.assertEqual(
+            release_id_to_lock_key(mbid),
+            release_id_to_lock_key(f"  {mbid}\n"))
+
 
 @requires_postgres
 class TestAdvisoryLock(unittest.TestCase):
