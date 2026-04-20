@@ -46,7 +46,7 @@ import subprocess as sp
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
-from lib.util import beets_subprocess_env
+from lib.util import beet_bin, beets_subprocess_env
 
 if TYPE_CHECKING:
     from lib.beets_db import BeetsDB
@@ -106,7 +106,7 @@ def _run_remove_selector(selector: str) -> SelectorFailure | None:
     """
     try:
         proc = sp.run(
-            ["beet", "remove", "-d", selector],
+            [beet_bin(), "remove", "-d", selector],
             capture_output=True, text=True, timeout=30,
             env=beets_subprocess_env(),
         )
@@ -135,6 +135,27 @@ def _run_remove_selector(selector: str) -> SelectorFailure | None:
             detail=f"rc={proc.returncode}: {msg}")
 
     return None
+
+
+def remove_album_by_beets_id(album_id: int) -> SelectorFailure | None:
+    """Remove a single album by its beets numeric primary key.
+
+    Narrower than ``remove_album_by_selectors``: the ``id:<N>``
+    selector is a ``SELECT ... WHERE id = ?`` — a beets numeric PK
+    is unique by construction, so this cannot match any album but
+    the one. Used by the harness to remove a stale same-MBID entry
+    AFTER a successful upgrade import: during the import both the
+    old and new albums briefly coexist (new is imported to a
+    disambiguated path via ``%aunique``), so we can't scope the
+    removal by MBID. Matching by beets id is the only selector
+    narrow enough to be safe — ``mb_albumid:<uuid>`` would match
+    both.
+
+    Returns ``None`` on clean exit, or a typed ``SelectorFailure``.
+    Caller decides how to surface a failure (log + proceed, or
+    escalate). No pipeline-DB coupling.
+    """
+    return _run_remove_selector(f"id:{album_id}")
 
 
 def remove_album_by_selectors(
