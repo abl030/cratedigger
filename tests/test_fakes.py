@@ -409,6 +409,26 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         rid = db.add_request("X", "Y", source="request")
         self.assertEqual(rid, 43)
 
+    def test_sort_mixes_seeded_iso_strings_and_added_datetimes(self):
+        """``make_request_row`` seeds ISO strings, ``add_request``
+        stores datetimes — the fake must normalise them so sorts
+        don't raise ``TypeError`` on mixed input (codex R2)."""
+        db = FakePipelineDB()
+        # Seeded: ISO string timestamps.
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        # Added: datetime timestamps.
+        db.add_request("Artist", "Album", source="request")
+        # Both of these would crash on ``str < datetime`` without
+        # normalisation.
+        rows = db.get_by_status("wanted")
+        self.assertEqual(len(rows), 2)
+        # Populate download history for both then ensure ``get_recent``
+        # also sorts through the mixed shapes without raising.
+        db.log_download(1, outcome="success")
+        db.log_download(2, outcome="success")
+        recent = db.get_recent()
+        self.assertEqual({r["id"] for r in recent}, {1, 2})
+
     def test_delete_request_removes_row_and_tracks(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
@@ -416,6 +436,27 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         db.delete_request(1)
         self.assertNotIn(1, db._requests)  # type: ignore[attr-defined]
         self.assertEqual(db.get_tracks(1), [])
+
+    def test_delete_request_cascades_to_child_tables(self):
+        """Real SQL has ``ON DELETE CASCADE`` from album_requests to
+        download_log, search_log, and source_denylist. The fake must
+        prune those too so tests cannot observe an impossible state
+        where orphaned child rows survive their parent (codex R2)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.log_download(1, outcome="success")
+        db.log_download(2, outcome="success")
+        db.log_search(1, outcome="found")
+        db.log_search(2, outcome="no_match")
+        db.add_denylist(1, "badguy")
+        db.add_denylist(2, "other")
+
+        db.delete_request(1)
+
+        self.assertEqual([e.request_id for e in db.download_logs], [2])
+        self.assertEqual([e.request_id for e in db.search_logs], [2])
+        self.assertEqual([e.request_id for e in db.denylist], [2])
 
     def test_get_wanted_prioritizes_new_and_respects_limit(self):
         db = FakePipelineDB()
@@ -467,6 +508,24 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
                          ["rejected", "failed"])
         # Joined request columns present.
         self.assertEqual(all_rows[0]["album_title"], "Album A")
+
+    def test_get_log_surfaces_auxiliary_columns(self):
+        """Real ``get_log`` returns ``dl.*`` — every ``log_download``
+        column must be present, including fields parked in
+        ``entry.extra`` (bitrate, spectral_grade, final_format, etc.)
+        Codex R2: callers that feed these rows into LogEntry.from_row
+        would otherwise classify incomplete data (codex R2)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.log_download(
+            1, outcome="success",
+            bitrate=256, spectral_grade="genuine",
+            final_format="mp3 v0", actual_min_bitrate=245)
+        rows = db.get_log()
+        self.assertEqual(rows[0]["bitrate"], 256)
+        self.assertEqual(rows[0]["spectral_grade"], "genuine")
+        self.assertEqual(rows[0]["final_format"], "mp3 v0")
+        self.assertEqual(rows[0]["actual_min_bitrate"], 245)
 
     def test_get_by_status_sorts_by_created_at(self):
         db = FakePipelineDB()
