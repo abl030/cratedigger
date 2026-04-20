@@ -113,7 +113,8 @@ FORCE/MANUAL (dispatch_import_from_db)
 The auto path only holds RELEASE, and acquires it at
 `_handle_valid_result` *before* `stage_to_ai` runs (Codex PR #136 R4
 P1 — see below). `dispatch_import_core`'s inner acquisition of the
-same key is a no-op reentrant acquire:
+same key — reached via `dispatch_import` (the auto-path orchestration
+wrapper in `lib/import_dispatch.py`) — is a no-op reentrant acquire:
 
 ```
 AUTO (_handle_valid_result in lib/download.py)
@@ -177,11 +178,19 @@ real one. The design keeps `dispatch_import_core`'s lock scope correct
 for the force/manual path (where it IS the first acquisition) without
 double-gating the auto path.
 
-The pipeline runs on a single `PipelineDB` instance per process —
-every call through `advisory_lock()` uses the same connection. If a
-future change introduces a second `PipelineDB` instance in the same
-process, cross-instance reentrancy no longer applies; revisit the
-ordering rules.
+**Scope**: reentrancy is per-session, not per-process. A single
+Cratedigger process does hold multiple `PipelineDB` instances in
+practice — the auto pipeline has `phase1_source` and `phase2_source`
+each owning their own session, `album_source.py` lazily opens another,
+and the web server opens yet one more. Every `advisory_lock()` call
+must go through the same `PipelineDB` instance as its matching outer
+acquire for the reentrant no-op to apply. The auto path and the
+force/manual path both thread the same
+`ctx.pipeline_db_source._get_db()` / `db` reference from the outer
+acquire down into `dispatch_import_core`, so they stay within one
+session. If a future change opens a fresh `PipelineDB` for the inner
+acquire, the second `pg_try_advisory_lock` comes from a different
+session and returns False — revisit the ordering rules.
 
 ## Call-site index
 
@@ -209,24 +218,45 @@ To add a new lock:
 3. If the new lock can be held concurrently with IMPORT or RELEASE,
    decide the ordering and document it here. Add a deadlock analysis
    in the commit message.
-4. Add a row to the **Namespaces** and **Call-site index** tables in
+4. Audit every `PipelineDB(...)` construction site the acquire can
+   reach. Advisory locks are **session-scoped**; if the caller runs
+   through a different `PipelineDB` instance than its matching outer
+   acquire, the inner `pg_try_advisory_lock` comes from a different
+   session and returns False. The auto path's reentrant no-op works
+   only because the same `ctx.pipeline_db_source` flows through the
+   whole chain; a new lock that spans web + CLI + auto needs a
+   design-level decision.
+5. Add a row to the **Namespaces** and **Call-site index** tables in
    this doc.
-5. Every acquire site must carry a comment referencing this doc
+6. Every acquire site must carry a comment referencing this doc
    (`See docs/advisory-locks.md.`).
-6. Add a test in `tests/test_pipeline_db.py`'s `TestAdvisoryLock`
+7. Add a test in `tests/test_pipeline_db.py`'s `TestAdvisoryLock`
    class exercising the new namespace. `FakePipelineDB` already
    covers the contract side via `advisory_lock_calls` and
-   `set_advisory_lock_result`.
+   `set_advisory_lock_result` (the fake records calls regardless of
+   namespace — no fake update needed unless the new namespace
+   requires per-key deterministic behaviour in some slice test, in
+   which case extend `set_advisory_lock_result`'s callable form).
+8. Verify on-host before calling it shipped. Unit tests prove the
+   semantics; the cross-process story (race with the 5-minute timer,
+   race with a web force-import) only manifests in a running
+   pipeline. Watch `pg_locks` during a deliberate race if you are
+   unsure. `nix build .#checks.x86_64-linux.moduleVm` does NOT
+   exercise cross-process lock behaviour — it's a smoke test for
+   module wiring only.
 
 ## Test coverage
 
 - `tests/test_pipeline_db.py::TestAdvisoryLock` — real PG semantics:
   same-key blocking across sessions, different-key no-contention,
-  cross-namespace same-key isolation, reentrancy within a session.
-- `tests/test_integration_slices.py` — release-lock contention on
-  the auto path (`TestReleaseLockContentionDefers...`) and the
-  force/manual path.
+  cross-namespace same-key isolation, exception-safe release,
+  same-session reentrancy.
+- `tests/test_integration_slices.py::TestReleaseLockContention`
+  and `::TestHandleValidResultReleaseLock` — release-lock contention
+  on the auto path at `_handle_valid_result` and the
+  `dispatch_import_core` inner site.
 - `tests/test_dispatch_from_db.py` — IMPORT-lock double-acquisition
-  short-circuits.
+  short-circuits without writing a `download_log` row, running a
+  subprocess, transitioning status, or firing cooldowns (fast-fail).
 - `tests/test_fakes.py` — `FakePipelineDB.advisory_lock` records calls
   and lets tests flip acquisition results per-`(namespace, key)`.

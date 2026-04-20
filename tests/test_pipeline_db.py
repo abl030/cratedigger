@@ -1442,6 +1442,34 @@ class TestAdvisoryLock(unittest.TestCase):
                     ADVISORY_LOCK_NAMESPACE_RELEASE, 12345) as a2:
                 self.assertTrue(a2)
 
+    def test_reentrant_within_same_session(self):
+        """``docs/advisory-locks.md`` depends on within-session
+        reentrancy: the auto path's outer ``_handle_valid_result``
+        acquire and ``dispatch_import_core``'s inner acquire on the
+        same key both succeed because they share a session.
+
+        Two acquires from the same session both return True; the inner
+        release must be a no-op (the outer context still prevents a
+        second session from acquiring). Only after the outer context
+        releases does a second session succeed.
+        """
+        with self.db1.advisory_lock(self.NS, 12345) as outer:
+            self.assertTrue(outer)
+            with self.db1.advisory_lock(self.NS, 12345) as inner:
+                self.assertTrue(inner)
+                # Inner release happens on __exit__; outer still holds.
+                # Second session must still be locked out.
+                with self.db2.advisory_lock(self.NS, 12345) as other:
+                    self.assertFalse(other)
+            # Back in the outer context after the inner release — the
+            # second session must STILL be blocked (outer still holds).
+            with self.db2.advisory_lock(self.NS, 12345) as other:
+                self.assertFalse(other)
+        # After the outer context releases, the second session can
+        # finally acquire.
+        with self.db2.advisory_lock(self.NS, 12345) as other:
+            self.assertTrue(other)
+
 
 @requires_postgres
 class TestGetWrongMatches(unittest.TestCase):
