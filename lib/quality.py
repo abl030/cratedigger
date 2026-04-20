@@ -1317,6 +1317,31 @@ class SpectralDetail:
 from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 
+@dataclass(frozen=True)
+class MovedSibling:
+    """Issue #132 P2 / issue #133: record of a sibling album whose
+    ``beet move`` successfully relocated its files during post-import
+    canonicalization.
+
+    ``album_id`` is the beets numeric primary key for the sibling.
+    ``new_path`` is the on-disk directory after the move.
+    ``mb_albumid`` / ``discogs_albumid`` are the two columns from
+    beets' ``albums`` table at emit time — the harness resolves them
+    so the dispatcher doesn't need a second beets DB connection when
+    propagating the new path to the pipeline DB.
+
+    Every field matters for propagation: if the sibling's release id
+    matches a tracked ``album_requests`` row, its ``imported_path``
+    gets updated so the UI stops pointing at the pre-move directory.
+    Untracked siblings (no matching pipeline row) are no-ops at the
+    dispatcher — propagation is best-effort.
+    """
+    album_id: int
+    new_path: str
+    mb_albumid: str = ""
+    discogs_albumid: str = ""
+
+
 @dataclass
 class PostflightInfo:
     """Beets post-import verification data."""
@@ -1332,12 +1357,21 @@ class PostflightInfo:
     # ``disambiguated=True`` (clean success) or that no move was
     # attempted (no duplicate kept).
     disambiguation_failure: Optional[DisambiguationFailure] = None
+    # Issue #132 P2 / issue #133: siblings canonicalized post-import.
+    # Empty for non-``kept_duplicate`` imports; populated when the
+    # harness's ``_canonicalize_siblings`` moved one or more siblings
+    # to re-evaluate ``%aunique`` on their paths. The dispatcher
+    # propagates each entry's ``new_path`` to the pipeline DB (the
+    # tracked request row, if any, for that sibling's release).
+    moved_siblings: list[MovedSibling] = field(default_factory=list)
 
 
 def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
-    """Construct PostflightInfo from a dict, handling the nested
-    ``disambiguation_failure`` (issue #127) and any other future nested
-    fields. Old rows missing the field default to ``None``.
+    """Construct PostflightInfo from a dict, handling nested fields
+    (``disambiguation_failure`` from issue #127, ``moved_siblings``
+    from issue #132 P2 / #133). Old rows missing a field default per
+    the dataclass — ``disambiguation_failure=None``,
+    ``moved_siblings=[]``.
     """
     if not d:
         return PostflightInfo()
@@ -1345,6 +1379,12 @@ def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
     df_d = pf_d.pop("disambiguation_failure", None)
     if isinstance(df_d, dict):
         pf_d["disambiguation_failure"] = DisambiguationFailure(**df_d)
+    ms_list = pf_d.pop("moved_siblings", None)
+    if isinstance(ms_list, list):
+        pf_d["moved_siblings"] = [
+            MovedSibling(**s) if isinstance(s, dict) else s
+            for s in ms_list
+        ]
     return PostflightInfo(**pf_d)
 
 

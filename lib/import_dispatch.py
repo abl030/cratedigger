@@ -353,6 +353,61 @@ def _cleanup_staged_dir(dest: str) -> None:
             logger.info(f"  Cleaned up empty artist dir: {parent}")
 
 
+def _propagate_moved_siblings(
+    db: "PipelineDB",
+    ir: ImportResult,
+    *,
+    label: str,
+) -> None:
+    """Update ``album_requests.imported_path`` for every sibling the
+    harness canonicalized post-import (issue #132 P2 / #133).
+
+    When beets' ``%aunique`` re-evaluates on a kept-duplicate import,
+    sibling albums whose paths shifted (e.g. ``/Palo Santo/`` →
+    ``/Palo Santo [2006]/``) have new on-disk locations — but if
+    those siblings are also tracked pipeline requests, their
+    ``album_requests.imported_path`` column still points at the
+    pre-move directory, and the web UI's "Imported to" label + the
+    ban-source button lie about where the files live.
+
+    The harness emits ``PostflightInfo.moved_siblings`` per sibling
+    whose ``beet move`` succeeded, carrying the beets album id, the
+    new path, and the pre-resolved ``(mb_albumid, discogs_albumid)``
+    columns from beets. This function translates each record into a
+    ``PipelineDB.update_imported_path_by_release_id`` call. Updates
+    are best-effort: a sibling not tracked in the pipeline DB is a
+    silent no-op (rowcount=0); a DB exception on one sibling is
+    logged and does not abort the rest.
+
+    No-op when ``moved_siblings`` is empty — the common case
+    (non-kept-duplicate imports).
+    """
+    if not ir.postflight.moved_siblings:
+        return
+    for sib in ir.postflight.moved_siblings:
+        try:
+            rows = db.update_imported_path_by_release_id(
+                mb_albumid=sib.mb_albumid,
+                discogs_albumid=sib.discogs_albumid,
+                new_path=sib.new_path,
+            )
+        except Exception:
+            logger.exception(
+                f"{label}: failed to propagate imported_path for "
+                f"sibling album_id={sib.album_id} "
+                f"(mb={sib.mb_albumid or '∅'}, "
+                f"discogs={sib.discogs_albumid or '∅'}) — "
+                "pipeline DB row will show pre-move path until next "
+                "upgrade or manual re-tag")
+            continue
+        if rows:
+            logger.info(
+                f"{label}: propagated imported_path → "
+                f"{sib.new_path} for sibling album_id={sib.album_id} "
+                f"({rows} pipeline row(s) updated)")
+        # rows == 0 is the common case (sibling not tracked) — silent.
+
+
 def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
     """Extract audio quality metadata from album files for download logging."""
     files = album_data.files
@@ -674,6 +729,7 @@ def dispatch_import_core(
                 outcome_message = f"No JSON result (rc={result.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
+                _propagate_moved_siblings(db, ir, label=label)
                 decision = ir.decision or "unknown"
                 action = dispatch_action(decision)
                 file_list = files or []

@@ -140,6 +140,63 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertTrue(r.postflight.disambiguated)
         self.assertIsNone(r.postflight.disambiguation_failure)
 
+    def test_moved_siblings_roundtrip(self):
+        """Issue #132 P2 / issue #133: ``PostflightInfo.moved_siblings``
+        survives ImportResult JSON round-trip. Harness emits the list
+        for kept-duplicate imports so ``dispatch_import_core`` can
+        propagate each sibling's new on-disk path to the pipeline DB.
+        """
+        from lib.quality import MovedSibling, PostflightInfo
+        r = ImportResult(
+            exit_code=0, decision="import",
+            postflight=PostflightInfo(
+                beets_id=42, track_count=11,
+                imported_path="/Beets/Artist/Album [2007]",
+                disambiguated=True,
+                moved_siblings=[
+                    MovedSibling(
+                        album_id=10314,
+                        new_path="/Beets/Artist/Album [2006]",
+                        mb_albumid="aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                        discogs_albumid=""),
+                    MovedSibling(
+                        album_id=10315,
+                        new_path="/Beets/Artist/Album [2008]",
+                        mb_albumid="",
+                        discogs_albumid="12856590"),
+                ]))
+        r2 = ImportResult.from_json(r.to_json())
+        self.assertEqual(len(r2.postflight.moved_siblings), 2)
+        self.assertEqual(r2.postflight.moved_siblings[0].album_id, 10314)
+        self.assertEqual(
+            r2.postflight.moved_siblings[0].mb_albumid,
+            "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
+        self.assertEqual(
+            r2.postflight.moved_siblings[0].new_path,
+            "/Beets/Artist/Album [2006]")
+        self.assertEqual(r2.postflight.moved_siblings[1].album_id, 10315)
+        self.assertEqual(
+            r2.postflight.moved_siblings[1].discogs_albumid, "12856590")
+
+    def test_postflight_legacy_row_without_moved_siblings_field(self):
+        """Old download_log rows predating issue #133 have no
+        ``moved_siblings`` key. Deserialization must default to an
+        empty list, not raise."""
+        d = {
+            "version": 2,
+            "exit_code": 0,
+            "decision": "import",
+            "postflight": {
+                "beets_id": 42,
+                "track_count": 11,
+                "imported_path": "/Beets/Artist/Album",
+                "disambiguated": True,
+                # NO moved_siblings key.
+            },
+        }
+        r = ImportResult.from_dict(d)
+        self.assertEqual(r.postflight.moved_siblings, [])
+
     def test_postflight_pre_133_failure_row_without_selector_field(self):
         """Issue #133 back-compat: old download_log rows serialized
         AFTER #127 but BEFORE #133 have ``disambiguation_failure``

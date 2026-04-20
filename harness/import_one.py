@@ -48,9 +48,9 @@ from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
 from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, ImportResult, PostflightInfo,
-                         QualityRankConfig, comparison_format_hint,
-                         determine_verified_lossless,
+                         AudioQualityMeasurement, ImportResult, MovedSibling,
+                         PostflightInfo, QualityRankConfig,
+                         comparison_format_hint, determine_verified_lossless,
                          import_quality_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
@@ -870,7 +870,9 @@ def _remove_stale_by_id_logged(stale_id: int) -> BeetsOpFailure | None:
 
 
 def _canonicalize_siblings(
-    sibling_album_ids: frozenset[int], beets: BeetsDB) -> None:
+    sibling_album_ids: frozenset[int],
+    beets: BeetsDB,
+) -> list[MovedSibling]:
     """Re-run ``beet move`` on each sibling album id after a kept-duplicate import.
 
     When beets' ``%aunique`` disambiguates the new album (adding a
@@ -895,26 +897,36 @@ def _canonicalize_siblings(
     every caller needs it — this function used to call
     ``fix_library_modes`` itself, issue #133 moved it into the op.
 
-    KNOWN LIMITATION (Codex PR #131 round 6 P2): this helper moves
-    sibling files on disk but does NOT update
-    ``album_requests.imported_path`` for those siblings in the
-    pipeline DB. If a sibling was tracked as a previous pipeline
-    request, its ``imported_path`` will point at the pre-move
-    location until a future event (next upgrade, manual re-tag)
-    updates it. The pipeline UI will show the wrong path for that
-    request in the interim. Cross-service plumbing — the harness
-    runs as a subprocess without a shared write handle to the
-    pipeline DB for arbitrary request ids — and is tracked as a
-    follow-up separate from the Palo Santo blast-radius fix.
+    Returns a list of ``MovedSibling`` records — one per sibling that
+    successfully moved and had a resolvable post-move path — closing
+    the KNOWN LIMITATION from Codex PR #131 round 6 P2 (issue #132 P2).
+    Each record carries the beets numeric id, the new directory path,
+    AND the ``(mb_albumid, discogs_albumid)`` columns resolved from
+    beets at emit time. The parent dispatch path
+    (``lib.import_dispatch.dispatch_import_core``) reads this list and
+    calls ``PipelineDB.update_imported_path_by_release_id(...)`` for
+    each, so any tracked ``album_requests`` row for a sibling release
+    gets its ``imported_path`` updated — the pipeline UI no longer
+    shows a pre-move directory that doesn't exist.
+
+    Resolving the beets release-id columns HERE (inside the harness
+    subprocess, which already has a beets DB connection) avoids making
+    the parent dispatch open a second beets DB handle for the same
+    data. Siblings without any release_id populated in beets are still
+    included — the dispatch-side update is a no-op when both are empty.
 
     Never raises — ``move_album`` returns a typed ``BeetsOpFailure``
     on any subprocess error. Per-sibling failures are logged but do
     not abort the remaining moves; the import itself is already on
     disk and any failed sibling move just means that sibling stays
     at its old path until something re-runs ``beet move`` on it.
+    Failed moves DO NOT appear in the returned list — the sibling's
+    pipeline row is already correct for its pre-move state, so no
+    propagation is needed.
     """
+    moved: list[MovedSibling] = []
     if not sibling_album_ids:
-        return
+        return moved
     _log(f"[CANONICALIZE] Re-running beet move -a for "
          f"{len(sibling_album_ids)} sibling album id(s) so %aunique "
          "stays symmetric")
@@ -934,9 +946,20 @@ def _canonicalize_siblings(
             # still shows per-sibling perm repair. Operators greppable
             # for 'fix_library_modes' and for 'beet move' can
             # cross-reference the two in post-hoc debugging.
+            mb_albumid, discogs_albumid = (
+                beets.get_release_ids_by_album_id(aid))
+            moved.append(MovedSibling(
+                album_id=aid,
+                new_path=result.new_path,
+                mb_albumid=mb_albumid,
+                discogs_albumid=discogs_albumid))
             _log(f"  [CANONICALIZE] moved sibling id:{aid} → "
                  f"{result.new_path}; fix_library_modes(...) ran "
-                 "inside move_album")
+                 "inside move_album; release_ids "
+                 f"(mb={mb_albumid or '∅'}, "
+                 f"discogs={discogs_albumid or '∅'}) "
+                 "emitted for pipeline DB propagation")
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -1547,7 +1570,13 @@ def main():
         # empty but albums.id is always present). Per-sibling
         # ``fix_library_modes`` runs inside the helper on any row
         # whose path changed (issue #84, Codex PR #131 round 5 P3).
-        _canonicalize_siblings(sibling_album_ids, beets)
+        # The returned ``MovedSibling`` records flow through
+        # ``PostflightInfo.moved_siblings`` → ImportResult JSON →
+        # ``dispatch_import_core`` which propagates each sibling's
+        # new path to any tracked ``album_requests`` row (issue #132
+        # P2 / #133).
+        r.postflight.moved_siblings = _canonicalize_siblings(
+            sibling_album_ids, beets)
 
     # --- Post-import extension check ---
     # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)
