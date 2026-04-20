@@ -801,6 +801,7 @@ def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
         mismatches.extend(_diff_positional_layout(name, real_sig, fake_sig))
         mismatches.extend(_diff_named_params(name, real_sig, fake_sig))
         mismatches.extend(_diff_variadic(name, real_sig, fake_sig))
+        mismatches.extend(_diff_fake_extras(name, real_sig, fake_sig))
     return mismatches
 
 
@@ -889,6 +890,41 @@ def _diff_named_params(
                 f"{method}({pname}): real has a default but fake "
                 "requires this param (production calls that omit it "
                 "would crash against the fake)")
+    return out
+
+
+def _diff_fake_extras(
+    method: str,
+    real_sig: inspect.Signature,
+    fake_sig: inspect.Signature,
+) -> list[str]:
+    """Fake params absent from real must have defaults.
+
+    A fake that adds a required keyword-only parameter
+    (e.g. ``def m(self, request_id, *, new_required):``) has no match
+    in ``_diff_named_params`` — that helper walks only real params.
+    Every production call that omits the new kwarg works against real
+    but raises ``TypeError`` against the fake. Codex R5.
+
+    Optional extras (with defaults) are fine — they represent
+    test-only bookkeeping the fake may accept.
+    """
+    out: list[str] = []
+    real_names = {p.name for p in real_sig.parameters.values()}
+    for fp in fake_sig.parameters.values():
+        if fp.name == "self":
+            continue
+        if fp.kind in (inspect.Parameter.VAR_POSITIONAL,
+                       inspect.Parameter.VAR_KEYWORD):
+            continue
+        if fp.name in real_names:
+            continue
+        # Fake-only parameter. Required → crashes real-valid callers.
+        if fp.default is inspect.Parameter.empty:
+            out.append(
+                f"{method}({fp.name}): fake requires a parameter not "
+                "on real — production calls that omit it would crash "
+                "against the fake (give it a default, or remove it)")
     return out
 
 
@@ -1050,3 +1086,33 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
             any("extra positional parameters" in m for m in diff),
             f"Expected drift for fake with extra positional, got: "
             f"{diff}")
+
+    def test_fake_with_required_keyword_only_not_on_real_is_caught(self):
+        """Codex R5: a fake that adds a required keyword-only
+        parameter real doesn't have would crash any production-valid
+        call that omits it."""
+        class Real:
+            def m(self, request_id: int) -> None:
+                ...
+        class Fake:
+            def m(self, request_id: int, *, new_required: str) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("new_required" in m and "not on real" in m
+                for m in diff),
+            f"Expected drift for required fake-only kwarg, got: "
+            f"{diff}")
+
+    def test_fake_with_optional_keyword_only_not_on_real_is_allowed(self):
+        """Optional fake-only params (for test-only bookkeeping) are
+        permitted — real-valid callers never pass them, so they don't
+        affect call compatibility."""
+        class Real:
+            def m(self, request_id: int) -> None:
+                ...
+        class Fake:
+            def m(self, request_id: int, *,
+                  test_only: bool = False) -> None:
+                ...
+        self.assertEqual(_diff_signatures(Real, Fake), [])
