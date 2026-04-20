@@ -189,7 +189,7 @@ flake.nix               — Outputs: packages.slskd-api, devShells.default,
 
 ## Infrastructure
 
-- **doc1** (`192.168.1.29`): Runs beets (Home Manager), this repo lives at `/home/abl030/soularr`
+- **doc1** (`192.168.1.29`): Runs beets (Home Manager), this repo lives at `/home/abl030/cratedigger`
 - **doc2** (`192.168.1.35`): Runs Cratedigger (systemd oneshot, 5-min timer), MusicBrainz mirror (`:5200`), slskd (`:5030`)
 - **Shared storage**: `/mnt/virtio` (virtiofs) — beets DB, pipeline DB, music library all accessible from both machines
 - **Nix deployment**: Cratedigger is a flake input (`cratedigger-src`) in `~/nixosconfig/flake.nix`. The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports `inputs.cratedigger-src.nixosModules.default` for the upstream module and layers on sops + nspawn DB + redis + localProxy. All scripts deploy from the Nix store via `${inputs.cratedigger-src}/...` paths set up by the upstream module's `cfg.src` (default `../.`).
