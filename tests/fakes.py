@@ -21,6 +21,33 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _as_datetime(value: Any) -> datetime:
+    """Normalise a timestamp-ish value to an aware ``datetime``.
+
+    ``make_request_row`` seeds ISO-string ``created_at``/``updated_at``
+    columns while ``FakePipelineDB.add_request`` stores datetimes.
+    Sorting with a mixed key would raise ``TypeError``; this helper
+    collapses both shapes to a comparable datetime (aware, UTC) and
+    uses ``_EPOCH`` as the sentinel for missing values so ordering
+    stays deterministic.
+    """
+    if value is None:
+        return _EPOCH
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return _EPOCH
+        return parsed if parsed.tzinfo else parsed.replace(
+            tzinfo=timezone.utc)
+    return _EPOCH
+
+
 @dataclass
 class DownloadLogRow:
     """One row in download_log, captured by FakePipelineDB.log_download."""
@@ -634,8 +661,22 @@ class FakePipelineDB:
         return rid
 
     def delete_request(self, request_id: int) -> None:
+        """Delete a request and cascade to child tables.
+
+        Real ``album_requests`` has ``ON DELETE CASCADE`` foreign keys
+        from ``album_tracks``, ``download_log``, ``search_log``, and
+        ``source_denylist`` (see ``migrations/001_initial.sql``). Mirror
+        that here so fake-backed tests cannot observe an impossible
+        post-delete state where child rows survive their parent.
+        """
         self._requests.pop(request_id, None)
         self._tracks.pop(request_id, None)
+        self.download_logs = [
+            e for e in self.download_logs if e.request_id != request_id]
+        self.search_logs = [
+            e for e in self.search_logs if e.request_id != request_id]
+        self.denylist = [
+            e for e in self.denylist if e.request_id != request_id]
 
     def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Return wanted requests past their retry gate, new ones first.
@@ -673,20 +714,14 @@ class FakePipelineDB:
             if outcome_filter == "rejected" and entry.outcome not in rejected:
                 continue
             req = self._requests.get(entry.request_id, {})
-            joined: dict[str, object] = {
-                "id": entry.id,
-                "request_id": entry.request_id,
-                "outcome": entry.outcome,
-                "soulseek_username": entry.soulseek_username,
-                "filetype": entry.filetype,
-                "beets_distance": entry.beets_distance,
-                "beets_scenario": entry.beets_scenario,
-                "beets_detail": entry.beets_detail,
-                "staged_path": entry.staged_path,
-                "error_message": entry.error_message,
-                "validation_result": entry.validation_result,
-                "import_result": entry.import_result,
-                "created_at": entry.created_at,
+            # Real SQL is ``SELECT dl.*, ar.album_title, …`` — every
+            # download_log column must appear, including the auxiliary
+            # fields ``log_download`` parks in ``entry.extra``
+            # (bitrate, actual_filetype, spectral_grade, final_format,
+            # etc.). Dropping them here would silently mis-classify rows
+            # in callers that feed ``get_log`` into LogEntry.from_row.
+            joined: dict[str, object] = self._download_log_to_dict(entry)
+            joined.update({
                 # Joined request columns.
                 "album_title": req.get("album_title"),
                 "artist_name": req.get("artist_name"),
@@ -699,7 +734,7 @@ class FakePipelineDB:
                 "search_filetype_override": req.get(
                     "search_filetype_override"),
                 "source": req.get("source"),
-            }
+            })
             rows.append(joined)
             if len(rows) >= limit:
                 break
@@ -710,7 +745,7 @@ class FakePipelineDB:
             copy.deepcopy(r) for r in sorted(
                 (r for r in self._requests.values()
                  if r.get("status") == status),
-                key=lambda r: r.get("created_at") or _utcnow())
+                key=lambda r: _as_datetime(r.get("created_at")))
         ]
 
     def get_recent(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -718,14 +753,13 @@ class FakePipelineDB:
         with_history = {row.request_id for row in self.download_logs}
         rows = [
             r for r in self._requests.values() if r["id"] in with_history]
-        # Use a sentinel for missing ``updated_at`` so Python's stable
-        # sort is deterministic (computing ``_utcnow()`` per key call
-        # would produce a fresh timestamp each comparison and make
-        # ordering non-deterministic when multiple rows share the
-        # sentinel).
-        epoch = datetime.min.replace(tzinfo=timezone.utc)
+        # ``_as_datetime`` normalises ISO strings (from ``make_request_row``)
+        # and datetimes (from ``add_request``) to one representation so
+        # Python's stable sort does not raise ``TypeError`` on mixed inputs,
+        # and uses a fixed epoch sentinel for missing ``updated_at`` so
+        # ordering stays deterministic.
         rows.sort(
-            key=lambda r: r.get("updated_at") or epoch, reverse=True)
+            key=lambda r: _as_datetime(r.get("updated_at")), reverse=True)
         return [copy.deepcopy(r) for r in rows[:limit]]
 
     def count_by_status(self) -> dict[str | None, int]:
