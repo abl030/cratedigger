@@ -1317,25 +1317,49 @@ class TestReleaseLockContention(unittest.TestCase):
             id=42, mb_release_id=self.MBID, status="downloading"))
         return db
 
-    def test_auto_contention_resets_request_to_wanted(self):
-        """Regression for review-round C1 on this commit. Auto path
-        contention MUST NOT leave the request at ``status='downloading'``:
-        the outer ``_run_completed_processing`` (lib/download.py) would
-        observe ``status=='downloading'`` + ``process_completed_album``
-        returning True and flip the request to ``imported`` even though
-        the subprocess never ran. That's a silent data-inconsistency
-        bug — the album is marked done while still sitting in /Incoming.
+    def test_auto_contention_returns_deferred_and_leaves_all_state(self):
+        """Issue #132 P1 + Codex PR #136 R3 P2/P3 combined regression.
 
-        Fix: on contention in the auto path (scenario not in
-        FORCE_MANUAL_SCENARIOS), ``dispatch_import_core`` transitions
-        the request back to ``wanted`` (so the outer flip-check fails)
-        and cleans the staged dir (so next cycle can re-mkdir it).
+        Auto-path contention must return ``DispatchOutcome(deferred=True)``
+        and leave EVERY piece of request state untouched, so
+        ``poll_active_downloads`` can re-enter ``process_completed_album``
+        on the next cycle and retry with all in-progress work
+        preserved:
+
+        - **status stays ``downloading``** — needed for
+          ``poll_active_downloads`` to find the row on the next tick.
+          The outer ``_run_completed_processing`` branches on
+          ``outcome.deferred`` and skips the flip-to-imported that
+          would otherwise fire on a True return from
+          ``process_completed_album`` (the C1 bug from commit 2's
+          review; fixed here without the earlier eager-reset
+          side effects).
+        - **staged dir stays put** — Codex R3 P3: deleting it forces
+          the next cycle to redownload from Soulseek even if the
+          competing import later fails. ``process_completed_album``
+          is idempotent on a pre-existing staging dir (it guards
+          ``os.mkdir`` with ``os.path.exists`` and skips file moves
+          when the destination already has the file).
+        - **``current_spectral_*`` stays populated** — Codex R3 P2:
+          ``run_preimport_gates`` ran BEFORE this contention path
+          fired and persisted spectral state from the downloaded
+          files. A retry on the same files would compute the same
+          spectral state anyway; clearing it would cause
+          ``override_min_bitrate`` / quality-gate decisions to
+          run against incomplete state on the next cycle.
+        - **no download_log row** — contention is a deferred retry,
+          not a failure.
         """
         from lib.import_dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
         db = self._make_db()
+        # Seed the spectral fields that ``run_preimport_gates`` would
+        # have populated pre-dispatch. These must survive the
+        # contention path.
+        db.request(42)["current_spectral_grade"] = "genuine"
+        db.request(42)["current_spectral_bitrate"] = 245
         def lock_result(namespace: int, key: int) -> bool:
             if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
                     and key == release_id_to_lock_key(self.MBID)):
@@ -1356,7 +1380,6 @@ class TestReleaseLockContention(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
                     distance=0.05,
-                    # Auto-import scenario — NOT FORCE_MANUAL_SCENARIOS.
                     scenario="strong_match",
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
@@ -1368,32 +1391,27 @@ class TestReleaseLockContention(unittest.TestCase):
 
         # Subprocess NEVER fires.
         ext.run.assert_not_called()
-        # No download_log row — deferred retry, not a failure.
-        self.assertEqual(db.download_logs, [])
-        # **Critical**: request was reset to 'wanted'. Without this,
-        # the outer _run_completed_processing in lib/download.py flips
-        # to 'imported' based on process_completed_album's True return,
-        # and the album is marked done without importing.
-        self.assertEqual(db.request(42)["status"], "wanted")
-        # Codex R2 P1: contention must NOT set ``next_retry_after``.
-        # That field would hold the request for the full backoff
-        # window (30min+ doubling up to 24h) before the next cycle
-        # could re-try — unacceptable for a contention-driven reset
-        # where the competing process might already have finished.
-        # ``reset_to_wanted`` clears it to NULL; if a future refactor
-        # re-introduces ``attempt_type="download"`` here, the
-        # ``record_attempt`` side effect would set it again and this
-        # assertion fails.
-        self.assertIsNone(db.request(42).get("next_retry_after"))
-        self.assertIsNone(db.request(42).get("last_attempt_at"))
-        # Staged dir cleanup ran (so the next cycle can re-mkdir).
-        ext.cleanup.assert_called_once_with(tmpdir)
-        # Outcome still carries the "try again shortly" signal.
+        # Outcome signals deferral — the new seam.
         self.assertFalse(outcome.success)
+        self.assertTrue(outcome.deferred)
         self.assertIn("Another import is already in progress",
                       outcome.message)
-        # Lock was attempted on the RELEASE namespace at the hashed
-        # MBID key.
+
+        # **All state preserved**:
+        self.assertEqual(db.request(42)["status"], "downloading",
+                         "Status must stay 'downloading' so "
+                         "poll_active_downloads retries next cycle.")
+        self.assertEqual(db.request(42)["current_spectral_grade"],
+                         "genuine", "Spectral state from the "
+                         "pre-dispatch run_preimport_gates MUST "
+                         "survive contention (Codex R3 P2).")
+        self.assertEqual(db.request(42)["current_spectral_bitrate"], 245)
+        # No staged-dir cleanup — Codex R3 P3.
+        ext.cleanup.assert_not_called()
+        # No download_log row — deferred retry, not a failure.
+        self.assertEqual(db.download_logs, [])
+
+        # Lock attempt recorded on the RELEASE namespace at the MBID key.
         self.assertIn(
             (ADVISORY_LOCK_NAMESPACE_RELEASE,
              release_id_to_lock_key(self.MBID)),
@@ -1561,6 +1579,86 @@ class TestReleaseLockContention(unittest.TestCase):
         # No RELEASE-namespace lock call — we skipped it entirely.
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
+
+
+class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
+    """The ``process_completed_album`` 3-way return → state-transition seam.
+
+    Pre-#133 this was a 2-way ``bool``: True → flip to ``imported``,
+    False → reset to ``wanted``. That binary misclassified release-
+    lock contention (commit 43e83e8 C1 — silently flipped to
+    ``imported``). Commit 2's fix papered over the bug by having
+    ``dispatch_import_core`` eagerly reset the row to ``wanted``;
+    Codex R3 P2/P3 then flagged that the reset clobbered spectral
+    state and staged files.
+
+    The proper seam is a 3-way return: ``None`` == deferred (leave
+    everything alone). These tests pin the branching at
+    ``_run_completed_processing`` so a future refactor can't silently
+    collapse the three states back to two.
+    """
+
+    def _ctx(self, db: FakePipelineDB):
+        from tests.helpers import make_ctx_with_fake_db
+        return make_ctx_with_fake_db(db)
+
+    def _entry(self):
+        from tests.helpers import make_grab_list_entry
+        return make_grab_list_entry()
+
+    def _state(self):
+        from lib.quality import ActiveDownloadState
+        return ActiveDownloadState(
+            filetype="mp3", enqueued_at="2026-04-20T00:00:00+00:00",
+            files=[])
+
+    def test_deferred_outcome_leaves_status_downloading(self):
+        """``process_completed_album`` returning ``None`` must NOT touch
+        the request's status. The next ``poll_active_downloads`` cycle
+        will re-enter via status='downloading'.
+        """
+        from lib import download as dl_mod
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=245))
+        with patch.object(dl_mod, "process_completed_album",
+                          return_value=None):
+            dl_mod._run_completed_processing(
+                self._entry(), 42, self._state(), db, self._ctx(db))
+        self.assertEqual(db.request(42)["status"], "downloading")
+        # Spectral untouched.
+        self.assertEqual(
+            db.request(42)["current_spectral_grade"], "genuine")
+        # No status-history transitions recorded — we didn't call
+        # apply_transition at all.
+        self.assertEqual(db.status_history, [])
+
+    def test_true_outcome_flips_to_imported(self):
+        """Happy path: ``process_completed_album`` returns ``True`` and
+        status was 'downloading' → flip to 'imported'."""
+        from lib import download as dl_mod
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        with patch.object(dl_mod, "process_completed_album",
+                          return_value=True):
+            dl_mod._run_completed_processing(
+                self._entry(), 42, self._state(), db, self._ctx(db))
+        self.assertEqual(db.request(42)["status"], "imported")
+
+    def test_false_outcome_resets_to_wanted_with_attempt(self):
+        """Failure: ``process_completed_album`` returns ``False`` →
+        reset to 'wanted' with an attempt increment (genuine failure
+        DOES deserve a backoff-scored attempt)."""
+        from lib import download as dl_mod
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        with patch.object(dl_mod, "process_completed_album",
+                          return_value=False):
+            dl_mod._run_completed_processing(
+                self._entry(), 42, self._state(), db, self._ctx(db))
+        self.assertEqual(db.request(42)["status"], "wanted")
 
 
 class TestSiblingImportedPathPropagation(unittest.TestCase):

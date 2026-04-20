@@ -673,64 +673,40 @@ def dispatch_import_core(
             logger.warning(
                 f"{mode} SKIPPED: {label} — release lock held by "
                 f"another process (mbid={mb_release_id})")
-            # Auto-path contention trap: ``_run_completed_processing``
-            # (lib/download.py) observes status=='downloading' +
-            # ``process_completed_album`` returning True → transitions
-            # the request to 'imported' even though no import ran.
-            # Adversarial-review finding C1 on this commit. The fix:
-            # when the request is 'downloading' (auto path; force/
-            # manual never hits this column's active-download branch),
-            # reset it to 'wanted' so the outer transition check sees
-            # a non-downloading row and skips the flip. The other
-            # process holding the release lock will finish the import;
-            # the next cycle re-searches, finds the album already in
-            # beets, and the request gets marked imported via the
-            # ``preflight_existing`` path — no re-download needed.
+            # Contention == deferred retry. The entire function now
+            # returns ``DispatchOutcome(deferred=True)`` without
+            # mutating ANY state:
             #
-            # Clean up the staged dir so the next cycle's
-            # ``process_completed_album`` can re-create
-            # ``import_folder_fullpath`` without ``FileExistsError`` on
-            # the ``os.mkdir`` at download.py:188.
+            # - No status transition (was: reset to 'wanted'). The
+            #   auto path's outer ``_run_completed_processing`` now
+            #   branches on ``outcome.deferred`` — no flip to
+            #   ``imported`` and no reset to ``wanted``; the request
+            #   stays ``downloading`` with its ``active_download_state``
+            #   intact, so ``poll_active_downloads`` re-enters
+            #   ``process_completed_album`` on the next cycle and
+            #   retries exactly where we stopped.
+            # - No staged-dir cleanup (was: ``_cleanup_staged_dir``).
+            #   Codex PR #136 R3 P3: if the competing import later
+            #   fails, wiping the staged copy forces a redownload
+            #   from Soulseek. Staging is preserved so the retry
+            #   resumes with the local files already in place.
+            # - No spectral clear. Codex PR #136 R3 P2: the prior
+            #   reset-to-wanted left ``current_spectral_*`` populated
+            #   from a download that was never imported, skewing the
+            #   next cycle's quality-gate decisions. With no reset,
+            #   ``run_preimport_gates`` re-runs on retry and
+            #   re-populates spectral from the same files.
             #
             # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
-            # do NOT reset — their caller receives the DispatchOutcome
-            # message and surfaces "try again shortly" to the user.
-            if scenario not in FORCE_MANUAL_SCENARIOS:
-                try:
-                    req_row = db.get_request(request_id)
-                    if req_row and req_row.get("status") == "downloading":
-                        _cleanup_staged_dir(path)
-                        # Contention is a deferred retry, not a failed
-                        # attempt — we didn't *try* to download, we
-                        # deferred to a concurrent process. Passing no
-                        # ``attempt_type`` skips the ``record_attempt``
-                        # side effect that would set
-                        # ``next_retry_after = now + backoff`` (30 min
-                        # for attempt #1, doubling each retry, up to
-                        # 24h). That backoff is designed for genuine
-                        # download failures; applying it to contention
-                        # would hold the request in ``wanted`` for
-                        # half an hour while the competing process
-                        # either finishes (we'd re-search, find the
-                        # album already in beets, mark imported via
-                        # the ``preflight_existing`` path) or fails
-                        # (we should retry). Codex R2 P1 caught this.
-                        apply_transition(
-                            db, request_id, "wanted",
-                            from_status="downloading")
-                        logger.info(
-                            f"{mode}: reset request {request_id} to "
-                            "'wanted' after release-lock contention; "
-                            "next cycle will re-search (the other "
-                            "process should have finished by then)")
-                except Exception:
-                    logger.exception(
-                        f"{mode}: failed to reset deferred request "
-                        f"{request_id} after release-lock contention")
+            # surface the message to the user via
+            # ``dispatch_import_from_db``; no state change needed
+            # because the request wasn't ``downloading`` to begin
+            # with.
             return DispatchOutcome(
                 success=False,
                 message=("Another import is already in progress for "
                          f"this release ({mb_release_id})"),
+                deferred=True,
             )
 
         try:
@@ -994,10 +970,26 @@ def dispatch_import_core(
 
 def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, dest: str,
                     dl_info: DownloadInfo, request_id: int,
-                    ctx: "CratediggerContext", *, force: bool = False) -> None:
+                    ctx: "CratediggerContext", *, force: bool = False
+                    ) -> "DispatchOutcome":
     """Import decision tree — thin adapter extracting plain params for the core.
 
-    Called from process_completed_album() for auto-import.
+    Called from ``process_completed_album()`` for auto-import.
+
+    Returns ``DispatchOutcome`` so the auto-path caller
+    (``_run_completed_processing``) can distinguish three terminal
+    states: ``success=True`` (import landed; flip to ``imported``),
+    ``deferred=True`` (release lock held; leave row alone for the
+    next cycle), or ``success=False`` with ``deferred=False`` (actual
+    failure; caller's existing fallback reset handles it).
+
+    Pre-#133 this returned ``None`` and callers inferred success from
+    ``process_completed_album``'s boolean. That branch mis-flipped
+    contention to ``imported`` (the C1 bug fixed in commit 43e83e8).
+    The Codex R3 follow-up widened the fix: threading ``deferred``
+    explicitly lets the caller preserve all resumable state
+    (staging, spectral, status) on contention, not just skip the
+    flip.
     """
     db = ctx.pipeline_db_source._get_db()
 
@@ -1014,7 +1006,7 @@ def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, de
     except Exception:
         logger.debug("DB lookup failed for override-min-bitrate")
 
-    dispatch_import_core(
+    return dispatch_import_core(
         path=dest,
         mb_release_id=album_data.mb_release_id or "",
         request_id=request_id,
@@ -1037,9 +1029,26 @@ def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, de
 
 @dataclass(frozen=True)
 class DispatchOutcome:
-    """Result of dispatch_import_from_db — typed return for web/CLI callers."""
+    """Result of ``dispatch_import_*`` — typed return for every caller
+    (auto-path, web/CLI force/manual, tests).
+
+    - ``success``: the import landed in beets and the request is now
+      ``imported``. Callers that further transition the request (the
+      auto-path's ``_run_completed_processing``) branch on this.
+    - ``message``: human-readable summary for UI / logs; never parsed.
+    - ``deferred``: the import did NOT run because a competing process
+      holds the release advisory lock (issue #132 P1 / #133). The
+      request's state is UNTOUCHED — no status transition, no staged
+      cleanup, no spectral clear — so the next cycle can resume
+      exactly where this one left off. Callers MUST check
+      ``deferred`` before applying any "on failure" fallback state
+      transition (Codex PR #136 R2 P1 + R3 P2/P3: every round of
+      review surfaced a different piece of state the old eager
+      reset-to-wanted was clobbering).
+    """
     success: bool
     message: str
+    deferred: bool = False
 
 def dispatch_import_from_db(
     db: "PipelineDB",
