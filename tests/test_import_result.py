@@ -771,6 +771,31 @@ class TestParseImportResult(unittest.TestCase):
         parsed = parse_import_result(stdout)
         self.assertIsNone(parsed)
 
+    def test_parse_wrong_typed_field_degrades_to_none(self):
+        """Issue #141 regression: after the ``msgspec.Struct`` migration,
+        strict-typed decode raises ``msgspec.ValidationError`` (not
+        ``TypeError``/``KeyError``) on type drift. ``parse_import_result``
+        must swallow this too — historically any decode failure degraded
+        to ``None`` and callers (the auto-import dispatch path) treat
+        "no typed result" the same way they treat "no sentinel line";
+        if the harness emits something malformed we don't want a whole
+        cycle to crash, we want to log and move on.
+        """
+        import msgspec
+        # ``exit_code`` is declared ``int`` on ImportResult — sending a
+        # string forces msgspec.ValidationError at the boundary.
+        stdout = IMPORT_RESULT_SENTINEL + json.dumps(
+            {"version": 2, "exit_code": "not-an-int",
+             "decision": "import"}) + "\n"
+        # Sanity: direct from_dict DOES raise — the guard under test is
+        # the caller swallowing that raise.
+        with self.assertRaises(msgspec.ValidationError):
+            ImportResult.from_dict(
+                {"version": 2, "exit_code": "not-an-int",
+                 "decision": "import"})
+        parsed = parse_import_result(stdout)
+        self.assertIsNone(parsed)
+
     def test_parse_sentinel_not_last_line(self):
         """Sentinel in the middle — still found (reverse scan)."""
         r = ImportResult(decision="import")

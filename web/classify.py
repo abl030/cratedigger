@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
+import msgspec
+
 from lib.quality import ImportResult
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,14 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
 
 
 def _parse_import_result(entry: LogEntry) -> ImportResult | None:
-    """Parse the import_result JSONB from a LogEntry, or None."""
+    """Parse the import_result JSONB from a LogEntry, or None.
+
+    Returns None on any decode failure, INCLUDING
+    ``msgspec.ValidationError`` from strict-typed decode post-#141:
+    historical JSONB rows predate the current schema and the Recents
+    tab degrades gracefully to "no typed result" rather than 500ing
+    the route on one bad legacy row.
+    """
     raw = entry.import_result
     if raw is None:
         return None
@@ -216,7 +225,8 @@ def _parse_import_result(entry: LogEntry) -> ImportResult | None:
         elif isinstance(raw, str):
             return ImportResult.from_json(raw)
         return None
-    except (json.JSONDecodeError, TypeError, KeyError):
+    except (json.JSONDecodeError, TypeError, KeyError,
+            msgspec.ValidationError):
         return None
 
 

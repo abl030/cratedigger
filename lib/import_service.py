@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 
+import msgspec
+
 from lib.quality import ImportResult
 
 logger = logging.getLogger("cratedigger")
@@ -106,7 +108,11 @@ def extract_import_log_fields(import_result_json: str | None) -> dict[str, objec
         return {}
     try:
         ir = ImportResult.from_json(import_result_json)
-    except (json.JSONDecodeError, TypeError, KeyError):
+    except (json.JSONDecodeError, TypeError, KeyError,
+            msgspec.ValidationError):
+        # Back-compat with pre-#141 behaviour: a malformed JSONB row
+        # degrades to "no extracted fields" instead of propagating a
+        # strict-decode error and aborting the backfill caller.
         return {}
 
     fields: dict[str, object] = {}
