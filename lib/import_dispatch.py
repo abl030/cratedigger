@@ -520,250 +520,312 @@ def dispatch_import_core(
     outcome_success = False
     outcome_message = ""
 
-    try:
-        cmd = [sys.executable, import_script, path, mb_release_id,
-               "--request-id", str(request_id)]
-        if force:
-            cmd.append("--force")
-        # Force/manual import operates on the user's only copy of the source
-        # material (typically failed_imports/…). Tell the harness to keep
-        # lossless originals intact until the quality decision — on
-        # downgrade/transcode_downgrade verdicts we exit before deletion so
-        # the user's FLACs survive (#111). Auto-import stages to disposable
-        # /Incoming and does not need the flag.
-        if scenario in FORCE_MANUAL_SCENARIOS:
-            cmd.append("--preserve-source")
-        if verified_lossless_target:
-            cmd.extend(["--verified-lossless-target", verified_lossless_target])
-        if target_format:
-            cmd.extend(["--target-format", target_format])
-        if override_min_bitrate is not None:
-            cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
-        # Serialize the runtime QualityRankConfig so the harness classifies
-        # with the same policy as the caller. Missing cfg (e.g. legacy test
-        # path) → harness falls back to QualityRankConfig.defaults().
-        if cfg is not None:
-            cmd.extend(["--quality-rank-config", cfg.quality_ranks.to_json()])
-        result = sp.run(cmd, capture_output=True, text=True,
-                        timeout=1800, env=beets_subprocess_env())
-        for line in (result.stderr or "").strip().split("\n"):
-            if line.strip():
-                logger.info(f"  [import] {line}")
+    # Cross-process same-release lock (issue #132 P1, issue #133). Held
+    # for the duration of the ``import_one.py`` subprocess. The Palo
+    # Santo blast-radius fix (PR #131) removed the destructive branch
+    # from the harness's ``resolve_duplicate`` handler, but the
+    # post-import cleanup still uses ``max(post_import_ids)`` to pick
+    # "the album we just imported" — vulnerable to a second process
+    # inserting its own same-MBID row between our import finishing and
+    # our re-enumerate query. This lock closes that window across every
+    # entry point (auto-import cycle, web force-import, CLI
+    # manual-import) because every one of them funnels through
+    # ``dispatch_import_core``.
+    #
+    # Non-blocking (``pg_try_advisory_lock``): if another process is
+    # already importing this MBID we return early with no rejection
+    # record. The auto cycle retries on its next timer tick; force/
+    # manual surface a "try again shortly" message to the user. A
+    # blocking wait would hold the caller's PG connection for the full
+    # duration of an unrelated process's import (minutes) without any
+    # clear benefit.
+    #
+    # Key derivation: stable int32 hash of ``mb_release_id`` (str).
+    # Covers both MB UUIDs and Discogs numeric ids since both share
+    # the ``mb_release_id`` column. See
+    # ``lib.pipeline_db.release_id_to_lock_key`` for collision analysis.
+    from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                 release_id_to_lock_key)
+    release_lock_key: int | None
+    if mb_release_id:
+        release_lock_key = release_id_to_lock_key(mb_release_id)
+    else:
+        # Defensive: ``dispatch_import_from_db`` already rejects empty
+        # mbids before reaching here; ``dispatch_import`` uses
+        # ``album_data.mb_release_id or ""``. An empty mbid means
+        # there's nothing to serialise across, so skip the lock.
+        release_lock_key = None
+        logger.warning(
+            f"{mode}: mb_release_id is empty; skipping release lock "
+            "(no cross-release race to serialise)")
 
-        ir = parse_import_result(result.stdout or "")
-        if ir is None:
-            logger.error(
-                f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
-            for line in (result.stdout or "").strip().split("\n"):
-                logger.error(f"  {line}")
-            _record_rejection_and_maybe_requeue(
-                db, request_id, dl_info,
-                distance=distance,
-                scenario="no_json_result",
-                detail=f"import_one.py rc={result.returncode}, no JSON",
-                error=f"rc={result.returncode}",
-                requeue=requeue_on_failure,
-                outcome_label="failed",
-                validation_result=ValidationResult(
+    if release_lock_key is not None:
+        lock_ctx = db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_RELEASE, release_lock_key)
+    else:
+        # No-op context manager that yields True (treat as "got lock"
+        # so the critical section runs). ``contextlib.nullcontext``
+        # forwards the enter value unchanged.
+        from contextlib import nullcontext
+        lock_ctx = nullcontext(True)
+
+    with lock_ctx as got_release_lock:
+        if not got_release_lock:
+            logger.warning(
+                f"{mode} SKIPPED: {label} — release lock held by "
+                f"another process (mbid={mb_release_id})")
+            # No rejection row: this is a deferred retry, not a
+            # failure. The caller's state is untouched.
+            return DispatchOutcome(
+                success=False,
+                message=("Another import is already in progress for "
+                         f"this release ({mb_release_id})"),
+            )
+
+        try:
+            cmd = [sys.executable, import_script, path, mb_release_id,
+                   "--request-id", str(request_id)]
+            if force:
+                cmd.append("--force")
+            # Force/manual import operates on the user's only copy of the source
+            # material (typically failed_imports/…). Tell the harness to keep
+            # lossless originals intact until the quality decision — on
+            # downgrade/transcode_downgrade verdicts we exit before deletion so
+            # the user's FLACs survive (#111). Auto-import stages to disposable
+            # /Incoming and does not need the flag.
+            if scenario in FORCE_MANUAL_SCENARIOS:
+                cmd.append("--preserve-source")
+            if verified_lossless_target:
+                cmd.extend(["--verified-lossless-target", verified_lossless_target])
+            if target_format:
+                cmd.extend(["--target-format", target_format])
+            if override_min_bitrate is not None:
+                cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
+            # Serialize the runtime QualityRankConfig so the harness classifies
+            # with the same policy as the caller. Missing cfg (e.g. legacy test
+            # path) → harness falls back to QualityRankConfig.defaults().
+            if cfg is not None:
+                cmd.extend(["--quality-rank-config", cfg.quality_ranks.to_json()])
+            result = sp.run(cmd, capture_output=True, text=True,
+                            timeout=1800, env=beets_subprocess_env())
+            for line in (result.stderr or "").strip().split("\n"):
+                if line.strip():
+                    logger.info(f"  [import] {line}")
+
+            ir = parse_import_result(result.stdout or "")
+            if ir is None:
+                logger.error(
+                    f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
+                for line in (result.stdout or "").strip().split("\n"):
+                    logger.error(f"  {line}")
+                _record_rejection_and_maybe_requeue(
+                    db, request_id, dl_info,
                     distance=distance,
                     scenario="no_json_result",
                     detail=f"import_one.py rc={result.returncode}, no JSON",
                     error=f"rc={result.returncode}",
+                    requeue=requeue_on_failure,
+                    outcome_label="failed",
+                    validation_result=ValidationResult(
+                        distance=distance,
+                        scenario="no_json_result",
+                        detail=f"import_one.py rc={result.returncode}, no JSON",
+                        error=f"rc={result.returncode}",
+                    ).to_json(),
+                    staged_path=path)
+                outcome_message = f"No JSON result (rc={result.returncode})"
+            else:
+                _populate_dl_info_from_import_result(dl_info, ir)
+                decision = ir.decision or "unknown"
+                action = dispatch_action(decision)
+                file_list = files or []
+                usernames = extract_usernames(file_list) if action.denylist else set()
+                narrowed_override = None
+                current_override = None
+
+                new_br = ir.new_measurement.min_bitrate_kbps if ir.new_measurement else None
+                prev_br = ir.existing_measurement.min_bitrate_kbps if ir.existing_measurement else None
+
+                # --- Mark done or failed with decision-specific details ---
+                if action.mark_done:
+                    logger.info(f"{mode} OK: {label} (decision={decision})")
+                    _do_mark_done(
+                        db, request_id, dl_info,
+                        distance=distance, scenario=scenario,
+                        dest_path=path, outcome_label=outcome_label,
+                        imported_path=ir.postflight.imported_path)
+                    if decision in ("import", "preflight_existing"):
+                        if prev_br is not None or new_br is not None:
+                            try:
+                                apply_transition(db, request_id, "imported",
+                                                 from_status="imported",
+                                                 prev_min_bitrate=prev_br,
+                                                 min_bitrate=new_br)
+                            except Exception:
+                                logger.exception("Failed to update upgrade delta")
+                    outcome_success = True
+                    outcome_message = "Import successful"
+                elif action.record_rejection:
+                    if decision == "downgrade":
+                        fail_scenario = "quality_downgrade"
+                        fail_detail: str | None = (f"new {new_br}kbps "
+                                                   f"<= existing {prev_br}kbps")
+                        logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
+                    elif decision == "transcode_downgrade":
+                        fail_scenario = "transcode_downgrade"
+                        fail_detail = (f"transcode {new_br}kbps "
+                                       f"<= existing {prev_br}kbps")
+                        logger.warning(f"TRANSCODE REJECTED: {label} "
+                                       f"at {new_br}kbps — not an upgrade")
+                    else:
+                        fail_scenario = decision or "import_error"
+                        fail_detail = ir.error
+                        logger.error(f"{mode} FAILED: {label} "
+                                     f"(decision={decision}, error={ir.error})")
+                    fail_error = ir.error if decision not in ("downgrade", "transcode_downgrade") else None
+
+                    if decision == "downgrade":
+                        try:
+                            req_row = db.get_request(request_id)
+                            current_override = req_row.get("search_filetype_override") if req_row else None
+                            narrowed_override = narrow_override_on_downgrade(
+                                current_override, dl_info)
+                            if narrowed_override is None and current_override is None and req_row:
+                                from lib.beets_db import BeetsDB
+                                from lib.quality import QualityRankConfig
+                                _gate_cfg = (
+                                    cfg.quality_ranks if cfg is not None
+                                    else QualityRankConfig.defaults())
+                                with BeetsDB() as beets:
+                                    beets_info = beets.get_album_info(
+                                        mb_release_id, _gate_cfg)
+                                if beets_info:
+                                    narrowed_override = rejection_backfill_override(
+                                        is_cbr=beets_info.is_cbr,
+                                        min_bitrate_kbps=beets_info.min_bitrate_kbps,
+                                        spectral_grade=req_row.get(
+                                            "current_spectral_grade"),
+                                        verified_lossless=bool(
+                                            req_row.get("verified_lossless")),
+                                        cfg=_gate_cfg,
+                                    )
+                                    if narrowed_override:
+                                        logger.info(
+                                            f"BACKFILL: {label} search_filetype_override=NULL"
+                                            f" → '{narrowed_override}' on downgrade"
+                                            f" ({beets_info.min_bitrate_kbps}kbps,"
+                                            f" cbr={beets_info.is_cbr})")
+                        except Exception:
+                            logger.debug(
+                                "Failed to inspect search_filetype_override before downgrade reset")
+
+                    _record_rejection_and_maybe_requeue(
+                        db, request_id, dl_info,
+                        distance=distance,
+                        scenario=fail_scenario,
+                        detail=fail_detail,
+                        error=fail_error,
+                        requeue=requeue_on_failure,
+                        outcome_label="rejected",
+                        search_filetype_override=narrowed_override,
+                        validation_result=(dl_info.validation_result
+                                           or ValidationResult(
+                                               distance=distance,
+                                               scenario=fail_scenario,
+                                               detail=fail_detail,
+                                               error=fail_error,
+                                           ).to_json()),
+                        staged_path=path)
+                    if narrowed_override is not None:
+                        logger.info(
+                            f"  Narrowed search_filetype_override '{current_override}'"
+                            f" -> '{narrowed_override}' after downgrade")
+                    outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
+
+                # --- Common actions driven by flags ---
+                if action.denylist:
+                    if decision == "downgrade":
+                        reason = "quality downgrade prevented"
+                    elif decision.startswith("transcode"):
+                        reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
+                    else:
+                        reason = f"rejected: {decision}"
+                    for username in usernames:
+                        db.add_denylist(request_id, username, reason)
+                        if cooled_down_users is not None:
+                            if db.check_and_apply_cooldown(username):
+                                cooled_down_users.add(username)
+                    logger.info(f"  Denylisted {usernames} for request {request_id}")
+
+                if action.requeue and (requeue_on_failure or not action.record_rejection):
+                    requeue_fields: dict[str, object] = {
+                        "search_filetype_override": QUALITY_UPGRADE_TIERS,
+                    }
+                    if action.mark_done and new_br is not None:
+                        requeue_fields["min_bitrate"] = new_br
+                    apply_transition(db, request_id, "wanted", **requeue_fields)
+
+                if action.run_quality_gate:
+                    _check_quality_gate_core(
+                        mb_id=mb_release_id,
+                        label=label,
+                        request_id=request_id,
+                        files=list(file_list),
+                        db=db,
+                        quality_ranks=cfg.quality_ranks if cfg is not None else None,
+                    )
+                if action.trigger_notifiers and cfg is not None:
+                    _trigger_meelo(cfg)
+                    _trigger_plex(cfg, ir.postflight.imported_path)
+                    _trigger_jellyfin(cfg)
+                if action.cleanup and _should_cleanup_path(scenario, action):
+                    # Issue #89: force/manual paths pass the user's
+                    # ``failed_imports/…`` folder as ``path`` — cleanup is
+                    # data loss on a ``downgrade`` / ``transcode_downgrade``
+                    # decision where beets never moved the files.
+                    # ``_should_cleanup_path`` only allows cleanup on force/
+                    # manual when the decision actually imported (mark_done=
+                    # True, i.e. beets has moved the files and the source
+                    # directory is now empty), which keeps the wrong-matches
+                    # tab honest and prevents duplicate re-imports of an
+                    # already-imported album. Auto-import scenarios always
+                    # clean — their staging dir under ``/Incoming`` is
+                    # disposable by design.
+                    _cleanup_staged_dir(path)
+                if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
+                    removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
+                    if removed and cfg is not None:
+                        trigger_meelo_clean(cfg)
+        except sp.TimeoutExpired:
+            logger.error(f"{mode} TIMEOUT: {label}")
+            _record_rejection_and_maybe_requeue(
+                db, request_id, dl_info,
+                distance=distance, scenario="timeout",
+                detail="import_one.py timed out", error="timeout",
+                requeue=requeue_on_failure, outcome_label="failed",
+                validation_result=ValidationResult(
+                    distance=distance,
+                    scenario="timeout",
+                    detail="import_one.py timed out",
+                    error="timeout",
                 ).to_json(),
                 staged_path=path)
-            outcome_message = f"No JSON result (rc={result.returncode})"
-        else:
-            _populate_dl_info_from_import_result(dl_info, ir)
-            decision = ir.decision or "unknown"
-            action = dispatch_action(decision)
-            file_list = files or []
-            usernames = extract_usernames(file_list) if action.denylist else set()
-            narrowed_override = None
-            current_override = None
-
-            new_br = ir.new_measurement.min_bitrate_kbps if ir.new_measurement else None
-            prev_br = ir.existing_measurement.min_bitrate_kbps if ir.existing_measurement else None
-
-            # --- Mark done or failed with decision-specific details ---
-            if action.mark_done:
-                logger.info(f"{mode} OK: {label} (decision={decision})")
-                _do_mark_done(
-                    db, request_id, dl_info,
-                    distance=distance, scenario=scenario,
-                    dest_path=path, outcome_label=outcome_label,
-                    imported_path=ir.postflight.imported_path)
-                if decision in ("import", "preflight_existing"):
-                    if prev_br is not None or new_br is not None:
-                        try:
-                            apply_transition(db, request_id, "imported",
-                                             from_status="imported",
-                                             prev_min_bitrate=prev_br,
-                                             min_bitrate=new_br)
-                        except Exception:
-                            logger.exception("Failed to update upgrade delta")
-                outcome_success = True
-                outcome_message = "Import successful"
-            elif action.record_rejection:
-                if decision == "downgrade":
-                    fail_scenario = "quality_downgrade"
-                    fail_detail: str | None = (f"new {new_br}kbps "
-                                               f"<= existing {prev_br}kbps")
-                    logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
-                elif decision == "transcode_downgrade":
-                    fail_scenario = "transcode_downgrade"
-                    fail_detail = (f"transcode {new_br}kbps "
-                                   f"<= existing {prev_br}kbps")
-                    logger.warning(f"TRANSCODE REJECTED: {label} "
-                                   f"at {new_br}kbps — not an upgrade")
-                else:
-                    fail_scenario = decision or "import_error"
-                    fail_detail = ir.error
-                    logger.error(f"{mode} FAILED: {label} "
-                                 f"(decision={decision}, error={ir.error})")
-                fail_error = ir.error if decision not in ("downgrade", "transcode_downgrade") else None
-
-                if decision == "downgrade":
-                    try:
-                        req_row = db.get_request(request_id)
-                        current_override = req_row.get("search_filetype_override") if req_row else None
-                        narrowed_override = narrow_override_on_downgrade(
-                            current_override, dl_info)
-                        if narrowed_override is None and current_override is None and req_row:
-                            from lib.beets_db import BeetsDB
-                            from lib.quality import QualityRankConfig
-                            _gate_cfg = (
-                                cfg.quality_ranks if cfg is not None
-                                else QualityRankConfig.defaults())
-                            with BeetsDB() as beets:
-                                beets_info = beets.get_album_info(
-                                    mb_release_id, _gate_cfg)
-                            if beets_info:
-                                narrowed_override = rejection_backfill_override(
-                                    is_cbr=beets_info.is_cbr,
-                                    min_bitrate_kbps=beets_info.min_bitrate_kbps,
-                                    spectral_grade=req_row.get(
-                                        "current_spectral_grade"),
-                                    verified_lossless=bool(
-                                        req_row.get("verified_lossless")),
-                                    cfg=_gate_cfg,
-                                )
-                                if narrowed_override:
-                                    logger.info(
-                                        f"BACKFILL: {label} search_filetype_override=NULL"
-                                        f" → '{narrowed_override}' on downgrade"
-                                        f" ({beets_info.min_bitrate_kbps}kbps,"
-                                        f" cbr={beets_info.is_cbr})")
-                    except Exception:
-                        logger.debug(
-                            "Failed to inspect search_filetype_override before downgrade reset")
-
-                _record_rejection_and_maybe_requeue(
-                    db, request_id, dl_info,
+            outcome_message = "Import timed out"
+        except Exception:
+            logger.exception(f"{mode} ERROR: {label}")
+            _record_rejection_and_maybe_requeue(
+                db, request_id, dl_info,
+                distance=distance, scenario="exception",
+                detail="unhandled exception in auto-import", error="exception",
+                requeue=requeue_on_failure, outcome_label="failed",
+                validation_result=ValidationResult(
                     distance=distance,
-                    scenario=fail_scenario,
-                    detail=fail_detail,
-                    error=fail_error,
-                    requeue=requeue_on_failure,
-                    outcome_label="rejected",
-                    search_filetype_override=narrowed_override,
-                    validation_result=(dl_info.validation_result
-                                       or ValidationResult(
-                                           distance=distance,
-                                           scenario=fail_scenario,
-                                           detail=fail_detail,
-                                           error=fail_error,
-                                       ).to_json()),
-                    staged_path=path)
-                if narrowed_override is not None:
-                    logger.info(
-                        f"  Narrowed search_filetype_override '{current_override}'"
-                        f" -> '{narrowed_override}' after downgrade")
-                outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
-
-            # --- Common actions driven by flags ---
-            if action.denylist:
-                if decision == "downgrade":
-                    reason = "quality downgrade prevented"
-                elif decision.startswith("transcode"):
-                    reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
-                else:
-                    reason = f"rejected: {decision}"
-                for username in usernames:
-                    db.add_denylist(request_id, username, reason)
-                    if cooled_down_users is not None:
-                        if db.check_and_apply_cooldown(username):
-                            cooled_down_users.add(username)
-                logger.info(f"  Denylisted {usernames} for request {request_id}")
-
-            if action.requeue and (requeue_on_failure or not action.record_rejection):
-                requeue_fields: dict[str, object] = {
-                    "search_filetype_override": QUALITY_UPGRADE_TIERS,
-                }
-                if action.mark_done and new_br is not None:
-                    requeue_fields["min_bitrate"] = new_br
-                apply_transition(db, request_id, "wanted", **requeue_fields)
-
-            if action.run_quality_gate:
-                _check_quality_gate_core(
-                    mb_id=mb_release_id,
-                    label=label,
-                    request_id=request_id,
-                    files=list(file_list),
-                    db=db,
-                    quality_ranks=cfg.quality_ranks if cfg is not None else None,
-                )
-            if action.trigger_notifiers and cfg is not None:
-                _trigger_meelo(cfg)
-                _trigger_plex(cfg, ir.postflight.imported_path)
-                _trigger_jellyfin(cfg)
-            if action.cleanup and _should_cleanup_path(scenario, action):
-                # Issue #89: force/manual paths pass the user's
-                # ``failed_imports/…`` folder as ``path`` — cleanup is
-                # data loss on a ``downgrade`` / ``transcode_downgrade``
-                # decision where beets never moved the files.
-                # ``_should_cleanup_path`` only allows cleanup on force/
-                # manual when the decision actually imported (mark_done=
-                # True, i.e. beets has moved the files and the source
-                # directory is now empty), which keeps the wrong-matches
-                # tab honest and prevents duplicate re-imports of an
-                # already-imported album. Auto-import scenarios always
-                # clean — their staging dir under ``/Incoming`` is
-                # disposable by design.
-                _cleanup_staged_dir(path)
-            if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
-                if removed and cfg is not None:
-                    trigger_meelo_clean(cfg)
-    except sp.TimeoutExpired:
-        logger.error(f"{mode} TIMEOUT: {label}")
-        _record_rejection_and_maybe_requeue(
-            db, request_id, dl_info,
-            distance=distance, scenario="timeout",
-            detail="import_one.py timed out", error="timeout",
-            requeue=requeue_on_failure, outcome_label="failed",
-            validation_result=ValidationResult(
-                distance=distance,
-                scenario="timeout",
-                detail="import_one.py timed out",
-                error="timeout",
-            ).to_json(),
-            staged_path=path)
-        outcome_message = "Import timed out"
-    except Exception:
-        logger.exception(f"{mode} ERROR: {label}")
-        _record_rejection_and_maybe_requeue(
-            db, request_id, dl_info,
-            distance=distance, scenario="exception",
-            detail="unhandled exception in auto-import", error="exception",
-            requeue=requeue_on_failure, outcome_label="failed",
-            validation_result=ValidationResult(
-                distance=distance,
-                scenario="exception",
-                detail="unhandled exception in auto-import",
-                error="exception",
-            ).to_json(),
-            staged_path=path)
-        outcome_message = "Unhandled exception"
+                    scenario="exception",
+                    detail="unhandled exception in auto-import",
+                    error="exception",
+                ).to_json(),
+                staged_path=path)
+            outcome_message = "Unhandled exception"
 
     return DispatchOutcome(success=outcome_success, message=outcome_message)
 

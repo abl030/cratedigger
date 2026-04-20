@@ -254,7 +254,8 @@ class FakePipelineDB:
         self.clear_download_state_calls: list[int] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self._cooldown_result: bool | Callable[[str], bool] = False
-        self._advisory_lock_result: bool = True
+        self._advisory_lock_result: (
+            bool | Callable[[int, int], bool]) = True
 
     # --- Seeding ---
 
@@ -275,21 +276,35 @@ class FakePipelineDB:
         """
         self._cooldown_result = result
 
-    def set_advisory_lock_result(self, result: bool) -> None:
-        """Configure what advisory_lock yields (True = acquired, False = contended)."""
+    def set_advisory_lock_result(
+        self, result: bool | Callable[[int, int], bool],
+    ) -> None:
+        """Configure what advisory_lock yields.
+
+        Pass a bool for a fixed result across every (namespace, key), or
+        a callable (namespace, key) -> bool for per-lock answers. The
+        callable form is needed for issue #133 where one test scenario
+        holds the request-lock but releases the release-lock (or vice
+        versa) to model the cross-process race between the auto cycle
+        and web force-import on the same MBID.
+        """
         self._advisory_lock_result = result
 
     @contextmanager
     def advisory_lock(self, namespace: int, key: int) -> Iterator[bool]:
         """In-memory stand-in for ``PipelineDB.advisory_lock``.
 
-        Records every ``(namespace, key)`` invocation and yields the value set
-        via ``set_advisory_lock_result`` (default ``True``). Tests that want to
-        simulate contention flip the flag to ``False`` before calling the code
-        under test.
+        Records every ``(namespace, key)`` invocation and yields the
+        value set via ``set_advisory_lock_result`` (default ``True``).
+        Tests that want to simulate contention flip the flag to ``False``
+        before calling the code under test.
         """
         self.advisory_lock_calls.append((namespace, key))
-        yield self._advisory_lock_result
+        acquired = (
+            self._advisory_lock_result(namespace, key)
+            if callable(self._advisory_lock_result)
+            else self._advisory_lock_result)
+        yield acquired
 
     # --- PipelineDB interface methods ---
 

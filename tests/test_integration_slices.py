@@ -1278,5 +1278,205 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         self.assertFalse(row["verified_lossless"])
 
 
+class TestReleaseLockContention(unittest.TestCase):
+    """Integration slice for issue #133 / #132 P1: the cross-process
+    same-release advisory lock.
+
+    The Palo Santo data-loss fix (PR #131) removed the destructive branch
+    from the harness but left a cross-process race: two processes
+    importing the same MBID can each see the other's newly-inserted row
+    as "the newest" and delete the wrong row during post-import cleanup.
+
+    The fix: ``dispatch_import_core`` now wraps the ``import_one.py``
+    subprocess in a release-keyed advisory lock (non-blocking). This
+    slice pins two behaviors:
+
+    1. **Contention** — when another session holds the release lock for
+       the same MBID, ``dispatch_import_core`` returns early with a
+       "try again shortly" outcome. It does NOT spawn ``import_one.py``
+       and does NOT write a ``download_log`` row (deferred retry, not
+       a failure). The request's status is untouched.
+
+    2. **Happy path** — when the lock is free, the subprocess runs
+       normally and the ``(namespace, key)`` recorded on the fake DB
+       matches ``release_id_to_lock_key(mbid)`` so the lock is keyed
+       exactly on the MBID and not e.g. the request_id.
+    """
+
+    MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+
+    def _make_cfg(self) -> CratediggerConfig:
+        return CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+    def _make_db(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID, status="downloading"))
+        return db
+
+    def test_contention_returns_early_without_spawning_subprocess(self):
+        from lib.import_dispatch import dispatch_import_core
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                     release_id_to_lock_key)
+
+        db = self._make_db()
+        # Simulate: another session already holds the RELEASE lock for
+        # this MBID. The REQUEST lock (not taken at this seam — it lives
+        # in dispatch_import_from_db) would still be free if we asked,
+        # but here dispatch_import_core only touches the release one.
+        def lock_result(namespace: int, key: int) -> bool:
+            # ``False`` exactly for the release lock on this MBID.
+            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                    and key == release_id_to_lock_key(self.MBID)):
+                return False
+            return True
+        db.set_advisory_lock_result(lock_result)
+
+        dl_info = DownloadInfo(username="user1")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext:
+                outcome = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID,
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Subprocess NEVER fires.
+        ext.run.assert_not_called()
+        # No rejection or success row — deferred retry, untouched state.
+        self.assertEqual(db.download_logs, [])
+        # Request status unchanged.
+        self.assertEqual(db.request(42)["status"], "downloading")
+        # Outcome carries the "try again shortly" signal to the caller.
+        self.assertFalse(outcome.success)
+        self.assertIn("Another import is already in progress",
+                      outcome.message)
+        # Lock was attempted exactly once, on the RELEASE namespace at
+        # the hashed MBID key.
+        self.assertIn(
+            (ADVISORY_LOCK_NAMESPACE_RELEASE,
+             release_id_to_lock_key(self.MBID)),
+            db.advisory_lock_calls)
+
+    def test_happy_path_acquires_lock_keyed_on_mbid_and_runs_import(self):
+        from lib.import_dispatch import dispatch_import_core
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                     release_id_to_lock_key)
+
+        db = self._make_db()
+        # Default: all locks acquired. Happy path.
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID,
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Subprocess ran exactly once.
+        ext.run.assert_called_once()
+        # Import succeeded; domain state reflects that.
+        self.assertEqual(db.request(42)["status"], "imported")
+        # Lock was taken on the RELEASE namespace with the hashed MBID
+        # as key — NOT the request_id. Confirms keying is on the
+        # release, which is the only way to serialise two different
+        # request_ids that share an MBID (the auto-cycle vs force-import
+        # race from the Palo Santo follow-up).
+        self.assertIn(
+            (ADVISORY_LOCK_NAMESPACE_RELEASE,
+             release_id_to_lock_key(self.MBID)),
+            db.advisory_lock_calls)
+
+    def test_empty_mbid_skips_release_lock_but_still_imports(self):
+        """Defensive: a caller that somehow reaches ``dispatch_import_core``
+        with an empty mb_release_id should not block on a lock keyed on
+        empty string (``crc32(b"") == 0``), which would otherwise
+        serialise every empty-mbid import. The code skips the lock
+        entirely and logs a warning.
+        """
+        from lib.import_dispatch import dispatch_import_core
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
+
+        db = self._make_db()
+        # Re-seed with empty mb_release_id.
+        db.seed_request(make_request_row(
+            id=43, mb_release_id="", status="downloading"))
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="",
+                    request_id=43,
+                    label="Test Artist - No MBID",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Subprocess runs (no lock held us up).
+        ext.run.assert_called_once()
+        # No RELEASE-namespace lock call — we skipped it entirely.
+        namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
+        self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
+
+
 if __name__ == "__main__":
     unittest.main()
