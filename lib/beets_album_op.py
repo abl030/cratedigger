@@ -113,14 +113,14 @@ class BeetsAlbumHandle:
     (SQLite auto-increment), unique by construction, narrow enough that
     the ``id:<N>`` selector cannot reach a sibling pressing.
 
-    ``release_id`` is the MB UUID or the Discogs numeric id (whichever
-    the row carries). Informational only: used for log messages and
-    the audit trail, never for the subprocess selector. Empty string
-    is acceptable — sibling canonicalization builds handles from
-    ``albums.id`` alone.
+    One-field dataclass kept as a distinct type rather than a bare
+    ``int`` so callsites are self-documenting (``BeetsAlbumHandle(
+    album_id=N)`` vs ``remove_album(N)``) and future additions — e.g.
+    a debug label, a request_id backref — can land without breaking
+    callsite signatures. Earlier drafts carried a ``release_id: str``
+    field for logs; nothing read it, so it was removed (YAGNI).
     """
     album_id: int
-    release_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -282,10 +282,9 @@ def move_album(
 def remove_by_selector(
     selector: str,
     *,
-    delete_files: bool = True,
     timeout: int = DEFAULT_REMOVE_TIMEOUT,
 ) -> BeetsOpFailure | None:
-    """Low-level primitive: ``beet remove -a [-d] <selector>``. Never raises.
+    """Low-level primitive: ``beet remove -a -d <selector>``. Never raises.
 
     For callsites that iterate arbitrary selectors (``mb_albumid:X``,
     ``discogs_albumid:Y``) because the album id is not known up front
@@ -294,12 +293,12 @@ def remove_by_selector(
     album id is available: the ``id:<N>`` selector is narrower and
     cannot accidentally match siblings.
 
-    ``delete_files`` matches ``remove_album``'s signature for symmetry;
-    every current caller passes ``True`` (the ban-source intent is
-    "remove from beets AND delete the tagged files"). Kept optional so
-    future callers can untag without deleting if the use case appears.
+    ``-d`` (delete files) is always on: every caller's intent is
+    "remove from beets AND delete the tagged files" (ban-source
+    cleanup). An untag-only selector-based remove has no production
+    use case today; if one appears, add the flag then.
 
     Returns ``None`` on clean exit or a typed ``BeetsOpFailure``.
     """
     return _run_beet_op(
-        "remove", selector, delete_files=delete_files, timeout=timeout)
+        "remove", selector, delete_files=True, timeout=timeout)
