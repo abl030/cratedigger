@@ -755,12 +755,39 @@ class TestPipelineDBFakeContract(unittest.TestCase):
         )
 
 
+_POSITIONAL_KINDS = (
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+)
+
+
 def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
     """Return a list of signature drift messages between two classes.
 
-    Extracted so ``TestPipelineDBFakeContractInternals`` can directly
-    exercise the drift detector against synthetic classes without
-    mutating the real fake.
+    The invariant the reviewers kept circling: the fake must be
+    substitutable for the real in every production-valid call pattern.
+    Checks, in order, what a caller could observe:
+
+    1. Positional layout must match exactly. Any reorder, insertion,
+       or rename at a positional slot would bind ``add_request("A",
+       "B", "request")`` to the wrong parameter on the fake (codex R4).
+    2. Every named real parameter must be declared by name on the
+       fake. ``**kwargs`` absorption is NOT sufficient — a fake that
+       absorbs a renamed kwarg silently reproduces the drift this
+       contract is meant to prevent (round 1).
+    3. Kinds must match exactly. Narrowing positional-or-keyword to
+       keyword-only breaks positional callers (codex R3).
+    4. Requiredness drift in both directions: real required → fake
+       optional lets the fake accept calls real would reject; real
+       optional → fake required crashes calls real would handle
+       (codex R3).
+    5. ``*args`` / ``**kwargs`` on real require equivalents on fake
+       so variadic callers don't silently lose arguments.
+
+    The fake may add trailing keyword-only parameters with defaults
+    (for test-only bookkeeping) and absorb test-only extras with
+    ``**kwargs`` — those are not visible to any real-valid caller so
+    they do not need to be mirrored back onto real.
     """
     real_methods = _public_methods(real_cls)
     fake_methods = _public_methods(fake_cls)
@@ -771,72 +798,125 @@ def _diff_signatures(real_cls: type, fake_cls: type) -> list[str]:
         real_sig = inspect.signature(getattr(real_cls, name))
         fake_sig = inspect.signature(getattr(fake_cls, name))
 
-        fake_params = fake_sig.parameters
-        fake_accepts_varargs = any(
-            p.kind == inspect.Parameter.VAR_POSITIONAL
-            for p in fake_params.values()
-        )
-        fake_accepts_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in fake_params.values()
-        )
-
-        for pname, param in real_sig.parameters.items():
-            if pname == "self":
-                continue
-            if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                if not fake_accepts_varargs:
-                    mismatches.append(
-                        f"{name}: real has *{pname} but fake does "
-                        "not accept variable positional args")
-                continue
-            if param.kind == inspect.Parameter.VAR_KEYWORD:
-                if not fake_accepts_kwargs:
-                    mismatches.append(
-                        f"{name}: real has **{pname} but fake does "
-                        "not accept variable keyword args")
-                continue
-            # Regular named parameter (positional-or-keyword or
-            # keyword-only). MUST be declared on the fake —
-            # **kwargs absorption is not sufficient.
-            if pname not in fake_params:
-                mismatches.append(
-                    f"{name}: param '{pname}' present on real but "
-                    "not declared on fake (declare it explicitly — "
-                    "**kwargs does not count)")
-                continue
-            fp = fake_params[pname]
-            # Kind must match exactly. A fake that narrows
-            # positional-or-keyword to keyword-only breaks any caller
-            # passing it positionally (``add_request("Artist",
-            # "Album", source="request")``) — fake-backed tests would
-            # raise ``TypeError`` while this contract stayed green
-            # (codex R3).
-            if fp.kind != param.kind:
-                mismatches.append(
-                    f"{name}({pname}): kind mismatch — "
-                    f"real={param.kind.name}, "
-                    f"fake={fp.kind.name}")
-                continue
-            # Requiredness drift in both directions:
-            # - real required → fake optional: silently makes the arg
-            #   optional on the fake so callers can omit it.
-            # - real optional → fake required: production calls that
-            #   omit the arg work against real but raise ``TypeError``
-            #   against the fake. Codex R3.
-            real_required = param.default is inspect.Parameter.empty
-            fake_required = fp.default is inspect.Parameter.empty
-            if real_required and not fake_required:
-                mismatches.append(
-                    f"{name}({pname}): real requires this param but "
-                    "fake gives it a default (silently makes it "
-                    "optional)")
-            elif fake_required and not real_required:
-                mismatches.append(
-                    f"{name}({pname}): real has a default but fake "
-                    "requires this param (production calls that omit "
-                    "it would crash against the fake)")
+        mismatches.extend(_diff_positional_layout(name, real_sig, fake_sig))
+        mismatches.extend(_diff_named_params(name, real_sig, fake_sig))
+        mismatches.extend(_diff_variadic(name, real_sig, fake_sig))
     return mismatches
+
+
+def _positional_params(
+    sig: inspect.Signature,
+) -> list[inspect.Parameter]:
+    return [
+        p for p in sig.parameters.values()
+        if p.name != "self" and p.kind in _POSITIONAL_KINDS
+    ]
+
+
+def _diff_positional_layout(
+    method: str,
+    real_sig: inspect.Signature,
+    fake_sig: inspect.Signature,
+) -> list[str]:
+    """Positional slots must match real exactly — no reorder, no extras.
+
+    Python binds positional args by index; a fake that adds
+    ``add_request(album_title, artist_name, source)`` would satisfy the
+    name-matching check while binding ``add_request("Artist", "Album",
+    "request")`` to the wrong parameters (codex R4).
+    """
+    out: list[str] = []
+    real_pos = _positional_params(real_sig)
+    fake_pos = _positional_params(fake_sig)
+
+    for i, rp in enumerate(real_pos):
+        if i >= len(fake_pos):
+            out.append(
+                f"{method}: positional slot {i} ('{rp.name}') "
+                "present on real but missing from fake's positional "
+                "sequence")
+            continue
+        fp = fake_pos[i]
+        if fp.name != rp.name:
+            out.append(
+                f"{method}: positional slot {i} — real='{rp.name}', "
+                f"fake='{fp.name}' (reorder, rename, or inserted "
+                "parameter would break positional callers)")
+    if len(fake_pos) > len(real_pos):
+        extras = [fp.name for fp in fake_pos[len(real_pos):]]
+        out.append(
+            f"{method}: fake has extra positional parameters beyond "
+            f"real: {extras} (a positional call on real would bind "
+            "nothing to these slots on the fake)")
+    return out
+
+
+def _diff_named_params(
+    method: str,
+    real_sig: inspect.Signature,
+    fake_sig: inspect.Signature,
+) -> list[str]:
+    """Every named real param must be declared on the fake with a
+    compatible kind and requiredness."""
+    out: list[str] = []
+    fake_params = fake_sig.parameters
+    for pname, param in real_sig.parameters.items():
+        if pname == "self":
+            continue
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL,
+                          inspect.Parameter.VAR_KEYWORD):
+            continue
+        if pname not in fake_params:
+            out.append(
+                f"{method}: param '{pname}' present on real but "
+                "not declared on fake (declare it explicitly — "
+                "**kwargs does not count)")
+            continue
+        fp = fake_params[pname]
+        if fp.kind != param.kind:
+            out.append(
+                f"{method}({pname}): kind mismatch — "
+                f"real={param.kind.name}, fake={fp.kind.name}")
+            continue
+        real_required = param.default is inspect.Parameter.empty
+        fake_required = fp.default is inspect.Parameter.empty
+        if real_required and not fake_required:
+            out.append(
+                f"{method}({pname}): real requires this param but "
+                "fake gives it a default (silently makes it optional)")
+        elif fake_required and not real_required:
+            out.append(
+                f"{method}({pname}): real has a default but fake "
+                "requires this param (production calls that omit it "
+                "would crash against the fake)")
+    return out
+
+
+def _diff_variadic(
+    method: str,
+    real_sig: inspect.Signature,
+    fake_sig: inspect.Signature,
+) -> list[str]:
+    """``*args`` / ``**kwargs`` on real require equivalents on fake."""
+    out: list[str] = []
+    fake_accepts_varargs = any(
+        p.kind == inspect.Parameter.VAR_POSITIONAL
+        for p in fake_sig.parameters.values())
+    fake_accepts_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in fake_sig.parameters.values())
+    for param in real_sig.parameters.values():
+        if (param.kind == inspect.Parameter.VAR_POSITIONAL
+                and not fake_accepts_varargs):
+            out.append(
+                f"{method}: real has *{param.name} but fake does "
+                "not accept variable positional args")
+        elif (param.kind == inspect.Parameter.VAR_KEYWORD
+                and not fake_accepts_kwargs):
+            out.append(
+                f"{method}: real has **{param.name} but fake does "
+                "not accept variable keyword args")
+    return out
 
 
 class TestPipelineDBFakeContractInternals(unittest.TestCase):
@@ -934,3 +1014,39 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
         self.assertTrue(
             any("fake requires this param" in m for m in diff),
             f"Expected drift for tightened requiredness, got: {diff}")
+
+    def test_positional_reorder_is_caught(self):
+        """Codex R4: a fake that swaps positional parameter order
+        would bind positional args to the wrong params. Name-matching
+        alone cannot catch this — the positional layout must be
+        checked by index."""
+        class Real:
+            def m(self, artist_name: str, album_title: str,
+                  source: str) -> None:
+                ...
+        class Fake:
+            def m(self, album_title: str, artist_name: str,
+                  source: str) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("positional slot" in m for m in diff),
+            f"Expected drift for reordered positional params, got: "
+            f"{diff}")
+
+    def test_fake_with_extra_positional_param_is_caught(self):
+        """Codex R4: a fake that adds an extra positional parameter
+        beyond real breaks positional callers — real's call pattern
+        would leave that slot unbound on the fake."""
+        class Real:
+            def m(self, artist_name: str, album_title: str) -> None:
+                ...
+        class Fake:
+            def m(self, artist_name: str, album_title: str,
+                  new_required: str) -> None:
+                ...
+        diff = _diff_signatures(Real, Fake)
+        self.assertTrue(
+            any("extra positional parameters" in m for m in diff),
+            f"Expected drift for fake with extra positional, got: "
+            f"{diff}")
