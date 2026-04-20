@@ -355,6 +355,9 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     Redownload paths (``source != 'request'`` or distance above
     threshold) don't take the lock — they just stage-and-mark-done
     without running the harness, so no cross-process race applies.
+
+    See ``docs/advisory-locks.md`` for the namespace table, key
+    derivation, ordering rules, and the call-site index.
     """
     from contextlib import nullcontext
     from lib.import_dispatch import DispatchOutcome

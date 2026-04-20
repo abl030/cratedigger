@@ -28,27 +28,20 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 
-# Advisory-lock namespace for force/manual-import concurrency protection
-# (issue #92). The two-arg pg_advisory_lock takes (int4, int4); the first
-# arg is a per-feature namespace constant, the second is the request_id.
-# 0x46494D50 = ASCII "FIMP" — recognisable in pg_locks during debugging.
+# Advisory-lock namespaces. Every lock in this codebase is
+# session-scoped, non-blocking (``pg_try_advisory_lock``), and
+# session-reentrant. See ``docs/advisory-locks.md`` for the canonical
+# rules covering namespace values, key derivation, ordering, and call
+# sites. Every acquire site links back there.
+
+# Per-request lock — force/manual-import double-click protection
+# (issue #92). Key = ``request_id``. ``0x46494D50`` = ASCII "FIMP",
+# recognisable in ``pg_locks`` during debugging.
 ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
 
-# Advisory-lock namespace for same-release concurrency protection
-# (issue #132 P1, issue #133). ``ADVISORY_LOCK_NAMESPACE_IMPORT`` above
-# serialises operations on the same *request_id* — it prevents a
-# double-click on force-import from running the pipeline twice for the
-# same album row. That is NOT enough to close the Palo Santo blast
-# radius: the auto-import cycle and the web force-import path can each
-# hold its own per-request lock while both targeting the same MBID
-# (different request_id, same release). In that race,
-# ``import_one.py``'s post-import ``max(post_import_ids)`` query can
-# pick up the OTHER process's newly-inserted row as "the newest" and
-# delete the row this process just imported. The fix is to serialise
-# at the release level too: every ``dispatch_import_core`` invocation
-# acquires this lock keyed on a stable hash of ``mb_release_id``.
-#
-# 0x52454C45 = ASCII "RELE" — recognisable alongside FIMP in pg_locks.
+# Per-release lock — Palo Santo protection (issue #132 P1, issue #133).
+# Key = ``release_id_to_lock_key(mb_release_id)``. ``0x52454C45`` =
+# ASCII "RELE", recognisable alongside FIMP in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_RELEASE = 0x52454C45
 
 
@@ -159,6 +152,9 @@ class PipelineDB:
         single session, so this only protects against inter-session races;
         the web server (single-threaded ``HTTPServer``) already serialises
         within its own session.
+
+        See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
+        and call-site index.
         """
         self._ensure_conn()
         with self.conn.cursor() as cur:

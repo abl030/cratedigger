@@ -619,30 +619,16 @@ def dispatch_import_core(
     outcome_success = False
     outcome_message = ""
 
-    # Cross-process same-release lock (issue #132 P1, issue #133). Held
-    # for the duration of the ``import_one.py`` subprocess. The Palo
-    # Santo blast-radius fix (PR #131) removed the destructive branch
-    # from the harness's ``resolve_duplicate`` handler, but the
-    # post-import cleanup still uses ``max(post_import_ids)`` to pick
-    # "the album we just imported" — vulnerable to a second process
-    # inserting its own same-MBID row between our import finishing and
-    # our re-enumerate query. This lock closes that window across every
-    # entry point (auto-import cycle, web force-import, CLI
-    # manual-import) because every one of them funnels through
-    # ``dispatch_import_core``.
-    #
-    # Non-blocking (``pg_try_advisory_lock``): if another process is
-    # already importing this MBID we return early with no rejection
-    # record. The auto cycle retries on its next timer tick; force/
-    # manual surface a "try again shortly" message to the user. A
-    # blocking wait would hold the caller's PG connection for the full
-    # duration of an unrelated process's import (minutes) without any
-    # clear benefit.
-    #
-    # Key derivation: stable int32 hash of ``mb_release_id`` (str).
-    # Covers both MB UUIDs and Discogs numeric ids since both share
-    # the ``mb_release_id`` column. See
-    # ``lib.pipeline_db.release_id_to_lock_key`` for collision analysis.
+    # Acquire the RELEASE (per-MBID) advisory lock for the duration of
+    # the ``import_one.py`` subprocess. This is the funnel every path
+    # goes through (auto, force, manual), so the lock here closes the
+    # Palo Santo window (issues #132 P1 / #133) for every entry point.
+    # Auto path: ``_handle_valid_result`` has already acquired RELEASE
+    # outer — this acquisition is a session-reentrant no-op. Force/
+    # manual path: this is the first RELEASE acquisition, nested inside
+    # the IMPORT lock held by ``dispatch_import_from_db``.
+    # See ``docs/advisory-locks.md`` for the full rationale, the
+    # ordering rules, and the call-site index.
     from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                  release_id_to_lock_key)
     release_lock_key: int | None
@@ -1067,11 +1053,15 @@ def dispatch_import_from_db(
     All other quality checks (downgrade prevention, quality gate, meelo scan,
     denylist) run identically to auto-import.
 
-    Concurrency (issue #92): a per-``request_id`` advisory lock is taken up
-    front. Two concurrent force/manual imports on the same request (double-
-    click in the UI, racing CLI invocations) would otherwise each run the
-    full pipeline and write duplicate ``download_log`` rows. The second
-    caller fast-fails without side effects.
+    Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
+    namespace) is taken up front. Two concurrent force/manual imports
+    on the same request (double-click in the UI, racing CLI
+    invocations) would otherwise each run the full pipeline and write
+    duplicate ``download_log`` rows. The second caller fast-fails
+    without side effects. ``dispatch_import_core`` below will acquire
+    the RELEASE lock as the inner nested acquisition. See
+    ``docs/advisory-locks.md`` for namespaces, ordering, and the
+    call-site index.
 
     Args:
         db: PipelineDB instance
