@@ -988,6 +988,18 @@ def _canonicalize_siblings(
     repair at the end of ``main()``; without mirroring it here, moved
     siblings ship with stricter perms than they started with.
 
+    KNOWN LIMITATION (Codex PR #131 round 6 P2): this helper moves
+    sibling files on disk but does NOT update
+    ``album_requests.imported_path`` for those siblings in the
+    pipeline DB. If a sibling was tracked as a previous pipeline
+    request, its ``imported_path`` will point at the pre-move
+    location until a future event (next upgrade, manual re-tag)
+    updates it. The pipeline UI will show the wrong path for that
+    request in the interim. Cross-service plumbing — the harness
+    runs as a subprocess without a shared write handle to the
+    pipeline DB for arbitrary request ids — and is tracked as a
+    follow-up separate from the Palo Santo blast-radius fix.
+
     Never raises — delegates to ``_run_album_move_by_id`` which
     returns a typed ``DisambiguationFailure`` on any subprocess
     error. Per-sibling failures are logged but do not abort the
@@ -1522,7 +1534,20 @@ def main():
     # This supersedes the round-3/4 ``stale_beets_id`` approach: by
     # deriving the set-to-remove from the post-import state directly,
     # we no longer depend on the pre-flight capture matching what
-    # ``resolve_duplicate`` sees. The race is closed.
+    # ``resolve_duplicate`` sees. The intra-process race is closed.
+    #
+    # KNOWN LIMITATION (Codex PR #131 round 6 P1): this remains
+    # vulnerable to CROSS-process races. If a second soularr process
+    # (e.g. soularr-web force-import racing an auto-import cycle)
+    # commits a same-MBID row between our ``run_import`` returning
+    # and this re-enumerate query, ``max(post_import_ids)`` would
+    # pick that other process's row as "new" and our cleanup would
+    # delete the one this process actually imported. Soularr.service
+    # is single-instance (``/var/lib/soularr/soularr.lock``) but the
+    # web force-import path does not hold that lock, so the race
+    # window exists in practice. Follow-up: a pipeline-level same-
+    # release advisory lock shared by both entry points, tracked
+    # separately from this data-loss fix.
     #
     # Each removal uses ``beet remove -a -d id:<N>`` — primary-key
     # scoped, cannot reach cross-MBID siblings. Any removal failure
