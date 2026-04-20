@@ -242,10 +242,15 @@ def decide_download_action(
 #   2. Wire-shape changes are detected by tests, not by production bugs.
 #   3. Near-zero overhead.
 #
-# Only types whose inputs come from outside our Python code (harness stdout,
-# in this case) belong here. Types we construct entirely in-process (e.g.
-# ImportResult, QualityRankConfig) stay as dataclasses — their inputs are
-# our own typed data, not a wire protocol.
+# Every wire-boundary type in this module is a ``msgspec.Struct`` — the
+# harness ones below PLUS ``ImportResult`` / ``PostflightInfo`` /
+# ``ConversionInfo`` / ``SpectralDetail`` / ``AudioQualityMeasurement`` /
+# ``MovedSibling`` / ``ValidationResult`` further down, which all round-trip
+# through ``download_log`` JSONB and/or subprocess stdout (issue #141
+# unified on one encoder: ``msgspec.json.encode``). Types constructed
+# entirely from in-process Python (e.g. ``QualityRankConfig``,
+# ``CratediggerConfig``) stay as ``@dataclass`` — their inputs are already
+# typed, not a wire protocol.
 # ---------------------------------------------------------------------------
 
 
@@ -363,8 +368,7 @@ class ChooseMatchMessage(msgspec.Struct):
     candidates: list[CandidateSummary] = []
 
 
-@dataclass
-class ValidationResult:
+class ValidationResult(msgspec.Struct):
     """Structured result from beets validation + audio integrity check.
 
     Accumulated through the validation pipeline:
@@ -373,6 +377,8 @@ class ValidationResult:
     3. cratedigger.py populates source info (username, folder, failed_path, denylisted)
 
     Stored in download_log.validation_result (JSONB) for complete auditability.
+    Wire-boundary type per ``.claude/rules/code-quality.md``: encode via
+    ``msgspec.json.encode``, decode via ``msgspec.convert`` — symmetric.
     """
     valid: bool = False
     distance: Optional[float] = None
@@ -381,9 +387,9 @@ class ValidationResult:
     mbid_found: bool = False
     target_mbid: Optional[str] = None
     candidate_count: int = 0
-    candidates: list[CandidateSummary] = field(default_factory=list)
+    candidates: list[CandidateSummary] = []
     # Local file info (from harness choose_match items)
-    items: list[dict] = field(default_factory=list)
+    items: list[dict] = []
     local_track_count: Optional[int] = None
     recommendation: Optional[str] = None        # beets confidence: "strong", "medium", "none"
     path: Optional[str] = None                  # album path being validated
@@ -391,22 +397,22 @@ class ValidationResult:
     soulseek_username: Optional[str] = None
     download_folder: Optional[str] = None
     failed_path: Optional[str] = None
-    denylisted_users: list[str] = field(default_factory=list)
+    denylisted_users: list[str] = []
     # Audio integrity
-    corrupt_files: list[str] = field(default_factory=list)
+    corrupt_files: list[str] = []
     error: Optional[str] = None
 
     def to_json(self) -> str:
-        """Serialize to JSON string. Uses msgspec because the
-        `candidates` field holds msgspec.Struct instances which
-        dataclasses.asdict does not know how to recurse into."""
+        """Serialize to JSON string via msgspec.json.encode."""
         return msgspec.json.encode(self).decode()
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationResult":
-        """Construct from a dict. Uses msgspec.convert so the nested
-        CandidateSummary / TrackMapping / HarnessItem / HarnessTrackInfo
-        structs are validated at their typed `str` contract."""
+        """Construct from a dict — strict-typed decode at the boundary.
+
+        Every nested ``CandidateSummary`` / ``TrackMapping`` / ``HarnessItem``
+        / ``HarnessTrackInfo`` is validated against its declared types.
+        """
         return msgspec.convert(d, type=cls)
 
     @classmethod
@@ -588,13 +594,15 @@ class DownloadInfo:
 # Audio quality measurement — ground truth from ffprobe + spectral
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class AudioQualityMeasurement:
+class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     """What we actually measured about a set of audio files.
 
     Ground truth from ffprobe and spectral analysis. Used by decision functions
     to compare new downloads against existing files and determine quality gate
-    outcomes.
+    outcomes. Wire-boundary type per ``.claude/rules/code-quality.md`` —
+    appears in ``ImportResult.{new_measurement,existing_measurement}`` and
+    crosses both the harness stdout and ``download_log.import_result`` JSONB
+    boundaries.
 
     Fields:
         min_bitrate_kbps:      min per-track bitrate (kbps), None if unmeasurable
@@ -1279,9 +1287,12 @@ def compare_quality(
 # Structured result from import_one.py
 # ---------------------------------------------------------------------------
 
-@dataclass
-class ConversionInfo:
-    """FLAC→V0 conversion details and process artifacts."""
+class ConversionInfo(msgspec.Struct):
+    """FLAC→V0 conversion details and process artifacts.
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` — nested in
+    ``ImportResult`` which crosses both the harness stdout and JSONB edges.
+    """
     converted: int = 0
     failed: int = 0
     was_converted: bool = False
@@ -1292,17 +1303,17 @@ class ConversionInfo:
     final_format: Optional[str] = None  # e.g. "opus 128", "mp3 v2", "aac 128"
 
 
-@dataclass
-class SpectralDetail:
+class SpectralDetail(msgspec.Struct):
     """Per-track spectral analysis detail.
 
     The album-level spectral grades and bitrates now live on
     AudioQualityMeasurement (new_measurement/existing_measurement on ImportResult).
     This carries the per-track detail data that doesn't fit on a measurement.
+    Wire-boundary type per ``.claude/rules/code-quality.md``.
     """
     cliff_freq_hz: Optional[int] = None
     suspect_pct: float = 0.0
-    per_track: list[dict] = field(default_factory=list)  # per-track grade/hf_deficit/cliff
+    per_track: list[dict] = []  # per-track grade/hf_deficit/cliff
     existing_suspect_pct: float = 0.0
 
 
@@ -1317,8 +1328,7 @@ class SpectralDetail:
 from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 
-@dataclass(frozen=True)
-class MovedSibling:
+class MovedSibling(msgspec.Struct, frozen=True):
     """Issue #132 P2 / issue #133: record of a sibling album whose
     ``beet move`` successfully relocated its files during post-import
     canonicalization.
@@ -1336,19 +1346,15 @@ class MovedSibling:
     Untracked siblings (no matching pipeline row) are no-ops at the
     dispatcher — propagation is best-effort.
 
-    **Wire-boundary policy.** This dataclass is decoded from harness
-    stdout JSON AND re-decoded from ``download_log.import_result`` JSONB
-    on every web API read. Per ``.claude/rules/code-quality.md`` §
-    "Wire-boundary types" the decoder at ``_postflight_from_dict`` uses
-    ``msgspec.convert(list, type=list[MovedSibling])`` which validates
-    every field against the declared types at the boundary —
-    ``msgspec.ValidationError`` raises if a future harness change emits
-    ``album_id`` as a string or drops a required field, instead of
+    Wire-boundary type per ``.claude/rules/code-quality.md`` §
+    "Wire-boundary types". Decoded from harness stdout JSON AND from
+    ``download_log.import_result`` JSONB on every web API read. The
+    strict-typed decode at ``_postflight_from_dict`` raises
+    ``msgspec.ValidationError`` if a future harness change emits
+    ``album_id`` as a string or drops a required field, rather than
     silently corrupting downstream state (the PR #98 / issue #99
-    lesson). ``@dataclass`` rather than ``msgspec.Struct`` is kept here
-    so ``ImportResult.to_json()``'s ``dataclasses.asdict`` traversal
-    still sees the fields (msgspec.Struct is opaque to ``asdict``);
-    strict validation happens on the inbound edge.
+    lesson). Encoded symmetrically via ``msgspec.json.encode`` —
+    same policy both directions.
     """
     album_id: int
     new_path: str
@@ -1356,13 +1362,16 @@ class MovedSibling:
     discogs_albumid: str = ""
 
 
-@dataclass
-class PostflightInfo:
-    """Beets post-import verification data."""
+class PostflightInfo(msgspec.Struct):
+    """Beets post-import verification data.
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` — nested
+    in ``ImportResult.postflight``, flows through ``download_log``.
+    """
     beets_id: Optional[int] = None
     track_count: Optional[int] = None
     imported_path: Optional[str] = None
-    bad_extensions: list[str] = field(default_factory=list)  # files with non-audio extensions
+    bad_extensions: list[str] = []  # files with non-audio extensions
     disambiguated: bool = False  # True if beet move ran cleanly to fix %aunique paths
     # Issue #127: when ``beet move`` was attempted but did not exit cleanly
     # (TimeoutExpired, OSError, or non-zero rc), this carries a typed
@@ -1377,45 +1386,33 @@ class PostflightInfo:
     # to re-evaluate ``%aunique`` on their paths. The dispatcher
     # propagates each entry's ``new_path`` to the pipeline DB (the
     # tracked request row, if any, for that sibling's release).
-    moved_siblings: list[MovedSibling] = field(default_factory=list)
+    moved_siblings: list[MovedSibling] = []
 
 
 def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
-    """Construct PostflightInfo from a dict, handling nested fields
-    (``disambiguation_failure`` from issue #127, ``moved_siblings``
-    from issue #132 P2 / #133). Old rows missing a field default per
-    the dataclass — ``disambiguation_failure=None``,
-    ``moved_siblings=[]``.
+    """Decode a ``postflight`` dict into a ``PostflightInfo`` Struct.
 
-    ``moved_siblings`` is decoded via ``msgspec.convert`` because
-    ``MovedSibling`` is a wire-boundary type per
-    ``.claude/rules/code-quality.md``. ``msgspec.convert`` accepts a
-    ``@dataclass`` target and validates each declared field strictly
-    — so int/str drift (a future harness change emitting ``album_id``
-    as string, say) raises ``msgspec.ValidationError`` here instead
-    of silently corrupting downstream state. ``MovedSibling`` stays a
-    ``@dataclass`` (not ``msgspec.Struct``) because ``ImportResult.to_json()``
-    serialises via ``dataclasses.asdict`` on the outbound edge, and
-    ``asdict`` is opaque to ``msgspec.Struct``. Asymmetric by design:
-    strict inbound validation, structural outbound serialisation.
-    Non-list values (malformed legacy JSONB) fall back to the dataclass
-    default ``[]`` without raising, preserving backwards compatibility.
+    Strict-typed decode via ``msgspec.convert``: every nested
+    ``DisambiguationFailure`` / ``MovedSibling`` is validated against
+    its declared types at the boundary (the PR #98 / issue #99 lesson).
+    Missing keys default per the Struct —
+    ``disambiguation_failure=None``, ``moved_siblings=[]``.
+
+    One pre-convert hedge: if ``moved_siblings`` arrives as a non-list
+    (malformed legacy JSONB — observed shapes: scalar, dict, null),
+    it's coerced to ``[]`` so the rest of the row still decodes.
+    Everything else raises on type drift rather than silently
+    corrupting state.
     """
     if not d:
         return PostflightInfo()
     pf_d = dict(d)
-    df_d = pf_d.pop("disambiguation_failure", None)
-    if isinstance(df_d, dict):
-        pf_d["disambiguation_failure"] = DisambiguationFailure(**df_d)
-    ms_list = pf_d.pop("moved_siblings", None)
-    if isinstance(ms_list, list):
-        pf_d["moved_siblings"] = msgspec.convert(
-            ms_list, type=list[MovedSibling])
-    return PostflightInfo(**pf_d)
+    if "moved_siblings" in pf_d and not isinstance(pf_d["moved_siblings"], list):
+        pf_d["moved_siblings"] = []
+    return msgspec.convert(pf_d, type=PostflightInfo)
 
 
-@dataclass
-class ImportResult:
+class ImportResult(msgspec.Struct):
     """Structured result emitted by import_one.py as JSON.
 
     Carries every piece of data that crosses the subprocess boundary
@@ -1425,6 +1422,13 @@ class ImportResult:
     new_measurement / existing_measurement carry the coherent quality state
     for the download and what was on disk. The same AudioQualityMeasurement
     type flows through decision functions and the audit trail.
+
+    Wire-boundary type per ``.claude/rules/code-quality.md``: encode via
+    ``msgspec.json.encode``, decode via ``msgspec.convert`` — symmetric.
+    The pre-#141 asymmetry (``json.dumps(asdict(self))`` outbound,
+    ``msgspec.convert`` inbound) forced ``MovedSibling`` et al to be
+    ``@dataclass`` so ``asdict`` could recurse; unifying on
+    ``msgspec.json.encode`` let every type become a Struct with one rule.
     """
     version: int = 2
     exit_code: int = 0
@@ -1432,18 +1436,18 @@ class ImportResult:
     already_in_beets: bool = False
     new_measurement: Optional[AudioQualityMeasurement] = None
     existing_measurement: Optional[AudioQualityMeasurement] = None
-    conversion: ConversionInfo = field(default_factory=ConversionInfo)
-    spectral: SpectralDetail = field(default_factory=SpectralDetail)
-    postflight: PostflightInfo = field(default_factory=PostflightInfo)
-    beets_log: list[str] = field(default_factory=list)  # beets stderr lines from import
+    conversion: ConversionInfo = msgspec.field(default_factory=ConversionInfo)
+    spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
+    postflight: PostflightInfo = msgspec.field(default_factory=PostflightInfo)
+    beets_log: list[str] = []  # beets stderr lines from import
     error: Optional[str] = None
     # Target-conversion audit trail — V0 bitrate that proved genuineness
     v0_verification_bitrate: Optional[int] = None
     final_format: Optional[str] = None  # configured target, None means keep V0/MP3
 
     def to_json(self) -> str:
-        """Serialize to JSON string."""
-        return json.dumps(asdict(self))
+        """Serialize to JSON string via msgspec.json.encode."""
+        return msgspec.json.encode(self).decode()
 
     def to_sentinel_line(self) -> str:
         """Format as the stdout sentinel line for subprocess communication."""
@@ -1451,7 +1455,13 @@ class ImportResult:
 
     @classmethod
     def _migrate_v1(cls, d: dict) -> "ImportResult":
-        """Migrate version 1 (QualityInfo + SpectralInfo) to version 2 (measurements)."""
+        """Migrate version 1 (QualityInfo + SpectralInfo) to version 2 (measurements).
+
+        v1 rows in production (~226 on doc2 as of 2026-04) carry
+        ``quality`` and ``spectral`` sub-objects instead of measurements.
+        This method reshapes the dict into v2 form, then routes through
+        ``from_dict`` so the strict-typed decode happens in one place.
+        """
         quality = d.get("quality") or {}
         spectral = d.get("spectral") or {}
         conv_d = dict(d.get("conversion") or {})
@@ -1465,40 +1475,43 @@ class ImportResult:
         # avg/median bitrate fields (issue #60 / #64) — leaving them at the
         # default None makes measurement_rank() fall back to min, which is
         # the same behavior the v1 row was originally classified under.
-        new_m = AudioQualityMeasurement(
-            min_bitrate_kbps=quality.get("new_min_bitrate"),
-            spectral_grade=spectral.get("grade"),
-            spectral_bitrate_kbps=spectral.get("bitrate"),
-            verified_lossless=quality.get("will_be_verified_lossless", False),
-            was_converted_from=(conv_d.get("original_filetype")
-                                if conv_d.get("was_converted") else None),
-        )
-        existing_m: Optional[AudioQualityMeasurement] = None
+        new_measurement: dict[str, Any] = {
+            "min_bitrate_kbps": quality.get("new_min_bitrate"),
+            "spectral_grade": spectral.get("grade"),
+            "spectral_bitrate_kbps": spectral.get("bitrate"),
+            "verified_lossless": quality.get(
+                "will_be_verified_lossless", False),
+            "was_converted_from": (conv_d.get("original_filetype")
+                                   if conv_d.get("was_converted") else None),
+        }
+        existing_measurement: Optional[dict[str, Any]] = None
         if quality.get("prev_min_bitrate") is not None:
-            existing_m = AudioQualityMeasurement(
-                min_bitrate_kbps=quality.get("prev_min_bitrate"),
-                spectral_grade=spectral.get("existing_grade"),
-                spectral_bitrate_kbps=spectral.get("existing_bitrate"),
-            )
+            existing_measurement = {
+                "min_bitrate_kbps": quality.get("prev_min_bitrate"),
+                "spectral_grade": spectral.get("existing_grade"),
+                "spectral_bitrate_kbps": spectral.get("existing_bitrate"),
+            }
 
-        return cls(
-            version=2,
-            exit_code=d.get("exit_code", 0),
-            decision=d.get("decision"),
-            already_in_beets=d.get("already_in_beets", False),
-            new_measurement=new_m,
-            existing_measurement=existing_m,
-            conversion=ConversionInfo(**conv_d),
-            spectral=SpectralDetail(
-                cliff_freq_hz=spectral.get("cliff_freq_hz"),
-                suspect_pct=spectral.get("suspect_pct", 0.0),
-                per_track=spectral.get("per_track", []),
-                existing_suspect_pct=spectral.get("existing_suspect_pct", 0.0),
-            ),
-            postflight=_postflight_from_dict(d.get("postflight")),
-            beets_log=d.get("beets_log", []),
-            error=d.get("error"),
-        )
+        normalised: dict[str, Any] = {
+            "version": 2,
+            "exit_code": d.get("exit_code", 0),
+            "decision": d.get("decision"),
+            "already_in_beets": d.get("already_in_beets", False),
+            "new_measurement": new_measurement,
+            "existing_measurement": existing_measurement,
+            "conversion": conv_d,
+            "spectral": {
+                "cliff_freq_hz": spectral.get("cliff_freq_hz"),
+                "suspect_pct": spectral.get("suspect_pct", 0.0),
+                "per_track": spectral.get("per_track", []),
+                "existing_suspect_pct": spectral.get(
+                    "existing_suspect_pct", 0.0),
+            },
+            "postflight": d.get("postflight") or {},
+            "beets_log": d.get("beets_log", []),
+            "error": d.get("error"),
+        }
+        return cls.from_dict(normalised)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ImportResult":
@@ -1506,34 +1519,19 @@ class ImportResult:
 
         Handles both old (v1 with quality/spectral sub-objects) and new
         (v2 with measurements) formats for backward compat with existing
-        download_log JSONB rows.
+        download_log JSONB rows. The v2 path uses ``msgspec.convert`` for
+        strict-typed decode; one pre-convert hedge coerces a non-list
+        ``postflight.moved_siblings`` to ``[]`` so malformed legacy
+        rows still decode the rest of the payload.
         """
         # Old format: has "quality" key, no "new_measurement"
         if "quality" in d and "new_measurement" not in d:
             return cls._migrate_v1(d)
-
-        new_m_d = d.get("new_measurement")
-        new_m = AudioQualityMeasurement(**new_m_d) if new_m_d else None
-        ex_m_d = d.get("existing_measurement")
-        ex_m = AudioQualityMeasurement(**ex_m_d) if ex_m_d else None
-
-        return cls(
-            version=d.get("version", 2),
-            exit_code=d.get("exit_code", 0),
-            decision=d.get("decision"),
-            already_in_beets=d.get("already_in_beets", False),
-            new_measurement=new_m,
-            existing_measurement=ex_m,
-            conversion=(ConversionInfo(**d["conversion"])
-                        if "conversion" in d else ConversionInfo()),
-            spectral=(SpectralDetail(**d["spectral"])
-                      if "spectral" in d else SpectralDetail()),
-            postflight=_postflight_from_dict(d.get("postflight")),
-            beets_log=d.get("beets_log", []),
-            error=d.get("error"),
-            v0_verification_bitrate=d.get("v0_verification_bitrate"),
-            final_format=d.get("final_format"),
-        )
+        pf = d.get("postflight")
+        if (isinstance(pf, dict) and "moved_siblings" in pf
+                and not isinstance(pf["moved_siblings"], list)):
+            d = {**d, "postflight": {**pf, "moved_siblings": []}}
+        return msgspec.convert(d, type=cls)
 
     @classmethod
     def from_json(cls, s: str) -> "ImportResult":

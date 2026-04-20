@@ -387,7 +387,18 @@ class TestImportResultSerialization(unittest.TestCase):
         self.assertIsNone(r.new_measurement)
 
     def test_from_dict_with_extra_fields_in_sub(self):
-        """Unknown fields in sub-dicts should raise (strict typing)."""
+        """Unknown fields in sub-dicts are silently ignored (issue #141).
+
+        Pre-#141 the loader raised ``TypeError`` because
+        ``ConversionInfo(**d["conversion"])`` propagated the kwargs error.
+        Post-#141 every wire-boundary type is a ``msgspec.Struct`` decoded
+        via ``msgspec.convert``, which drops unknown keys by default — and
+        that's actually the back-compat posture we want: old rows that
+        accrued stale keys across schema changes decode without 500ing
+        the web API. Type drift on *declared* fields still raises, which
+        is the guard that matters (see
+        ``test_postflight_moved_siblings_wrong_element_type_raises``).
+        """
         d = {
             "version": 2, "exit_code": 0, "decision": "import",
             "conversion": {"converted": 5, "failed": 0, "was_converted": True,
@@ -396,8 +407,12 @@ class TestImportResultSerialization(unittest.TestCase):
                            "is_transcode": False,
                            "bogus_field": 999},
         }
-        with self.assertRaises(TypeError):
-            ImportResult.from_dict(d)
+        r = ImportResult.from_dict(d)
+        self.assertEqual(r.conversion.converted, 5)
+        self.assertTrue(r.conversion.was_converted)
+        self.assertEqual(r.conversion.original_filetype, "flac")
+        # Stale key dropped — no attribute leaks onto the Struct.
+        self.assertFalse(hasattr(r.conversion, "bogus_field"))
 
     def test_v1_migration(self):
         """Old format (with quality/spectral sub-objects) migrates to v2."""
