@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from lib.beets_db import AlbumInfo
-from lib.config import SoularrConfig
+from lib.config import CratediggerConfig
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_LOSSLESS,
@@ -72,7 +72,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         ))
 
         if cfg is None:
-            cfg = SoularrConfig(
+            cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
             )
@@ -236,7 +236,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             avg_bitrate_kbps=180, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
-        custom_cfg = SoularrConfig(
+        custom_cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             quality_ranks=QualityRankConfig(gate_min_rank=QualityRank.GOOD),
@@ -279,7 +279,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             median_bitrate_kbps=245,
             format="MP3", is_cbr=False, album_path="/Beets/Test")
 
-        custom_cfg = SoularrConfig(
+        custom_cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             quality_ranks=QualityRankConfig(
@@ -454,7 +454,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """
 
     def test_suspect_download_updates_current_spectral_and_denylists(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -468,7 +468,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             is_cbr=True,
             album_path="/Beets/Test",
         )
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
             "lib.preimport.spectral_analyze",
@@ -488,7 +488,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            with self.assertLogs("soularr", level="WARNING") as logs:
+            with self.assertLogs("cratedigger", level="WARNING") as logs:
                 result = run_preimport_gates(
                     path="/tmp/download",
                     mb_release_id="mbid-123",
@@ -535,7 +535,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         import_no_exist. The key invariant: the reject reason must NOT
         read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
         """
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -550,7 +550,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             is_cbr=True,
             album_path="/Beets/Test",
         )
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
             "lib.preimport.spectral_analyze",
@@ -592,7 +592,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         against 320kbps (a real comparison) and the detail string reflects
         that — not the self-compare "128 <= 128" the old code produced.
         """
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -606,7 +606,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             is_cbr=True,
             album_path="/Beets/Test",
         )
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
             "lib.preimport.spectral_analyze",
@@ -647,7 +647,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
         With the fix: decision sees 280 vs container 256 → import_upgrade.
         """
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -661,7 +661,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             is_cbr=True,
             album_path="/Beets/Test",
         )
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
             "lib.preimport.spectral_analyze",
@@ -705,7 +705,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
         )
@@ -756,7 +756,7 @@ class TestForceImportSlice(unittest.TestCase):
             avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
         )
@@ -812,7 +812,7 @@ class TestForceImportSlice(unittest.TestCase):
             avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
 
         tmpdir = tempfile.mkdtemp()
@@ -1076,7 +1076,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             id=42, status="downloading",
             **(request_overrides or {}),
         ))
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
         )

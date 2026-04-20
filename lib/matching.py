@@ -1,4 +1,4 @@
-"""Matching helpers extracted from soularr.py."""
+"""Matching helpers extracted from cratedigger.py."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ from lib.browse import _browse_directories, rank_candidate_dirs
 from lib.util import _track_titles_cross_check
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
-    from lib.context import SoularrContext
-    from soularr import SlskdDirectory, SlskdFile, TrackRecord
+    from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
+    from cratedigger import SlskdDirectory, SlskdFile, TrackRecord
 
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
-def get_album_by_id(album_id: int, ctx: SoularrContext) -> Any:
+def get_album_by_id(album_id: int, ctx: CratediggerContext) -> Any:
     """Get album data by ID from the context cache."""
     if album_id in ctx.current_album_cache:
         return ctx.current_album_cache[album_id]
@@ -31,7 +31,7 @@ def album_match(
     slskd_tracks: Sequence[SlskdFile],
     username: str,
     filetype: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> bool:
     """Check whether the browsed directory matches the expected album."""
     match_cfg = ctx.cfg
@@ -132,7 +132,7 @@ def check_ratio(
 
 def album_track_num(
     directory: SlskdDirectory,
-    match_cfg: SoularrConfig,
+    match_cfg: CratediggerConfig,
 ) -> dict[str, Any]:
     """Count matching audio tracks and infer a consistent filetype."""
     from lib.quality import AUDIO_EXTENSIONS as _all_audio_exts
@@ -173,7 +173,7 @@ def check_for_match(
     allowed_filetype: str,
     file_dirs: list[str],
     username: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> tuple[bool, Any, str]:
     """Check candidate directories for an album match."""
     logger.debug(f"Current broken users {ctx.broken_user}")

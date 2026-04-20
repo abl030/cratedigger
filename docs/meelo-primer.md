@@ -638,7 +638,7 @@ Beets (canonical tagger)
   → writes tagged files to /mnt/virtio/Music/Beets/
   → Meelo scans /mnt/virtio/Music/ (all subdirs: Beets, AI, Live, etc.)
 
-Lidarr + Soularr + slskd (download pipeline on doc2)
+Lidarr + Cratedigger + slskd (download pipeline on doc2)
   → downloads and validates music
   → beets imports to /Beets
   → Meelo picks up new files on next scan

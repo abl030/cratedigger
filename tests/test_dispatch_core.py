@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from lib.config import SoularrConfig
+from lib.config import CratediggerConfig
 from lib.quality import DownloadInfo
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
@@ -38,7 +38,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         )
         db.seed_request(req)
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             verified_lossless_target=verified_lossless_target,
@@ -183,7 +183,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
         ir = kwargs.pop("ir", make_import_result())
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
         )

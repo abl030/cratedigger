@@ -10,7 +10,7 @@ Query full audit trail for a download_log entry. Pass the download_log ID or an 
 
 1. Find the row:
 ```bash
-ssh doc2 "psql -h 192.168.100.11 -U soularr soularr -c \"
+ssh doc2 "psql -h 192.168.100.11 -U cratedigger cratedigger -c \"
 SELECT dl.id, ar.artist_name, ar.album_title, dl.outcome, dl.beets_scenario,
        dl.import_result IS NOT NULL as has_ir,
        dl.validation_result IS NOT NULL as has_vr,
@@ -24,7 +24,7 @@ ORDER BY dl.id DESC LIMIT 5;
 
 2. Import decision (if has_ir):
 ```bash
-ssh doc2 "psql -h 192.168.100.11 -U soularr soularr -c \"
+ssh doc2 "psql -h 192.168.100.11 -U cratedigger cratedigger -c \"
 SELECT import_result->>'decision' as decision,
        import_result->'quality'->>'new_min_bitrate' as new_br,
        import_result->'quality'->>'prev_min_bitrate' as prev_br,
@@ -41,7 +41,7 @@ FROM download_log WHERE id = <ID>;
 
 3. Per-track spectral (if has per_track):
 ```bash
-ssh doc2 "psql -h 192.168.100.11 -U soularr soularr -c \"
+ssh doc2 "psql -h 192.168.100.11 -U cratedigger cratedigger -c \"
 SELECT t->>'grade' as grade, t->>'hf_deficit_db' as hf_deficit,
        t->>'cliff_detected' as cliff, t->>'estimated_bitrate_kbps' as est_br
 FROM download_log, jsonb_array_elements(import_result->'spectral'->'per_track') AS t
@@ -51,7 +51,7 @@ WHERE id = <ID>;
 
 4. Validation detail (if has_vr):
 ```bash
-ssh doc2 "psql -h 192.168.100.11 -U soularr soularr -c \"
+ssh doc2 "psql -h 192.168.100.11 -U cratedigger cratedigger -c \"
 SELECT validation_result->>'scenario' as scenario,
        validation_result->>'distance' as distance,
        validation_result->>'recommendation' as rec,
@@ -66,7 +66,7 @@ FROM download_log WHERE id = <ID>;
 
 5. Track mapping (if has_vr with mapping):
 ```bash
-ssh doc2 "psql -h 192.168.100.11 -U soularr soularr -c \"
+ssh doc2 "psql -h 192.168.100.11 -U cratedigger cratedigger -c \"
 SELECT m->'item'->>'title' as local_title,
        m->'track'->>'title' as mb_title,
        m->'item'->>'path' as local_file

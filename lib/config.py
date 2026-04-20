@@ -1,6 +1,6 @@
-"""Soularr configuration dataclass.
+"""Cratedigger configuration dataclass.
 
-Replaces the 50+ module-level globals in soularr.py with a single
+Replaces the 50+ module-level globals in cratedigger.py with a single
 frozen dataclass. Constructed once from config.ini via from_ini().
 """
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # --- Secret file reader (issue #117) ---
 #
 # Secrets (slskd API key, notifier credentials) must NOT sit plaintext in the
-# rendered /var/lib/soularr/config.ini. Instead, the config stores a *_file path
+# rendered /var/lib/cratedigger/config.ini. Instead, the config stores a *_file path
 # pointing at an out-of-band secret (sops-nix, agenix, raw file, etc.) and the
 # Python pipeline reads it on demand here. The in-process cache avoids
 # re-reading on every notifier call while still picking up rotations across
@@ -55,7 +55,7 @@ def invalidate_secret_cache() -> None:
 
 
 @dataclass(frozen=True)
-class SoularrConfig:
+class CratediggerConfig:
     """All configuration values, read-only after initialization."""
 
     # --- Slskd ---
@@ -113,7 +113,7 @@ class SoularrConfig:
 
     # --- Pipeline DB ---
     pipeline_db_enabled: bool = False
-    pipeline_db_dsn: str = "postgresql://soularr@localhost/soularr"
+    pipeline_db_dsn: str = "postgresql://cratedigger@localhost/cratedigger"
 
     # --- Meelo ---
     meelo_url: Optional[str] = None
@@ -184,10 +184,10 @@ class SoularrConfig:
 
     @classmethod
     def from_ini(cls, config: configparser.RawConfigParser,
-                 config_dir: str = ".", var_dir: str = ".") -> "SoularrConfig":
-        """Parse a ConfigParser into a SoularrConfig.
+                 config_dir: str = ".", var_dir: str = ".") -> "CratediggerConfig":
+        """Parse a ConfigParser into a CratediggerConfig.
 
-        Reproduces the exact same parsing logic as main() in soularr.py.
+        Reproduces the exact same parsing logic as main() in cratedigger.py.
         """
         def get(section, key, fallback=""):
             return config.get(section, key, fallback=fallback)
@@ -272,7 +272,7 @@ class SoularrConfig:
             quality_ranks=QualityRankConfig.from_ini(config),
             # Pipeline DB
             pipeline_db_enabled=getbool("Pipeline DB", "enabled", False),
-            pipeline_db_dsn=get("Pipeline DB", "dsn", "postgresql://soularr@localhost/soularr"),
+            pipeline_db_dsn=get("Pipeline DB", "dsn", "postgresql://cratedigger@localhost/cratedigger"),
             # Meelo
             meelo_url=get("Meelo", "url") or None,
             meelo_username=get("Meelo", "username") or None,
@@ -292,27 +292,27 @@ class SoularrConfig:
             jellyfin_library_id=get("Jellyfin", "library_id") or None,
             # Paths
             var_dir=var_dir,
-            lock_file_path=os.path.join(var_dir, ".soularr.lock"),
+            lock_file_path=os.path.join(var_dir, ".cratedigger.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
         )
 
 
-DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/soularr/config.ini"
+DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/cratedigger/config.ini"
 
 
 def _runtime_config_path(config_path: str | None = None) -> str:
     """Resolve the active runtime config.ini path."""
-    return config_path or os.environ.get("SOULARR_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
+    return config_path or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
 
 
-def read_runtime_config(config_path: str | None = None) -> SoularrConfig:
-    """Read the active runtime config.ini into a full SoularrConfig.
+def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
+    """Read the active runtime config.ini into a full CratediggerConfig.
 
     Manual-import, force-import, the CLI, and web simulator all need the same
-    runtime config the main soularr process reads.
+    runtime config the main cratedigger process reads.
 
     Missing config (file does not exist) is a soft failure — return a default
-    SoularrConfig so callers degrade safely. This covers test environments and
+    CratediggerConfig so callers degrade safely. This covers test environments and
     the very first deploy before the prestart has rendered the file.
 
     Unreadable config (file exists but PermissionError) raises loudly. This
@@ -325,23 +325,23 @@ def read_runtime_config(config_path: str | None = None) -> SoularrConfig:
     """
     path = _runtime_config_path(config_path)
     if not path or not os.path.exists(path):
-        return SoularrConfig()
+        return CratediggerConfig()
 
     parser = configparser.RawConfigParser()
     try:
         parser.read(path)
     except configparser.Error:
-        return SoularrConfig()
+        return CratediggerConfig()
     except PermissionError as exc:
         raise PermissionError(
             f"Cannot read {path} — check file mode / group ownership. "
-            "On the upstream NixOS module, set services.soularr.configMode "
-            "(default 0600) and services.soularr.configGroup so the calling "
+            "On the upstream NixOS module, set services.cratedigger.configMode "
+            "(default 0600) and services.cratedigger.configGroup so the calling "
             "user can read it. See issue #117."
         ) from exc
 
     runtime_dir = os.path.dirname(path)
-    return SoularrConfig.from_ini(
+    return CratediggerConfig.from_ini(
         parser,
         config_dir=runtime_dir,
         var_dir=runtime_dir,
@@ -356,7 +356,7 @@ def read_runtime_rank_config(config_path: str | None = None) -> QualityRankConfi
 def read_verified_lossless_target(config_path: str | None = None) -> str:
     """Read verified_lossless_target from the runtime config file.
 
-    Manual-import and force-import run outside the main soularr process, so they
+    Manual-import and force-import run outside the main cratedigger process, so they
     need a small helper to discover the same runtime setting. Callers may pass an
     explicit path, otherwise the standard doc2 runtime config is used.
     """

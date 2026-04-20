@@ -1,7 +1,7 @@
 """Quality decision logic for the download pipeline.
 
 Pure functions — no database, no filesystem, no external dependencies.
-Used by soularr.py and import_one.py, tested directly against real audio fixtures.
+Used by cratedigger.py and import_one.py, tested directly against real audio fixtures.
 """
 
 import configparser
@@ -370,7 +370,7 @@ class ValidationResult:
     Accumulated through the validation pipeline:
     1. beets_validate() populates candidates, distance, scenario
     2. Audio integrity check may set scenario=audio_corrupt + corrupt_files
-    3. soularr.py populates source info (username, folder, failed_path, denylisted)
+    3. cratedigger.py populates source info (username, folder, failed_path, denylisted)
 
     Stored in download_log.validation_result (JSONB) for complete auditability.
     """
@@ -387,7 +387,7 @@ class ValidationResult:
     local_track_count: Optional[int] = None
     recommendation: Optional[str] = None        # beets confidence: "strong", "medium", "none"
     path: Optional[str] = None                  # album path being validated
-    # Source info (populated by soularr.py)
+    # Source info (populated by cratedigger.py)
     soulseek_username: Optional[str] = None
     download_folder: Optional[str] = None
     failed_path: Optional[str] = None
@@ -551,7 +551,7 @@ class ActiveDownloadState:
 class DownloadInfo:
     """Audio quality metadata extracted from downloaded files.
 
-    Replaces the untyped dl_info dict that was passed through soularr.py,
+    Replaces the untyped dl_info dict that was passed through cratedigger.py,
     album_source.py, and pipeline_db.py. Every field that ends up in
     download_log has a typed slot here.
     """
@@ -1359,7 +1359,7 @@ class ImportResult:
     """Structured result emitted by import_one.py as JSON.
 
     Carries every piece of data that crosses the subprocess boundary
-    from import_one.py back to soularr.py. Stored in download_log.import_result
+    from import_one.py back to cratedigger.py. Stored in download_log.import_result
     for complete auditability.
 
     new_measurement / existing_measurement carry the coherent quality state
@@ -1769,7 +1769,7 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
 
 
 # ---------------------------------------------------------------------------
-# Post-import quality gate (runs after successful import in soularr.py)
+# Post-import quality gate (runs after successful import in cratedigger.py)
 # ---------------------------------------------------------------------------
 
 def gate_rank(

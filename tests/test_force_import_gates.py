@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from lib.beets_db import AlbumInfo
-from lib.config import SoularrConfig
+from lib.config import CratediggerConfig
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_import_result,
@@ -167,7 +167,7 @@ class TestForceImportRunsSpectralGate(unittest.TestCase):
             album_path="/Beets/Luce",
         )
 
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             audio_check_mode="normal",
@@ -329,7 +329,7 @@ class TestForceImportRunsAudioCheck(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             audio_check_mode="normal",
@@ -398,7 +398,7 @@ class TestForceImportStillSkipsBeetsDistance(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             audio_check_mode="normal",
@@ -602,7 +602,7 @@ class TestForceImportSplitsMultiUserSources(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=96,
             avg_bitrate_kbps=96, format="MP3", is_cbr=True,
             album_path="/Beets/Luce")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True, audio_check_mode="normal",
         )
@@ -666,7 +666,7 @@ class TestPreimportRejectionPreservesCorruptFiles(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True,
             audio_check_mode="normal",
         )
@@ -735,7 +735,7 @@ class TestForceImportDoesNotCorruptSpectralStateOnFailure(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=192,
             avg_bitrate_kbps=192, format="MP3", is_cbr=True,
             album_path="/Beets/NonexistentPath")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True,
             audio_check_mode="normal",
         )
@@ -787,7 +787,7 @@ class TestAutoPathPreservesSpectralPropagation(unittest.TestCase):
     """
 
     def test_auto_path_propagates_download_spectral(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -799,7 +799,7 @@ class TestAutoPathPreservesSpectralPropagation(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=256,
             avg_bitrate_kbps=256, format="MP3", is_cbr=True,
             album_path="/Beets/NonexistentPath")
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch("lib.preimport.spectral_analyze",
                    return_value=_analyze_result("suspect", 192, 80.0, 5)), \
@@ -912,7 +912,7 @@ class TestForceImportRepairsBeforeInspection(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True,
             audio_check_mode="normal")
 
@@ -980,7 +980,7 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
     """
 
     def test_stored_spectral_used_when_beets_lookup_empty(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -998,7 +998,7 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/NonexistentPath")
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch("lib.preimport.spectral_analyze",
                    return_value=_analyze_result(
@@ -1036,10 +1036,10 @@ class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
     def test_repair_runs_with_audio_check_off(self):
         import os
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
@@ -1075,7 +1075,7 @@ class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
     """
 
     def test_genuine_stored_spectral_ignored(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -1091,7 +1091,7 @@ class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/NonexistentPath")
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         # Download is a suspect 192kbps transcode. If the fallback used the
         # stored grade=genuine/bitrate=96 verbatim, 192 > 96 would wrongly
@@ -1135,12 +1135,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """is_vbr=None → filesystem inspection fills it in → spectral runs."""
         import os
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -1185,12 +1185,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -1247,12 +1247,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -1296,12 +1296,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -1348,12 +1348,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         upload through the gate is cheap and safe.
         """
         from unittest.mock import patch
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates, LocalFileInspection
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch("lib.preimport.inspect_local_files",
                    return_value=LocalFileInspection(
@@ -1388,7 +1388,7 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
     """
 
     def test_no_beets_album_means_no_fallback(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
@@ -1400,7 +1400,7 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=128,
         ))
-        cfg = SoularrConfig(audio_check_mode="off")
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         # BeetsDB returns None → album not in beets.
         def _mock_beets_db_no_album():
@@ -1474,7 +1474,7 @@ class TestGateRejectionWritesRejectedOutcome(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True,
             audio_check_mode="normal")
 
@@ -1541,7 +1541,7 @@ class TestForceImportRejectsNestedLayout(unittest.TestCase):
             album_id=1, track_count=10, min_bitrate_kbps=320,
             avg_bitrate_kbps=320, format="MP3", is_cbr=True,
             album_path="/Beets/Test")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True,
             audio_check_mode="off")
 

@@ -1,6 +1,6 @@
-"""Tests for beets validation pipeline in soularr.
+"""Tests for beets validation pipeline in cratedigger.
 
-Since soularr.py has heavy external dependencies (slskd_api, music_tag),
+Since cratedigger.py has heavy external dependencies (slskd_api, music_tag),
 we mock at the module level before importing, or test via subprocess simulation.
 """
 
@@ -14,16 +14,16 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-# Mock heavy dependencies before importing soularr
+# Mock heavy dependencies before importing cratedigger
 sys.modules["requests"] = MagicMock()
 sys.modules["music_tag"] = MagicMock()
 sys.modules["slskd_api"] = MagicMock()
 sys.modules["slskd_api.apis"] = MagicMock()
 sys.modules["slskd_api.apis.users"] = MagicMock()
 
-# Now import soularr and lib modules
+# Now import cratedigger and lib modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import soularr
+import cratedigger
 from lib.beets import beets_validate
 from lib.grab_list import GrabListEntry
 from lib.quality import ValidationResult
@@ -165,7 +165,7 @@ class TestBeetsValidate(unittest.TestCase):
     @patch("lib.beets.sp.Popen")
     def test_launches_harness_with_beets_subprocess_env(self, mock_popen):
         """Regression guard: the harness subprocess MUST receive the beets
-        env (HOME override). When soularr runs as the systemd service (root,
+        env (HOME override). When cratedigger runs as the systemd service (root,
         HOME=/root) without this, beets' Discogs plugin can't find its
         config at `~/.config/beets/` and returns 0 candidates for every
         --search-id — scenario=mbid_not_found on every Discogs validation.

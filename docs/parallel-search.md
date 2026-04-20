@@ -1,6 +1,6 @@
 # Parallel Soulseek Searches
 
-Soularr can overlap Soulseek searches to cut cycle time significantly.
+Cratedigger can overlap Soulseek searches to cut cycle time significantly.
 
 ## Problem
 
@@ -111,7 +111,7 @@ Note: the benchmark currently fires concurrent `search_text()` calls, which work
 | File | Role |
 |------|------|
 | `lib/search.py` | `SearchResult` dataclass |
-| `soularr.py` | `_submit_search()`, `_collect_search_results()`, `_search_and_queue_parallel()` |
+| `cratedigger.py` | `_submit_search()`, `_collect_search_results()`, `_search_and_queue_parallel()` |
 | `lib/config.py` | `parallel_searches` config field |
 | `scripts/bench_parallel_search.py` | Concurrency sweep benchmark |
 | `tests/test_slskd_live.py` | `TestParallelSearchTiming` live tests |

@@ -87,7 +87,7 @@ class TestDiscoverMigrations(unittest.TestCase):
 
     def test_missing_directory_raises(self):
         with self.assertRaises(FileNotFoundError):
-            discover_migrations("/tmp/this-path-does-not-exist-soularr")
+            discover_migrations("/tmp/this-path-does-not-exist-cratedigger")
 
     def test_default_migrations_dir_resolves(self):
         """Sanity: the package-level DEFAULT_MIGRATIONS_DIR points at migrations/."""

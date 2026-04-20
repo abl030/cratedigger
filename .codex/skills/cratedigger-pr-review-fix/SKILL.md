@@ -1,13 +1,13 @@
 ---
-name: soularr-pr-review-fix
-description: Review, fix, verify, and publish GitHub pull requests for the Soularr repository. Use when working in this repo and the user asks to review a PR, inspect the current PR branch, address findings, push the fixes to the PR branch, and leave a concise PR comment summarizing the changes and verification.
+name: cratedigger-pr-review-fix
+description: Review, fix, verify, and publish GitHub pull requests for the Cratedigger repository. Use when working in this repo and the user asks to review a PR, inspect the current PR branch, address findings, push the fixes to the PR branch, and leave a concise PR comment summarizing the changes and verification.
 ---
 
-# Soularr PR Review Fix
+# Cratedigger PR Review Fix
 
 ## Overview
 
-Run the full Soularr PR workflow end-to-end: load repo context, inspect the PR with GitHub plus the local checkout, review for bugs and regressions, implement fixes on the PR branch, verify with repo-required checks, push, and comment on the PR.
+Run the full Cratedigger PR workflow end-to-end: load repo context, inspect the PR with GitHub plus the local checkout, review for bugs and regressions, implement fixes on the PR branch, verify with repo-required checks, push, and comment on the PR.
 
 Prefer GitHub connector data for PR metadata, patch text, and comments. Prefer local `git` and the checked-out repo for file context, edits, tests, and pushing.
 
@@ -67,7 +67,7 @@ If the user asked for a review-only pass, stop after findings. If the user asked
 4. Keep one logical change per commit.
 5. When fixing a bug, also fix the structural cause if the repo rules make that the correct scope.
 
-For Soularr specifically:
+For Cratedigger specifically:
 
 - use typed dataclasses, not dict bridges
 - keep decision logic in `lib/quality.py` when the behavior is a pure decision
@@ -89,7 +89,7 @@ Use the full suite when the change is broad, cross-cutting, or risky:
 nix-shell --run "bash scripts/run_tests.sh"
 ```
 
-If you use the full suite, read `/tmp/soularr-test-output.txt` instead of rerunning just to inspect output.
+If you use the full suite, read `/tmp/cratedigger-test-output.txt` instead of rerunning just to inspect output.
 
 Do not claim verification you did not run.
 

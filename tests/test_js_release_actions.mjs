@@ -93,7 +93,7 @@ clearStore();
 {
   // User report: "downloading" pressing showed Remove request greyed
   // out. The backend's /api/pipeline/delete handles any status, so
-  // there's no reason to disable. Soularr's next poll cycle drops
+  // there's no reason to disable. Cratedigger's next poll cycle drops
   // any orphan slskd transfer when the row is gone.
   const html = renderActionToolbar({
     id: 'rel-5', in_library: false,

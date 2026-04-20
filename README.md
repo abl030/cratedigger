@@ -72,19 +72,19 @@ Add it to your flake:
 
 ```nix
 {
-  inputs.cratedigger.url = "github:abl030/soularr";
+  inputs.cratedigger.url = "github:abl030/cratedigger";
   outputs = { self, nixpkgs, cratedigger, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
         cratedigger.nixosModules.default
         ({ config, ... }: {
-          services.soularr = {
+          services.cratedigger = {
             enable = true;
             slskd = {
               apiKeyFile = "/run/secrets/slskd-api-key";   # raw key, one line
               downloadDir = "/var/lib/slskd/downloads";
             };
-            pipelineDb.dsn = "postgresql://soularr@localhost/soularr";
+            pipelineDb.dsn = "postgresql://cratedigger@localhost/cratedigger";
             beetsValidation = {
               enable = true;
               stagingDir = "/srv/music/Incoming";
@@ -102,17 +102,17 @@ Add it to your flake:
 }
 ```
 
-You provide: PostgreSQL (the module just takes a DSN), slskd, redis if you want web caching, and a secrets backend that materializes `*File` paths the module reads. The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.soularr.user` once you've set up the surrounding permissions.
+You provide: PostgreSQL (the module just takes a DSN), slskd, redis if you want web caching, and a secrets backend that materializes `*File` paths the module reads. The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.cratedigger.user` once you've set up the surrounding permissions.
 
 Try it without committing:
 
 ```bash
-nix develop github:abl030/soularr        # dev shell with deps
-nix run github:abl030/soularr#slskd-api  # build the slskd-api package
-nix flake check github:abl030/soularr    # boot the VM check
+nix develop github:abl030/cratedigger        # dev shell with deps
+nix run github:abl030/cratedigger#slskd-api  # build the slskd-api package
+nix flake check github:abl030/cratedigger    # boot the VM check
 ```
 
-For homelab consumers (sops-nix, nspawn DB containers, reverse proxies), see `~/nixosconfig/modules/nixos/services/soularr.nix` for a worked example wrapping this module.
+For homelab consumers (sops-nix, nspawn DB containers, reverse proxies), see `~/nixosconfig/modules/nixos/services/cratedigger.nix` for a worked example wrapping this module.
 
 ## Quality decision pipeline
 
@@ -127,13 +127,13 @@ All quality decisions are pure functions in `lib/quality.py` with full unit test
 
 ## Tuning the quality rank model
 
-Every threshold, enum, and per-codec band in the rank model is tunable via Nix options on the deployment side. The runtime parses them from `[Quality Ranks]` in `/var/lib/soularr/config.ini`, which is regenerated on every `nixos-rebuild switch` from the Nix module. Full rationale and per-band justification lives in [`docs/quality-ranks.md`](docs/quality-ranks.md); this section is the tuning reference.
+Every threshold, enum, and per-codec band in the rank model is tunable via Nix options on the deployment side. The runtime parses them from `[Quality Ranks]` in `/var/lib/cratedigger/config.ini`, which is regenerated on every `nixos-rebuild switch` from the Nix module. Full rationale and per-band justification lives in [`docs/quality-ranks.md`](docs/quality-ranks.md); this section is the tuning reference.
 
 ### Where to tune
 
-All options live under `services.soularr.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Soularr picks up the new values on its next 5-min timer fire.
+All options live under `services.cratedigger.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Cratedigger picks up the new values on its next 5-min timer fire.
 
-**Source of truth**: `QualityRankConfig.defaults()` in `lib/quality.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `soularr.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at soularr test time: bump a default in either repo, the pin test fails and reminds you to update the other.
+**Source of truth**: `QualityRankConfig.defaults()` in `lib/quality.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `cratedigger.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at cratedigger test time: bump a default in either repo, the pin test fails and reminds you to update the other.
 
 ### Nix-exposed options
 
@@ -183,8 +183,8 @@ Three fields are part of the rank model but are NOT surfaced as Nix options beca
 The exact deploy flow depends on where you set the options. For a host config that imports `cratedigger.nixosModules.default` directly:
 
 ```bash
-$EDITOR hosts/<your-host>/configuration.nix   # tweak services.soularr.qualityRanks.*
-git commit -am "soularr: retune <what>" && git push
+$EDITOR hosts/<your-host>/configuration.nix   # tweak services.cratedigger.qualityRanks.*
+git commit -am "cratedigger: retune <what>" && git push
 sudo nixos-rebuild switch --flake .
 ```
 
@@ -193,22 +193,22 @@ For the abl030 homelab (this project's reference deployment):
 ```bash
 # On doc1 — has git push credentials for nixosconfig
 cd ~/nixosconfig
-$EDITOR hosts/doc2/configuration.nix          # tweak services.soularr.qualityRanks.*
-git commit -am "soularr: retune <what>" && git push
+$EDITOR hosts/doc2/configuration.nix          # tweak services.cratedigger.qualityRanks.*
+git commit -am "cratedigger: retune <what>" && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```
 
 ### How to verify the new config is live
 
-1. **Read the generated file** -- `ssh doc2 'sudo cat /var/lib/soularr/config.ini | grep -A 30 "\[Quality Ranks\]"'`. The section should show the exact values from your Nix edit.
+1. **Read the generated file** -- `ssh doc2 'sudo cat /var/lib/cratedigger/config.ini | grep -A 30 "\[Quality Ranks\]"'`. The section should show the exact values from your Nix edit.
 
-2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Soularr hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start soularr --no-block`.
+2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
 
 3. **Visual confirmation** -- open the [Decisions tab at music.ablz.au](https://music.ablz.au). The top of the tab renders three pills (**Gate min rank** / **Bitrate metric** / **Within-rank tolerance**) pulled from the same `_runtime_rank_config()` snapshot. If your tuning is live, the pills show the new values (#68). The transcode stage rule threshold also reflects `bands.mp3Vbr.excellent` live, since `get_decision_tree()` threads `cfg` through (#75).
 
 ### The search filter is deliberately permissive
 
-The `[Search Settings] allowed_filetypes` list in `config.ini` (exposed as `services.soularr.searchSettings.allowedFiletypes` on the upstream module) is a **priority-ordered preference list**, not a quality gate. It decides which codecs Soularr prefers when multiple options exist for the same album and drives peer selection within each tier; it does NOT decide whether a file is "good enough". That call belongs to the rank model.
+The `[Search Settings] allowed_filetypes` list in `config.ini` (exposed as `services.cratedigger.searchSettings.allowedFiletypes` on the upstream module) is a **priority-ordered preference list**, not a quality gate. It decides which codecs Cratedigger prefers when multiple options exist for the same album and drives peer selection within each tier; it does NOT decide whether a file is "good enough". That call belongs to the rank model.
 
 **Current production list** (top-to-bottom priority):
 
@@ -216,7 +216,7 @@ The `[Search Settings] allowed_filetypes` list in `config.ini` (exposed as `serv
 mp3 v0,mp3 320,flac 24/192,flac 24/96,flac 24/48,flac 16/44.1,flac,alac,aac,opus,ogg,mp3,wav
 ```
 
-**How it actually works** (in `soularr.py:_build_search_cache` → `lib/enqueue.py:_try_filetype`):
+**How it actually works** (in `cratedigger.py:_build_search_cache` → `lib/enqueue.py:_try_filetype`):
 
 1. slskd returns every peer that has a file matching the raw text query "artist album". No filetype restriction on the wire — the codec preference is applied locally.
 2. `_build_search_cache()` walks each file and buckets it into the **first tier it matches**. Files that match zero tiers are dropped.
@@ -241,7 +241,7 @@ mp3 v0,mp3 320,flac 24/192,flac 24/96,flac 24/48,flac 16/44.1,flac,alac,aac,opus
 - **Remove a bare-codec fallback tier** if you want the search filter to enforce a codec floor. E.g. removing `opus` means Opus 128 is invisible again, matching the pre-2026-04-11 behavior.
 - **Add format/bitrate-specific tiers** if you want to promote or demote specific subsets. E.g. inserting `opus 128+` between `alac` and the bare-codec fallbacks would prefer Opus 128 before falling through to AAC/OGG.
 
-**Exposed as `services.soularr.searchSettings.allowedFiletypes`** (a `listOf str`). Set it on the host config that imports the upstream module to override the default list above.
+**Exposed as `services.cratedigger.searchSettings.allowedFiletypes`** (a `listOf str`). Set it on the host config that imports the upstream module to override the default list above.
 
 ### Where the docs live
 
@@ -323,7 +323,7 @@ curl -s "http://192.168.1.35:5200/ws/2/release/<MBID>?inc=recordings+media&fmt=j
 After verifying a FLAC download is genuine (via spectral analysis + V0 conversion), the pipeline can convert to a configurable target format instead of keeping V0. Set via the upstream module:
 
 ```nix
-services.soularr.beetsValidation.verifiedLosslessTarget = "opus 128";
+services.cratedigger.beetsValidation.verifiedLosslessTarget = "opus 128";
 ```
 
 This renders into `[Beets Validation] verified_lossless_target = opus 128` in the runtime `config.ini`.
@@ -349,7 +349,7 @@ After a successful auto-import, Cratedigger fires a best-effort library-refresh 
 Configure via the upstream module:
 
 ```nix
-services.soularr.notifiers = {
+services.cratedigger.notifiers = {
   meelo = {
     enable = true;
     url = "https://meelo.example.com";
@@ -376,7 +376,7 @@ The module renders the `[Meelo]` / `[Plex]` / `[Jellyfin]` sections of `config.i
 ## Running tests
 
 ```bash
-nix-shell --run "bash scripts/run_tests.sh"    # full suite, saves to /tmp/soularr-test-output.txt
+nix-shell --run "bash scripts/run_tests.sh"    # full suite, saves to /tmp/cratedigger-test-output.txt
 nix-shell --run "python3 -m unittest tests.<module> -v"  # single module
 ```
 
@@ -393,18 +393,18 @@ Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/help
 
 Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) builds a Python environment with dependencies and registers four systemd units:
 
-- `soularr-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
-- `soularr.service` — oneshot pipeline run, triggered by `soularr.timer`. Runs healthcheck → prestart (renders `config.ini`) → `soularr.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
-- `soularr.timer` — fires every 5 minutes by default (`services.soularr.timer.onUnitActiveSec`).
-- `soularr-web.service` — long-running web UI bound to `services.soularr.web.port` (default 8085).
+- `cratedigger-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
+- `cratedigger.service` — oneshot pipeline run, triggered by `cratedigger.timer`. Runs healthcheck → prestart (renders `config.ini`) → `cratedigger.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
+- `cratedigger.timer` — fires every 5 minutes by default (`services.cratedigger.timer.onUnitActiveSec`).
+- `cratedigger-web.service` — long-running web UI bound to `services.cratedigger.web.port` (default 8085).
 
-`soularr.service` and `soularr-web.service` both `requires` the migrate unit, so the app cannot start against an un-migrated DB.
+`cratedigger.service` and `cratedigger-web.service` both `requires` the migrate unit, so the app cannot start against an un-migrated DB.
 
 To deploy a new revision:
 
 ```bash
-# 1. Push your soularr changes
-cd /path/to/soularr && git push
+# 1. Push your cratedigger changes
+cd /path/to/cratedigger && git push
 
 # 2. Update the flake input on the consumer side
 cd /path/to/your-nixos-config
@@ -415,11 +415,11 @@ git commit -am "cratedigger: bump" && git push
 sudo nixos-rebuild switch --flake .       # or via --flake github:user/repo#host
 ```
 
-`restartIfChanged = false` on `soularr.service` means the deploy completes without restarting an in-flight cycle; the next 5-min timer fire runs the new code.
+`restartIfChanged = false` on `cratedigger.service` means the deploy completes without restarting an in-flight cycle; the next 5-min timer fire runs the new code.
 
 ### Schema migrations
 
-Schema lives in `migrations/NNN_name.sql`, applied by a tiny custom migrator (`lib/migrator.py`) that tracks applied versions in a `schema_migrations` table. The deploy systemd unit `soularr-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE the app services start. `soularr.service` and `soularr-web.service` both `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
+Schema lives in `migrations/NNN_name.sql`, applied by a tiny custom migrator (`lib/migrator.py`) that tracks applied versions in a `schema_migrations` table. The deploy systemd unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE the app services start. `cratedigger.service` and `cratedigger-web.service` both `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
 
 To add a schema change:
 

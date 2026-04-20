@@ -166,7 +166,7 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
 
 def _runtime_rank_config():
     """Load the runtime QualityRankConfig from the same config.ini the main
-    soularr process reads, so web simulator matches production dispatch."""
+    cratedigger process reads, so web simulator matches production dispatch."""
     from lib.config import read_runtime_rank_config  # type: ignore[import-not-found]
 
     return read_runtime_rank_config()

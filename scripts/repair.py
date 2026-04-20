@@ -24,7 +24,7 @@ from lib.transitions import apply_transition
 
 DEFAULT_DSN = os.environ.get(
     "PIPELINE_DB_DSN",
-    "postgresql://soularr@192.168.100.11:5432/soularr",
+    "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
 )
 
 

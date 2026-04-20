@@ -13,7 +13,7 @@ import msgspec
 from lib.quality import ValidationResult, ChooseMatchMessage
 from lib.util import beets_subprocess_env
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0.15):

@@ -61,8 +61,8 @@ def _make_transfer_mock(filename="01 - Track.mp3", username="user1",
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
-    """Build a mock SoularrContext."""
-    from lib.context import SoularrContext
+    """Build a mock CratediggerContext."""
+    from lib.context import CratediggerContext
     if cfg is None:
         cfg = MagicMock()
         cfg.slskd_download_dir = "/tmp/test_downloads"
@@ -81,7 +81,7 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
         slskd = MagicMock()
     if pipeline_db_source is None:
         pipeline_db_source = MagicMock()
-    return SoularrContext(cfg=cfg, slskd=slskd,
+    return CratediggerContext(cfg=cfg, slskd=slskd,
                           pipeline_db_source=pipeline_db_source)
 
 
@@ -212,7 +212,7 @@ class TestCancelAndDelete(unittest.TestCase):
         slskd.transfers.cancel_download_error = Exception("network error")
         ctx = _make_ctx(slskd=slskd)
         f = make_download_file()
-        with self.assertLogs("soularr", level="WARNING") as logs, \
+        with self.assertLogs("cratedigger", level="WARNING") as logs, \
              patch("os.path.isdir", return_value=False):
             cancel_and_delete([f], ctx)  # should not raise
         self.assertIn("Failed to cancel download", "\n".join(logs.output))
@@ -1255,7 +1255,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         }])
         slskd.transfers.enqueue_result = False
 
-        with self.assertLogs("soularr", level="WARNING") as logs:
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
             poll_active_downloads(ctx)
 
         # Should NOT process — 7 files vanished (errored), album not complete
@@ -1675,7 +1675,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
             search_filetype_override=None,
         ))
 
-        # Real SoularrConfig is heavy; a SimpleNamespace with quality_ranks
+        # Real CratediggerConfig is heavy; a SimpleNamespace with quality_ranks
         # is enough — _compute_rejection_backfill only reads ctx.cfg.quality_ranks.
         from types import SimpleNamespace
         cfg = SimpleNamespace(

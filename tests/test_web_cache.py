@@ -156,7 +156,7 @@ class TestMetaNamespace(_CacheTestBase):
 class TestStartupFlushLeavesMetaAlone(unittest.TestCase):
     """Server startup flushes legacy `web:*` routing cache but MUST NOT
     touch the pure `meta:*` metadata namespace. Flushing it on every
-    `systemctl restart soularr-web` would defeat the 24h cache —
+    `systemctl restart cratedigger-web` would defeat the 24h cache —
     Codex review on PR #104.
     """
 

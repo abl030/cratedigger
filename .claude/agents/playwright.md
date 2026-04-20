@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: Drive a real browser to test the soularr web UI at music.ablz.au. Use for debugging the browse tab (MusicBrainz + Discogs sources), library view, recents/validation log, decisions simulator, and the add-to-pipeline flow. Especially useful for the Discogs pathway — search, artist discography, master pressings, release detail, and verifying external links.
+description: Drive a real browser to test the cratedigger web UI at music.ablz.au. Use for debugging the browse tab (MusicBrainz + Discogs sources), library view, recents/validation log, decisions simulator, and the add-to-pipeline flow. Especially useful for the Discogs pathway — search, artist discography, master pressings, release detail, and verifying external links.
 mcpServers:
   - playwright:
       type: stdio
@@ -29,9 +29,9 @@ Common workflow:
 - `browser_console_messages` / `browser_network_requests` — diagnose broken panels / API failures
 - `browser_close` — tear down
 
-## Primary Target: music.ablz.au (soularr web UI)
+## Primary Target: music.ablz.au (cratedigger web UI)
 
-A single-page app for browsing MusicBrainz and Discogs, viewing the beets library, and adding releases to the pipeline. Served on doc2 by `soularr-web.service`. Architecture details in `docs/webui-primer.md`; the Discogs mirror it calls into is documented in `docs/discogs-mirror.md`.
+A single-page app for browsing MusicBrainz and Discogs, viewing the beets library, and adding releases to the pipeline. Served on doc2 by `cratedigger-web.service`. Architecture details in `docs/webui-primer.md`; the Discogs mirror it calls into is documented in `docs/discogs-mirror.md`.
 
 **Always use `https://music.ablz.au`** (HTTPS; plain HTTP will time out). Cloudflare-tunnelled — LAN presence or Cloudflare Access may be required. If you hit an auth wall, report it and stop; don't guess credentials.
 

@@ -1,7 +1,7 @@
 """Tests for lib/pipeline_db.py — Pipeline DB module (PostgreSQL).
 
 Requires a PostgreSQL server. Set TEST_DB_DSN env var to run, e.g.:
-    TEST_DB_DSN=postgresql://soularr@localhost/soularr_test python3 -m unittest tests.test_pipeline_db -v
+    TEST_DB_DSN=postgresql://cratedigger@localhost/cratedigger_test python3 -m unittest tests.test_pipeline_db -v
 
 Tests create/drop tables in the target database — use a dedicated test DB.
 """

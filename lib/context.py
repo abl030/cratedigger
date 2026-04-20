@@ -1,7 +1,7 @@
-"""SoularrContext — runtime state container for the pipeline engine.
+"""CratediggerContext — runtime state container for the pipeline engine.
 
-Replaces module-level globals in soularr.py. Functions extracted to
-lib/download.py, lib/import_dispatch.py, etc. receive a SoularrContext
+Replaces module-level globals in cratedigger.py. Functions extracted to
+lib/download.py, lib/import_dispatch.py, etc. receive a CratediggerContext
 as their first parameter instead of reading globals.
 """
 
@@ -12,15 +12,15 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
-    from lib.config import SoularrConfig
+    from lib.config import CratediggerConfig
 
 
 @dataclass
-class SoularrContext:
+class CratediggerContext:
     """All runtime state needed by the pipeline engine."""
 
     # --- Core dependencies (set once in main()) ---
-    cfg: SoularrConfig
+    cfg: CratediggerConfig
     slskd: Any  # slskd_api.SlskdClient — Any to avoid import
     pipeline_db_source: DatabaseSource
 

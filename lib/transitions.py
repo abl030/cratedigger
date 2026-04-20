@@ -16,7 +16,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 @dataclass(frozen=True)

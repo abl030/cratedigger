@@ -1,6 +1,6 @@
 """Download processing — monitoring, completion, and orchestration.
 
-Extracted from soularr.py. All functions receive a SoularrContext
+Extracted from cratedigger.py. All functions receive a CratediggerContext
 instead of reading module-level globals.
 """
 
@@ -26,10 +26,10 @@ from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
                       log_validation_result)
 
 if TYPE_CHECKING:
-    from lib.context import SoularrContext
+    from lib.context import CratediggerContext
     from lib.quality import ValidationResult
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 MAX_FILE_RETRIES = 5
 
 
@@ -42,7 +42,7 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
 
 # === slskd transfer helpers ===
 
-def cancel_and_delete(files: list[Any], ctx: SoularrContext) -> None:
+def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
     """Cancel downloads and remove their directories."""
     for file in files:
         if not file.id:
@@ -57,7 +57,7 @@ def cancel_and_delete(files: list[Any], ctx: SoularrContext) -> None:
             shutil.rmtree(delete_dir)
 
 
-def slskd_download_status(downloads: list[Any], ctx: SoularrContext,
+def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
                           *, snapshot: list[dict[str, Any]] | None = None) -> bool:
     """Get status of each download file from slskd API.
 
@@ -85,7 +85,7 @@ def slskd_download_status(downloads: list[Any], ctx: SoularrContext,
 
 
 def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
-                     file_dir: str, ctx: SoularrContext) -> list[DownloadFile] | None:
+                     file_dir: str, ctx: CratediggerContext) -> list[DownloadFile] | None:
     """Enqueue files for download via slskd. Returns DownloadFile list or None."""
     try:
         enqueue = ctx.slskd.transfers.enqueue(username=username, files=files)
@@ -177,7 +177,7 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 # === Download completion processing ===
 
 def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: SoularrContext) -> bool:
+                            ctx: CratediggerContext) -> bool:
     """Process a fully-downloaded album: move files, tag, validate, stage/import."""
     import_folder_name = sanitize_folder_name(
         f"{album_data.artist} - {album_data.title} ({album_data.year})")
@@ -241,7 +241,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
 
 
 def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath: str,
-                              ctx: SoularrContext) -> None:
+                              ctx: CratediggerContext) -> None:
     """Beets validation sub-path of process_completed_album.
 
     After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
@@ -292,7 +292,7 @@ def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath:
 
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          import_folder_fullpath: str,
-                         ctx: SoularrContext) -> None:
+                         ctx: CratediggerContext) -> None:
     """Handle a valid beets validation result: stage and optionally auto-import."""
     dest = stage_to_ai(album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
     log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
@@ -321,7 +321,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
                             import_folder_fullpath: str,
-                            ctx: SoularrContext) -> None:
+                            ctx: CratediggerContext) -> None:
     """Handle a rejected beets validation result."""
     failed_dest = move_failed_import(import_folder_fullpath, scenario=bv_result.scenario)
     bv_result.failed_path = failed_dest
@@ -356,7 +356,7 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
 
 
 def _compute_rejection_backfill(album_data: GrabListEntry,
-                                ctx: SoularrContext) -> str | None:
+                                ctx: CratediggerContext) -> str | None:
     """Check if search_filetype_override should be backfilled on rejection.
 
     Only fires when search_filetype_override is currently NULL and the on-disk state
@@ -618,7 +618,7 @@ def _timeout_album(
     entry: GrabListEntry,
     request_id: int,
     reason: str,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> None:
     """Handle download timeout: cancel, log, reset to wanted."""
     cancel_and_delete(entry.files, ctx)
@@ -715,7 +715,7 @@ def _run_completed_processing(
     request_id: int,
     state: ActiveDownloadState,
     db: Any,
-    ctx: SoularrContext,
+    ctx: CratediggerContext,
 ) -> None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
@@ -744,7 +744,7 @@ def _run_completed_processing(
                              attempt_type="download")
 
 
-def poll_active_downloads(ctx: SoularrContext) -> None:
+def poll_active_downloads(ctx: CratediggerContext) -> None:
     """Poll slskd for status of all downloading albums.
 
     For each album with status='downloading':
@@ -918,7 +918,7 @@ def poll_active_downloads(ctx: SoularrContext) -> None:
 
 def grab_most_wanted(albums: list[Any],
                      search_and_queue: Callable[..., tuple[dict, list, list]],
-                     ctx: SoularrContext) -> int:
+                     ctx: CratediggerContext) -> int:
     """Search, enqueue, persist download state, return immediately.
 
     Does NOT block waiting for downloads. Download monitoring happens

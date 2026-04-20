@@ -53,7 +53,7 @@ class EphemeralPostgres:
                 "nix-shell -p postgresql python3Packages.psycopg2"
             )
 
-        self.tmpdir = tempfile.mkdtemp(prefix="soularr_test_pg_")
+        self.tmpdir = tempfile.mkdtemp(prefix="cratedigger_test_pg_")
         self.port = _find_free_port()
         datadir = os.path.join(self.tmpdir, "data")
         logfile = os.path.join(self.tmpdir, "pg.log")
@@ -94,10 +94,10 @@ class EphemeralPostgres:
             host="127.0.0.1", port=self.port, dbname="postgres", user=os.getenv("USER", "root")
         )
         conn.autocommit = True
-        conn.cursor().execute("CREATE DATABASE soularr_test")
+        conn.cursor().execute("CREATE DATABASE cratedigger_test")
         conn.close()
 
-        self.dsn = f"postgresql://{os.getenv('USER', 'root')}@127.0.0.1:{self.port}/soularr_test"
+        self.dsn = f"postgresql://{os.getenv('USER', 'root')}@127.0.0.1:{self.port}/cratedigger_test"
         self._started = True
 
         # Register cleanup in case stop() is never called

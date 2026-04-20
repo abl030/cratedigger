@@ -28,10 +28,10 @@ from lib.quality import (SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement,
 from lib.util import repair_mp3_headers, validate_audio
 
 if TYPE_CHECKING:
-    from lib.config import SoularrConfig
+    from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 # Lazy import proxy — keeps sox out of import-time deps.
@@ -196,7 +196,7 @@ def _needs_spectral_check(
 
 def _analyze_existing(
     mb_release_id: str,
-    cfg: "SoularrConfig",
+    cfg: "CratediggerConfig",
 ) -> tuple[int | None, SpectralMeasurement | None]:
     """Look up existing beets album and spectral-analyze its files.
 
@@ -286,7 +286,7 @@ def run_preimport_gates(
     download_filetype: str,
     download_min_bitrate_bps: int | None,
     download_is_vbr: bool | None,
-    cfg: "SoularrConfig",
+    cfg: "CratediggerConfig",
     db: "PipelineDB | None" = None,
     request_id: int | None = None,
     usernames: set[str] | None = None,
@@ -320,7 +320,7 @@ def run_preimport_gates(
             files, in bps (or kbps if < 1000). Normalized internally.
         download_is_vbr: True when any file in the download reports VBR.
             Spectral check is skipped for VBR MP3s.
-        cfg: Runtime SoularrConfig (for ``audio_check_mode`` and
+        cfg: Runtime CratediggerConfig (for ``audio_check_mode`` and
             ``quality_ranks``).
         db: Pipeline DB — pass to enable denylist + spectral state side effects.
         request_id: Required when ``db`` is supplied.

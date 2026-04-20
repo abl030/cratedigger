@@ -1,4 +1,4 @@
-"""Tests for SoularrConfig — verify from_ini() matches old global parsing."""
+"""Tests for CratediggerConfig — verify from_ini() matches old global parsing."""
 
 import configparser
 import os
@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.config import (
-    SoularrConfig,
+    CratediggerConfig,
     invalidate_secret_cache,
     read_runtime_config,
     read_runtime_rank_config,
@@ -23,7 +23,7 @@ TEST_CONFIG = os.path.join(FIXTURES_DIR, "test_config.ini")
 
 
 def load_test_config():
-    """Load the test config.ini the same way soularr.py does (RawConfigParser)."""
+    """Load the test config.ini the same way cratedigger.py does (RawConfigParser)."""
     config = configparser.RawConfigParser()
     config.read(TEST_CONFIG)
     return config
@@ -35,7 +35,7 @@ class TestConfigFromIni(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         ini = load_test_config()
-        cls.cfg = SoularrConfig.from_ini(ini, config_dir="/etc/soularr", var_dir="/var/lib/soularr")
+        cls.cfg = CratediggerConfig.from_ini(ini, config_dir="/etc/cratedigger", var_dir="/var/lib/cratedigger")
 
     # --- Slskd ---
     def test_slskd_api_key(self):
@@ -98,10 +98,10 @@ class TestConfigFromIni(unittest.TestCase):
 
     def test_browse_parallelism_capped_at_8(self):
         """Values > 8 should be clamped to 8."""
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         ini = configparser.ConfigParser()
         ini.read_string("[Search Settings]\nbrowse_parallelism = 20\n")
-        cfg = SoularrConfig.from_ini(ini)
+        cfg = CratediggerConfig.from_ini(ini)
         self.assertEqual(cfg.browse_parallelism, 8)
 
     # --- Release ---
@@ -164,7 +164,7 @@ class TestConfigFromIni(unittest.TestCase):
 
     def test_pipeline_db_dsn(self):
         self.assertEqual(self.cfg.pipeline_db_dsn,
-                         "postgresql://soularr@192.168.100.11:5432/soularr")
+                         "postgresql://cratedigger@192.168.100.11:5432/cratedigger")
 
     # --- Meelo ---
     def test_meelo_url(self):
@@ -188,10 +188,10 @@ class TestConfigFromIni(unittest.TestCase):
 
     # --- Paths ---
     def test_lock_file_path(self):
-        self.assertEqual(self.cfg.lock_file_path, "/var/lib/soularr/.soularr.lock")
+        self.assertEqual(self.cfg.lock_file_path, "/var/lib/cratedigger/.cratedigger.lock")
 
     def test_config_file_path(self):
-        self.assertEqual(self.cfg.config_file_path, "/etc/soularr/config.ini")
+        self.assertEqual(self.cfg.config_file_path, "/etc/cratedigger/config.ini")
 
 
 
@@ -200,7 +200,7 @@ class TestConfigFrozen(unittest.TestCase):
 
     def test_cannot_mutate(self):
         ini = load_test_config()
-        cfg = SoularrConfig.from_ini(ini)
+        cfg = CratediggerConfig.from_ini(ini)
         with self.assertRaises(AttributeError):
             cfg.page_size = 99  # type: ignore[misc]  # intentional: testing frozen dataclass  # type: ignore[misc]
 
@@ -214,7 +214,7 @@ class TestConfigDefaults(unittest.TestCase):
         for section in ["Slskd", "Search Settings", "Release Settings",
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
-        cfg = SoularrConfig.from_ini(config)
+        cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.page_size, 10)
         self.assertEqual(cfg.stalled_timeout, 3600)
         self.assertAlmostEqual(cfg.beets_distance_threshold, 0.15)
@@ -230,7 +230,7 @@ class TestConfigDefaults(unittest.TestCase):
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
         config.set("Search Settings", "allowed_filetypes", "flac")
-        cfg = SoularrConfig.from_ini(config)
+        cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.allowed_filetypes, ("flac",))
 
     def test_verified_lossless_target_default_empty(self):
@@ -238,7 +238,7 @@ class TestConfigDefaults(unittest.TestCase):
         for section in ["Slskd", "Search Settings", "Release Settings",
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
-        cfg = SoularrConfig.from_ini(config)
+        cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.verified_lossless_target, "")
 
     def test_verified_lossless_target_set(self):
@@ -247,14 +247,14 @@ class TestConfigDefaults(unittest.TestCase):
                         "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
             config.add_section(section)
         config.set("Beets Validation", "verified_lossless_target", "opus 128")
-        cfg = SoularrConfig.from_ini(config)
+        cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.verified_lossless_target, "opus 128")
 
 
 class TestReadVerifiedLosslessTarget(unittest.TestCase):
     def test_missing_file_returns_empty(self):
         self.assertEqual(
-            read_verified_lossless_target("/nonexistent/soularr-config.ini"), ""
+            read_verified_lossless_target("/nonexistent/cratedigger-config.ini"), ""
         )
 
     def test_reads_runtime_value_from_config_file(self):
@@ -370,7 +370,7 @@ class TestReadSecretFile(unittest.TestCase):
 
 
 class TestSecretFileFields(unittest.TestCase):
-    """from_ini() reads *_file keys from the INI into SoularrConfig."""
+    """from_ini() reads *_file keys from the INI into CratediggerConfig."""
 
     def setUp(self):
         invalidate_secret_cache()
@@ -389,7 +389,7 @@ class TestSecretFileFields(unittest.TestCase):
             "[Jellyfin]\n"
             "token_file = /run/secrets/jellyfin-token\n"
         )
-        cfg = SoularrConfig.from_ini(config)
+        cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.slskd_api_key_file, "/run/secrets/slskd-key")
         self.assertEqual(cfg.meelo_username_file, "/run/secrets/meelo-user")
         self.assertEqual(cfg.meelo_password_file, "/run/secrets/meelo-pass")
@@ -397,7 +397,7 @@ class TestSecretFileFields(unittest.TestCase):
         self.assertEqual(cfg.jellyfin_token_file, "/run/secrets/jellyfin-token")
 
     def test_file_paths_default_to_empty(self):
-        cfg = SoularrConfig.from_ini(configparser.RawConfigParser())
+        cfg = CratediggerConfig.from_ini(configparser.RawConfigParser())
         self.assertEqual(cfg.slskd_api_key_file, "")
         self.assertEqual(cfg.meelo_username_file, "")
         self.assertEqual(cfg.meelo_password_file, "")
@@ -427,21 +427,21 @@ class TestResolvedSecrets(unittest.TestCase):
 
     def test_slskd_api_key_resolves_file_over_direct(self):
         path = self._write_secret("from-file\n")
-        cfg = SoularrConfig(slskd_api_key="from-direct", slskd_api_key_file=path)
+        cfg = CratediggerConfig(slskd_api_key="from-direct", slskd_api_key_file=path)
         self.assertEqual(cfg.resolved_slskd_api_key(), "from-file")
 
     def test_slskd_api_key_falls_back_to_direct_when_no_file(self):
-        cfg = SoularrConfig(slskd_api_key="from-direct")
+        cfg = CratediggerConfig(slskd_api_key="from-direct")
         self.assertEqual(cfg.resolved_slskd_api_key(), "from-direct")
 
     def test_slskd_api_key_empty_when_neither_set(self):
-        cfg = SoularrConfig()
+        cfg = CratediggerConfig()
         self.assertEqual(cfg.resolved_slskd_api_key(), "")
 
     def test_meelo_credentials_resolve_from_files(self):
         user_path = self._write_secret("meelo-user")
         pass_path = self._write_secret("meelo-pass")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             meelo_username_file=user_path,
             meelo_password_file=pass_path,
         )
@@ -450,25 +450,25 @@ class TestResolvedSecrets(unittest.TestCase):
 
     def test_plex_token_resolves_from_file(self):
         path = self._write_secret("plex-live-token\n")
-        cfg = SoularrConfig(plex_url="http://plex", plex_token_file=path)
+        cfg = CratediggerConfig(plex_url="http://plex", plex_token_file=path)
         self.assertEqual(cfg.resolved_plex_token(), "plex-live-token")
 
     def test_jellyfin_token_resolves_from_file(self):
         path = self._write_secret("jellyfin-live-token\n")
-        cfg = SoularrConfig(jellyfin_url="http://jellyfin", jellyfin_token_file=path)
+        cfg = CratediggerConfig(jellyfin_url="http://jellyfin", jellyfin_token_file=path)
         self.assertEqual(cfg.resolved_jellyfin_token(), "jellyfin-live-token")
 
     def test_notifier_resolvers_none_when_unset(self):
-        cfg = SoularrConfig()
+        cfg = CratediggerConfig()
         self.assertIsNone(cfg.resolved_meelo_username())
         self.assertIsNone(cfg.resolved_meelo_password())
         self.assertIsNone(cfg.resolved_plex_token())
         self.assertIsNone(cfg.resolved_jellyfin_token())
 
     def test_legacy_plaintext_field_still_resolves(self):
-        """Direct fields on SoularrConfig keep working so tests and old deployments
+        """Direct fields on CratediggerConfig keep working so tests and old deployments
         that haven't switched to *_file paths continue to function."""
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             meelo_url="http://meelo",
             meelo_username="legacy-user",
             meelo_password="legacy-pass",
@@ -507,7 +507,7 @@ class TestMainCLIParsing(unittest.TestCase):
     """Test the CLI argument parsing and config loading path in main()."""
 
     def setUp(self):
-        # soularr.main() calls reset_umask() (sets umask to 0 for the pipeline's
+        # cratedigger.main() calls reset_umask() (sets umask to 0 for the pipeline's
         # subprocess chain, GH #84). Restore the prior umask so later tests in
         # the same process keep their expected default.
         self._saved_umask = os.umask(0o022)
@@ -532,31 +532,31 @@ class TestMainCLIParsing(unittest.TestCase):
         return path
 
     def _run_main_until_config_parse(self, argv: list[str], callback) -> None:
-        import soularr
+        import cratedigger
 
-        soularr.cfg = None
-        soularr.pipeline_db_source = None
-        soularr._module_ctx = None
+        cratedigger.cfg = None
+        cratedigger.pipeline_db_source = None
+        cratedigger._module_ctx = None
 
         def fake_from_ini(config, config_dir=".", var_dir="."):
             callback(config, config_dir, var_dir)
             raise self._StopMain()
 
         with patch.object(sys, "argv", argv), \
-             patch("lib.config.SoularrConfig.from_ini", side_effect=fake_from_ini):
+             patch("lib.config.CratediggerConfig.from_ini", side_effect=fake_from_ini):
             with self.assertRaises(self._StopMain):
-                soularr.main()
+                cratedigger.main()
 
     def test_missing_config_exits_with_error(self):
         """main() exits 1 when config.ini doesn't exist at --config-dir."""
-        import soularr
+        import cratedigger
 
         with tempfile.TemporaryDirectory() as d:
             with patch.object(sys, "argv", [
-                "soularr", "--config-dir", d, "--var-dir", d, "--no-lock-file"
+                "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
             ]):
                 with self.assertRaises(SystemExit) as cm:
-                    soularr.main()
+                    cratedigger.main()
             self.assertEqual(cm.exception.code, 1)
 
     def test_config_dir_resolves_config_path(self):
@@ -571,15 +571,15 @@ class TestMainCLIParsing(unittest.TestCase):
                 self.assertEqual(config.get("Slskd", "api_key"), "from-config-dir")
 
             self._run_main_until_config_parse(
-                ["soularr", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
+                ["cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
                 assert_from_ini,
             )
 
     def test_lock_file_created_in_var_dir(self):
-        """Lock file path is var_dir/.soularr.lock."""
+        """Lock file path is var_dir/.cratedigger.lock."""
         with tempfile.TemporaryDirectory() as config_dir, tempfile.TemporaryDirectory() as var_dir:
             self._write_minimal_config(config_dir)
-            lock_path = os.path.join(var_dir, ".soularr.lock")
+            lock_path = os.path.join(var_dir, ".cratedigger.lock")
 
             def assert_from_ini(config, actual_config_dir, actual_var_dir):
                 self.assertEqual(actual_config_dir, config_dir)
@@ -587,7 +587,7 @@ class TestMainCLIParsing(unittest.TestCase):
                 self.assertTrue(os.path.exists(lock_path))
 
             self._run_main_until_config_parse(
-                ["soularr", "--config-dir", config_dir, "--var-dir", var_dir],
+                ["cratedigger", "--config-dir", config_dir, "--var-dir", var_dir],
                 assert_from_ini,
             )
 
@@ -595,7 +595,7 @@ class TestMainCLIParsing(unittest.TestCase):
         """--no-lock-file sets the flag to True."""
         with tempfile.TemporaryDirectory() as d:
             self._write_minimal_config(d)
-            lock_path = os.path.join(d, ".soularr.lock")
+            lock_path = os.path.join(d, ".cratedigger.lock")
 
             def assert_from_ini(config, config_dir, var_dir):
                 self.assertEqual(config_dir, d)
@@ -603,7 +603,7 @@ class TestMainCLIParsing(unittest.TestCase):
                 self.assertFalse(os.path.exists(lock_path))
 
             self._run_main_until_config_parse(
-                ["soularr", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
+                ["cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
                 assert_from_ini,
             )
 
@@ -617,9 +617,9 @@ class TestMainCLIParsing(unittest.TestCase):
                 self.assertEqual(var_dir, cwd)
                 self.assertEqual(config.get("Slskd", "api_key"), "from-default-cwd")
 
-            with patch("soularr.os.getcwd", return_value=cwd):
+            with patch("cratedigger.os.getcwd", return_value=cwd):
                 self._run_main_until_config_parse(
-                    ["soularr", "--no-lock-file"],
+                    ["cratedigger", "--no-lock-file"],
                     assert_from_ini,
                 )
 

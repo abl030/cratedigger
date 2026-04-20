@@ -1,4 +1,4 @@
-"""Persist runtime caches across soularr runs.
+"""Persist runtime caches across cratedigger runs.
 
 Atomic save/load of folder_cache, user_upload_speed, search_dir_audio_count
 to a JSON file in var_dir. Per-entry TTL: each entry is stamped when fetched,
@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lib.context import SoularrContext
+    from lib.context import CratediggerContext
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
-CACHE_FILENAME = "soularr_cache.json"
+CACHE_FILENAME = "cratedigger_cache.json"
 FOLDER_CACHE_TTL_SECONDS = 86400  # 24 hours
 
 
@@ -27,7 +27,7 @@ def cache_path(var_dir: str) -> str:
     return os.path.join(var_dir, CACHE_FILENAME)
 
 
-def save_caches(ctx: SoularrContext, var_dir: str) -> None:
+def save_caches(ctx: CratediggerContext, var_dir: str) -> None:
     """Save persistable caches to disk. Atomic write (tmp + rename).
 
     Each entry is wrapped with its fetch timestamp for per-entry TTL eviction.
@@ -79,7 +79,7 @@ def save_caches(ctx: SoularrContext, var_dir: str) -> None:
         logger.warning("Failed to save caches", exc_info=True)
 
 
-def load_caches(ctx: SoularrContext, var_dir: str) -> None:
+def load_caches(ctx: CratediggerContext, var_dir: str) -> None:
     """Load persisted caches into ctx. Evicts entries older than TTL."""
     path = cache_path(var_dir)
     if not os.path.exists(path):

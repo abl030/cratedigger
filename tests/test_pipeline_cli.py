@@ -568,7 +568,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
 
             args = MagicMock(dry_run=False)
             stdout = io.StringIO()
-            with patch.dict(os.environ, {"SOULARR_RUNTIME_CONFIG": cfg_path}), \
+            with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(db, args)

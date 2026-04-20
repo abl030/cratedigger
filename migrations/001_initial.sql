@@ -17,11 +17,11 @@
 
 -- Idle-in-transaction safety net: kill anything sitting on a transaction
 -- for more than 60 seconds. Wrapped in a DO block so it does not abort the
--- migration when the soularr role does not exist (ephemeral test DBs) or
+-- migration when the cratedigger role does not exist (ephemeral test DBs) or
 -- the migrating user lacks ALTER ROLE privilege.
 DO $$
 BEGIN
-    ALTER ROLE soularr SET idle_in_transaction_session_timeout = '60s';
+    ALTER ROLE cratedigger SET idle_in_transaction_session_timeout = '60s';
 EXCEPTION
     WHEN undefined_object THEN NULL;
     WHEN insufficient_privilege THEN NULL;

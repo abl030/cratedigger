@@ -1,4 +1,4 @@
-"""Tests for lib/util.py — pure utility functions extracted from soularr.py."""
+"""Tests for lib/util.py — pure utility functions extracted from cratedigger.py."""
 
 import json
 import os
@@ -596,7 +596,7 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
     """Issue #117: notifier functions must read secrets from *_file paths so
     the rendered config.ini never embeds plaintext credentials.
 
-    These tests use a real SoularrConfig (not MagicMock) so the resolver
+    These tests use a real CratediggerConfig (not MagicMock) so the resolver
     methods actually run and the file-reading path is exercised end to end.
     """
 
@@ -616,11 +616,11 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
     @patch("lib.util._meelo_scanner_post")
     @patch("lib.util._meelo_jwt_login", return_value="tok")
     def test_meelo_scan_reads_credentials_from_files(self, mock_login, mock_post):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_meelo_scan
         user_path = self._write("meelo-user", "live-user\n")
         pass_path = self._write("meelo-pass", "live-pass\n")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             meelo_url="http://meelo:5001",
             meelo_username_file=user_path,
             meelo_password_file=pass_path,
@@ -632,11 +632,11 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
     @patch("lib.util._meelo_scanner_post")
     @patch("lib.util._meelo_jwt_login", return_value="tok")
     def test_meelo_clean_reads_credentials_from_files(self, mock_login, mock_post):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_meelo_clean
         user_path = self._write("meelo-user", "live-user\n")
         pass_path = self._write("meelo-pass", "live-pass\n")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             meelo_url="http://meelo:5001",
             meelo_username_file=user_path,
             meelo_password_file=pass_path,
@@ -646,10 +646,10 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
 
     @patch("lib.util.urllib.request.urlopen")
     def test_plex_scan_reads_token_from_file(self, mock_urlopen):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_plex_scan
         token_path = self._write("plex-token", "plex-live-tok\n")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             plex_url="http://plex:32400",
             plex_token_file=token_path,
             plex_library_section_id="3",
@@ -666,10 +666,10 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
 
     @patch("lib.util.urllib.request.urlopen")
     def test_jellyfin_scan_reads_token_from_file(self, mock_urlopen):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_jellyfin_scan
         token_path = self._write("jf-token", "jellyfin-live-tok\n")
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             jellyfin_url="http://jellyfin:8096",
             jellyfin_token_file=token_path,
         )
@@ -683,23 +683,23 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         self.assertEqual(req.get_header("X-emby-token"), "jellyfin-live-tok")
 
     def test_plex_scan_skipped_when_token_file_empty_and_no_direct_token(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_plex_scan
-        cfg = SoularrConfig(plex_url="http://plex:32400")
+        cfg = CratediggerConfig(plex_url="http://plex:32400")
         # Should not raise, should just skip — no token available.
         trigger_plex_scan(cfg, "/path")
 
     def test_jellyfin_scan_skipped_when_token_file_empty(self):
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.util import trigger_jellyfin_scan
-        cfg = SoularrConfig(jellyfin_url="http://jellyfin:8096")
+        cfg = CratediggerConfig(jellyfin_url="http://jellyfin:8096")
         trigger_jellyfin_scan(cfg)
 
 
 class TestBeetsSubprocessEnv(unittest.TestCase):
     """beets_subprocess_env() is the single source of truth for the env dict
     used by every subprocess that invokes beets (directly or via the harness
-    / import_one.py). Beets reads `~/.config/beets/config.yaml`; when soularr
+    / import_one.py). Beets reads `~/.config/beets/config.yaml`; when cratedigger
     runs as the systemd service (root, HOME=/root), the Nix Home Manager
     beets config isn't there and the Discogs plugin returns 0 candidates for
     every --search-id. See live failures in download_log for Blueline Medic.
@@ -722,7 +722,7 @@ class TestBeetsSubprocessEnv(unittest.TestCase):
         """Non-HOME vars pass through unchanged — PATH, PYTHONPATH etc. must
         still reach the subprocess."""
         from lib.util import beets_subprocess_env
-        sentinel = "SOULARR_TEST_SENTINEL_VAR_XYZ"
+        sentinel = "CRATEDIGGER_TEST_SENTINEL_VAR_XYZ"
         with patch.dict(os.environ, {sentinel: "present"}, clear=False):
             env = beets_subprocess_env()
         self.assertEqual(env.get(sentinel), "present")

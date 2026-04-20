@@ -2,7 +2,7 @@
 
 # **Windows laptop SSH access**: There is no native SSH key on Windows. A NixOS WSL2 instance has the SSH key via sops-nix at `/run/secrets/ssh_key_abl030`. To get SSH access to doc1/doc2, run: `mkdir -p ~/.ssh && wsl -d NixOS -- bash -c 'cat /run/secrets/ssh_key_abl030' > ~/.ssh/id_doc2 && chmod 600 ~/.ssh/id_doc2` then SSH with `ssh -i ~/.ssh/id_doc2 abl030@doc2` or `ssh -i ~/.ssh/id_doc2 abl030@proxmox-vm`. The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 
-# **The pipeline DB is PostgreSQL (migrated from SQLite on 2026-03-25). It runs in an nspawn container on doc2 (192.168.100.11:5432). Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Data lives at `/mnt/virtio/soularr/postgres` for portability. 4 statuses: wanted, downloading, imported, manual.**
+# **The pipeline DB is PostgreSQL (migrated from SQLite on 2026-03-25). It runs in an nspawn container on doc2 (192.168.100.11:5432). Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Data lives at `/mnt/virtio/cratedigger/postgres` for portability. 4 statuses: wanted, downloading, imported, manual.**
 
 # **NIXOSCONFIG CHANGES MUST BE MADE ON DOC1. The nixosconfig repo lives at `~/nixosconfig` on doc1. All edits, commits, and pushes MUST happen there — doc1 has the git push credentials. NEVER try to edit nixosconfig from doc2 or Windows. SSH to doc1 first, make the change, commit, push, then deploy to doc2.**
 
@@ -12,17 +12,17 @@
 
 A quality-obsessed music acquisition pipeline. Searches Soulseek via slskd, validates downloads against MusicBrainz via beets, auto-imports with spectral quality verification, or stages for manual review. Includes a web UI at `music.ablz.au` for browsing MusicBrainz and adding album requests.
 
-Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-Fi](https://ko-fi.com/mrusse)). Has since diverged into its own project — the pipeline DB is the sole source of truth, and the web UI at `music.ablz.au` is the album picker. Internal code still uses "soularr" naming in many places (class names, logger, systemd service, DB name).
+Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-Fi](https://ko-fi.com/mrusse)). Has since diverged into its own project — the pipeline DB is the sole source of truth, and the web UI at `music.ablz.au` is the album picker.
 
 ## Web UI (music.ablz.au)
 
-A single-page web app for browsing the local MusicBrainz mirror and Discogs mirror, viewing your beets library, and adding releases to the pipeline. Runs on doc2 as `soularr-web` systemd service. No build step — stdlib `http.server`, vanilla JS, single HTML file. For full details on architecture, API endpoints, frontend features, and deployment, read `docs/webui-primer.md`.
+A single-page web app for browsing the local MusicBrainz mirror and Discogs mirror, viewing your beets library, and adding releases to the pipeline. Runs on doc2 as `cratedigger-web` systemd service. No build step — stdlib `http.server`, vanilla JS, single HTML file. For full details on architecture, API endpoints, frontend features, and deployment, read `docs/webui-primer.md`.
 
 The browse tab has an MB/Discogs source toggle. When Discogs is selected, search, artist discography, master pressings, and release detail all hit the local Discogs mirror at `discogs.ablz.au`. Discogs releases can be added to the pipeline and flow through the same search → download → validate → import pipeline as MusicBrainz releases. External links are source-aware (musicbrainz.org vs discogs.com).
 
 ## Meelo
 
-Meelo is the self-hosted music server that scans the beets library and serves a browseable catalogue with playback. After soularr auto-imports an album to beets, it triggers a Meelo scanner rescan so the new album appears in the UI immediately. Meelo runs on doc1 (proxmox-vm) as podman containers. For full details on architecture, API access, troubleshooting, and the scanner/refresh workflow, read `docs/meelo-primer.md`.
+Meelo is the self-hosted music server that scans the beets library and serves a browseable catalogue with playback. After cratedigger auto-imports an album to beets, it triggers a Meelo scanner rescan so the new album appears in the UI immediately. Meelo runs on doc1 (proxmox-vm) as podman containers. For full details on architecture, API access, troubleshooting, and the scanner/refresh workflow, read `docs/meelo-primer.md`.
 
 ## Beets
 
@@ -37,7 +37,7 @@ Beets' Discogs plugin is patched (Nix `substituteInPlace` in `beets.nix`) to use
 ## Repository Structure
 
 ```
-soularr.py              — Search, match, enqueue logic + main(). Thin wrappers delegate
+cratedigger.py              — Search, match, enqueue logic + main(). Thin wrappers delegate
                            to lib/ modules for download processing and utilities.
 album_source.py         — AlbumRecord, DatabaseSource abstraction
 web/
@@ -48,8 +48,8 @@ web/
 lib/
   beets.py              — Beets validation (dry-run import via harness, returns ValidationResult)
   beets_db.py           — BeetsDB: read-only beets SQLite queries (AlbumInfo dataclass)
-  config.py             — SoularrConfig dataclass (typed config from config.ini)
-  context.py            — SoularrContext dataclass (replaces module globals for extracted functions).
+  config.py             — CratediggerConfig dataclass (typed config from config.ini)
+  context.py            — CratediggerContext dataclass (replaces module globals for extracted functions).
                            Includes cooled_down_users cache populated at cycle start.
   download.py           — Async download polling, completion processing, slskd
                            transfer helpers. All functions accept ctx. Delegates
@@ -93,7 +93,7 @@ lib/
                            Dispatch functions:
                            - dispatch_action() → DispatchAction (mark_done/failed/denylist/requeue flags)
                            - compute_effective_override_bitrate(), extract_usernames()
-                           - verify_filetype() (slskd file matching, moved from soularr.py)
+                           - verify_filetype() (slskd file matching, moved from cratedigger.py)
                            Import result types:
                            - ImportResult, ConversionInfo, SpectralDetail, PostflightInfo
                            - AudioQualityMeasurement (on ImportResult as new_measurement/existing_measurement)
@@ -136,9 +136,9 @@ scripts/
   pipeline_cli.py       — CLI: list, add, status, retry, cancel, show, quality, query,
                            force-import, manual-import, set-intent, repair-spectral
   migrate_db.py         — CLI entry point for the schema migrator. Runs by the
-                           soularr-db-migrate.service systemd unit on every nixos-rebuild.
+                           cratedigger-db-migrate.service systemd unit on every nixos-rebuild.
   populate_tracks.py    — Populate tracks from MusicBrainz API
-  run_tests.sh          — Test runner: saves output to /tmp/soularr-test-output.txt
+  run_tests.sh          — Test runner: saves output to /tmp/cratedigger-test-output.txt
 tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash scripts/run_tests.sh"
   fakes.py              — FakePipelineDB (full PipelineDB stand-in: requests, download_logs,
                            denylist, cooldowns, status_history, spectral state, attempt counters,
@@ -158,7 +158,7 @@ tests/                  — Test suite (1400+ tests). Run: nix-shell --run "bash
                            TestRouteContractAudit guard that introspects Handler._FUNC_*_ROUTES
                            and fails if any route is unclassified — enforces contract coverage
                            at test time, not at review time.
-test_soularr.py         — Legacy verify_filetype tests (imports from lib/quality)
+test_cratedigger.py         — Legacy verify_filetype tests (imports from lib/quality)
 nix/                    — Nix-native distribution (PR series 2026-04-19)
   slskd-api.nix         — slskd-api PyPI build (single source of truth — was duplicated
                            between shell.nix and the downstream module before)
@@ -171,11 +171,11 @@ nix/                    — Nix-native distribution (PR series 2026-04-19)
                            Generic, paths-as-options, no sops/homelab assumptions.
                            Owns: configTemplate, preStartScript, slskdHealthCheck,
                            qualityRanksSection, all systemd unit definitions, and
-                           the full options surface (services.soularr.*).
+                           the full options surface (services.cratedigger.*).
   tests/module-vm.nix   — NixOS VM check (nix flake check #moduleVm). Boots the
                            module against an ephemeral postgres and asserts:
                            migrator runs, config.ini renders, pipeline-cli works,
-                           soularr-web responds 200. Catches breakage in the option
+                           cratedigger-web responds 200. Catches breakage in the option
                            surface, prestart, systemd graph, wrapper PYTHONPATH.
 flake.nix               — Outputs: packages.slskd-api, devShells.default,
                            nixosModules.default, checks.moduleVm
@@ -190,40 +190,40 @@ flake.nix               — Outputs: packages.slskd-api, devShells.default,
 ## Infrastructure
 
 - **doc1** (`192.168.1.29`): Runs beets (Home Manager), this repo lives at `/home/abl030/soularr`
-- **doc2** (`192.168.1.35`): Runs Soularr (systemd oneshot, 5-min timer), MusicBrainz mirror (`:5200`), slskd (`:5030`)
+- **doc2** (`192.168.1.35`): Runs Cratedigger (systemd oneshot, 5-min timer), MusicBrainz mirror (`:5200`), slskd (`:5030`)
 - **Shared storage**: `/mnt/virtio` (virtiofs) — beets DB, pipeline DB, music library all accessible from both machines
-- **Nix deployment**: Soularr is a flake input (`soularr-src`) in `~/nixosconfig/flake.nix`. The downstream wrapper at `~/nixosconfig/modules/nixos/services/soularr.nix` imports `inputs.soularr-src.nixosModules.default` for the upstream module and layers on sops + nspawn DB + redis + localProxy. All scripts deploy from the Nix store via `${inputs.soularr-src}/...` paths set up by the upstream module's `cfg.src` (default `../.`).
+- **Nix deployment**: Cratedigger is a flake input (`cratedigger-src`) in `~/nixosconfig/flake.nix`. The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports `inputs.cratedigger-src.nixosModules.default` for the upstream module and layers on sops + nspawn DB + redis + localProxy. All scripts deploy from the Nix store via `${inputs.cratedigger-src}/...` paths set up by the upstream module's `cfg.src` (default `../.`).
 
 ### Key Paths
 
 | Path | Machine | Purpose |
 |------|---------|---------|
-| `192.168.100.11:5432/soularr` | doc2 nspawn | Pipeline DB (PostgreSQL, source of truth) |
-| `/mnt/virtio/soularr/postgres` | Shared | PostgreSQL data dir (portable) |
+| `192.168.100.11:5432/cratedigger` | doc2 nspawn | Pipeline DB (PostgreSQL, source of truth) |
+| `/mnt/virtio/cratedigger/postgres` | Shared | PostgreSQL data dir (portable) |
 | `/mnt/virtio/Music/beets-library.db` | Shared | Beets library DB |
 | `/mnt/virtio/Music/Beets` | Shared | Beets library (tagged files) |
 | `/mnt/virtio/Music/Incoming` | Shared | Staging area for validated downloads |
 | `/mnt/virtio/Music/Re-download` | Shared | READMEs for redownload targets |
 | `/mnt/virtio/music/slskd` | doc2 | slskd download directory |
-| `/var/lib/soularr` | doc2 | Soularr runtime state (config.ini, lock file, denylists) |
+| `/var/lib/cratedigger` | doc2 | Cratedigger runtime state (config.ini, lock file, denylists) |
 
 ### Accessing doc2
 
 ```bash
 ssh doc2
-sudo journalctl -u soularr -f                        # tail logs
-sudo journalctl -u soularr --since "5 min ago"        # recent logs
-sudo systemctl is-active soularr                       # check if running
-sudo systemctl start soularr --no-block                # trigger run (oneshot — without --no-block it blocks until the entire run completes)
-sudo cat /var/lib/soularr/config.ini                   # view generated config
+sudo journalctl -u cratedigger -f                        # tail logs
+sudo journalctl -u cratedigger --since "5 min ago"        # recent logs
+sudo systemctl is-active cratedigger                       # check if running
+sudo systemctl start cratedigger --no-block                # trigger run (oneshot — without --no-block it blocks until the entire run completes)
+sudo cat /var/lib/cratedigger/config.ini                   # view generated config
 ```
 
-**IMPORTANT for Claude Code**: `systemctl start soularr` blocks until the oneshot service finishes (minutes). Always use `--no-block` when starting via SSH from a Bash tool call. To start + tail logs:
+**IMPORTANT for Claude Code**: `systemctl start cratedigger` blocks until the oneshot service finishes (minutes). Always use `--no-block` when starting via SSH from a Bash tool call. To start + tail logs:
 ```bash
 # Step 1: start (returns immediately)
-ssh doc2 'sudo systemctl start soularr --no-block'
+ssh doc2 'sudo systemctl start cratedigger --no-block'
 # Step 2: tail logs (separate command, use run_in_background or timeout)
-ssh doc2 'sudo journalctl -u soularr -f --since "5 sec ago"'
+ssh doc2 'sudo journalctl -u cratedigger -f --since "5 sec ago"'
 ```
 Never use `&` inside SSH quotes to background systemctl — SSH keeps the connection open waiting for all child processes regardless.
 
@@ -245,7 +245,7 @@ Web UI (music.ablz.au)               CLI
     │ (check previous downloads)  │ (search new)
     ▼                             ▼
 ┌──────────────────────────────────────────────┐
-│  Soularr (soularr.py + lib/download.py)      │
+│  Cratedigger (cratedigger.py + lib/download.py)      │
 │  Phase 1: poll → Phase 2: search + enqueue   │
 └──────────────────┬───────────────────────────┘
                    │
@@ -378,7 +378,7 @@ Quality comparison is now **rank-based**, not raw-bitrate-based. Every measureme
 - **FLAC > any lossy** (LOSSLESS > TRANSPARENT)
 - **Unverifiable CBR 320** → TRANSPARENT but still `requeue_lossless` via the `is_cbr && !verified_lossless` branch
 
-Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be retuned via Nix options at `services.soularr.qualityRanks.*` on the upstream module (`nix/module.nix` in this repo), which render into `[Quality Ranks]` in `/var/lib/soularr/config.ini` on every `nixos-rebuild`. The default `mp3_vbr.excellent=210` preserves the legacy 210kbps gate threshold for bare-codec measurements. **To retune: see `README.md` § "Tuning the quality rank model"** — every option documented with defaults, meaning, and when to retune, plus the three collection fields (`mp3_vbr_levels`, `lossless_codecs`, `mixed_format_precedence`) that are NOT Nix-exposed but live on the same dataclass. Full rationale in `docs/quality-ranks.md`; default drift caught by `TestQualityRankConfigDefaults` pin tests (#67). **The search filter (`[Search Settings] allowed_filetypes`) is deliberately permissive**: high-quality preferred tiers lead, bare-codec fallback tiers at the end (`aac, opus, ogg, mp3, wav`) catch anything the rank model understands so the rank model is the authoritative quality decision (not the search filter). README § "The search filter is deliberately permissive" has the full design.
+Every numeric threshold lives in `QualityRankConfig` (one dataclass) and can be retuned via Nix options at `services.cratedigger.qualityRanks.*` on the upstream module (`nix/module.nix` in this repo), which render into `[Quality Ranks]` in `/var/lib/cratedigger/config.ini` on every `nixos-rebuild`. The default `mp3_vbr.excellent=210` preserves the legacy 210kbps gate threshold for bare-codec measurements. **To retune: see `README.md` § "Tuning the quality rank model"** — every option documented with defaults, meaning, and when to retune, plus the three collection fields (`mp3_vbr_levels`, `lossless_codecs`, `mixed_format_precedence`) that are NOT Nix-exposed but live on the same dataclass. Full rationale in `docs/quality-ranks.md`; default drift caught by `TestQualityRankConfigDefaults` pin tests (#67). **The search filter (`[Search Settings] allowed_filetypes`) is deliberately permissive**: high-quality preferred tiers lead, bare-codec fallback tiers at the end (`aac, opus, ogg, mp3, wav`) catch anything the rank model understands so the rank model is the authoritative quality decision (not the search filter). README § "The search filter is deliberately permissive" has the full design.
 
 **Key rule**: the `verified_lossless=True` bypass is now **tier-gated**. It imports on verdict `"better"` or `"equivalent"` but blocks on `"worse"`. This prevents a deliberately-too-low `verified_lossless_target` (Opus 64) from replacing a good existing album.
 
@@ -417,7 +417,7 @@ Lo-fi V0 at 207kbps now passes the gate via the `"mp3 v0"` label contract (`cfg.
 2. Import directly, quality gate classifies the measurement into a `QualityRank` (mp3_vbr band table) and accepts if the rank is at or above `cfg.quality_ranks.gate_min_rank` (default `EXCELLENT` ≈ 210kbps)
 
 **MP3 CBR downloads** (320, 256, etc.):
-1. Spectral check runs in `process_completed_album()` (soularr.py) — detects upsampled garbage via cliff detection
+1. Spectral check runs in `process_completed_album()` (cratedigger.py) — detects upsampled garbage via cliff detection
 2. If spectral says SUSPECT → reject, denylist user
 3. If spectral says genuine or marginal → import (something is better than nothing)
 4. Quality gate: even when CBR rank is TRANSPARENT, the `is_cbr && !verified_lossless && rank < LOSSLESS` branch fires → re-queues with `search_filetype_override="lossless"` to find a verifiable lossless source
@@ -521,7 +521,7 @@ CREATE TABLE user_cooldowns (
 1. **Trigger**: `_timeout_album()` (download.py) and `reject_and_requeue()` (album_source.py) call `db.check_and_apply_cooldown(username)` after logging the outcome
 2. **Decision**: `check_and_apply_cooldown()` queries `download_log` for last N outcomes, delegates to `should_cooldown()` pure function
 3. **Storage**: If triggered, upserts `user_cooldowns` with `cooldown_until = NOW() + 3 days`
-4. **Cache**: `ctx.cooled_down_users` populated at cycle start in `soularr.py main()`, shared with Phase 1 thread. Updated in real-time when new cooldowns are applied mid-cycle.
+4. **Cache**: `ctx.cooled_down_users` populated at cycle start in `cratedigger.py main()`, shared with Phase 1 thread. Updated in real-time when new cooldowns are applied mid-cycle.
 5. **Enforcement**: `try_enqueue()` and `try_multi_enqueue()` in `lib/enqueue.py` skip users in `ctx.cooled_down_users` before checking the per-request denylist
 
 ### Re-cooldown behavior
@@ -541,7 +541,7 @@ pipeline-cli query "SELECT * FROM user_cooldowns ORDER BY cooldown_until DESC"
 pipeline-cli query "SELECT soulseek_username, COUNT(*) FROM download_log WHERE outcome = 'timeout' GROUP BY soulseek_username ORDER BY count DESC LIMIT 10"
 
 # Manually seed cooldowns for all users with 5+ consecutive failures
-psql -h 192.168.100.11 -U soularr soularr -c "INSERT INTO user_cooldowns ..."
+psql -h 192.168.100.11 -U cratedigger cratedigger -c "INSERT INTO user_cooldowns ..."
 ```
 
 ## Deploying Changes
@@ -554,21 +554,21 @@ Flake input changes MUST be done on doc1 and pushed from there. Doc2 has no git 
 git add <files> && git commit -m "description" && git push
 
 # 2. Update Nix flake input (MUST be on doc1 — it has git push access)
-ssh doc1 'cd ~/nixosconfig && nix flake update soularr-src && git add flake.lock && git commit -m "soularr: description" && git push'
+ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src && git add flake.lock && git commit -m "cratedigger: description" && git push'
 
-# 3. Deploy to doc2 — runs soularr-db-migrate.service AND restarts soularr-web automatically
+# 3. Deploy to doc2 — runs cratedigger-db-migrate.service AND restarts cratedigger-web automatically
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```
 
 **From doc1 directly:**
 ```bash
 cd ~/nixosconfig
-nix flake update soularr-src
-git add flake.lock && git commit -m "soularr: description" && git push
+nix flake update cratedigger-src
+git add flake.lock && git commit -m "cratedigger: description" && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```
 
-**IMPORTANT**: `restartIfChanged = false` on `soularr.service` — deploys don't restart Soularr itself. The 5-min timer picks up new code on the next cycle, or manually start. `soularr-web` and `soularr-db-migrate` use the systemd default (restart on change) so they pick up the new code immediately at switch time.
+**IMPORTANT**: `restartIfChanged = false` on `cratedigger.service` — deploys don't restart Cratedigger itself. The 5-min timer picks up new code on the next cycle, or manually start. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default (restart on change) so they pick up the new code immediately at switch time.
 
 ### Validating before deploy
 
@@ -582,7 +582,7 @@ This catches: option surface breakage, prestart sed-substitution bugs, systemd d
 
 ## Database Migrations
 
-Schema changes go through versioned migration files. The deploy unit `soularr-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE `soularr.service` and `soularr-web.service` start. Both services `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
+Schema changes go through versioned migration files. The deploy unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE `cratedigger.service` and `cratedigger-web.service` start. Both services `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
 
 **Layout:**
 - `migrations/NNN_name.sql` — versioned, append-only. Each file runs in its own transaction, exactly once per DB.
@@ -597,13 +597,13 @@ Schema changes go through versioned migration files. The deploy unit `soularr-db
 
 **Verifying after deploy:**
 ```bash
-ssh doc2 'sudo systemctl status soularr-db-migrate.service --no-pager | head -10'
+ssh doc2 'sudo systemctl status cratedigger-db-migrate.service --no-pager | head -10'
 ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 5"'
 ```
 
-**If a migration fails:** `ssh doc2 'sudo journalctl -u soularr-db-migrate.service -n 50'`. The unit must be in `active (exited)` state for soularr/soularr-web to start.
+**If a migration fails:** `ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service -n 50'`. The unit must be in `active (exited)` state for cratedigger/cratedigger-web to start.
 
-**For destructive changes**, backup first: `ssh doc2 'pg_dump -h 192.168.100.11 -U soularr soularr' > /tmp/soularr_backup_$(date +%Y%m%d_%H%M%S).sql`
+**For destructive changes**, backup first: `ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
 
 **Never** edit a migration file that has already shipped. Frozen history. To fix a mistake, add a new migration that corrects it.
 
@@ -613,12 +613,12 @@ ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migra
 
 The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosModules.default` in `flake.nix`. It's generic and homelab-agnostic: every secret is a `*File` path, the DB is a `dsn` string, no sops/nspawn/reverse-proxy assumptions.
 
-`~/nixosconfig/modules/nixos/services/soularr.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
-- sops-nix per-key secret materialization (`soularr-secrets-split` oneshot — see "Sops + per-key secrets" below)
+`~/nixosconfig/modules/nixos/services/cratedigger.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
+- sops-nix per-key secret materialization (`cratedigger-secrets-split` oneshot — see "Sops + per-key secrets" below)
 - the nspawn PostgreSQL container for the pipeline DB
 - the redis instance for the web UI cache
 - the `homelab.localProxy.hosts` entry for `music.ablz.au`
-- systemd `after`/`wants`/`restartTriggers` splicing in `container@soularr-db.service`
+- systemd `after`/`wants`/`restartTriggers` splicing in `container@cratedigger-db.service`
 
 Key options on the upstream module (full set in `nix/module.nix`):
 
@@ -626,8 +626,8 @@ Key options on the upstream module (full set in `nix/module.nix`):
 |---|---|---|
 | `enable` | `false` | Master switch |
 | `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. |
-| `src` | `../.` | Path to soularr source tree. Defaults to this flake's repo root. |
-| `stateDir` | `/var/lib/soularr` | Runtime state (config.ini, lock file). |
+| `src` | `../.` | Path to cratedigger source tree. Defaults to this flake's repo root. |
+| `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
@@ -645,35 +645,35 @@ Key options on the upstream module (full set in `nix/module.nix`):
 
 The module:
 1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, slskd-api)
-2. Wraps `soularr.py` / `pipeline_cli.py` / `migrate_db.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH
-3. Renders `/var/lib/soularr/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path
-4. Pre-start: health-check slskd → render config.ini → start `soularr.py`
+2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH
+3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path
+4. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`
 
 Systemd units:
-- `soularr-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. Both `soularr.service` and `soularr-web.service` `requires` it, so the app cannot start against an un-migrated DB.
-- `soularr.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
-- `soularr.timer` — fires every 5 minutes (configurable via `timer.onUnitActiveSec`).
-- `soularr-web.service` — long-running web UI for music.ablz.au.
+- `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. Both `cratedigger.service` and `cratedigger-web.service` `requires` it, so the app cannot start against an un-migrated DB.
+- `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
+- `cratedigger.timer` — fires every 5 minutes (configurable via `timer.onUnitActiveSec`).
+- `cratedigger-web.service` — long-running web UI for music.ablz.au.
 
 ### Sops + per-key secrets
 
-sops-nix's `key = "..."` does NOT actually extract a single value from a multi-key dotenv file (it writes the whole `KEY=VALUE` envfile regardless — verified empirically; same gotcha is documented in `~/nixosconfig/modules/nixos/services/alerting.nix` for the gotify token). The upstream module wants raw values per file, so the homelab wrapper materializes them via a `soularr-secrets-split` oneshot at boot:
+sops-nix's `key = "..."` does NOT actually extract a single value from a multi-key dotenv file (it writes the whole `KEY=VALUE` envfile regardless — verified empirically; same gotcha is documented in `~/nixosconfig/modules/nixos/services/alerting.nix` for the gotify token). The upstream module wants raw values per file, so the homelab wrapper materializes them via a `cratedigger-secrets-split` oneshot at boot:
 
 ```nix
-systemd.services.soularr-secrets-split = {
-  before = ["soularr.service" "soularr-web.service" "soularr-db-migrate.service"];
-  serviceConfig.ExecStart = pkgs.writeShellScript "soularr-secrets-split" ''
+systemd.services.cratedigger-secrets-split = {
+  before = ["cratedigger.service" "cratedigger-web.service" "cratedigger-db-migrate.service"];
+  serviceConfig.ExecStart = pkgs.writeShellScript "cratedigger-secrets-split" ''
     set -euo pipefail
-    install -d -m 0700 /run/soularr-secrets
+    install -d -m 0700 /run/cratedigger-secrets
     for key in SOULARR_SLSKD_API_KEY MEELO_USERNAME MEELO_PASSWORD PLEX_TOKEN JELLYFIN_TOKEN; do
       grep -m1 "^$key=" "${config.sops.secrets."soularr/env".path}" \
-        | cut -d= -f2- | tr -d '\n' > "/run/soularr-secrets/$key"
-      chmod 0400 "/run/soularr-secrets/$key"
+        | cut -d= -f2- | tr -d '\n' > "/run/cratedigger-secrets/$key"
+      chmod 0400 "/run/cratedigger-secrets/$key"
     done
   '';
 };
-services.soularr.slskd.apiKeyFile = "/run/soularr-secrets/SOULARR_SLSKD_API_KEY";
-services.soularr.notifiers.meelo.usernameFile = "/run/soularr-secrets/MEELO_USERNAME";
+services.cratedigger.slskd.apiKeyFile = "/run/cratedigger-secrets/SOULARR_SLSKD_API_KEY";
+services.cratedigger.notifiers.meelo.usernameFile = "/run/cratedigger-secrets/MEELO_USERNAME";
 # ... etc
 ```
 
@@ -682,7 +682,7 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 ### Flake outputs
 
 ```
-github:abl030/soularr
+github:abl030/cratedigger
 ├── nixosModules.default              ← upstream NixOS module
 ├── packages.<system>.slskd-api        ← slskd-api PyPI build (not in nixpkgs)
 ├── devShells.<system>.default         ← test/dev environment
@@ -695,15 +695,15 @@ Build the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 
 **ALWAYS use `nix-shell --run` to run tests and Python commands.** The dev shell (`shell.nix`) provides psycopg2, sox, ffmpeg, music-tag, slskd-api — without it, tests will fail with missing imports. Never run `python3` directly outside `nix-shell`.
 
-**Use the test runner script** — it saves output to `/tmp/soularr-test-output.txt` so you can grep failures without re-running the full 2-minute suite:
+**Use the test runner script** — it saves output to `/tmp/cratedigger-test-output.txt` so you can grep failures without re-running the full 2-minute suite:
 
 ```bash
 nix-shell --run "bash scripts/run_tests.sh"           # full suite (~2 min), saves output
-grep "^FAIL\|^ERROR" /tmp/soularr-test-output.txt     # check for failures after the fact
-grep "^Ran " /tmp/soularr-test-output.txt              # quick pass/fail count
+grep "^FAIL\|^ERROR" /tmp/cratedigger-test-output.txt     # check for failures after the fact
+grep "^Ran " /tmp/cratedigger-test-output.txt              # quick pass/fail count
 ```
 
-**NEVER re-run the full suite just to grep output differently.** Read `/tmp/soularr-test-output.txt` instead.
+**NEVER re-run the full suite just to grep output differently.** Read `/tmp/cratedigger-test-output.txt` instead.
 
 For single test modules during development:
 ```bash
@@ -851,4 +851,4 @@ curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 ## Secrets
 
 - slskd API key: sops-managed, injected into config.ini at runtime
-- Discogs token: `~/.config/beets/secrets.yaml` on doc1 (not used by Soularr directly)
+- Discogs token: `~/.config/beets/secrets.yaml` on doc1 (not used by Cratedigger directly)

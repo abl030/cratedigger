@@ -2,7 +2,7 @@
 
 ## What It Is
 
-A single-page web app for browsing MusicBrainz and adding album releases to the Soularr pipeline. Replaces Lidarr as the album picker. Served at `https://music.ablz.au`.
+A single-page web app for browsing MusicBrainz and adding album releases to the Cratedigger pipeline. Replaces Lidarr as the album picker. Served at `https://music.ablz.au`.
 
 ## Architecture
 
@@ -17,8 +17,8 @@ Browser → https://music.ablz.au
 ```
 
 - **No build step, no npm, no framework** — stdlib `http.server`, vanilla JS, single HTML file
-- Runs on doc2 as `soularr-web` systemd service
-- Python env shared with soularr (psycopg2, requests, etc.)
+- Runs on doc2 as `cratedigger-web` systemd service
+- Python env shared with cratedigger (psycopg2, requests, etc.)
 
 ## Files
 
@@ -69,7 +69,7 @@ Browser → https://music.ablz.au
 The upstream module declares the web options at `nix/module.nix` in this repo:
 
 ```nix
-services.soularr.web = {
+services.cratedigger.web = {
   enable = mkOption { type = types.bool; default = false; };
   port = mkOption { type = types.port; default = 8085; };
   beetsDb = mkOption { type = types.str; description = "Path to beets-library.db (read-only)"; };
@@ -80,27 +80,27 @@ services.soularr.web = {
 };
 ```
 
-Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (and the wrapper at `~/nixosconfig/modules/nixos/services/soularr.nix` provides the redis instance + reverse proxy entry):
+Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (and the wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` provides the redis instance + reverse proxy entry):
 
 ```nix
 # in hosts/doc2/configuration.nix — picks up the wrapper's defaults
-homelab.services.soularr.enable = true;
-# the wrapper sets services.soularr.web.enable = true; on its own
+homelab.services.cratedigger.enable = true;
+# the wrapper sets services.cratedigger.web.enable = true; on its own
 ```
 
 What this creates on doc2:
-- `soularr-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
-- `services.redis.servers.soularr` — provided by the homelab wrapper (not the upstream module)
+- `cratedigger-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
+- `services.redis.servers.cratedigger` — provided by the homelab wrapper (not the upstream module)
 - `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
 - Cloudflare DNS + ACME cert auto-provisioned
 
 ## Deployment
 
-Code changes in `web/` deploy via the normal soularr flake update:
+Code changes in `web/` deploy via the normal cratedigger flake update:
 
 ```bash
 cd ~/soularr && git add web/ && git commit -m "..." && git push
-cd ~/nixosconfig && nix flake update soularr-src && nix fmt
+cd ~/nixosconfig && nix flake update cratedigger-src && nix fmt
 git add flake.lock && git commit -m "..." && git push
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```

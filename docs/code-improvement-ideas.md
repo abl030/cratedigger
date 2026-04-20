@@ -4,12 +4,12 @@ Notes from the async-downloads implementation (2026-04-03). These are structural
 
 ## 1. TestConfig factory instead of MagicMock
 
-**Problem**: Tests create `SoularrConfig` via `MagicMock()`, which means pyright can't check attribute names. About 10 pyright "errors" across test files are `Cannot assign to attribute "stalled_timeout" for class "SoularrConfig"`. Real type errors are invisible in this noise.
+**Problem**: Tests create `CratediggerConfig` via `MagicMock()`, which means pyright can't check attribute names. About 10 pyright "errors" across test files are `Cannot assign to attribute "stalled_timeout" for class "CratediggerConfig"`. Real type errors are invisible in this noise.
 
-**Fix**: Create a `TestConfig` factory that returns a real `SoularrConfig` with test defaults:
+**Fix**: Create a `TestConfig` factory that returns a real `CratediggerConfig` with test defaults:
 
 ```python
-def make_test_config(**overrides) -> SoularrConfig:
+def make_test_config(**overrides) -> CratediggerConfig:
     defaults = {
         "slskd_download_dir": "/tmp/test_downloads",
         "stalled_timeout": 300,
@@ -18,7 +18,7 @@ def make_test_config(**overrides) -> SoularrConfig:
         ...
     }
     defaults.update(overrides)
-    return SoularrConfig(**defaults)
+    return CratediggerConfig(**defaults)
 ```
 
 Tests get `ctx.cfg.stalled_timeout = 600` → `make_test_config(stalled_timeout=600)`. Pyright catches typos at write time. The mock noise vanishes.
@@ -57,11 +57,11 @@ class CompletionResult:
 
 Or simpler: have `process_completed_album` always set status, even in the no-beets path. The safety net in `poll_active_downloads` becomes dead code.
 
-## 4. Extract soularr.py globals into a proper entry point
+## 4. Extract cratedigger.py globals into a proper entry point
 
-**Problem**: `soularr.py` uses module-level globals (`slskd`, `cfg`, `pipeline_db_source`, `search_cache`, `folder_cache`, `broken_user`) and thin closure wrappers (`_make_ctx()`, `cancel_and_delete()`, `grab_most_wanted()`) to bridge between the global state and `lib/` functions that take `SoularrContext`. Adding `poll_active_downloads` to `main()` required understanding which globals were initialized at which point.
+**Problem**: `cratedigger.py` uses module-level globals (`slskd`, `cfg`, `pipeline_db_source`, `search_cache`, `folder_cache`, `broken_user`) and thin closure wrappers (`_make_ctx()`, `cancel_and_delete()`, `grab_most_wanted()`) to bridge between the global state and `lib/` functions that take `CratediggerContext`. Adding `poll_active_downloads` to `main()` required understanding which globals were initialized at which point.
 
-**Fix**: Build `SoularrContext` once at the top of `main()` after all initialization is complete. Thread it through explicitly. Kill the closure wrappers. The search caches could live on `SoularrContext` or a new `SearchState` dataclass.
+**Fix**: Build `CratediggerContext` once at the top of `main()` after all initialization is complete. Thread it through explicitly. Kill the closure wrappers. The search caches could live on `CratediggerContext` or a new `SearchState` dataclass.
 
 This would also make integration testing the full `main()` flow possible — currently you can't test `main()` without mocking module globals.
 
@@ -90,6 +90,6 @@ This catches CHECK constraint issues, column migration bugs, and status visibili
 
 ## 7. `failed_grab` parameter is vestigial
 
-**Problem**: `process_completed_album` accepts `failed_grab: list[Any]` but never reads it. Every caller passes `[]`. It's been dead since the function was extracted from `soularr.py`.
+**Problem**: `process_completed_album` accepts `failed_grab: list[Any]` but never reads it. Every caller passes `[]`. It's been dead since the function was extracted from `cratedigger.py`.
 
 **Fix**: Remove the parameter. Update the 3 callers. One-line diff per caller.

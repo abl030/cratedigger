@@ -4,7 +4,7 @@ Tier 1: Search + enqueue shape validation (~30s) — runs if slskd available.
 Tier 2: Full download pipeline (~2-5min) — runs if SLSKD_TEST_FULL=1.
 
 These tests validate that real slskd API responses match the dict shapes
-soularr.py expects. They caught three production crashes from dict/DownloadFile
+cratedigger.py expects. They caught three production crashes from dict/DownloadFile
 boundary mismatches on 2026-03-29.
 
 Requires: tests/.slskd-creds.json + docker (auto-started by conftest.py).
@@ -125,10 +125,10 @@ class TestSlskdSearchShapes(unittest.TestCase):
         """verify_filetype() works with actual slskd file dicts — no AttributeError."""
         # Mock cfg to avoid global state issues
         from unittest.mock import MagicMock
-        import soularr
+        import cratedigger
         from lib.quality import verify_filetype
-        orig_cfg = soularr.cfg
-        soularr.cfg = MagicMock()
+        orig_cfg = cratedigger.cfg
+        cratedigger.cfg = MagicMock()
         try:
             for r in self.results[:3]:
                 for f in r.get("files", [])[:3]:
@@ -138,7 +138,7 @@ class TestSlskdSearchShapes(unittest.TestCase):
                     except (KeyError, ValueError):
                         pass  # Wrong type is fine — crashing is not
         finally:
-            soularr.cfg = orig_cfg
+            cratedigger.cfg = orig_cfg
 
 
 @unittest.skipUnless(SLSKD_HOST, "slskd not available — no creds or docker")

@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from lib.config import SoularrConfig
+from lib.config import CratediggerConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AudioQualityMeasurement,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
@@ -38,7 +38,7 @@ def _make_album_data(artist="Test Artist", title="Test Album",
 
 
 def _make_ctx():
-    """Build a mock SoularrContext."""
+    """Build a mock CratediggerContext."""
     ctx = MagicMock()
     ctx.cfg.beets_harness_path = "/nix/store/fake/harness/run_beets_harness.sh"
     ctx.cfg.beets_distance_threshold = 0.15
@@ -172,7 +172,7 @@ class TestDispatchImport(unittest.TestCase):
             id=42, status="downloading",
             **(request_overrides or {}),
         ))
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
         )
@@ -431,9 +431,9 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 
     def test_default_cfg_serializes_to_argv(self):
         """Default QualityRankConfig → argv contains the round-trip JSON."""
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.quality import QualityRankConfig
-        cfg = SoularrConfig(beets_harness_path=_HARNESS)
+        cfg = CratediggerConfig(beets_harness_path=_HARNESS)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)
         self.assertIsNotNone(raw)
@@ -444,7 +444,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 
     def test_custom_cfg_serializes_to_argv(self):
         """Custom gate_min_rank + metric survive the argv round-trip."""
-        from lib.config import SoularrConfig
+        from lib.config import CratediggerConfig
         from lib.quality import (QualityRank, QualityRankConfig,
                                  RankBitrateMetric)
         custom_ranks = QualityRankConfig(
@@ -452,7 +452,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             gate_min_rank=QualityRank.GOOD,
             within_rank_tolerance_kbps=15,
         )
-        cfg = SoularrConfig(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, quality_ranks=custom_ranks)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)

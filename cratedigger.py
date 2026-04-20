@@ -13,8 +13,8 @@ import slskd_api
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
-    from lib.config import SoularrConfig
-    from lib.context import SoularrContext
+    from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
 
 
 class TrackRecord(TypedDict):
@@ -42,12 +42,12 @@ class SlskdDirectory(TypedDict):
     files: list[SlskdFile]
 
 
-# === Typed Config (populated in main() via SoularrConfig.from_ini()) ===
-cfg: SoularrConfig = None  # type: ignore[assignment]  # Set in main()
+# === Typed Config (populated in main() via CratediggerConfig.from_ini()) ===
+cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
 
 # === API Clients & Logging ===
 slskd: slskd_api.SlskdClient = None  # type: ignore[assignment]  # Set in main()
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 # === API client instances (set in main()) ===
 pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
@@ -55,7 +55,7 @@ pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set i
 # === Runtime context (populated in main()) ===
 # Module-level reference for thin wrappers that can't receive ctx as a parameter.
 # All matching/search functions receive ctx explicitly.
-_module_ctx: Any = None  # SoularrContext — set in main()
+_module_ctx: Any = None  # CratediggerContext — set in main()
 
 from lib.browse import (
     _browse_directories,
@@ -84,7 +84,7 @@ from lib.matching import (
 )
 
 
-def filter_list(albums: Sequence[Any], filter_cfg: SoularrConfig) -> list[Any] | None:
+def filter_list(albums: Sequence[Any], filter_cfg: CratediggerConfig) -> list[Any] | None:
     """Filter albums against the title blacklist. Returns None if nothing passes."""
     result = []
     for album in albums:
@@ -525,7 +525,7 @@ from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
 
 
 def _make_ctx():
-    """Return the module-level SoularrContext (created in main())."""
+    """Return the module-level CratediggerContext (created in main())."""
     return _module_ctx
 
 
@@ -556,7 +556,7 @@ def main():
     from lib.permissions import reset_umask
     reset_umask()
 
-    parser = argparse.ArgumentParser(description="Soularr music download pipeline")
+    parser = argparse.ArgumentParser(description="Cratedigger music download pipeline")
     parser.add_argument("-c", "--config-dir", default=os.getcwd(),
                         help="Config directory (default: cwd)")
     parser.add_argument("-v", "--var-dir", default=os.getcwd(),
@@ -565,11 +565,11 @@ def main():
                         help="Disable lock file creation")
     args = parser.parse_args()
 
-    lock_file_path = os.path.join(args.var_dir, ".soularr.lock")
+    lock_file_path = os.path.join(args.var_dir, ".cratedigger.lock")
     config_file_path = os.path.join(args.config_dir, "config.ini")
 
     if not args.no_lock_file and os.path.exists(lock_file_path):
-        logger.info("Soularr instance is already running.")
+        logger.info("Cratedigger instance is already running.")
         sys.exit(1)
 
     try:
@@ -585,14 +585,14 @@ def main():
             logger.error(
                 f"Config file not found at {config_file_path}. "
                 "Pass --config-dir to specify its location. "
-                "Under the upstream NixOS module, /var/lib/soularr/config.ini "
+                "Under the upstream NixOS module, /var/lib/cratedigger/config.ini "
                 "is rendered by preStartScript at boot."
             )
             sys.exit(1)
 
         # --- Parse config into typed dataclass ---
-        from lib.config import SoularrConfig
-        cfg = SoularrConfig.from_ini(config, config_dir=args.config_dir, var_dir=args.var_dir)
+        from lib.config import CratediggerConfig
+        cfg = CratediggerConfig.from_ini(config, config_dir=args.config_dir, var_dir=args.var_dir)
 
         setup_logging(config)
 
@@ -636,8 +636,8 @@ def main():
         slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.resolved_slskd_api_key(), url_base=cfg.slskd_url_base)
 
         # Build context with fresh caches for this cycle
-        from lib.context import SoularrContext
-        _module_ctx = SoularrContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
+        from lib.context import CratediggerContext
+        _module_ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
 
         # Load persisted caches from previous runs
         from lib.cache import load_caches
@@ -667,7 +667,7 @@ def main():
         def _run_phase1():
             """Run Phase 1 in a background thread with its own DB connection."""
             phase1_source = DatabaseSource(cfg.pipeline_db_dsn)
-            phase1_ctx = SoularrContext(
+            phase1_ctx = CratediggerContext(
                 cfg=cfg,
                 slskd=slskd,
                 pipeline_db_source=phase1_source,
@@ -698,7 +698,7 @@ def main():
                 except Exception:
                     logger.exception("Fatal error in search phase!")
                 if failed == 0:
-                    logger.info("Soularr finished. Exiting...")
+                    logger.info("Cratedigger finished. Exiting...")
                 else:
                     logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
             else:
@@ -715,7 +715,7 @@ def main():
         slskd.transfers.remove_completed_downloads()
 
         elapsed = time.time() - cycle_start
-        logger.info(f"Soularr cycle complete in {elapsed:.1f}s")
+        logger.info(f"Cratedigger cycle complete in {elapsed:.1f}s")
 
     finally:
         # Save caches for next run

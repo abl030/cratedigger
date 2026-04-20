@@ -902,7 +902,7 @@ def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
     """Post-import cleanup: delete the stale same-MBID album by beets id.
 
     Thin logger around ``remove_album_by_beets_id``. Always logs the
-    outcome so the import audit trail (stderr → soularr journal)
+    outcome so the import audit trail (stderr → cratedigger journal)
     shows exactly which beets row was removed and why.
     """
     _log(f"[POST-IMPORT CLEANUP] Removing stale same-MBID entry "
@@ -1037,7 +1037,7 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
     """Update pipeline DB status. Best-effort — failures logged but don't block."""
     try:
         from lib.pipeline_db import PipelineDB
-        dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://soularr@localhost/soularr")
+        dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
         extra = {}
         if imported_path:
@@ -1537,13 +1537,13 @@ def main():
     # ``resolve_duplicate`` sees. The intra-process race is closed.
     #
     # KNOWN LIMITATION (Codex PR #131 round 6 P1): this remains
-    # vulnerable to CROSS-process races. If a second soularr process
-    # (e.g. soularr-web force-import racing an auto-import cycle)
+    # vulnerable to CROSS-process races. If a second cratedigger process
+    # (e.g. cratedigger-web force-import racing an auto-import cycle)
     # commits a same-MBID row between our ``run_import`` returning
     # and this re-enumerate query, ``max(post_import_ids)`` would
     # pick that other process's row as "new" and our cleanup would
-    # delete the one this process actually imported. Soularr.service
-    # is single-instance (``/var/lib/soularr/soularr.lock``) but the
+    # delete the one this process actually imported. Cratedigger.service
+    # is single-instance (``/var/lib/cratedigger/cratedigger.lock``) but the
     # web force-import path does not hold that lock, so the race
     # window exists in practice. Follow-up: a pipeline-level same-
     # release advisory lock shared by both entry points, tracked

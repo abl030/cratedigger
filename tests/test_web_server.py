@@ -927,8 +927,8 @@ class TestPipelineRouteDirectEquivalence(_WebServerCase):
         from lib.config import read_runtime_rank_config
 
         # The route reads the runtime cfg via `_runtime_rank_config()`.
-        # In the test env there's no /var/lib/soularr/config.ini, so it
-        # falls back to SoularrConfig() defaults. Read it once here so
+        # In the test env there's no /var/lib/cratedigger/config.ini, so it
+        # falls back to CratediggerConfig() defaults. Read it once here so
         # both sides use identical cfg.
         cfg = read_runtime_rank_config()
 
@@ -3068,7 +3068,7 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
         first = self._call_release_detail()
         self.assertEqual(first["pipeline_status"], "wanted")
 
-        # Simulate soularr pipeline flipping status outside the web UI.
+        # Simulate cratedigger pipeline flipping status outside the web UI.
         # No POST to /api/cache/invalidate, no web-UI cache-group flush —
         # this is the exact sequence that produced the stale-badge bug.
         self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(

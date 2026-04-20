@@ -201,7 +201,7 @@ class TestApplyTransition(unittest.TestCase):
         """When set_downloading returns False, transition logs a warning."""
         db = self._make_db("wanted")
         db.set_downloading.return_value = False
-        with self.assertLogs("soularr", level="WARNING") as cm:
+        with self.assertLogs("cratedigger", level="WARNING") as cm:
             apply_transition(db, 1, "downloading", from_status="wanted",
                              state_json='{"filetype":"flac"}')
         self.assertTrue(any("status guard" in msg for msg in cm.output))

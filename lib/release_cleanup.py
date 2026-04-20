@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
 
 
-log = logging.getLogger("soularr")
+log = logging.getLogger("cratedigger")
 
 
 SelectorFailureReason = Literal["timeout", "nonzero_rc", "exception"]

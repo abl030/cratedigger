@@ -204,7 +204,7 @@ It now tier-gates the bypass:
 - `verified_lossless=True` + verdict `"worse"` → **downgrade** (blocked).
 
 This prevents a deliberately-too-low `verified_lossless_target` (Opus 64,
-Opus 48) from replacing a good existing album. The soularr process also logs
+Opus 48) from replacing a good existing album. The cratedigger process also logs
 a warning at startup when `verified_lossless_target` classifies below
 `gate_min_rank`, so operators see the contradiction before it bites.
 
@@ -284,8 +284,8 @@ Validation:
 - All codec strings are lowercased on parse — `FLAC,Alac,WAV` is identical
   to `flac,alac,wav`.
 
-Reload by restarting `soularr-web` (the web simulator reads this file on
-every request) and waiting for the next `soularr.timer` fire (5 min).
+Reload by restarting `cratedigger-web` (the web simulator reads this file on
+every request) and waiting for the next `cratedigger.timer` fire (5 min).
 
 ## Diagnostic tooling
 

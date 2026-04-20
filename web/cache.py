@@ -1,4 +1,4 @@
-"""Redis cache layer for the Soularr web UI.
+"""Redis cache layer for the Cratedigger web UI.
 
 Two separate namespaces:
 
@@ -13,7 +13,7 @@ Two separate namespaces:
   group, discogs master/release, beets, pipeline, library/artist,
   disambiguate, …) MUST NOT be cached here — that baked
   `pipeline_status` / `in_library` into the payload and leaked stale
-  badges when soularr-the-pipeline updated Postgres outside the web
+  badges when cratedigger-the-pipeline updated Postgres outside the web
   UI's POST invalidation paths. See issue #101.
 
 All operations fail-safe — Redis being down means cache miss, never

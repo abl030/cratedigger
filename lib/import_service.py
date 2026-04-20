@@ -12,7 +12,7 @@ import logging
 
 from lib.quality import ImportResult
 
-logger = logging.getLogger("soularr")
+logger = logging.getLogger("cratedigger")
 
 
 def _apply_request_spectral_fields(
