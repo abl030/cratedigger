@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for ValidationResult + CandidateSummary dataclasses.
+"""Tests for ValidationResult + CandidateSummary Structs.
 
 RED/GREEN TDD — tests written before implementation.
 """
@@ -499,6 +499,53 @@ class TestValidationResultAttributeAccess(unittest.TestCase):
             _ = vr["valid"]  # type: ignore[index]
         with self.assertRaises(TypeError):
             vr["valid"] = False  # type: ignore[index]
+
+
+class TestValidationResultPre48914caCompat(unittest.TestCase):
+    """Pin test for the documented forward-only rename trap on
+    ``CandidateSummary``.
+
+    ``CandidateSummary`` is declared ``rename={"mbid": "album_id"}``.
+    Rows written BEFORE commit 48914ca (PR #100) used the key ``mbid``;
+    rows written AFTER use ``album_id``. ``msgspec.convert``'s default
+    behaviour is to silently drop unknown keys, so decoding an old row
+    through ``ValidationResult.from_dict`` sets ``candidate.mbid = ""``
+    (the Struct default) instead of raising.
+
+    The ``CandidateSummary`` docstring documents this as a forward-only
+    format change and asserts that no production code round-trips old
+    rows back through ``from_dict`` (web routes parse the raw dict).
+    This test locks that contract so a future "helpful" refactor that
+    adds ``mbid`` as a secondary rename source (or swaps the rename to
+    forbid unknown fields) either deliberately changes this test or
+    gets caught by it.
+    """
+
+    def test_pre_48914ca_mbid_key_is_silently_dropped(self) -> None:
+        old_row = {
+            "valid": True,
+            "candidate_count": 1,
+            "candidates": [{
+                # Pre-48914ca wire key. The Struct's rename target is
+                # ``album_id`` — ``mbid`` as a JSON key is unknown.
+                "mbid": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "artist": "Ye",
+                "album": "BULLY",
+                "distance": 0.05,
+            }],
+        }
+        vr = ValidationResult.from_dict(old_row)
+        self.assertEqual(len(vr.candidates), 1)
+        c = vr.candidates[0]
+        # Every other field decodes; mbid silently resets to "" because
+        # the wire key is unknown to the Struct's rename map.
+        self.assertEqual(c.artist, "Ye")
+        self.assertEqual(c.album, "BULLY")
+        self.assertEqual(c.distance, 0.05)
+        self.assertEqual(c.mbid, "",
+                         "pre-48914ca mbid-keyed row MUST silently drop — "
+                         "changing this behaviour breaks the documented "
+                         "forward-only format contract")
 
 
 if __name__ == "__main__":
