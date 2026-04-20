@@ -274,45 +274,69 @@ class TestBeetOpArgvIsCentralised(unittest.TestCase):
     argv construction. The only allowed callsites are this module and
     tests (tests intentionally write argv as literals to verify shapes).
 
-    Enforcement mechanism: this test walks the Python source tree and
-    fails if it finds a file outside the allowlist containing either
-    pattern. If a future PR needs to build an argv fragment, it must
-    go through ``lib.beets_album_op``.
+    Enforcement mechanism: walk the Python source tree and fail if any
+    file outside the allowlist contains a matching pattern. New callers
+    must route through ``lib.beets_album_op``.
 
-    Patterns matched:
-    - ``"beet", "remove"`` (argv list literal with quoted entries)
-    - ``"beet", "move"``
+    Patterns matched (each catches a different natural construction):
+    - Literal string:   ``"beet", "remove"`` or ``'beet', 'move'``
+    - Wrapper function: ``beet_bin(), "remove"`` / ``beet_bin(), "move"``
+    - Wrapper constant: ``BEET_BIN, "remove"`` / ``BEET_BIN, "move"``
 
-    This is coarse grep — it will not catch every possible evasion (you
-    could write ``argv = [BEET, "remove"]`` or build the list dynamically)
-    — but it covers the shape every current callsite uses and every
-    natural-looking new one.
+    ``beet_bin()`` is the canonical way most of the codebase resolves the
+    binary (``lib/util.py::beet_bin``), so catching that shape too was
+    the most likely bypass (the first version of this guard only
+    matched the literal ``"beet"`` form — the entire production code
+    base used ``beet_bin()`` and would have slipped through silently).
+
+    Inevitable gaps: fully-dynamic argv (``[cmd, verb, *flags]`` where
+    cmd/verb are variables) can't be caught by grep. That's fine — the
+    guard covers every natural-looking new callsite; a truly obfuscated
+    argv construction would require deliberate effort to add and stand
+    out in code review on its own.
     """
 
     PATTERNS = [
-        re.compile(r'"beet"\s*,\s*"remove"'),
-        re.compile(r'"beet"\s*,\s*"move"'),
+        # Literal "beet" / 'beet' — shape used by test argv assertions.
+        re.compile(r'["\']beet["\']\s*,\s*["\'](?:remove|move)["\']'),
+        # beet_bin() wrapper — the production code's canonical form.
+        re.compile(r'beet_bin\s*\(\s*\)\s*,\s*["\'](?:remove|move)["\']'),
+        # BEET_BIN constant alias — legacy, may still live in some
+        # harness-adjacent code paths.
+        re.compile(r'BEET_BIN\s*,\s*["\'](?:remove|move)["\']'),
     ]
 
     # Files allowed to construct raw ``beet remove``/``beet move`` argv.
     # The op module itself is the only production allowlist entry.
-    # Test modules are allowed to write argv literals in assertions
-    # (they document the expected shape and would be unreadable if
-    # forced through the op wrapper).
-    ALLOWED_FILES = {
+    # Test modules are allowed to write argv literals in assertions —
+    # they document the expected shape and would be unreadable forced
+    # through the op wrapper.
+    ALLOWED_FILES = frozenset({
         "lib/beets_album_op.py",
         # Tests that assert argv shapes — intentional literals:
         "tests/test_beets_album_op.py",
         "tests/test_preflight_stale_removal.py",
         "tests/test_release_cleanup.py",
         "tests/test_disambiguation.py",
-    }
+    })
 
     # Directories ignored entirely (not Python source we own):
     IGNORE_DIRS = {
         ".git", "__pycache__", ".venv", "venv", "result",
         "node_modules", ".mypy_cache", ".pytest_cache",
     }
+
+    def test_allowlist_entries_still_exist(self) -> None:
+        """Fail loud if an allowlist entry is stale (file renamed or
+        removed). Prevents the allowlist silently protecting a file
+        that no longer exists while the rename now bypasses the guard
+        with a new path."""
+        for rel in self.ALLOWED_FILES:
+            abs_path = REPO_ROOT / rel
+            self.assertTrue(
+                abs_path.is_file(),
+                f"ALLOWED_FILES entry {rel!r} does not exist. Remove "
+                f"stale entries; the file may have been renamed.")
 
     def test_no_file_outside_allowlist_constructs_beet_argv(self) -> None:
         offending: list[tuple[str, int, str]] = []

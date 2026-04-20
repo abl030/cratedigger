@@ -140,6 +140,43 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertTrue(r.postflight.disambiguated)
         self.assertIsNone(r.postflight.disambiguation_failure)
 
+    def test_postflight_pre_133_failure_row_without_selector_field(self):
+        """Issue #133 back-compat: old download_log rows serialized
+        AFTER #127 but BEFORE #133 have ``disambiguation_failure``
+        with only ``{reason, detail}`` — no ``selector``. The unified
+        ``BeetsOpFailure`` (was ``DisambiguationFailure``) added
+        ``selector: str = ""`` so these rows still deserialize.
+
+        Without the default, ``DisambiguationFailure(**{"reason":"timeout",
+        "detail":"x"})`` would raise ``TypeError`` and every
+        ``/api/pipeline/force-import`` call that parses old import_result
+        JSONB would 500. This test nails the contract so a future
+        refactor can't remove the default silently.
+        """
+        d = {
+            "version": 2,
+            "exit_code": 0,
+            "decision": "import",
+            "postflight": {
+                "beets_id": 42,
+                "track_count": 11,
+                "imported_path": "/Beets/Artist/Album",
+                "disambiguated": False,
+                "disambiguation_failure": {
+                    "reason": "timeout",
+                    "detail": "timeout after 120s",
+                    # NO selector key — predates issue #133.
+                },
+            },
+        }
+        r = ImportResult.from_dict(d)
+        assert r.postflight.disambiguation_failure is not None
+        self.assertEqual(r.postflight.disambiguation_failure.reason, "timeout")
+        self.assertEqual(
+            r.postflight.disambiguation_failure.detail, "timeout after 120s")
+        # Missing-in-JSON → default empty string on the dataclass.
+        self.assertEqual(r.postflight.disambiguation_failure.selector, "")
+
     def test_full_construction(self):
         r = ImportResult(
             exit_code=0,

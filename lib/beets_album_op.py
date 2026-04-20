@@ -1,9 +1,9 @@
 """Typed wrapper around ``beet remove`` / ``beet move`` subprocess ops (issue #133).
 
 Single source of truth for invoking beets destructive or path-changing
-commands at the subprocess level. Extracted in PR #XXX to unify the
-five+ ad-hoc callsites that PR #131 spread across the codebase
-(pre-flight stale cleanup, post-import cleanup, ``_apply_disambiguation``,
+commands at the subprocess level. Extracted to unify the five+ ad-hoc
+callsites that PR #131 spread across the codebase (pre-flight stale
+cleanup, post-import cleanup, ``_apply_disambiguation``,
 ``_canonicalize_siblings``, ``remove_album_by_beets_id``) — each callsite
 had drifted, some missing ``-a``, some missing perm repair, some missing
 DB propagation. Every new callsite that touches ``beet remove`` or
@@ -15,18 +15,25 @@ constructs ``["beet", "remove", ...]`` or ``["beet", "move", ...]`` argv.
 The grep is the enforcement mechanism — nothing stops you from writing
 raw argv elsewhere, but the suite fails if you do.
 
-Invariants this module enforces at the type level:
+Invariants this module enforces by construction (callers cannot bypass
+without rewriting the op). Note these are *structural* guarantees —
+``album_id`` is just a Python ``int``, so ``BeetsAlbumHandle(album_id=0)``
+or ``-1`` would still construct; that's a convention for callers, not
+a type-level constraint:
 
-1. **Album-mode (``-a``) is mandatory.** Without ``-a`` the ``id:<N>``
-   selector would be interpreted against ``items.id`` (a single track
-   row in a separate auto-increment namespace), not ``albums.id``. PR
-   #131 round 2 P1 caught item-mode silently matching unrelated tracks.
+1. **Album-mode (``-a``) is mandatory.** Every argv built by
+   ``_run_beet_op`` starts with ``[beet, verb, "-a"]``. Without ``-a``
+   the ``id:<N>`` selector would be interpreted against ``items.id``
+   (a single track row in a separate auto-increment namespace), not
+   ``albums.id``. PR #131 round 2 P1 caught item-mode silently
+   matching unrelated tracks.
 
-2. **Primary-key-scoped selectors.** ``remove_album`` and ``move_album``
-   take a ``BeetsAlbumHandle`` wrapping the beets numeric primary key.
-   The subprocess argv is ``id:<N>`` — a ``SELECT ... WHERE id = ?``
+2. **Primary-key-scoped selectors for id-based ops.** ``remove_album``
+   and ``move_album`` take a ``BeetsAlbumHandle`` and always emit
+   ``id:<album_id>``. The PK selector is a ``SELECT ... WHERE id = ?``
    which cannot match cross-MBID siblings (the Palo Santo data-loss
-   root cause).
+   root cause). Arbitrary selectors route through ``remove_by_selector``
+   where the caller is explicitly opting out of PK narrowing.
 
 3. **Source-agnostic.** ``mb_albumid`` is empty for Discogs rows and
    ``discogs_albumid`` is empty for MB rows; ``albums.id`` is the one
@@ -152,12 +159,17 @@ def _run_beet_op(
 
     The ``-a`` flag is mandatory — see the module docstring, invariant 1.
     """
-    # Deferred imports break a top-level cycle: ``lib.util`` imports
-    # ``lib.quality`` partway through its body (``AUDIO_EXTENSIONS``),
-    # and ``lib.quality`` imports ``BeetsOpFailure`` from this module
-    # for its ``DisambiguationFailure`` alias. Keeping ``lib.util`` and
-    # ``lib.quality`` out of this module's import graph at top-level
-    # resolves the cycle without pushing hacks into those modules.
+    # Deferred imports break a top-level cycle. Exact path:
+    #   lib.beets_album_op ── top-level import ──► lib.util
+    #   lib.util           ── mid-body import ───► lib.quality
+    #   lib.quality        ── top-level import ──► lib.beets_album_op
+    #                        (DisambiguationFailure alias for BeetsOpFailure)
+    # If this module imported ``lib.util`` at top level, loading
+    # ``harness/import_one.py`` would trigger the chain and hit
+    # beets_album_op mid-init (BeetsOpFailure not defined yet).
+    # Deferring the ``lib.util`` import to call time keeps the
+    # top-level import graph acyclic. Python caches module imports so
+    # the per-call cost is a dict lookup.
     from lib.util import beet_bin, beets_subprocess_env
 
     argv: list[str] = [beet_bin(), verb, "-a"]
@@ -270,9 +282,10 @@ def move_album(
 def remove_by_selector(
     selector: str,
     *,
+    delete_files: bool = True,
     timeout: int = DEFAULT_REMOVE_TIMEOUT,
 ) -> BeetsOpFailure | None:
-    """Low-level primitive: ``beet remove -a -d <selector>``. Never raises.
+    """Low-level primitive: ``beet remove -a [-d] <selector>``. Never raises.
 
     For callsites that iterate arbitrary selectors (``mb_albumid:X``,
     ``discogs_albumid:Y``) because the album id is not known up front
@@ -281,7 +294,12 @@ def remove_by_selector(
     album id is available: the ``id:<N>`` selector is narrower and
     cannot accidentally match siblings.
 
+    ``delete_files`` matches ``remove_album``'s signature for symmetry;
+    every current caller passes ``True`` (the ban-source intent is
+    "remove from beets AND delete the tagged files"). Kept optional so
+    future callers can untag without deleting if the use case appears.
+
     Returns ``None`` on clean exit or a typed ``BeetsOpFailure``.
     """
     return _run_beet_op(
-        "remove", selector, delete_files=True, timeout=timeout)
+        "remove", selector, delete_files=delete_files, timeout=timeout)
