@@ -70,8 +70,14 @@ def release_id_to_lock_key(mb_release_id: str) -> int:
     losing a cycle of parallelism is cheap, whereas a missed lock on
     the real race is how the Palo Santo 11-track edition lost every
     mp3 on disk.
+
+    Input is ``.strip()``ed before hashing so a legacy DB row with
+    stray leading/trailing whitespace (``"12856590 "`` vs
+    ``"12856590"``) still keys the lock at the same value across
+    processes — otherwise a normalization mismatch would defeat the
+    lock's purpose silently.
     """
-    return zlib.crc32(mb_release_id.encode("utf-8")) & 0x7FFFFFFF
+    return zlib.crc32(mb_release_id.strip().encode("utf-8")) & 0x7FFFFFFF
 
 # Schema is managed by lib/migrator.py via numbered files in migrations/.
 # PipelineDB itself never runs DDL — see scripts/migrate_db.py and the

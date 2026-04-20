@@ -1446,18 +1446,16 @@ def main():
     # we no longer depend on the pre-flight capture matching what
     # ``resolve_duplicate`` sees. The intra-process race is closed.
     #
-    # KNOWN LIMITATION (Codex PR #131 round 6 P1): this remains
-    # vulnerable to CROSS-process races. If a second cratedigger process
-    # (e.g. cratedigger-web force-import racing an auto-import cycle)
-    # commits a same-MBID row between our ``run_import`` returning
-    # and this re-enumerate query, ``max(post_import_ids)`` would
-    # pick that other process's row as "new" and our cleanup would
-    # delete the one this process actually imported. Cratedigger.service
-    # is single-instance (``/var/lib/cratedigger/cratedigger.lock``) but the
-    # web force-import path does not hold that lock, so the race
-    # window exists in practice. Follow-up: a pipeline-level same-
-    # release advisory lock shared by both entry points, tracked
-    # separately from this data-loss fix.
+    # Cross-process race closed by issue #133 / #132 P1:
+    # ``dispatch_import_core`` takes ``ADVISORY_LOCK_NAMESPACE_RELEASE``
+    # keyed on a stable hash of ``mb_release_id`` for the duration of
+    # this subprocess. Previously ``max(post_import_ids)`` was
+    # vulnerable to a racing process inserting its own same-MBID row
+    # between ``run_import`` returning and this re-enumerate query;
+    # the release-level advisory lock serialises every entry point
+    # (auto cycle, web force-import, CLI manual-import) that spawns
+    # import_one.py so this window no longer exists. The non-blocking
+    # lock means a second caller returns early rather than queueing.
     #
     # Each removal uses ``beet remove -a -d id:<N>`` — primary-key
     # scoped, cannot reach cross-MBID siblings. Any removal failure
