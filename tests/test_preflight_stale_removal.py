@@ -138,6 +138,10 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         from harness import import_one
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         beets = MagicMock()
+        # ``_canonicalize_siblings`` resolves release ids for
+        # propagation (issue #132 P2 / #133). Return empty tuple —
+        # the test's sibling isn't tracked in the pipeline DB.
+        beets.get_release_ids_by_album_id.return_value = ("", "")
         beets.get_album_path_by_id.return_value = (
             "/Beets/Shearwater/2006 - Palo Santo [2006]")
 
@@ -169,6 +173,10 @@ class TestCanonicalizeSiblings(unittest.TestCase):
         from harness import import_one
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         beets = MagicMock()
+        # ``_canonicalize_siblings`` resolves release ids for
+        # propagation (issue #132 P2 / #133). Return empty tuple —
+        # the test's sibling isn't tracked in the pipeline DB.
+        beets.get_release_ids_by_album_id.return_value = ("", "")
         beets.get_album_path_by_id.return_value = (
             "/Beets/Discogs/Artist/Album [12856590]")
 
@@ -199,6 +207,7 @@ class TestCanonicalizeSiblings(unittest.TestCase):
             MagicMock(returncode=0, stderr=""),
         ]
         beets = MagicMock()
+        beets.get_release_ids_by_album_id.return_value = ("", "")
         # Any valid path for the sibling that moved clean.
         beets.get_album_path_by_id.return_value = "/Beets/X/Y [2006]"
 

@@ -334,6 +334,65 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    def update_imported_path_by_release_id(
+        self,
+        *,
+        mb_albumid: str,
+        discogs_albumid: str,
+        new_path: str,
+    ) -> int:
+        """Update ``imported_path`` for any request whose release id matches.
+
+        Issue #132 P2 / issue #133: when sibling canonicalization in
+        the harness moves a sibling's files on disk (e.g. from
+        ``/Beets/Shearwater/2006 - Palo Santo/`` to ``…/2006 - Palo
+        Santo [2006]/`` after ``%aunique`` re-evaluates because a new
+        same-name edition was just imported), the sibling might itself
+        be a tracked pipeline request — in which case its
+        ``album_requests.imported_path`` column is now stale. The UI
+        ("Imported to" label, ban-source button) would point at a
+        directory that no longer exists.
+
+        This method finds the tracked request across both layout combos
+        (MB-sourced: ``mb_release_id=<mbid>``; Discogs-sourced:
+        ``discogs_release_id=<numeric>`` and/or ``mb_release_id=<numeric>``
+        for legacy pre-plugin-patch imports) and updates its
+        ``imported_path``. Callers pass the two beets-side columns as
+        two arguments; either may be the empty string. No-op if neither
+        is populated.
+
+        Returns the number of rows updated (usually 0 or 1). A duplicate
+        request for the same release in the pipeline DB would return
+        more — that's the caller's signal that data is inconsistent
+        (the ``UNIQUE`` constraint on ``mb_release_id`` makes duplicate
+        MBIDs impossible in practice).
+        """
+        if not mb_albumid and not discogs_albumid:
+            return 0
+        now = datetime.now(timezone.utc)
+        clauses: list[str] = []
+        params: list[object] = [new_path, now]
+        if mb_albumid:
+            # Covers both ``mb_release_id = <UUID>`` (MB-sourced) AND
+            # ``mb_release_id = <numeric>`` (legacy Discogs). ``mb_albumid``
+            # on the beets side carries whichever value beets has for
+            # the row; matching against ``mb_release_id`` here handles
+            # both cases without needing to distinguish on the pipeline
+            # side.
+            clauses.append("mb_release_id = %s")
+            params.append(mb_albumid)
+        if discogs_albumid:
+            clauses.append("discogs_release_id = %s")
+            params.append(discogs_albumid)
+        where = " OR ".join(clauses)
+        cur = self._execute(
+            f"UPDATE album_requests SET imported_path = %s, "
+            f"updated_at = %s WHERE {where}",
+            tuple(params),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     # --- Downloading state ---
 
     def set_downloading(self, request_id: int, state_json: str) -> bool:

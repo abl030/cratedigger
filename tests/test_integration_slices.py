@@ -1552,5 +1552,267 @@ class TestReleaseLockContention(unittest.TestCase):
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
 
+class TestSiblingImportedPathPropagation(unittest.TestCase):
+    """Integration slice for issue #132 P2 / issue #133: after
+    ``_canonicalize_siblings`` moves a sibling's files on disk, any
+    tracked ``album_requests`` row for that sibling must get its
+    ``imported_path`` updated.
+
+    Pre-fix scenario (from issue #132 P2): sibling edition gets
+    re-shuffled from ``/Palo Santo/`` to ``/Palo Santo [2006]/`` after
+    the new same-name edition imports. If the sibling was itself a
+    pipeline request (e.g. a prior upgrade tracked in the DB), its
+    ``imported_path`` keeps pointing at the non-existent pre-move
+    directory. The UI's "Imported to" label and the ban-source button
+    both lie until the next event touches the row.
+
+    Fix flow (covered by this slice):
+    1. ``import_one.py::_canonicalize_siblings`` resolves each
+       sibling's ``(mb_albumid, discogs_albumid)`` from beets and
+       emits a ``MovedSibling`` record in ``PostflightInfo.moved_siblings``.
+    2. ``dispatch_import_core`` calls ``_propagate_moved_siblings``
+       which calls ``PipelineDB.update_imported_path_by_release_id``
+       for each record.
+    3. The tracked sibling row's ``imported_path`` now matches the
+       post-move directory. Untracked siblings are silently skipped.
+    """
+
+    MBID_NEW = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"  # the album being imported
+    MBID_SIBLING = "cccccccc-4444-5555-6666-dddddddddddd"  # tracked sibling
+    DISCOGS_SIBLING = "12856590"
+    PRE_MOVE_PATH = "/Beets/Shearwater/2006 - Palo Santo"
+    POST_MOVE_PATH = "/Beets/Shearwater/2006 - Palo Santo [2006]"
+
+    def _make_cfg(self) -> CratediggerConfig:
+        return CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+    def test_mb_sibling_path_propagates_when_tracked(self):
+        """Tracked MB-sourced sibling: ``imported_path`` updated."""
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import MovedSibling
+
+        db = FakePipelineDB()
+        # Request 42 is the one being imported right now.
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID_NEW, status="downloading"))
+        # Request 17 is the tracked sibling, already imported long ago.
+        # Its imported_path still points at the pre-move directory —
+        # propagation must update it.
+        db.seed_request(make_request_row(
+            id=17, mb_release_id=self.MBID_SIBLING,
+            status="imported", imported_path=self.PRE_MOVE_PATH))
+
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir.postflight.moved_siblings = [
+            MovedSibling(
+                album_id=10314,
+                new_path=self.POST_MOVE_PATH,
+                mb_albumid=self.MBID_SIBLING,
+                discogs_albumid=""),
+        ]
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID_NEW,
+                    request_id=42,
+                    label="Shearwater - Palo Santo (2007)",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Sibling's imported_path updated to the post-move directory.
+        self.assertEqual(
+            db.request(17)["imported_path"], self.POST_MOVE_PATH)
+
+    def test_discogs_sibling_path_propagates_via_discogs_release_id(self):
+        """Tracked Discogs-sourced sibling: matches on
+        ``discogs_release_id`` since ``mb_albumid`` is empty for Discogs
+        rows in beets.
+        """
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import MovedSibling
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID_NEW, status="downloading"))
+        # Discogs-sourced sibling: pipeline DB carries the id in
+        # ``discogs_release_id``, and beets has it in ``discogs_albumid``
+        # with an empty ``mb_albumid``.
+        db.seed_request(make_request_row(
+            id=18, mb_release_id=None,
+            discogs_release_id=self.DISCOGS_SIBLING,
+            status="imported", imported_path=self.PRE_MOVE_PATH))
+
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir.postflight.moved_siblings = [
+            MovedSibling(
+                album_id=10315,
+                new_path=self.POST_MOVE_PATH,
+                mb_albumid="",
+                discogs_albumid=self.DISCOGS_SIBLING),
+        ]
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID_NEW,
+                    request_id=42,
+                    label="Shearwater - Palo Santo (2007)",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Discogs sibling's imported_path updated.
+        self.assertEqual(
+            db.request(18)["imported_path"], self.POST_MOVE_PATH)
+
+    def test_untracked_sibling_is_silently_skipped(self):
+        """Sibling that beets knows about but the pipeline DB does not:
+        no pipeline row matches, update returns rowcount=0, no error.
+        The import still succeeds as a whole. Pre-fix this was implicit
+        too, but pinning it prevents a future regression where an
+        untracked sibling somehow raises."""
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import MovedSibling
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID_NEW, status="downloading"))
+        # Intentionally NO request row for MBID_SIBLING. Beets has the
+        # sibling; the pipeline DB does not. Propagation is a no-op.
+
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir.postflight.moved_siblings = [
+            MovedSibling(
+                album_id=10314,
+                new_path=self.POST_MOVE_PATH,
+                mb_albumid=self.MBID_SIBLING,
+                discogs_albumid=""),
+        ]
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID_NEW,
+                    request_id=42,
+                    label="Shearwater - Palo Santo (2007)",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Main import still marked done.
+        self.assertEqual(db.request(42)["status"], "imported")
+
+    def test_empty_moved_siblings_is_noop(self):
+        """Non-kept_duplicate imports emit ``moved_siblings=[]``. The
+        dispatch helper must be a no-op in that case (the common case)."""
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID_NEW, status="downloading"))
+        db.seed_request(make_request_row(
+            id=17, mb_release_id=self.MBID_SIBLING,
+            status="imported", imported_path=self.PRE_MOVE_PATH))
+
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        # Explicit empty list — no siblings to propagate.
+        ir.postflight.moved_siblings = []
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+        dl_info = DownloadInfo(username="user1")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=self.MBID_NEW,
+                    request_id=42,
+                    label="Plain import — no siblings",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=self._make_cfg(),
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Sibling's imported_path UNTOUCHED.
+        self.assertEqual(
+            db.request(17)["imported_path"], self.PRE_MOVE_PATH)
+
+
 if __name__ == "__main__":
     unittest.main()

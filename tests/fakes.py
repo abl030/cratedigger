@@ -334,6 +334,36 @@ class FakePipelineDB:
             row[key] = val
         self.status_history.append((request_id, status))
 
+    def update_imported_path_by_release_id(
+        self,
+        *,
+        mb_albumid: str,
+        discogs_albumid: str,
+        new_path: str,
+    ) -> int:
+        """Stand-in for ``PipelineDB.update_imported_path_by_release_id``.
+
+        Mirrors the prod behaviour: find every ``album_requests`` row
+        where ``mb_release_id == mb_albumid`` OR
+        ``discogs_release_id == discogs_albumid`` (ignoring empty
+        inputs), set ``imported_path``, and return the number of rows
+        updated. No-op when both inputs are empty.
+        """
+        if not mb_albumid and not discogs_albumid:
+            return 0
+        updated = 0
+        for row in self._requests.values():
+            mb_hit = bool(
+                mb_albumid and row.get("mb_release_id") == mb_albumid)
+            discogs_hit = bool(
+                discogs_albumid
+                and row.get("discogs_release_id") == discogs_albumid)
+            if mb_hit or discogs_hit:
+                row["imported_path"] = new_path
+                row["updated_at"] = _utcnow()
+                updated += 1
+        return updated
+
     def reset_to_wanted(self, request_id: int, **fields: Any) -> None:
         row = self._requests.get(request_id)
         if row is None:

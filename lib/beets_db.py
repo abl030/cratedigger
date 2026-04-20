@@ -429,6 +429,35 @@ class BeetsDB:
             return None
         return os.path.dirname(self._decode_path(row[0]))
 
+    def get_release_ids_by_album_id(
+            self, album_id: int) -> tuple[str, str]:
+        """Return ``(mb_albumid, discogs_albumid)`` for a beets album id.
+
+        Either or both may be the empty string depending on the album
+        layout: MB-sourced rows carry an ``mb_albumid`` (UUID) and an
+        empty ``discogs_albumid``, Discogs-sourced rows carry the
+        opposite, and legacy pre-plugin-patch Discogs imports may have
+        their numeric id in ``mb_albumid`` with an empty
+        ``discogs_albumid``.
+
+        Used by sibling ``imported_path`` propagation (issue #132 P2):
+        after ``_canonicalize_siblings`` moves a sibling's files, the
+        dispatcher needs to find any pipeline ``album_requests`` row
+        whose ``mb_release_id`` or ``discogs_release_id`` matches, so
+        the UI doesn't keep pointing at a pre-move directory. Returning
+        both columns lets the caller match across every layout combo.
+
+        Returns ``("", "")`` if the album id is not present.
+        """
+        row = self._conn.execute(
+            "SELECT mb_albumid, discogs_albumid FROM albums "
+            "WHERE id = ?",
+            (album_id,)
+        ).fetchone()
+        if not row:
+            return ("", "")
+        return (row[0] or "", row[1] or "")
+
     # ── Web UI query methods ────────────────────────────────────────
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
