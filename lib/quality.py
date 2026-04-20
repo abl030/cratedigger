@@ -1324,9 +1324,9 @@ class SpectralDetail(msgspec.Struct):
 # imports (``from lib.quality import DisambiguationFailure`` in the
 # harness, tests/helpers.py, etc). The unified type added a ``selector``
 # field (default ``""``) so old JSON rows with only ``{reason, detail}``
-# still decode cleanly via ``msgspec.convert(..., type=PostflightInfo)``
-# inside ``_postflight_from_dict`` — msgspec defaults fill in any
-# missing key.
+# still decode cleanly via the ``msgspec.convert(d, type=ImportResult)``
+# call in ``ImportResult.from_dict`` — msgspec defaults fill in any
+# missing key on the nested Struct.
 from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 
@@ -1351,12 +1351,13 @@ class MovedSibling(msgspec.Struct, frozen=True):
     Wire-boundary type per ``.claude/rules/code-quality.md`` §
     "Wire-boundary types". Decoded from harness stdout JSON AND from
     ``download_log.import_result`` JSONB on every web API read. The
-    strict-typed decode at ``_postflight_from_dict`` raises
-    ``msgspec.ValidationError`` if a future harness change emits
-    ``album_id`` as a string or drops a required field, rather than
-    silently corrupting downstream state (the PR #98 / issue #99
-    lesson). Encoded symmetrically via ``msgspec.json.encode`` —
-    same policy both directions.
+    strict-typed decode via ``msgspec.convert(d, type=ImportResult)``
+    in ``ImportResult.from_dict`` raises ``msgspec.ValidationError``
+    if a future harness change emits ``album_id`` as a string or
+    drops a required field, rather than silently corrupting
+    downstream state (the PR #98 / issue #99 lesson). Encoded
+    symmetrically via ``msgspec.json.encode`` — same policy both
+    directions.
     """
     album_id: int
     new_path: str
@@ -1389,29 +1390,6 @@ class PostflightInfo(msgspec.Struct):
     # propagates each entry's ``new_path`` to the pipeline DB (the
     # tracked request row, if any, for that sibling's release).
     moved_siblings: list[MovedSibling] = []
-
-
-def _postflight_from_dict(d: Optional[dict]) -> PostflightInfo:
-    """Decode a ``postflight`` dict into a ``PostflightInfo`` Struct.
-
-    Strict-typed decode via ``msgspec.convert``: every nested
-    ``DisambiguationFailure`` / ``MovedSibling`` is validated against
-    its declared types at the boundary (the PR #98 / issue #99 lesson).
-    Missing keys default per the Struct —
-    ``disambiguation_failure=None``, ``moved_siblings=[]``.
-
-    One pre-convert hedge: if ``moved_siblings`` arrives as a non-list
-    (malformed legacy JSONB — observed shapes: scalar, dict, null),
-    it's coerced to ``[]`` so the rest of the row still decodes.
-    Everything else raises on type drift rather than silently
-    corrupting state.
-    """
-    if not d:
-        return PostflightInfo()
-    pf_d = dict(d)
-    if "moved_siblings" in pf_d and not isinstance(pf_d["moved_siblings"], list):
-        pf_d["moved_siblings"] = []
-    return msgspec.convert(pf_d, type=PostflightInfo)
 
 
 class ImportResult(msgspec.Struct):
