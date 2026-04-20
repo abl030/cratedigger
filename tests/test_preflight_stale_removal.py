@@ -1,26 +1,34 @@
-"""Tests for pre-flight same-MBID removal in import_one.py.
+"""Tests for same-MBID stale-entry handling in import_one.py.
 
 Bug being locked in (live 2026-04-20): when an upgrade re-import runs
-against an album already in beets, the stale same-MBID entry must be
-removed via a *targeted* ``beet remove -d mb_albumid:<mbid>`` BEFORE
-the beets import harness starts — not mid-import via beets' own
-``remove_duplicates()``, which has cross-MBID blast radius and wiped
-the 11-track Palo Santo sibling in production.
+against an album already in beets, we must remove the stale same-MBID
+row with a selector that CANNOT reach sibling pressings. The narrowest
+such selector is the beets numeric primary key (``id:<N>``).
 
-The seam these tests pin: ``_preflight_remove_stale_mbid(mbid, beets)``
-in ``harness/import_one.py``. It delegates to
-``lib.release_cleanup.remove_album_by_selectors`` (the pure-beets
-primitive — no PipelineDB coupling, because the harness subprocess has
-no PipelineDB on hand).
+Round 2 design (post PR #131 Codex P1): the stale removal runs AFTER
+the new album is successfully in beets, not before. A pre-flight
+remove could leave the user with no files at all if the harness times
+out / crashes. The capture-then-import-then-remove shape keeps the
+existing copy alive until the replacement is confirmed.
 
-Contract:
-- If the album IS in beets → returns a non-None ReleaseCleanupResult
-  with absent_after reflecting whether removal succeeded. Subprocess
-  ran at least once.
-- If the album is NOT in beets → returns None (no work to do). No
-  subprocess runs.
-- Empty mbid → returns None (preflight is opt-in; callers that
-  already know the album isn't present shouldn't need to gate).
+Seams pinned here:
+
+- ``_capture_stale_beets_id(mbid, beets)``
+  Pre-import, no destruction: returns the stale row's beets id (if
+  present) or None. Caller stashes it until post-import cleanup.
+
+- ``_remove_stale_by_id_logged(stale_id)``
+  Post-import, destructive: runs ``beet remove -d id:<N>`` via
+  ``lib.release_cleanup.remove_album_by_beets_id``. ``id:<N>`` is a
+  SQLite primary-key selector — it cannot match any other row, by
+  construction. Logs the outcome so the import audit trail shows
+  exactly which beets row was removed.
+
+- ``_canonicalize_siblings(sibling_mbids)``
+  Post-import, non-destructive: re-runs ``beet move`` on each
+  different-edition sibling so ``%aunique`` re-evaluates their paths
+  too. Keeps folder layout symmetric when two pressings of the same
+  album name co-exist.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 TARGET_MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+SIBLING_MBID = "cccccccc-4444-5555-6666-dddddddddddd"
 
 
 @dataclass
@@ -48,113 +57,162 @@ class _StubLocation:
 
 
 class _StubBeetsDB:
-    """Minimal BeetsDB double. Same shape as tests/test_release_cleanup.py."""
+    """Minimal BeetsDB double for capture-only pre-flight tests.
 
-    def __init__(self, sequence: list[_StubLocation]) -> None:
-        self._sequence = list(sequence)
-        self.locate_calls: list[str] = []
+    ``_capture_stale_beets_id`` calls ``get_album_info`` to extract the
+    stale row's beets id. Shape: return an ``AlbumInfo`` with the id we
+    want to see captured, or None for the "not in beets" path.
+    """
 
-    def locate(self, release_id: str) -> _StubLocation:
-        self.locate_calls.append(release_id)
-        return self._sequence.pop(0)
+    def __init__(self, album_info: object | None) -> None:
+        self._album_info = album_info
 
-    def album_exists(self, mbid: str) -> bool:
-        """Harness pre-flight uses album_exists for the initial check.
-
-        The stub mirrors locate() — one entry consumed per call.
-        """
-        return self._sequence[0].kind == "exact" if self._sequence else False
+    def get_album_info(self, mbid: str, cfg: object) -> object | None:
+        return self._album_info
 
 
 def _ok() -> MagicMock:
     return MagicMock(returncode=0, stdout="", stderr="")
 
 
-class TestPreflightRemoveStaleMBID(unittest.TestCase):
-    """The pre-flight helper is the seam that makes the Palo Santo fix work.
+class TestCaptureStaleBeetsId(unittest.TestCase):
+    """Pre-import capture is non-destructive — it only reads.
 
-    By the time ``run_import`` starts, the stale same-MBID album must
-    already be gone — otherwise beets' ``find_duplicates()`` drags it
-    into the resolve_duplicate callback and we're back to answering
-    ``"keep"`` on a dup list that may include cross-MBID siblings.
-    (Keep is safe, but cleaner to not even have the stale entry
-    present.)
+    The PR #131 round-1 regression was that the remove ran before the
+    import, so a crashed import left the user with no album at all.
+    This helper replaces that path: it just reads the stale id, caller
+    stores it, and the destructive step runs post-import.
     """
 
-    @patch("lib.release_cleanup.sp.run")
-    def test_removes_when_album_in_beets(self, mock_run: MagicMock) -> None:
-        """Album present → targeted beet remove runs, result returned."""
+    def test_returns_beets_id_when_album_present(self) -> None:
         from harness import import_one
-        mock_run.return_value = _ok()
-        beets = _StubBeetsDB([
-            _StubLocation("exact", 1, (f"mb_albumid:{TARGET_MBID}",)),
-            _StubLocation("absent", None, ()),
-        ])
+        from lib.beets_db import AlbumInfo
 
-        result = import_one._preflight_remove_stale_mbid(
+        beets = _StubBeetsDB(AlbumInfo(
+            album_id=10319, track_count=19,
+            min_bitrate_kbps=320, is_cbr=True,
+            album_path="/Beets/Shearwater/2007 - Palo Santo"))
+
+        result = import_one._capture_stale_beets_id(
             TARGET_MBID, beets)  # type: ignore[arg-type]
 
-        self.assertIsNotNone(result)
-        assert result is not None  # narrow for pyright
-        self.assertTrue(result.beets_removed)
-        self.assertTrue(result.absent_after)
-        # The subprocess MUST use an MBID-scoped selector.
-        mock_run.assert_called_once()
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(argv[0:3], ["beet", "remove", "-d"])
-        self.assertEqual(argv[3], f"mb_albumid:{TARGET_MBID}")
+        self.assertEqual(result, 10319)
 
-    @patch("lib.release_cleanup.sp.run")
-    def test_no_op_when_album_absent(self, mock_run: MagicMock) -> None:
-        """Album not in beets → returns None, no subprocess, no churn."""
+    def test_returns_none_when_absent(self) -> None:
         from harness import import_one
-        beets = _StubBeetsDB([
-            _StubLocation("absent", None, ()),
-        ])
+        beets = _StubBeetsDB(None)
 
-        result = import_one._preflight_remove_stale_mbid(
+        result = import_one._capture_stale_beets_id(
             TARGET_MBID, beets)  # type: ignore[arg-type]
 
         self.assertIsNone(result)
-        mock_run.assert_not_called()
 
-    @patch("lib.release_cleanup.sp.run")
-    def test_empty_mbid_returns_none(self, mock_run: MagicMock) -> None:
-        """Empty MBID is a no-op (caller guards)."""
+    def test_returns_none_for_empty_mbid(self) -> None:
         from harness import import_one
-        beets = _StubBeetsDB([])
+        beets = _StubBeetsDB(None)
 
-        result = import_one._preflight_remove_stale_mbid(
+        result = import_one._capture_stale_beets_id(
             "", beets)  # type: ignore[arg-type]
 
         self.assertIsNone(result)
-        mock_run.assert_not_called()
+
+
+class TestRemoveStaleByIdLogged(unittest.TestCase):
+    """Post-import cleanup: ``beet remove -d id:<N>`` via the release_cleanup
+    primitive. The ``id:<N>`` selector is the beets numeric PK — it
+    cannot match any other album, so the blast radius is exactly one
+    row."""
 
     @patch("lib.release_cleanup.sp.run")
-    def test_surfaces_partial_failure(self, mock_run: MagicMock) -> None:
-        """Timeout leaves the album on disk → result reflects it.
+    def test_clean_exit_returns_none(self, mock_run: MagicMock) -> None:
+        from harness import import_one
+        mock_run.return_value = _ok()
 
-        Caller (main) must be able to see absent_after=False and decide
-        whether to abort the import rather than blunder on into a
-        beets ``remove_duplicates`` → data-loss scenario.
-        """
+        result = import_one._remove_stale_by_id_logged(10319)
+
+        self.assertIsNone(result)
+        mock_run.assert_called_once()
+        argv = mock_run.call_args.args[0]
+        # Selector must be id:<int> — primary-key scope, NEVER mb_albumid
+        # (which can match multiple rows and would hit siblings).
+        self.assertEqual(argv[1:4], ["remove", "-d", "id:10319"])
+
+    @patch("lib.release_cleanup.sp.run")
+    def test_timeout_surfaces_typed_failure(self, mock_run: MagicMock) -> None:
         from harness import import_one
         mock_run.side_effect = sp.TimeoutExpired(
-            cmd=["beet", "remove", "-d", f"mb_albumid:{TARGET_MBID}"],
-            timeout=30)
-        beets = _StubBeetsDB([
-            _StubLocation("exact", 1, (f"mb_albumid:{TARGET_MBID}",)),
-            _StubLocation("exact", 1, (f"mb_albumid:{TARGET_MBID}",)),
-        ])
+            cmd=["beet", "remove", "-d", "id:10319"], timeout=30)
 
-        result = import_one._preflight_remove_stale_mbid(
-            TARGET_MBID, beets)  # type: ignore[arg-type]
+        result = import_one._remove_stale_by_id_logged(10319)
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertFalse(result.absent_after)
-        self.assertEqual(len(result.selector_failures), 1)
-        self.assertEqual(result.selector_failures[0].reason, "timeout")
+        self.assertEqual(result.reason, "timeout")
+
+    @patch("lib.release_cleanup.sp.run")
+    def test_nonzero_rc_surfaces_typed_failure(
+            self, mock_run: MagicMock) -> None:
+        from harness import import_one
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="some error")
+
+        result = import_one._remove_stale_by_id_logged(10319)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.reason, "nonzero_rc")
+
+
+class TestCanonicalizeSiblings(unittest.TestCase):
+    """Re-running ``beet move`` on sibling MBIDs keeps folder layout symmetric.
+
+    When ``%aunique`` disambiguates an incoming album because a
+    different-edition sibling already exists, only the new album gets
+    its path re-evaluated at import time. The sibling stays at the
+    path it had when it was originally imported — often with no
+    suffix because it was alone back then. ``beet move
+    mb_albumid:<sibling>`` re-evaluates ``%aunique`` for the sibling
+    too, so both editions end up shaped the same way.
+    """
+
+    @patch("harness.import_one.subprocess.run")
+    def test_noop_when_no_siblings(self, mock_run: MagicMock) -> None:
+        from harness import import_one
+        import_one._canonicalize_siblings(frozenset())
+        mock_run.assert_not_called()
+
+    @patch("harness.import_one.subprocess.run")
+    def test_runs_beet_move_for_each_sibling(
+            self, mock_run: MagicMock) -> None:
+        from harness import import_one
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        import_one._canonicalize_siblings(frozenset([SIBLING_MBID]))
+
+        mock_run.assert_called_once()
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(argv[1:], ["move", f"mb_albumid:{SIBLING_MBID}"])
+
+    @patch("harness.import_one.subprocess.run")
+    def test_continues_past_per_sibling_failure(
+            self, mock_run: MagicMock) -> None:
+        """Timeout on sibling 1 must not stop sibling 2 moving.
+
+        Import is already on disk — per-sibling failures only affect
+        that sibling's cosmetic path. Keep going.
+        """
+        from harness import import_one
+        other = "dddddddd-7777-8888-9999-eeeeeeeeeeee"
+        # Sibling 1 times out, sibling 2 exits clean.
+        mock_run.side_effect = [
+            sp.TimeoutExpired(cmd=["beet", "move"], timeout=120),
+            MagicMock(returncode=0, stderr=""),
+        ]
+
+        import_one._canonicalize_siblings(
+            frozenset([SIBLING_MBID, other]))
+
+        self.assertEqual(mock_run.call_count, 2)
 
 
 if __name__ == "__main__":

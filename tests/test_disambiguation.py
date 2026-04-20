@@ -71,7 +71,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         # select.select always says stdout is ready
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 0)
@@ -106,7 +106,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 0)
@@ -138,7 +138,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 0)
@@ -165,7 +165,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         # select returns empty = timeout
         mock_select.return_value = ([], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 2)
@@ -187,7 +187,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 4)
@@ -214,7 +214,7 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate = import_one.run_import(
+        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 2)
@@ -313,7 +313,7 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, _, kept_duplicate = import_one.run_import(
+        rc, _, kept_duplicate, _siblings = import_one.run_import(
             "/tmp/test", TARGET_MBID)
 
         self.assertEqual(rc, 0)
