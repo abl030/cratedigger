@@ -96,30 +96,45 @@ class ReleaseCleanupResult:
 
 
 def _run_remove_selector(selector: str) -> SelectorFailure | None:
-    """Run ``beet remove -d <selector>`` once, never raise.
+    """Run ``beet remove -a -d <selector>`` once, never raise.
 
-    Returns ``None`` on clean exit (rc=0), otherwise a
-    ``SelectorFailure``. This is the one place that touches the beets
-    subprocess; isolating it means the loop in
-    ``remove_and_reset_release`` can be trivially correct ("always
-    iterate every selector, collect any failures").
+    The ``-a`` flag is **mandatory**. Without it, ``beet remove`` runs
+    in ITEM mode: queries ``items`` (tracks), not ``albums``. That has
+    two hazards:
+
+    - ``id:<N>`` in item mode is ``items.id = N`` — matches ONE TRACK,
+      not one album. Since ``items.id`` and ``albums.id`` are separate
+      autoincrement PKs, an album id passed to item-mode ``id:`` would
+      either match an unrelated track or nothing at all, leaving the
+      stale album fully intact. Codex (PR #131 round 2 P1) flagged
+      this against ``remove_album_by_beets_id``.
+    - ``mb_albumid:<X>`` in item mode happens to work "by accident"
+      because ``mb_albumid`` is also a per-item column inherited from
+      the album, and deleting all matching items garbage-collects the
+      empty album row. But that's fragile correctness — album-mode is
+      what we actually mean.
+
+    Every selector this module hands off is album-scoped conceptually
+    (``mb_albumid:``, ``discogs_albumid:``, ``id:`` where id is from
+    ``albums.id``), so ``-a`` is always the right flag. Returns
+    ``None`` on clean exit (rc=0), otherwise a ``SelectorFailure``.
     """
     try:
         proc = sp.run(
-            [beet_bin(), "remove", "-d", selector],
+            [beet_bin(), "remove", "-a", "-d", selector],
             capture_output=True, text=True, timeout=30,
             env=beets_subprocess_env(),
         )
     except sp.TimeoutExpired as exc:
         msg = f"timed out after {exc.timeout}s"
         log.warning(
-            "release_cleanup: beet remove -d %s %s", selector, msg)
+            "release_cleanup: beet remove -a -d %s %s", selector, msg)
         return SelectorFailure(
             selector=selector, reason="timeout", detail=msg)
     except OSError as exc:
         msg = f"{type(exc).__name__}: {exc}"
         log.warning(
-            "release_cleanup: beet remove -d %s raised %s",
+            "release_cleanup: beet remove -a -d %s raised %s",
             selector, msg)
         return SelectorFailure(
             selector=selector, reason="exception", detail=msg)
@@ -128,7 +143,7 @@ def _run_remove_selector(selector: str) -> SelectorFailure | None:
         stderr = (proc.stderr or "").strip().splitlines()
         msg = stderr[-1] if stderr else f"rc={proc.returncode}"
         log.warning(
-            "release_cleanup: beet remove -d %s exited %d: %s",
+            "release_cleanup: beet remove -a -d %s exited %d: %s",
             selector, proc.returncode, msg)
         return SelectorFailure(
             selector=selector, reason="nonzero_rc",

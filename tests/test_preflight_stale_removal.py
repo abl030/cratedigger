@@ -59,16 +59,19 @@ class _StubLocation:
 class _StubBeetsDB:
     """Minimal BeetsDB double for capture-only pre-flight tests.
 
-    ``_capture_stale_beets_id`` calls ``get_album_info`` to extract the
-    stale row's beets id. Shape: return an ``AlbumInfo`` with the id we
-    want to see captured, or None for the "not in beets" path.
+    ``_capture_stale_beets_id`` calls ``locate(mbid)`` to extract the
+    stale row's beets id — deliberately NOT ``get_album_info``, which
+    would skip the capture for partial stale imports (corrupted items,
+    zero-bitrate tracks, etc.). Codex (PR #131 round 2 P2) flagged
+    that: the whole point of cleanup is to handle the broken-import
+    case, so the capture must not depend on track readability.
     """
 
-    def __init__(self, album_info: object | None) -> None:
-        self._album_info = album_info
+    def __init__(self, location: _StubLocation | None) -> None:
+        self._location = location or _StubLocation("absent", None, ())
 
-    def get_album_info(self, mbid: str, cfg: object) -> object | None:
-        return self._album_info
+    def locate(self, release_id: str) -> _StubLocation:
+        return self._location
 
 
 def _ok() -> MagicMock:
@@ -86,21 +89,40 @@ class TestCaptureStaleBeetsId(unittest.TestCase):
 
     def test_returns_beets_id_when_album_present(self) -> None:
         from harness import import_one
-        from lib.beets_db import AlbumInfo
 
-        beets = _StubBeetsDB(AlbumInfo(
-            album_id=10319, track_count=19,
-            min_bitrate_kbps=320, is_cbr=True,
-            album_path="/Beets/Shearwater/2007 - Palo Santo"))
+        beets = _StubBeetsDB(_StubLocation(
+            "exact", 10319, (f"mb_albumid:{TARGET_MBID}",)))
 
         result = import_one._capture_stale_beets_id(
             TARGET_MBID, beets)  # type: ignore[arg-type]
 
         self.assertEqual(result, 10319)
 
+    def test_returns_beets_id_for_partial_import_with_broken_items(self) -> None:
+        """Codex PR #131 round 2 P2: a stale album with zero-bitrate items
+        (corrupted, unreadable, partially downloaded) would return None
+        from ``get_album_info`` but is exactly the case cleanup exists
+        for. ``locate()`` doesn't touch items, so the capture still
+        fires and post-import cleanup can run.
+        """
+        from harness import import_one
+
+        # Simulate a partial stale album: locate() finds it, any
+        # attempt to read its track data would return None — but we
+        # never go there now.
+        beets = _StubBeetsDB(_StubLocation(
+            "exact", 10319, (f"mb_albumid:{TARGET_MBID}",)))
+
+        result = import_one._capture_stale_beets_id(
+            TARGET_MBID, beets)  # type: ignore[arg-type]
+
+        self.assertEqual(result, 10319,
+                         "locate()-based capture must work even when "
+                         "the stale album has no readable track data.")
+
     def test_returns_none_when_absent(self) -> None:
         from harness import import_one
-        beets = _StubBeetsDB(None)
+        beets = _StubBeetsDB(_StubLocation("absent", None, ()))
 
         result = import_one._capture_stale_beets_id(
             TARGET_MBID, beets)  # type: ignore[arg-type]
@@ -133,9 +155,12 @@ class TestRemoveStaleByIdLogged(unittest.TestCase):
         self.assertIsNone(result)
         mock_run.assert_called_once()
         argv = mock_run.call_args.args[0]
-        # Selector must be id:<int> — primary-key scope, NEVER mb_albumid
-        # (which can match multiple rows and would hit siblings).
-        self.assertEqual(argv[1:4], ["remove", "-d", "id:10319"])
+        # Selector must be ``-a -d id:<int>`` — album mode (``-a``),
+        # delete files (``-d``), primary-key scope (``id:<N>`` against
+        # ``albums.id``, unique by SQLite auto-increment). Without
+        # ``-a`` the selector would be interpreted against ``items``
+        # and match a track PK or nothing (Codex PR #131 round 2 P1).
+        self.assertEqual(argv[1:5], ["remove", "-a", "-d", "id:10319"])
 
     @patch("lib.release_cleanup.sp.run")
     def test_timeout_surfaces_typed_failure(self, mock_run: MagicMock) -> None:

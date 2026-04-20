@@ -126,6 +126,33 @@ class TestAllSelectorsSucceed(unittest.TestCase):
         pdb.clear_on_disk_quality_fields.assert_called_once_with(42)
 
     @patch("lib.release_cleanup.sp.run")
+    def test_argv_uses_album_mode_flag(
+            self, mock_run: MagicMock) -> None:
+        """Every ``beet remove`` invocation MUST include ``-a`` (album
+        mode). Without it, ``id:<N>`` is interpreted against
+        ``items.id`` and the stale album survives (Codex PR #131
+        round 2 P1). The ``-a`` flag is also required for
+        ``remove_album_by_beets_id`` which this module exposes.
+        Re-asserted here as a contract test so a future refactor that
+        drops ``-a`` fails at test time, not in production.
+        """
+        mock_run.return_value = _ok()
+        beets = _StubBeetsDB([
+            _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
+            _StubLocation("absent", None, ()),
+        ])
+        pdb = MagicMock()
+
+        remove_and_reset_release(
+            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            release_id=RELEASE_UUID, request_id=42)
+
+        argv = mock_run.call_args.args[0]
+        # Shape: [beet_binary, "remove", "-a", "-d", selector]
+        self.assertEqual(argv[1:4], ["remove", "-a", "-d"])
+        self.assertEqual(argv[4], f"mb_albumid:{RELEASE_UUID}")
+
+    @patch("lib.release_cleanup.sp.run")
     def test_discogs_pair_of_selectors_both_run(
             self, mock_run: MagicMock) -> None:
         """Discogs numeric → two selectors; both run on the happy path."""
