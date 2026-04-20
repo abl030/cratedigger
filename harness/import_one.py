@@ -882,13 +882,20 @@ def _capture_stale_beets_id(
     the new album imports, both briefly coexist; we then remove the
     captured id. If the album isn't in beets at all, returns None and
     the caller simply skips the post-import cleanup.
+
+    Uses ``BeetsDB.locate()`` rather than ``get_album_info()`` because
+    ``get_album_info()`` returns ``None`` for albums with no readable
+    track/bitrate rows — and "partial stale import with broken items"
+    is exactly the pathology this cleanup exists to handle (Codex PR
+    #131 round 2 P2). ``locate()`` only queries ``albums`` so the
+    presence check and id capture don't depend on item-level data.
     """
     if not mbid:
         return None
-    info = beets.get_album_info(mbid, _rank_cfg)
-    if info is None:
+    location = beets.locate(mbid)
+    if location.kind != "exact" or location.album_id is None:
         return None
-    return info.album_id
+    return location.album_id
 
 
 def _remove_stale_by_id_logged(stale_id: int) -> SelectorFailure | None:
@@ -1426,15 +1433,32 @@ def main():
     # captured above), there are now TWO rows with the target MBID —
     # the stale one and the fresh import (beets' ``%aunique`` placed
     # the new album at a disambiguated path, so both coexist on disk).
-    # Remove the stale one by its exact numeric primary key. ``id:<N>``
-    # cannot match any other row.
+    # Remove the stale one by its exact album-mode numeric primary
+    # key. ``beet remove -a -d id:<N>`` runs in album mode and matches
+    # ``albums.id = N`` exactly — cannot match any other row.
     #
-    # Why this runs BEFORE ``get_album_info`` below: with two rows
-    # sharing the MBID, ``get_album_info``'s ``LIMIT 1`` lookup is
-    # undefined. Removing the stale first makes the subsequent
-    # lookup unambiguous.
+    # Codex (PR #131 round 2 P3): treat any cleanup failure as
+    # ``import_failed``. The new album IS on disk at this point, but
+    # leaving the stale row in beets silently leads to a split-brain
+    # library where subsequent upgrades may capture the wrong id or
+    # reason about the stale row's paths/bitrates. Failing explicitly
+    # surfaces the problem so the operator's ban-source cleanup can
+    # run before the request is considered complete.
     if stale_beets_id is not None:
-        _remove_stale_by_id_logged(stale_beets_id)
+        failure = _remove_stale_by_id_logged(stale_beets_id)
+        if failure is not None:
+            r.exit_code = 2
+            r.decision = "import_failed"
+            r.error = (f"Stale beets album id:{stale_beets_id} "
+                       f"(mbid={mbid}) could not be removed: "
+                       f"{failure.reason}: {failure.detail}. The new "
+                       "album is on disk but two same-MBID rows now "
+                       "exist in beets. Operator must clean up via "
+                       "ban-source before the request can be marked "
+                       "complete.")
+            _log(f"[ERROR] {r.error}")
+            beets.close()
+            _emit_and_exit(r)
 
     # --- Post-flight verification ---
     pf_info = beets.get_album_info(mbid, _rank_cfg)
@@ -1446,18 +1470,16 @@ def main():
         beets.close()
         _emit_and_exit(r)
 
-    # If the stale removal failed, two rows may still exist and
-    # ``pf_info`` may have picked the STALE one (it's got an older,
-    # lower id and beets' lookup is LIMIT-1 with no ORDER BY). Bail
-    # out loudly rather than let the pipeline run a quality decision
-    # against the wrong album — the new album IS in beets, but the
-    # postflight info is unreliable until someone cleans up.
+    # Extra guard: if pf_info still resolves to the stale id, something
+    # is seriously wrong (cleanup claimed success but beets still holds
+    # the row). Fail loudly rather than quality-gate against the stale.
     if stale_beets_id is not None and pf_info.album_id == stale_beets_id:
         r.exit_code = 2
         r.decision = "import_failed"
-        r.error = (f"Post-flight picked stale beets_id={stale_beets_id} "
-                   f"for mbid={mbid}; stale removal failed and two rows "
-                   "still exist. Operator must clean up via ban-source.")
+        r.error = (f"Post-flight resolved to stale beets_id={stale_beets_id} "
+                   f"for mbid={mbid} despite cleanup reporting success — "
+                   "beets DB is in an inconsistent state. Operator must "
+                   "clean up via ban-source.")
         _log(f"[ERROR] {r.error}")
         beets.close()
         _emit_and_exit(r)
