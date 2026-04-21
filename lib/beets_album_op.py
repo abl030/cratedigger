@@ -186,10 +186,17 @@ def _run_beet_op(
     argv.append(selector)
 
     try:
+        # ``beet remove`` prompts "Really? (yes/[no])" before destructive
+        # deletes. Running from systemd (no tty) with stdin inherited from
+        # the parent, the prompt reads EOF and exits rc=1 with "stdin stream
+        # ended while input required" — silently blocking every upgrade
+        # post-import cleanup. Piping "y\n" answers the prompt affirmatively.
+        # ``beet move`` doesn't prompt, so the extra byte is harmless there.
         proc = sp.run(
             argv,
             capture_output=True, text=True, timeout=timeout,
             env=beets_subprocess_env(),
+            input="y\n",
         )
     except sp.TimeoutExpired as exc:
         msg = f"timed out after {exc.timeout}s"

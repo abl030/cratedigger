@@ -113,6 +113,20 @@ class TestRemoveAlbum(unittest.TestCase):
         self.assertEqual(argv[1:], ["remove", "-a", "-d", "id:42"])
 
     @patch("lib.beets_album_op.sp.run")
+    def test_passes_affirmative_stdin_to_beets_prompt(
+            self, mock_run: MagicMock) -> None:
+        """``beet remove`` prompts "Really? (yes/[no])" before deleting.
+
+        Live 2026-04-21: running from systemd (no tty) with stdin inherited,
+        the prompt read EOF and exited rc=1 with "stdin stream ended while
+        input required" — every upgrade post-import cleanup silently failed,
+        leaving split-brain 2-row states. Fix: always pipe ``y\\n`` to stdin.
+        """
+        mock_run.return_value = _ok()
+        remove_album(BeetsAlbumHandle(album_id=42))
+        self.assertEqual(mock_run.call_args.kwargs.get("input"), "y\n")
+
+    @patch("lib.beets_album_op.sp.run")
     def test_delete_files_false_omits_dash_d(
             self, mock_run: MagicMock) -> None:
         """Untag-only mode is available even though no production caller uses it."""
