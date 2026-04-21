@@ -71,7 +71,9 @@ def resolve_slskd_local_path(file: "DownloadFile",
     Returns the full path, or ``None`` if the file cannot be located.
     Tries the exact expected path first, then falls back to matching the
     ``_<ticks>`` collision-rename variants. When multiple collision variants
-    exist, prefers the one whose byte size matches ``file.size``.
+    exist, prefers the one whose byte size matches ``file.size``, else
+    picks deterministically and logs a warning so ambiguous cases are
+    visible in journald.
     """
     folder = slskd_local_folder(file.file_dir, slskd_download_dir)
     expected_name = file.filename.split("\\")[-1]
@@ -90,14 +92,32 @@ def resolve_slskd_local_path(file: "DownloadFile",
             matches.append(candidate)
     if not matches:
         return None
-    if len(matches) > 1 and file.size:
-        for candidate in matches:
-            try:
-                if os.path.getsize(candidate) == file.size:
-                    return candidate
-            except OSError:
-                continue
-    return sorted(matches)[0]
+    if len(matches) == 1:
+        logger.info(f"slskd collision-renamed file resolved: {expected_name} → "
+                    f"{os.path.basename(matches[0])}")
+        return matches[0]
+    if file.size:
+        size_matches = [c for c in matches
+                        if _safe_getsize(c) == file.size]
+        if len(size_matches) == 1:
+            logger.info(f"slskd collision-renamed file resolved by size: "
+                        f"{expected_name} → {os.path.basename(size_matches[0])} "
+                        f"(chose 1 of {len(matches)} candidates by size={file.size})")
+            return size_matches[0]
+    chosen = sorted(matches)[0]
+    logger.warning(f"AMBIGUOUS slskd collision resolution for {expected_name} in {folder}: "
+                   f"{len(matches)} candidates, no unique size match, picked "
+                   f"{os.path.basename(chosen)} deterministically. "
+                   f"Target size={file.size}, candidates="
+                   f"{[(os.path.basename(c), _safe_getsize(c)) for c in matches]}")
+    return chosen
+
+
+def _safe_getsize(path: str) -> int | None:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 # === slskd transfer helpers ===
@@ -256,7 +276,10 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     import_folder_fullpath = os.path.join(ctx.cfg.slskd_download_dir, import_folder_name)
     rm_dirs: list[str] = []
     moved_files_history: list[tuple[str, str]] = []
-    if not os.path.exists(import_folder_fullpath):
+    if os.path.exists(import_folder_fullpath):
+        logger.info(f"Staging folder {import_folder_fullpath} already exists — "
+                    f"resuming or reusing prior attempt")
+    else:
         os.mkdir(import_folder_fullpath)
     for file in album_data.files:
         src_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
@@ -274,6 +297,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
         file.import_path = dst_file
         if os.path.exists(dst_file) and not os.path.exists(src_file):
             # Resume safely after a crash that already moved this file.
+            logger.info(f"Already-moved file detected: {dst_file} (src gone, skipping)")
             continue
         try:
             shutil.move(src_file, dst_file)
