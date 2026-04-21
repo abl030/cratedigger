@@ -40,6 +40,16 @@ import { esc } from './util.js';
 import { pipelineStore } from './state.js';
 
 /**
+ * Encode a JS string literal for embedding inside a double-quoted HTML attribute.
+ * Returns HTML-escaped JSON, e.g. `&quot;Kid A&quot;`.
+ * @param {string|null|undefined} value
+ * @returns {string}
+ */
+function jsArg(value) {
+  return esc(JSON.stringify(String(value ?? '')));
+}
+
+/**
  * @typedef {Object} ActionItem
  * @property {string} id - Release ID (MB UUID or numeric Discogs)
  * @property {boolean} [in_library]
@@ -75,9 +85,9 @@ export function renderActionToolbar(item, opts = {}) {
     : 'padding:4px 10px;font-size:0.78em;';
   const baseStyle = `${sizeStyle}white-space:nowrap;`;
 
-  const escId = esc(item.id);
-  const artist = esc(item.artist || '');
-  const album = esc(item.album || '');
+  const idArg = jsArg(item.id);
+  const artistArg = jsArg(item.artist || '');
+  const albumArg = jsArg(item.album || '');
   const trackCount = item.track_count || 0;
 
   // Acquire — single context-aware button. See module header for the
@@ -91,9 +101,9 @@ export function renderActionToolbar(item, opts = {}) {
     // mid-download cancels.
     acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;
   } else if (inLibrary || pStatus === 'imported') {
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum('${escId}', this)">Upgrade</button>`;
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum(${idArg}, this)">Upgrade</button>`;
   } else if (!inLibrary && !pStatus) {
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease('${escId}', this)">Add request</button>`;
+    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease(${idArg}, this)">Add request</button>`;
   } else {
     // Manual review or other terminal/unknown state — no live action.
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
@@ -101,7 +111,7 @@ export function renderActionToolbar(item, opts = {}) {
 
   // Remove from beets — greyed out when not in library
   const removeBeetsBtn = canRemoveBeets
-    ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, '${artist}', '${album}', ${trackCount}, ${pId ?? 'null'}, '${escId}')">Remove from beets</button>`
+    ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${idArg})">Remove from beets</button>`
     : `<button class="btn" style="${baseStyle}" disabled>Remove from beets</button>`;
 
   return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeBeetsBtn}</span>`;
