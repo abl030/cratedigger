@@ -40,6 +40,12 @@ class AlbumState:
     search_filetype_override: str | None  # search_filetype_override (transient search filter)
     target_format: str | None = None  # persistent user intent
     existing_format: str | None = None  # beets items.format ("MP3"/"FLAC"/"Opus"/None)
+    # Beets items.bitrate avg across the album. Defaults to None → simulator
+    # falls back to min_bitrate (legacy scenarios that don't distinguish).
+    # Supply an explicit value for genuinely VBR existing albums where avg
+    # diverges from min; the CBR-conditional override in full_pipeline_decision
+    # needs this to behave correctly (see test_unter_null_failure_epiphany_vbr_loop).
+    avg_bitrate: int | None = None
 
 
 def _derive_album_format(album: "AlbumState") -> str | None:
@@ -128,6 +134,19 @@ ALBUM_STATES = [
     AlbumState("cbr_192_genuine", 192, True, "genuine", None, False, None),
     AlbumState("cbr_192_suspect", 192, True, "suspect", None, False, None),
     AlbumState("verified_lossless_opus", 123, False, "genuine", 123, True, None),
+    # Unter Null - The Failure Epiphany (req 1749). 24-track beets album
+    # with per-track bitrates 152-310 kbps (avg 225, median 224). Spectral
+    # flags every track likely_transcode at ~96 kbps — very likely a false
+    # positive on the genre's naturally sparse high frequencies. Quality gate
+    # with override=lossless,mp3 v0,mp3 320 is already set (the 4th field
+    # below). Existing test fixtures don't set avg, so the VBR→override
+    # intersection (which drove the 2026-04-21 import→gate-deny loop) wasn't
+    # covered until this entry.
+    AlbumState("unter_null_failure_epiphany", 152, False,
+               "likely_transcode", 96, False,
+               "lossless,mp3 v0,mp3 320",
+               avg_bitrate=225,
+               existing_format="MP3"),
 ]
 
 ALBUM_MAP = {a.name: a for a in ALBUM_STATES}
@@ -173,6 +192,13 @@ DOWNLOAD_SCENARIOS = [
     DownloadScenario("cbr_320_no_spectral", False, 320, True),
     DownloadScenario("cbr_256_no_spectral", False, 256, True),
     DownloadScenario("cbr_192_no_spectral", False, 192, True),
+    DownloadScenario("cbr_152_no_spectral", False, 152, True),
+    # CBR 152 with transcode spectral — the shape every Soulseek source for
+    # Unter Null - The Failure Epiphany delivered on 2026-04-21 (drasslok23,
+    # shutupman2, synthetic, DrinkMoxie). All 152 kbps CBR, all with a
+    # cliff at ~96 kbps.
+    DownloadScenario("cbr_152_likely_transcode_96", False, 152, True,
+                     spectral_grade="likely_transcode", spectral_bitrate=96),
     # CBR with spectral
     DownloadScenario("cbr_320_genuine", False, 320, True,
                      spectral_grade="genuine"),
@@ -210,6 +236,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
 
     result = full_pipeline_decision(
         existing_min_bitrate=album.min_bitrate,
+        existing_avg_bitrate=album.avg_bitrate,
         existing_spectral_bitrate=existing_spectral_bitrate,
         override_min_bitrate=override,
         existing_format=_derive_album_format(album),
@@ -497,6 +524,65 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertTrue(r.keep_searching)
         self.assertIsNone(r.backfill_override,
                           "Suspect spectral must NOT trigger backfill")
+
+    def test_unter_null_failure_epiphany_vbr_loop_break(self):
+        """VBR existing + CBR 152 download (no spectral on new) -> stage2 downgrade.
+
+        Live reproduction: Unter Null - The Failure Epiphany (req 1749).
+        Beets album with per-track bitrates 152-310 kbps (avg 225), spectral
+        flagged likely_transcode at ~96 kbps (false positive on genre).
+
+        In production on 2026-04-21 every Soulseek source delivered a
+        152 kbps MP3 transcode and each one was marked ``outcome=success``
+        in download_log — meaning preimport's ``_needs_spectral_check``
+        returned False (possibly a filetype/VBR-flag edge case in slskd
+        metadata) so stage 1's spectral check never fired. The comparison
+        that decided those imports was stage 2's ``import_quality_decision``
+        under the AVG metric.
+
+        Old behavior: override clobbered existing.avg from 225 to 96, so
+        every 152-avg download "beat" the clobbered existing at stage 2,
+        looped through every source, wasted bandwidth, wrongly denylisted.
+
+        New behavior: VBR existing keeps its real 225 avg. The 152-avg
+        download reads as ACCEPTABLE vs the existing's EXCELLENT → stage 2
+        returns ``downgrade`` and nothing imports. The loop stops.
+
+        Test uses ``cbr_152_no_spectral`` (download-side spectral omitted)
+        so stage 1 does not short-circuit — we want stage 2 to make the
+        call. The spectral-reject path on stage 1 is a separate safety
+        net covered by its own tests; this one pins the stage-2 rank
+        comparison under the AVG policy for a VBR existing.
+        """
+        album = ALBUM_MAP["unter_null_failure_epiphany"]
+        r = simulate(album, DL_MAP["cbr_152_no_spectral"])
+
+        self.assertFalse(
+            r.imported,
+            "CBR 152 download must not win stage-2 compare against a VBR "
+            "225-avg existing — the clobber bug that drove 1749's loop")
+        self.assertEqual(
+            r.stage2_import, "downgrade",
+            "Stage 2 must return 'downgrade' — pins the AVG-metric "
+            "rank comparison with VBR existing preserving its real avg")
+
+    def test_unter_null_failure_epiphany_vbr_real_upgrade(self):
+        """VBR existing (1749 shape) + genuine V0 upgrade still imports.
+
+        Companion to the loop-break test: the fix must not block real
+        upgrades. A genuine V0 download with avg ~245 kbps (mp3_v0_240)
+        is a legitimate upgrade for a VBR 225-avg existing, regardless of
+        the spectral override on min. Confirms fake-CBR-320 protection
+        is untouched and VBR-avg-preservation only affects the specific
+        same-or-lower-quality downgrade case.
+        """
+        album = ALBUM_MAP["unter_null_failure_epiphany"]
+        r = simulate(album, DL_MAP["mp3_v0_240"])
+
+        self.assertTrue(
+            r.imported,
+            "Genuine V0 upgrade (245 avg) must still beat VBR 225-avg existing")
+        self.assertEqual(r.stage2_import, "import")
 
     def test_lofi_verified_lossless_accepted(self):
         """207kbps verified lossless -> quality gate accepts despite < 210 threshold.

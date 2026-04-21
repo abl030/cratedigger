@@ -2520,6 +2520,12 @@ def get_decision_tree(
                            "existing: AudioQualityMeasurement | None",
                            "is_transcode"],
                 "rules": [
+                    {"condition": "existing is CBR: override_min_bitrate drives min + avg + median (fake-CBR-320 protection)",
+                     "result": "clamped", "color": "amber",
+                     "effect": "clobber all three bitrate fields to the spectral floor"},
+                    {"condition": "existing is VBR: override_min_bitrate drives min only; avg + median keep beets values",
+                     "result": "preserved", "color": "green",
+                     "effect": "real avg signal survives — a 152kbps transcode can't win against a genuine 225-avg VBR album"},
                     {"condition": "new.verified_lossless = true AND compare_quality(new, existing) in {better,equivalent}",
                      "result": "import", "color": "green",
                      "effect": "verified-lossless imports only when it is not worse"},
@@ -2541,8 +2547,14 @@ def get_decision_tree(
                 "outcomes": ["import", "downgrade", "transcode_upgrade",
                              "transcode_downgrade", "transcode_first",
                              "preflight_existing"],
-                "note": "Caller resolves override_min_bitrate into "
-                        "existing.min_bitrate_kbps",
+                "note": ("Caller resolves override_min_bitrate into "
+                         "existing.min_bitrate_kbps unconditionally. "
+                         "avg/median follow only when existing is CBR "
+                         "(fake-CBR-320 protection). For VBR existing, "
+                         "avg/median preserve beets values so the rank "
+                         "comparison sees the real signal — the "
+                         "loop-breaking fix for Unter Null - The Failure "
+                         "Epiphany (req 1749, 2026-04-21)."),
             },
             {
                 "id": "quality_gate",
@@ -2777,11 +2789,20 @@ def full_pipeline_decision(
     _effective_existing_min = (override_min_bitrate
                                if override_min_bitrate is not None
                                else existing_min_bitrate)
-    _effective_existing_avg = (override_min_bitrate
-                               if override_min_bitrate is not None
-                               else (existing_avg_bitrate
-                                     if existing_avg_bitrate is not None
-                                     else existing_min_bitrate))
+    # Override avg/median only when existing is CBR. Kept in lockstep with
+    # ``harness.import_one.build_existing_measurement`` — see the comment
+    # there for rationale. Simulator needs the same CBR-conditional rule
+    # so ``pipeline-cli quality <id>`` mirrors what the live pipeline does
+    # for VBR existing (issue #: Unter Null - The Failure Epiphany loop,
+    # req 1749, where clobbering avg made every 152 CBR transcode "win"
+    # against a genuinely VBR 225-avg existing at compare_quality).
+    _raw_avg = (existing_avg_bitrate
+                if existing_avg_bitrate is not None
+                else existing_min_bitrate)
+    if existing_is_cbr and override_min_bitrate is not None:
+        _effective_existing_avg = override_min_bitrate
+    else:
+        _effective_existing_avg = _raw_avg
     existing_m = (AudioQualityMeasurement(
                       min_bitrate_kbps=_effective_existing_min,
                       avg_bitrate_kbps=_effective_existing_avg,

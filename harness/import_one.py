@@ -162,16 +162,26 @@ def build_existing_measurement(
         if override_min_bitrate is not None
         else existing_info.min_bitrate_kbps
     )
-    effective_avg = (
-        override_min_bitrate
-        if override_min_bitrate is not None
-        else existing_info.avg_bitrate_kbps
-    )
-    effective_median = (
-        override_min_bitrate
-        if override_min_bitrate is not None
-        else existing_info.median_bitrate_kbps
-    )
+    # Override avg/median only when existing is CBR.
+    #
+    # The override exists to defend against fake-CBR-320: a monolithic
+    # 320 kbps CBR file that's really 96 kbps audio padded up. For those,
+    # every bitrate field is the same lie, so clobbering all three lines
+    # up with the spectral truth and lets a genuine V0 upgrade win.
+    #
+    # But existing can also be genuine VBR where avg carries a real quality
+    # signal (an album with per-track bitrates spanning 152-310 has avg=225
+    # and that reflects reality). Spectral false-positives on such albums
+    # used to clobber avg too, making every 152-kbps transcode "beat"
+    # existing=96 at compare_quality, producing the import→gate-reject
+    # loop we saw on request 1749 (Unter Null - The Failure Epiphany).
+    # For VBR, keep the real avg/median; only min gets the clamp.
+    if existing_info.is_cbr and override_min_bitrate is not None:
+        effective_avg = override_min_bitrate
+        effective_median = override_min_bitrate
+    else:
+        effective_avg = existing_info.avg_bitrate_kbps
+        effective_median = existing_info.median_bitrate_kbps
     return AudioQualityMeasurement(
         min_bitrate_kbps=effective_existing,
         avg_bitrate_kbps=effective_avg,

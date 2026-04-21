@@ -211,12 +211,15 @@ class TestQualityDecisionStage(unittest.TestCase):
 class TestExistingMeasurementBuilder(unittest.TestCase):
     """Tests for import_one's existing-measurement wiring."""
 
-    def test_override_replaces_avg_metric_too(self):
-        """Spectral override must affect every selectable rank metric, not just min.
+    def test_override_replaces_avg_metric_too_for_cbr(self):
+        """Spectral override drives every metric when existing is CBR.
 
-        Issue #64 added MEDIAN as a third metric — override_min_bitrate must
-        drive median too, otherwise a future MEDIAN-policy deployment would
-        silently outvote the override and compare against the original median.
+        Issue #64 added MEDIAN as a third metric. For a monolithic CBR file
+        (``is_cbr=True``), every bitrate field is the same value — so the
+        spectral clamp must drive all three, otherwise a fake CBR 320 that's
+        really 96 kbps audio would still out-rank a genuine V0 under the
+        AVG or MEDIAN policy (see test_override_preserves_vbr_avg_and_median
+        for the complementary case).
         """
         from harness.import_one import build_existing_measurement
         from lib.beets_db import AlbumInfo
@@ -242,10 +245,90 @@ class TestExistingMeasurementBuilder(unittest.TestCase):
         self.assertEqual(m.min_bitrate_kbps, 128)
         self.assertEqual(
             m.avg_bitrate_kbps, 128,
-            "override_min_bitrate must drive comparison under the default avg metric")
+            "override_min_bitrate must drive comparison under AVG for CBR existing")
         self.assertEqual(
             m.median_bitrate_kbps, 128,
-            "override_min_bitrate must drive comparison under MEDIAN policy too")
+            "override_min_bitrate must drive comparison under MEDIAN for CBR existing")
+
+    def test_override_preserves_vbr_avg_and_median(self):
+        """Override must NOT clobber avg/median when existing is genuinely VBR.
+
+        Live reproduction: Unter Null - The Failure Epiphany (req 1749).
+        Beets album with per-track bitrates spanning 152-310 kbps (avg 225)
+        is unambiguously VBR. Spectral analysis produced ``likely_transcode``
+        at 96 kbps — a false positive on industrial/electronic source that
+        naturally lacks high-frequency content.
+
+        Old behavior: override clobbered all three metrics to 96, making
+        every 152 kbps CBR transcode "win" against ``existing.avg=96`` at
+        compare_quality → imported → gate denied → requeued → repeat. The
+        loop the user called out on 2026-04-21.
+
+        New behavior: for VBR existing, keep the real ``avg`` / ``median``
+        from beets. Only ``min`` takes the clamp (preserves the
+        fake-CBR-320 protection for the CBR branch). The true 225 avg
+        survives and a 152 CBR transcode now reads as a genuine downgrade.
+
+        The complementary CBR case is test_override_replaces_avg_metric_too_for_cbr.
+        """
+        from harness.import_one import build_existing_measurement
+        from lib.beets_db import AlbumInfo
+
+        info = AlbumInfo(
+            album_id=1,
+            track_count=24,
+            min_bitrate_kbps=152,
+            avg_bitrate_kbps=225,
+            median_bitrate_kbps=224,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/Unter Null/2005 - The Failure Epiphany",
+        )
+        m = build_existing_measurement(
+            info,
+            override_min_bitrate=96,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=96,
+        )
+        self.assertIsNotNone(m)
+        assert m is not None
+        self.assertEqual(
+            m.min_bitrate_kbps, 96,
+            "min takes the spectral clamp (unchanged)")
+        self.assertEqual(
+            m.avg_bitrate_kbps, 225,
+            "VBR existing must keep its real avg — clobbering it made "
+            "1749 loop forever on same-quality transcodes")
+        self.assertEqual(
+            m.median_bitrate_kbps, 224,
+            "VBR existing must keep its real median for the MEDIAN policy")
+
+    def test_override_no_op_when_not_supplied(self):
+        """No override → all three fields pass through unchanged (CBR or VBR)."""
+        from harness.import_one import build_existing_measurement
+        from lib.beets_db import AlbumInfo
+
+        info = AlbumInfo(
+            album_id=1,
+            track_count=24,
+            min_bitrate_kbps=152,
+            avg_bitrate_kbps=225,
+            median_bitrate_kbps=224,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/Test",
+        )
+        m = build_existing_measurement(
+            info,
+            override_min_bitrate=None,
+            existing_spectral_grade="genuine",
+            existing_spectral_bitrate=None,
+        )
+        self.assertIsNotNone(m)
+        assert m is not None
+        self.assertEqual(m.min_bitrate_kbps, 152)
+        self.assertEqual(m.avg_bitrate_kbps, 225)
+        self.assertEqual(m.median_bitrate_kbps, 224)
 
 
 # ============================================================================

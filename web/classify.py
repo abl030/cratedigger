@@ -269,13 +269,51 @@ def _comparison_verdict(
     new_kbps: int | None,
     old_kbps: int | None,
     prefix: str = "",
+    metric: str | None = None,
 ) -> str:
-    """Build a '… is not better than existing …' verdict string."""
-    new_s = f"{new_kbps}kbps" if new_kbps is not None else "unknown"
-    old_s = f"{old_kbps}kbps" if old_kbps is not None else "unknown"
+    """Build a '… is not better than existing …' verdict string.
+
+    ``metric`` ("avg" / "min") annotates the bitrates so the reader can see
+    which number drove the rank comparison. This matters when the backend's
+    spectral override clamped ``min`` but kept ``avg`` on a VBR existing —
+    without the label, a verdict like "152 is not better than 96" reads as
+    a contradiction (it's really "avg 152 is not better than avg 225" but
+    min was shown and looked inverted). Pass ``None`` to omit the label when
+    both sides come from the same raw min.
+    """
+    suffix = f" {metric}" if metric else ""
+    new_s = f"{new_kbps}kbps{suffix}" if new_kbps is not None else "unknown"
+    old_s = f"{old_kbps}kbps{suffix}" if old_kbps is not None else "unknown"
     if prefix:
         return f"{prefix} {new_s} — not better than existing {old_s}"
     return f"{new_s} is not better than existing {old_s}"
+
+
+def _verdict_bitrate(m) -> tuple[int | None, str | None]:
+    """Pick the bitrate and metric label to display for a measurement.
+
+    Prefers ``avg_bitrate_kbps`` when present (production's default
+    ``cfg.bitrate_metric=avg``) and falls back to ``min_bitrate_kbps``,
+    then ``spectral_bitrate_kbps`` as a last resort. Returns the value
+    plus a metric label ("avg" / "min" / None) so the caller can annotate
+    the verdict string.
+
+    Returning avg when it exists is important after the 2026-04-21
+    CBR-conditional override fix: for VBR existing, ``avg_bitrate_kbps``
+    carries the real signal that drove the rank comparison while
+    ``min_bitrate_kbps`` has been clamped by the spectral override.
+    Displaying min alone produced contradictory-looking verdicts
+    ("new 152 is not better than existing 96").
+    """
+    if m is None:
+        return None, None
+    if m.avg_bitrate_kbps is not None:
+        return m.avg_bitrate_kbps, "avg"
+    if m.min_bitrate_kbps is not None:
+        return m.min_bitrate_kbps, "min"
+    if m.spectral_bitrate_kbps is not None:
+        return m.spectral_bitrate_kbps, None
+    return None, None
 
 
 def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
@@ -290,18 +328,20 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
 
     new_m = ir.new_measurement
     existing_m = ir.existing_measurement
-    new_kbps = new_m.min_bitrate_kbps if new_m is not None else None
-    old_kbps = None
-    if existing_m is not None:
-        old_kbps = (existing_m.min_bitrate_kbps
-                    if existing_m.min_bitrate_kbps is not None
-                    else existing_m.spectral_bitrate_kbps)
+    new_kbps, new_metric = _verdict_bitrate(new_m)
+    old_kbps, old_metric = _verdict_bitrate(existing_m)
+    # Prefer the richer metric label when sides disagree ("avg" > "min")
+    # so the string doesn't read "new 152kbps avg vs existing 96kbps min".
+    # That split is rare — both sides come from the same ImportResult —
+    # but falling back to None keeps the verdict readable in the edge case.
+    metric = new_metric if new_metric == old_metric else None
 
     if ir.decision == "downgrade":
-        return _comparison_verdict(new_kbps, old_kbps)
+        return _comparison_verdict(new_kbps, old_kbps, metric=metric)
 
     if ir.decision == "transcode_downgrade":
-        return _comparison_verdict(new_kbps, old_kbps, prefix="Transcode at")
+        return _comparison_verdict(new_kbps, old_kbps,
+                                   prefix="Transcode at", metric=metric)
 
     if ir.error:
         return f"Import error: {ir.error}"

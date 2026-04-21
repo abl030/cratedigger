@@ -673,8 +673,17 @@ class TestVerdictSpectralFallback(unittest.TestCase):
 
     def test_quality_downgrade_uses_real_bitrate_not_spectral(self):
         """The Ataris / Welcome the Night bug: actual_min_bitrate is NULL,
-        spectral_bitrate is 96, but the real download is 128kbps min.
-        The import_result JSONB has the correct new_measurement."""
+        spectral_bitrate is 96, but the real download is 128kbps min
+        (187kbps avg). The import_result JSONB has the correct new_measurement.
+
+        Test intent: verdict must show a real file bitrate, not the
+        spectral cliff estimate of 96. After the 2026-04-21 shift to the
+        avg-preferring renderer, that real bitrate is now 187 (the VBR
+        avg) rather than 128 (the min of the quietest track). Both are
+        "real" in the sense the original bug cared about — what changed
+        is simply that avg is the more informative number when available
+        and it matches what the backend compared at under ``bitrate_metric=avg``.
+        """
         result = classify_log_entry(_entry(
             outcome="rejected",
             beets_scenario="quality_downgrade",
@@ -707,8 +716,9 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 },
             },
         ))
-        # Verdict must say 128, not 96
-        self.assertIn("128", result.verdict)
+        # Avg is preferred — that's what the rank comparison used
+        self.assertIn("187", result.verdict)
+        # Must never surface the spectral cliff estimate
         self.assertNotIn("96", result.verdict)
 
     def test_quality_downgrade_without_import_result_uses_container_bitrate(self):
@@ -747,6 +757,71 @@ class TestVerdictSpectralFallback(unittest.TestCase):
         ))
         self.assertIn("192", result.verdict)
         self.assertNotIn("96", result.verdict)
+
+    def test_vbr_downgrade_verdict_uses_avg_not_min(self):
+        """Unter Null - The Failure Epiphany (req 1749) VBR-downgrade rendering.
+
+        Back-end fix: ``build_existing_measurement`` / ``full_pipeline_decision``
+        no longer clobber existing.avg/median when existing is VBR — the
+        spectral override only drives min. Under cfg.bitrate_metric=avg
+        (production default) the comparison now reads at the avg level:
+        new avg 152 is lower than existing avg 225 → downgrade.
+
+        The UI must render the comparison at the same metric the backend
+        used. If the verdict prints min (new=152 vs existing=96 after
+        clamp), the rejection reads as "152kbps is not better than 96kbps",
+        which contradicts itself to any human reader.
+
+        Assert: the verdict mentions the real avg numbers (152 and 225),
+        not the clamped min (96) and definitely not a naked contradiction.
+        """
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="quality_downgrade",
+            actual_min_bitrate=152,
+            spectral_bitrate=96,
+            existing_min_bitrate=96,          # clamped by override
+            existing_spectral_bitrate=96,
+            bitrate=152000,
+            import_result={
+                "version": 2,
+                "exit_code": 5,
+                "decision": "downgrade",
+                "new_measurement": {
+                    "min_bitrate_kbps": 152,
+                    "avg_bitrate_kbps": 152,
+                    "median_bitrate_kbps": 152,
+                    "spectral_bitrate_kbps": 96,
+                    "spectral_grade": "likely_transcode",
+                    "format": "MP3",
+                    "is_cbr": True,
+                    "verified_lossless": False,
+                },
+                "existing_measurement": {
+                    "min_bitrate_kbps": 96,      # overridden
+                    "avg_bitrate_kbps": 225,     # real, preserved by the fix
+                    "median_bitrate_kbps": 224,
+                    "spectral_bitrate_kbps": 96,
+                    "spectral_grade": "likely_transcode",
+                    "format": "MP3",
+                    "is_cbr": False,
+                    "verified_lossless": False,
+                },
+            },
+        ))
+        # Verdict must show the real avg numbers that drove the decision.
+        self.assertIn("152", result.verdict,
+                      "verdict must cite new avg (152)")
+        self.assertIn("225", result.verdict,
+                      "verdict must cite existing avg (225), "
+                      "not the clamped min — otherwise '152 > 96 but "
+                      "rejected' reads as a contradiction")
+        # And MUST NOT say "152 is not better than 96" — the stale
+        # min-based comparison.
+        self.assertNotRegex(
+            result.verdict,
+            r"152.*?(kbps)?.*not better.*?96",
+            "verdict must not emit the misleading min-based comparison")
 
     def test_transcode_classify_uses_real_bitrate_not_spectral(self):
         """_classify_transcode has the same or-chain bug for success transcodes."""
