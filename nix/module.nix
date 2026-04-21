@@ -41,15 +41,23 @@
     exec ${pythonEnv}/bin/python ${src}/cratedigger.py "$@"
   '';
 
+  # PYTHONPATH carries ONLY the repo root. Adding ${src}/lib or ${src}/web
+  # puts our modules at the top level of sys.path, where lib/beets.py
+  # shadows the beets PyPI package for any subprocess (including `beet`)
+  # that inherits PYTHONPATH. That shadow load executes our `import
+  # msgspec` before the subprocess can reach its own site-packages, and
+  # crashes it with ModuleNotFoundError. All internal imports use
+  # `from lib.X import Y` / `from web.X import Y` against the repo root
+  # already, so the flat entries are both unnecessary and harmful.
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:${src}/lib:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
     exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''
-    export PYTHONPATH="${src}:${src}/lib:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
     exec ${pythonEnv}/bin/python ${src}/scripts/migrate_db.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --migrations-dir "${src}/migrations" "$@"
@@ -57,7 +65,7 @@
 
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:${src}/lib:${src}/web:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
     exec ${pythonEnv}/bin/python ${src}/web/server.py \
       --port ${toString cfg.web.port} \
       --dsn "${cfg.pipelineDb.dsn}" \
