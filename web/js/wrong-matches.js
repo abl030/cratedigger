@@ -219,7 +219,7 @@ function renderGroup(g) {
   // clear an entire release's failed_imports without clicking each candidate.
   const bulkActions = `
     <div style="display:flex;justify-content:flex-end;margin:4px 0 0 0;">
-      <button class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, ${JSON.stringify(String(g.artist) + ' — ' + String(g.album))}, this)">Delete All (${count})</button>
+      <button class="p-btn delete" data-release-name="${esc(String(g.artist) + ' — ' + String(g.album))}" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
     </div>`;
 
   return `${header}
@@ -425,10 +425,10 @@ export async function forceImportWrongMatch(logId, btn) {
 /**
  * Delete every wrong-match candidate for one release at once.
  * @param {number} requestId
- * @param {string} releaseName - "Artist — Album" for confirmation text
- * @param {HTMLButtonElement} btn
+ * @param {HTMLButtonElement} btn - the clicked button; carries data-release-name for the confirm dialog
  */
-export async function deleteWrongMatchGroup(requestId, releaseName, btn) {
+export async function deleteWrongMatchGroup(requestId, btn) {
+  const releaseName = btn.dataset.releaseName || 'this release';
   if (!confirm(`Delete ALL wrong-match candidates for "${releaseName}"?\nThis removes the files from disk and clears them from the review queue.`)) return;
   btn.disabled = true;
   btn.textContent = 'Deleting…';
