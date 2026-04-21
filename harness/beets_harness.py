@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from beets import config, library, plugins  # type: ignore[attr-defined]
@@ -27,6 +28,15 @@ from beets.ui import get_path_formats, get_replacements
 
 if TYPE_CHECKING:
     from beets.importer.tasks import ImportTask
+
+
+# Append-only JSONL log of every beets album mutation the harness drives.
+# Captures MBID swaps that bypass cratedigger's pipeline DB — e.g. the
+# tagging-workspace fix_reissues/fix_undated scripts that drive this harness
+# with --search-id to intentionally retag existing albums. Without this log,
+# those mutations are invisible to cratedigger's audit trail (see the 04-14
+# Lucksmiths case). Located next to the library so it survives host rebuilds.
+MUTATIONS_LOG_PATH = "/mnt/virtio/Music/.harness-mutations.jsonl"
 
 
 # Redirect beets logging to stderr so stdout stays clean for JSON protocol
@@ -159,6 +169,86 @@ def _serialize_track_candidate(idx: int, candidate) -> dict:
     }
 
 
+def _mbid_swap_event(task, candidate) -> dict | None:
+    """Return an audit event if applying `candidate` would change the items'
+    `mb_albumid`; return None if the mbids already match or there's no
+    existing mbid to diff against.
+
+    Pure: takes the task and candidate, returns the dict or None. No I/O.
+    The caller (``_apply_decision``) is responsible for writing the log.
+
+    This catches the fix_reissues class of mutation: the items on disk are
+    already in beets with some MBID X, and the harness has been told (via
+    ``--search-id Y``) to retag them as Y. Without this audit, the swap is
+    invisible to cratedigger's pipeline DB (download_log sees nothing —
+    different code path) and to beets' built-in import.log (the harness
+    bypasses the CLI logger). The 2026-04-14 Lucksmiths case took hours
+    of forensics to RC because no single log captured it.
+    """
+    new_mbid = _id_str(getattr(candidate.info, "album_id", None))
+    if not new_mbid:
+        return None
+    items = list(getattr(task, "items", None) or [])
+    existing = {
+        _id_str(getattr(it, "mb_albumid", None)) for it in items
+        if getattr(it, "mb_albumid", None)
+    }
+    existing.discard("")
+    existing.discard(new_mbid)
+    if not existing:
+        return None
+    # Deterministic pick for tests; in practice items of an album share one mbid.
+    old_mbid = sorted(existing)[0]
+    path = _path_str(task.paths[0]) if getattr(task, "paths", None) else ""
+    return {
+        "event": "harness_mbid_swap",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "path": path,
+        "old_mb_albumid": old_mbid,
+        "new_mb_albumid": new_mbid,
+        "argv": list(sys.argv),
+        "ppid": os.getppid(),
+    }
+
+
+def _append_mutation_log(event: dict, log_path: str = MUTATIONS_LOG_PATH) -> None:
+    """Append one JSONL event. Never raises — the audit log must not break
+    the import itself. Failures are logged to stderr for operator visibility."""
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+    except OSError as e:
+        print(f"[harness] mutation log write failed ({log_path}): {e}",
+              file=sys.stderr)
+
+
+def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
+    """Fail loud if beets' `import.duplicate_keys.album` omits `mb_albumid`.
+
+    Beets reads this strictly from `config["import"]["duplicate_keys"]["album"]`.
+    If the key is misplaced (e.g. top-level `duplicate_keys =` in config.yaml)
+    the user's override is silently ignored and beets falls back to the default
+    `[albumartist, album]`. `find_duplicates()` then matches cross-MBID siblings
+    on album title alone, and the harness's duplicate resolution can trigger
+    beets' `task.should_remove_duplicates = True` blast radius — the exact shape
+    of the 2026-04-20 Shearwater "Palo Santo" data-loss event.
+
+    This assertion turns that silent misconfig into a loud startup failure.
+    Raises SystemExit(1) on regression.
+    """
+    keys = list(cfg["import"]["duplicate_keys"]["album"].as_str_seq())
+    if "mb_albumid" not in keys:
+        msg = (
+            "FATAL: beets config import.duplicate_keys.album does not include "
+            f"'mb_albumid' (got {keys!r}). This enables cross-MBID sibling "
+            "destruction via find_duplicates — the 2026-04-20 Palo Santo bug. "
+            "Fix: move the `duplicate_keys` block under `import:` in "
+            "~/.config/beets/config.yaml (or the equivalent Nix module)."
+        )
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+
+
 def _send(msg: dict):
     """Write a JSON message to stdout."""
     sys.stdout.write(json.dumps(msg) + "\n")
@@ -253,6 +343,10 @@ class HarnessImportSession(ImportSession):
                     # cause beets to apply it (DB write + scrub plugin strips
                     # tags from source files). Just skip after reporting.
                     return Action.SKIP
+                # Audit any MBID swap before apply mutates the album.
+                ev = _mbid_swap_event(task, task.candidates[idx])
+                if ev is not None:
+                    _append_mutation_log(ev)
                 return task.candidates[idx]
             else:
                 _send({
@@ -383,6 +477,10 @@ def main():
 
     # Load beets configuration
     config.read()
+
+    # Structural guard against the 2026-04-20 Palo Santo misconfig class.
+    # Must fire before any import work touches beets' duplicate-detection path.
+    _assert_duplicate_keys_include_mb_albumid(config)
 
     # Config overrides MUST happen before plugins.load_plugins() because the
     # musicbrainz plugin reads host/https settings at load time.
