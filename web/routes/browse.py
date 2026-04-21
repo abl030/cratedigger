@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from web import cache as _cache
@@ -57,42 +58,12 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
             return []
 
         db = srv._db()
-        if mbid:
-            cur = db._execute(
-                """
-                SELECT id, mb_release_id, mb_release_group_id,
-                       artist_name, album_title, year, country, format,
-                       source, status, created_at, min_bitrate,
-                       search_filetype_override, target_format
-                FROM album_requests
-                WHERE mb_artist_id = %s
-                   OR (artist_name ILIKE %s
-                       AND (mb_artist_id IS NULL OR mb_artist_id = ''
-                            OR mb_artist_id NOT LIKE '%%-%%'))
-                ORDER BY year, album_title
-                """,
-                (mbid, f"%{name}%"),
-            )
-        else:
-            cur = db._execute(
-                """
-                SELECT id, mb_release_id, mb_release_group_id,
-                       artist_name, album_title, year, country, format,
-                       source, status, created_at, min_bitrate,
-                       search_filetype_override, target_format
-                FROM album_requests
-                WHERE artist_name ILIKE %s
-                ORDER BY year, album_title
-                """,
-                (f"%{name}%",),
-            )
-
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = db.list_requests_by_artist(name, mbid)
         track_counts = db.get_track_counts([int(r["id"]) for r in rows]) if rows else {}
         result: list[dict[str, object]] = []
         for row in rows:
             created_at = row.get("created_at")
-            added = created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
+            added = created_at.timestamp() if isinstance(created_at, datetime) else 0.0
             min_br = row.get("min_bitrate")
             result.append({
                 "id": int(row["id"]),
@@ -118,6 +89,8 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
                     row["status"] == "wanted"
                     and bool(row.get("search_filetype_override") or row.get("target_format"))
                 ),
+                # Keep the payload shape uniform with in-library rows.
+                # badges.js ignores library_rank unless in_library=true.
                 "library_rank": "unknown",
             })
         return result

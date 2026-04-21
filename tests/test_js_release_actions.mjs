@@ -36,7 +36,7 @@ clearStore();
 {
   const html = renderActionToolbar({ id: 'rel-1', in_library: false });
   assertContains(html, '>Add request</button>', 'shows Add request label');
-  assertContains(html, "window.addRelease('rel-1'", 'Add wired up');
+  assertContains(html, 'window.addRelease(&quot;rel-1&quot;', 'Add wired up');
   assertExcludes(html, '>Upgrade</button>', 'no Upgrade in this state');
   assertExcludes(html, '>Remove request</button>', 'no Remove request in this state');
   assertContains(html, '>Remove from beets</button>', 'Remove from beets always rendered');
@@ -51,13 +51,13 @@ clearStore();
     artist: 'Bodyjar', album: 'Plastic Skies', track_count: 12,
   });
   assertContains(html, '>Upgrade</button>', 'shows Upgrade label');
-  assertContains(html, "window.upgradeAlbum('rel-2'", 'Upgrade wired up');
+  assertContains(html, 'window.upgradeAlbum(&quot;rel-2&quot;', 'Upgrade wired up');
   assertExcludes(html, '>Add request</button>', 'no Add request');
   assertExcludes(html, '>Remove request</button>', 'no Remove request');
   assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets enabled');
-  assertContains(html, ", null, 'rel-2')", 'release id passed to delete confirm');
-  assertContains(html, "'Bodyjar'", 'artist passed to delete confirm');
-  assertContains(html, "'Plastic Skies'", 'album passed to delete confirm');
+  assertContains(html, ', null, &quot;rel-2&quot;)', 'release id passed to delete confirm');
+  assertContains(html, '&quot;Bodyjar&quot;', 'artist passed to delete confirm');
+  assertContains(html, '&quot;Plastic Skies&quot;', 'album passed to delete confirm');
 }
 
 console.log('Acquire button — in library + wanted → Remove request (the user-reported bug)');
@@ -75,7 +75,7 @@ clearStore();
   assertExcludes(html, '>Upgrade</button>', 'no Upgrade — wanted wins');
   // Remove from beets still independent
   assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets still enabled');
-  assertContains(html, ", 1712, 'rel-3')", 'pipeline context passed to delete confirm');
+  assertContains(html, ', 1712, &quot;rel-3&quot;)', 'pipeline context passed to delete confirm');
 }
 
 console.log('Acquire button — not in library + wanted → Remove request');
@@ -128,6 +128,22 @@ pipelineStore.set('rel-7', { status: 'wanted', id: 500 });
     pipeline_status: null, pipeline_id: null,
   });
   assertContains(html, 'window.disambRemove(500', 'pipelineStore overrides backend');
+}
+
+console.log('Remove from beets — apostrophes stay JS-safe inside onclick');
+clearStore();
+{
+  const html = renderActionToolbar({
+    id: "rel-10'oops",
+    in_library: true,
+    beets_album_id: 77,
+    artist: 'The 12th Man',
+    album: "Some of the 12th Man's Greatest Hits",
+    track_count: 14,
+  });
+  assertContains(html, '&quot;rel-10&#39;oops&quot;', 'release id encoded as JS string arg');
+  assertContains(html, '&quot;Some of the 12th Man&#39;s Greatest Hits&quot;', 'album encoded as JS string arg');
+  assertContains(html, 'window.confirmDeleteBeets(77', 'delete handler still rendered');
 }
 
 console.log('Acquire button — manual review → disabled Add request');

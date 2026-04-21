@@ -28,6 +28,11 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQL LIKE wildcards for ``... LIKE %s ESCAPE '\'``."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 # Advisory-lock namespaces. Every lock in this codebase is
 # session-scoped, non-blocking (``pg_try_advisory_lock``), and
 # session-reentrant. See ``docs/advisory-locks.md`` for the canonical
@@ -523,6 +528,45 @@ class PipelineDB:
             "SELECT status, COUNT(*) as cnt FROM album_requests GROUP BY status"
         )
         return {r["status"]: r["cnt"] for r in cur.fetchall()}
+
+    def list_requests_by_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """List request rows for one artist, including legacy name fallbacks.
+
+        ``/api/library/artist`` is the SSOT view for albums already in
+        beets and albums still wanted in beets. Prefer exact
+        ``mb_artist_id`` matches when available, but keep the legacy
+        name fallback for older pipeline rows that predate artist-id
+        population or store a non-MB value there.
+        """
+        name_pattern = f"%{_escape_like_pattern(artist_name.strip())}%"
+        if mb_artist_id:
+            cur = self._execute(
+                """
+                SELECT *
+                FROM album_requests
+                WHERE mb_artist_id = %s
+                   OR (artist_name ILIKE %s ESCAPE '\\'
+                       AND (mb_artist_id IS NULL OR mb_artist_id = ''
+                            OR mb_artist_id NOT LIKE '%%-%%'))
+                ORDER BY year, album_title
+                """,
+                (mb_artist_id, name_pattern),
+            )
+        else:
+            cur = self._execute(
+                """
+                SELECT *
+                FROM album_requests
+                WHERE artist_name ILIKE %s ESCAPE '\\'
+                ORDER BY year, album_title
+                """,
+                (name_pattern,),
+            )
+        return [dict(r) for r in cur.fetchall()]
 
     # --- Track management ---
 

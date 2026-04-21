@@ -797,6 +797,44 @@ class FakePipelineDB:
             counts[status] = counts.get(status, 0) + 1
         return counts
 
+    def list_requests_by_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, Any]]:
+        needle = artist_name.lower()
+
+        def _legacy_name_match(row: dict[str, Any]) -> bool:
+            artist = str(row.get("artist_name") or "").lower()
+            artist_id = row.get("mb_artist_id")
+            artist_id_str = str(artist_id or "")
+            return (
+                needle in artist
+                and (
+                    artist_id is None
+                    or artist_id_str == ""
+                    or "-" not in artist_id_str
+                )
+            )
+
+        rows: list[dict[str, Any]] = []
+        for row in self._requests.values():
+            if mb_artist_id:
+                if row.get("mb_artist_id") == mb_artist_id or _legacy_name_match(row):
+                    rows.append(copy.deepcopy(row))
+            else:
+                if needle in str(row.get("artist_name") or "").lower():
+                    rows.append(copy.deepcopy(row))
+
+        def _sort_key(row: dict[str, Any]) -> tuple[bool, int, str]:
+            year = row.get("year")
+            year_num = int(year) if isinstance(year, int) else 0
+            title = str(row.get("album_title") or "")
+            return (year is not None, year_num, title)
+
+        rows.sort(key=_sort_key)
+        return rows
+
     # --- Track management ---
 
     def set_tracks(self, request_id: int,

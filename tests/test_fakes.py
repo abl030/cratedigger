@@ -209,6 +209,56 @@ class TestFakePipelineDB(unittest.TestCase):
         ids = {r["id"] for r in rows}
         self.assertEqual(ids, {1, 3})
 
+    def test_list_requests_by_artist_prefers_mb_artist_id_and_legacy_fallback(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            artist_name="Test Artist",
+            album_title="Exact MBID",
+            mb_artist_id="artist-1234-uuid",
+        ))
+        db.seed_request(make_request_row(
+            id=2,
+            artist_name="Test Artist",
+            album_title="Legacy Name Match",
+            mb_artist_id=None,
+        ))
+        db.seed_request(make_request_row(
+            id=3,
+            artist_name="Test Artist",
+            album_title="Other MBID",
+            mb_artist_id="other-artist-uuid",
+        ))
+
+        rows = db.list_requests_by_artist("Test Artist", "artist-1234-uuid")
+
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+
+    def test_list_requests_by_artist_name_only_matches_substring(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            artist_name="The National",
+            album_title="Boxer",
+            year=2007,
+        ))
+        db.seed_request(make_request_row(
+            id=2,
+            artist_name="The National",
+            album_title="Sleep Well Beast",
+            year=2017,
+        ))
+        db.seed_request(make_request_row(
+            id=3,
+            artist_name="Nation of Language",
+            album_title="Introduction, Presence",
+            year=2020,
+        ))
+
+        rows = db.list_requests_by_artist("The National")
+
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         db.log_download(42, outcome="success", soulseek_username="user1")
