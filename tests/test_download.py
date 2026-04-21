@@ -782,6 +782,153 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             self.assertFalse(result)
 
 
+class TestResolveSlskdLocalPath(unittest.TestCase):
+    """Pure tests for the slskd on-disk path resolution helper.
+
+    slskd places files at ``{download_root}/{last_remote_folder}/{filename}``.
+    On filename collision with an existing file, slskd appends a `_<ticks>`
+    suffix before the extension (the `_<18-19-digit-integer>` pattern seen on
+    disk). The resolver must find the file in both cases. Regression guard
+    for issue #144.
+    """
+
+    def test_returns_expected_path_when_file_exists(self):
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "CD1")
+            os.makedirs(folder)
+            fname = "17.- The Crystals - Da Doo Ron Ron.mp3"
+            src = os.path.join(folder, fname)
+            with open(src, "w") as fp:
+                fp.write("x")
+            f = make_download_file(
+                filename=f"@@ctvhz\\Shared Music\\Phil Spector\\CD1\\{fname}",
+                file_dir="@@ctvhz\\Shared Music\\Phil Spector\\CD1",
+                size=1,
+            )
+            self.assertEqual(resolve_slskd_local_path(f, tmpdir), src)
+
+    def test_finds_collision_renamed_file(self):
+        """slskd renames colliding filenames as ``<base>_<ticks><ext>``.
+
+        When the plain filename is absent, the resolver must match the
+        ticks-suffixed variant. Reproduces the #144 crash scenario — file
+        ``17.- ...Da Doo Ron Ron.mp3`` landed on disk as
+        ``17.- ...Da Doo Ron Ron_639123086573912108.mp3``.
+        """
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "CD1")
+            os.makedirs(folder)
+            base = "17.- The Crystals - Da Doo Ron Ron"
+            suffixed = os.path.join(folder, f"{base}_639123086573912108.mp3")
+            with open(suffixed, "w") as fp:
+                fp.write("x" * 2048)
+            f = make_download_file(
+                filename=f"@@ctvhz\\CD1\\{base}.mp3",
+                file_dir="@@ctvhz\\CD1",
+                size=2048,
+            )
+            self.assertEqual(resolve_slskd_local_path(f, tmpdir), suffixed)
+
+    def test_prefers_size_match_when_multiple_collision_candidates(self):
+        """Size tiebreak disambiguates when multiple collision-suffixed
+        variants exist (multiple users uploading same-named files to the
+        same on-disk folder — frequent with generic ``CD1`` folders)."""
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "CD1")
+            os.makedirs(folder)
+            base = "01 - Track"
+            wrong = os.path.join(folder, f"{base}_639000000000000001.mp3")
+            right = os.path.join(folder, f"{base}_639000000000000002.mp3")
+            with open(wrong, "w") as fp:
+                fp.write("x" * 100)
+            with open(right, "w") as fp:
+                fp.write("x" * 5555)
+            f = make_download_file(
+                filename=f"user\\CD1\\{base}.mp3",
+                file_dir="user\\CD1",
+                size=5555,
+            )
+            self.assertEqual(resolve_slskd_local_path(f, tmpdir), right)
+
+    def test_returns_none_when_file_missing(self):
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "CD1"))
+            f = make_download_file(
+                filename="user\\CD1\\nope.mp3",
+                file_dir="user\\CD1",
+                size=1,
+            )
+            self.assertIsNone(resolve_slskd_local_path(f, tmpdir))
+
+    def test_does_not_match_partial_base_prefix(self):
+        """Globbing must not match ``01 - Track Two.mp3`` when looking for
+        ``01 - Track.mp3`` — the collision suffix is ``_<digits>``, not a
+        free-form extension of the basename."""
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "CD1")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "01 - Track Two.mp3"), "w") as fp:
+                fp.write("x")
+            f = make_download_file(
+                filename="user\\CD1\\01 - Track.mp3",
+                file_dir="user\\CD1",
+                size=1,
+            )
+            self.assertIsNone(resolve_slskd_local_path(f, tmpdir))
+
+
+class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
+    """Integration: ``process_completed_album`` must handle slskd's collision
+    rename. Directly reproduces the issue #144 crash — file landed on disk
+    with ``_<ticks>`` appended; the move must still succeed."""
+
+    @patch("lib.download.music_tag")
+    def test_moves_collision_renamed_files(self, mock_mt):
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "CD1")
+            os.makedirs(folder)
+            base = "17.- The Crystals - Da Doo Ron Ron"
+            src_suffixed = os.path.join(folder, f"{base}_639123086573912108.mp3")
+            with open(src_suffixed, "w") as fp:
+                fp.write("fake audio")
+
+            files = [make_download_file(
+                filename=f"@@ctvhz\\Phil Spector\\CD1\\{base}.mp3",
+                file_dir="@@ctvhz\\Phil Spector\\CD1",
+                size=len("fake audio"),
+            )]
+            album = make_grab_list_entry(files=files, mb_release_id="",
+                                          artist="Phil Spector", title="Back to Mono",
+                                          year="1991")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = False
+            mock_mt.load_file.return_value = MagicMock()
+            result = process_completed_album(album, [], ctx)
+            self.assertTrue(result)
+            # Source should be gone; destination should exist.
+            self.assertFalse(os.path.exists(src_suffixed))
+            import_folder = os.path.join(
+                tmpdir, "Phil Spector - Back to Mono (1991)")
+            moved = os.listdir(import_folder)
+            self.assertEqual(len(moved), 1)
+            # Destination keeps the clean (non-suffixed) basename.
+            self.assertEqual(moved[0], f"{base}.mp3")
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 

@@ -6,8 +6,10 @@ instead of reading module-level globals.
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
+import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -41,6 +43,63 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 
+# === slskd on-disk path resolution ===
+#
+# slskd's default placement rule: a remote share path like
+#   @@user\Share\Artist\Album\CD1\17 - Track.mp3
+# gets saved to
+#   {download_root}/CD1/17 - Track.mp3
+# i.e. the trailing component of the remote folder becomes the on-disk
+# folder name. On filename collision — the same folder name (e.g. "CD1")
+# often appears across unrelated downloads — slskd appends a .NET Ticks
+# suffix before the extension:
+#   17 - Track_639123086573912108.mp3
+# See issue #144 for the regression this locked down.
+
+_TICKS_SUFFIX = re.compile(r"^(?P<base>.+)_(?P<ticks>\d{17,20})$")
+
+
+def slskd_local_folder(file_dir: str, slskd_download_dir: str) -> str:
+    """Return the on-disk folder slskd places this file_dir's downloads into."""
+    return os.path.join(slskd_download_dir, file_dir.split("\\")[-1])
+
+
+def resolve_slskd_local_path(file: "DownloadFile",
+                             slskd_download_dir: str) -> str | None:
+    """Resolve the actual on-disk path of a downloaded slskd file.
+
+    Returns the full path, or ``None`` if the file cannot be located.
+    Tries the exact expected path first, then falls back to matching the
+    ``_<ticks>`` collision-rename variants. When multiple collision variants
+    exist, prefers the one whose byte size matches ``file.size``.
+    """
+    folder = slskd_local_folder(file.file_dir, slskd_download_dir)
+    expected_name = file.filename.split("\\")[-1]
+    expected_path = os.path.join(folder, expected_name)
+    if os.path.isfile(expected_path):
+        return expected_path
+
+    base, ext = os.path.splitext(expected_name)
+    # Collision candidates only — filter by strict `_<17-20 digit ticks><ext>`
+    # shape so we never match a different file that happens to share a prefix.
+    pattern = os.path.join(folder, f"{glob.escape(base)}_*{ext}")
+    matches: list[str] = []
+    for candidate in glob.iglob(pattern):
+        stem = os.path.splitext(os.path.basename(candidate))[0]
+        if _TICKS_SUFFIX.fullmatch(stem):
+            matches.append(candidate)
+    if not matches:
+        return None
+    if len(matches) > 1 and file.size:
+        for candidate in matches:
+            try:
+                if os.path.getsize(candidate) == file.size:
+                    return candidate
+            except OSError:
+                continue
+    return sorted(matches)[0]
+
+
 # === slskd transfer helpers ===
 
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
@@ -53,7 +112,7 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
         except Exception:
             logger.warning(f"Failed to cancel download {file.filename} for {file.username}",
                            exc_info=True)
-        delete_dir = os.path.join(ctx.cfg.slskd_download_dir, file.file_dir.split("\\")[-1])
+        delete_dir = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
         if os.path.isdir(delete_dir):
             shutil.rmtree(delete_dir)
 
@@ -200,12 +259,15 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     if not os.path.exists(import_folder_fullpath):
         os.mkdir(import_folder_fullpath)
     for file in album_data.files:
-        file_folder = file.file_dir.split("\\")[-1]
-        filename = file.filename.split("\\")[-1]
-        src_folder = os.path.join(ctx.cfg.slskd_download_dir, file_folder)
+        src_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)
-        src_file = os.path.join(src_folder, filename)
+        # Destination filename keeps the remote basename (no ticks suffix,
+        # even if slskd appended one on the source).
+        filename = file.filename.split("\\")[-1]
+        resolved_src = resolve_slskd_local_path(file, ctx.cfg.slskd_download_dir)
+        src_file = resolved_src if resolved_src is not None \
+            else os.path.join(src_folder, filename)
         if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
             filename = f"Disk {file.disk_no} - {filename}"
         dst_file = os.path.join(import_folder_fullpath, filename)
