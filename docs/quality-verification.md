@@ -185,6 +185,23 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 | Quiet jazz/classical (genuine CD) | 33-57dB | None |
 | Children's choir (genuine CD) | 31-62dB | None |
 
+## Edge cases
+
+- **Lo-fi recordings** (Mountain Goats boombox era): genuine V0 from verified FLAC can produce ~207 kbps. The `"mp3 v0"` label classifies as `TRANSPARENT` via `cfg.mp3_vbr_levels[0]` regardless of bitrate, so the gate accepts without needing a `verified_lossless` blanket bypass.
+- **Mixed-source CBR** (e.g. 13 tracks at 320 + 1 track at 192): looks like VBR to `COUNT(DISTINCT bitrate)` but isn't genuine V0. Quality gate ranks against the bare-codec band table — 192 lands in `GOOD` (< default `EXCELLENT`) → re-queues for upgrade.
+- **Fake FLACs**: MP3 wrapped in FLAC container. Spectral detects the cliff pre-conversion, V0 bitrate confirms post-conversion. Source denylisted, but file imported if better than existing.
+- **Discogs-sourced albums**: numeric IDs stored in `mb_release_id` for pipeline compat. Beets auto-routes numeric IDs to the Discogs plugin via `--search-id`. `detect_release_source()` in `lib/quality.py` distinguishes UUID vs numeric format for conditional UI rendering. The full pipeline (search, download, validate, import, quality gate) works identically for both sources.
+
+## Downgrade prevention
+
+- `--override-min-bitrate` arg: `dispatch_import()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
+- `mark_done()` respects `verified_lossless_override` from import_one.py instead of re-deriving via `is_verified_lossless()`. When verified lossless, `current_spectral_bitrate` is set to the actual V0 min bitrate (not the spectral cliff estimate, which can miscalibrate on genuine files).
+- Spectral state writes always go through `RequestSpectralStateUpdate` — grade and bitrate are always written together (including explicit NULLs for genuine files with no cliff). This prevents stale spectral data from persisting after an upgrade.
+- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), skips V0 conversion and keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. Genuine lossless on disk is marked `verified_lossless`. Passed from `dispatch_import()` when `album_data.db_target_format` is set.
+- `--verified-lossless-target` flag: target format after verified lossless (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
+- `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
+- Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade, 6=transcode (may or may not have imported as upgrade).
+
 ## TODO
 
 - [ ] Integrate spectral gradient check into pipeline (import_one.py or cratedigger.py)
