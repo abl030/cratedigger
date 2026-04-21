@@ -38,11 +38,18 @@ export function renderRecentsItems(items) {
       const borderColor = item.border_color || '#444';
       const summary = item.summary || '';
 
+      // Issue #130: a `disambiguation_failure` chip surfaces post-import
+      // `beet move` errors that leave the album in beets at a stale path.
+      // Rendered inline next to the main badge; hover for detail.
+      const disambigChip = item.disambiguation_failure
+        ? `<span class="badge badge-warn" title="${esc(item.disambiguation_detail || '')}">disambig: ${esc(item.disambiguation_failure)}</span>`
+        : '';
+
       return `
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div style="font-size:0.75em;color:#666;">${time}</div>

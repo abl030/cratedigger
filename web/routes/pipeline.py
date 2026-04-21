@@ -52,6 +52,11 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         item["border_color"] = classified.border_color
         item["verdict"] = classified.verdict
         item["summary"] = classified.summary
+        # Issue #130: surface post-import `beet move` failures so the
+        # Recents tab can render a warning chip without forcing the
+        # operator to query JSONB manually. Null on clean rows.
+        item["disambiguation_failure"] = classified.disambiguation_failure
+        item["disambiguation_detail"] = classified.disambiguation_detail
         result.append(item)
     # Count outcomes for filter buttons (single query, no limit)
     count_cur = _server()._db()._execute("""

@@ -504,6 +504,19 @@ def _render_import_result(ir_raw):
     if ir.get("error"):
         lines.append(f"      error:     {ir['error']}")
 
+    # Issue #130: surface post-import `beet move` failures so operators
+    # don't have to grep JSONB to see them. `disambiguated=True` means
+    # the move ran cleanly; a `disambiguation_failure` object means it
+    # did not exit cleanly and the album is in beets at a stale path.
+    pf = ir.get("postflight") or {}
+    dfail = pf.get("disambiguation_failure")
+    if dfail:
+        reason = dfail.get("reason", "unknown")
+        detail = dfail.get("detail", "")
+        lines.append(f"      disambig:  FAILED ({reason}): {detail}")
+    elif pf.get("disambiguated") is True:
+        lines.append(f"      disambig:  ok")
+
     return lines
 
 

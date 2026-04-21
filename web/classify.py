@@ -100,6 +100,14 @@ class ClassifiedEntry:
     verdict: str
     summary: str
     downloaded_label: str = ""  # e.g. "MP3 320", "FLAC (converted to MP3 V0)"
+    # Issue #130: ``PostflightInfo.disambiguation_failure`` reaches JSONB but
+    # had no UI surface until this field was added. ``None`` = no failure
+    # (either disambiguation succeeded or wasn't attempted); string values
+    # mirror ``BeetsOpFailureReason`` Literal: "timeout" | "nonzero_rc" |
+    # "exception". ``disambiguation_detail`` carries the short human-readable
+    # ``detail`` for hover/tooltip — do not parse it.
+    disambiguation_failure: Optional[str] = None
+    disambiguation_detail: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +147,30 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     badge, badge_class, border_color, verdict = _classify(entry)
     summary = _build_summary(entry, badge, verdict)
     downloaded_label = _build_downloaded_label(entry)
+    disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     return ClassifiedEntry(
         badge=badge, badge_class=badge_class,
         border_color=border_color, verdict=verdict,
         summary=summary, downloaded_label=downloaded_label,
+        disambiguation_failure=disambig_reason,
+        disambiguation_detail=disambig_detail,
     )
+
+
+def _extract_disambiguation_failure(
+    entry: LogEntry,
+) -> tuple[Optional[str], Optional[str]]:
+    """Pull ``postflight.disambiguation_failure.{reason, detail}`` out of the
+    ImportResult JSONB. Returns ``(None, None)`` when no failure is present
+    or the blob is missing/unreadable — callers render the chip conditionally.
+    """
+    ir = _parse_import_result(entry)
+    if ir is None or ir.postflight is None:
+        return (None, None)
+    fail = ir.postflight.disambiguation_failure
+    if fail is None:
+        return (None, None)
+    return (fail.reason, fail.detail)
 
 
 def _classify(entry: LogEntry) -> tuple[str, str, str, str]:

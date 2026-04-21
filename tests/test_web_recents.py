@@ -116,6 +116,113 @@ class TestClassifiedEntry(unittest.TestCase):
         self.assertEqual(c.badge, "Imported")
         self.assertEqual(c.summary, "MP3 320 · testuser")
 
+    def test_disambiguation_fields_default_none(self):
+        # Clean rows (no post-import beet move, or clean move success) must
+        # emit None so the frontend can conditionally render the chip.
+        c = ClassifiedEntry(badge="Imported", badge_class="badge-new",
+                            border_color="#1a4a2a", verdict="", summary="")
+        self.assertIsNone(c.disambiguation_failure)
+        self.assertIsNone(c.disambiguation_detail)
+
+
+# ============================================================================
+# classify_log_entry — disambiguation_failure surface (#130)
+# ============================================================================
+
+class TestClassifyDisambiguationFailure(unittest.TestCase):
+    """The ``PostflightInfo.disambiguation_failure`` field lands in
+    ``download_log.import_result`` JSONB but has no UI surface yet.
+    Classify must read it through and emit typed reason + detail so the
+    Recents tab, ``pipeline-cli show``, and ``/debug-download`` can
+    render a warning chip. See issue #130.
+    """
+
+    def _entry_with_disambig(self, reason: str, detail: str) -> LogEntry:
+        return _entry(
+            outcome="success",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "postflight": {
+                    "beets_id": 9999,
+                    "track_count": 12,
+                    "disambiguated": False,
+                    "imported_path": "/Beets/Artist/Album",
+                    "bad_extensions": [],
+                    "disambiguation_failure": {
+                        "reason": reason,
+                        "detail": detail,
+                        "selector": "",
+                    },
+                    "moved_siblings": [],
+                },
+                "new_measurement": {
+                    "min_bitrate_kbps": 320,
+                    "is_cbr": True,
+                    "was_converted_from": None,
+                    "verified_lossless": False,
+                    "spectral_grade": None,
+                    "spectral_bitrate_kbps": None,
+                    "avg_bitrate_kbps": None,
+                },
+                "existing_measurement": None,
+                "conversion": {
+                    "converted": 0,
+                    "failed": 0,
+                    "target_filetype": None,
+                    "final_format": None,
+                    "original_filetype": None,
+                    "was_converted": False,
+                    "is_transcode": False,
+                    "post_conversion_min_bitrate": None,
+                },
+                "spectral": {
+                    "suspect_pct": 0.0,
+                    "cliff_freq_hz": None,
+                    "per_track": [],
+                },
+            },
+        )
+
+    def test_timeout_reason_surfaces(self):
+        result = classify_log_entry(
+            self._entry_with_disambig("timeout", "timeout after 120s"))
+        self.assertEqual(result.disambiguation_failure, "timeout")
+        self.assertEqual(result.disambiguation_detail, "timeout after 120s")
+
+    def test_nonzero_rc_reason_surfaces(self):
+        result = classify_log_entry(
+            self._entry_with_disambig("nonzero_rc", "rc=1: no matching album"))
+        self.assertEqual(result.disambiguation_failure, "nonzero_rc")
+        self.assertEqual(result.disambiguation_detail,
+                         "rc=1: no matching album")
+
+    def test_exception_reason_surfaces(self):
+        result = classify_log_entry(
+            self._entry_with_disambig("exception",
+                                       "FileNotFoundError: beet missing"))
+        self.assertEqual(result.disambiguation_failure, "exception")
+        self.assertEqual(result.disambiguation_detail,
+                         "FileNotFoundError: beet missing")
+
+    def test_clean_import_leaves_fields_none(self):
+        # Happy path: ImportResult present, disambiguation succeeded.
+        entry = self._entry_with_disambig("timeout", "ignored")
+        assert entry.import_result is not None
+        entry.import_result["postflight"]["disambiguation_failure"] = None
+        entry.import_result["postflight"]["disambiguated"] = True
+        result = classify_log_entry(entry)
+        self.assertIsNone(result.disambiguation_failure)
+        self.assertIsNone(result.disambiguation_detail)
+
+    def test_no_import_result_leaves_fields_none(self):
+        # Rejected/timeout rows have no import_result — must not raise.
+        result = classify_log_entry(
+            _entry(outcome="rejected", import_result=None,
+                   beets_scenario="high_distance", beets_distance=0.4))
+        self.assertIsNone(result.disambiguation_failure)
+        self.assertIsNone(result.disambiguation_detail)
+
 
 # ============================================================================
 # quality_label

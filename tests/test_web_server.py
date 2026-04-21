@@ -618,6 +618,10 @@ class TestPipelineRouteContracts(_WebServerCase):
         "id", "request_id", "outcome", "album_title", "artist_name",
         "created_at", "badge", "badge_class", "border_color", "summary",
         "verdict", "in_beets",
+        # Issue #130: post-import `beet move` failures surface as typed
+        # reason + detail so the frontend can render a warning chip.
+        # Null on clean rows; the field must always be present.
+        "disambiguation_failure", "disambiguation_detail",
     }
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
