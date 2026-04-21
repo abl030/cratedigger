@@ -1,21 +1,13 @@
 """Tests for same-MBID stale-entry handling in import_one.py.
 
-Bug being locked in (live 2026-04-20): when an upgrade re-import runs
-against an album already in beets, we must remove the stale same-MBID
-row with a selector that CANNOT reach sibling pressings. The narrowest
-such selector is the beets numeric primary key (``id:<N>``).
-
-Round 2 design (post PR #131 Codex P1): the stale removal runs AFTER
-the new album is successfully in beets, not before. A pre-flight
-remove could leave the user with no files at all if the harness times
-out / crashes. The capture-then-import-then-remove shape keeps the
-existing copy alive until the replacement is confirmed.
+When an upgrade re-import runs against an album already in beets, stale
+same-MBID rows must be removed with a selector that CANNOT reach
+sibling pressings. The narrowest such selector is the beets numeric
+primary key (``id:<N>``). Stale removal runs AFTER the new album is
+successfully in beets — a pre-flight remove could leave the user with
+no files at all if the harness times out / crashes.
 
 Seams pinned here:
-
-- ``_capture_stale_beets_id(mbid, beets)``
-  Pre-import, no destruction: returns the stale row's beets id (if
-  present) or None. Caller stashes it until post-import cleanup.
 
 - ``_remove_stale_by_id_logged(stale_id)``
   Post-import, destructive: runs ``beet remove -d id:<N>`` via

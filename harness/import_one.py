@@ -1085,41 +1085,6 @@ def main():
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
 
-    # --- Enumerate stale same-MBID rows + fail-fast on split-brain ---
-    #
-    # Runs BEFORE any destructive pre-import work (Codex PR #131 round
-    # 4 P2). If we bail with ``import_failed`` because beets already
-    # has more than one same-MBID row, the staged download must still
-    # be intact so the operator can re-run the pipeline after cleanup.
-    # Later stages — spectral analysis, ``convert_lossless``,
-    # ``_remove_lossless_files`` — mutate ``args.path`` in place, so a
-    # guard placed after them would leave operators without the
-    # original files to retry with.
-    #
-    # ``locate()`` uses ``LIMIT 1`` and would miss siblings in the
-    # split-brain case (Codex PR #131 round 3 P2). The enumerate
-    # helper scans every ``albums.id`` matching the release id across
-    # both layouts (mb_albumid + discogs_albumid).
-    stale_ids: list[int] = (
-        beets.get_all_album_ids_for_release(mbid)
-        if already_in_beets else [])
-    if len(stale_ids) > 1:
-        r.exit_code = 2
-        r.decision = "import_failed"
-        r.error = (f"Beets already has {len(stale_ids)} rows for "
-                   f"mbid={mbid} before import: {stale_ids}. "
-                   "Cannot safely run an upgrade against a split-brain "
-                   "state — operator must reduce to at most one row "
-                   "(e.g. via ban-source cleanup) before retrying. "
-                   "Staged download is untouched.")
-        _log(f"[ERROR] {r.error}")
-        beets.close()
-        _emit_and_exit(r)
-    stale_beets_id: int | None = stale_ids[0] if stale_ids else None
-    if stale_beets_id is not None:
-        _log(f"[PRE-FLIGHT] Captured stale beets id:{stale_beets_id} for "
-             f"post-import cleanup (will remove after upgrade lands)")
-
     # --- Path check (pure decision) ---
     pf = preflight_decision(already_in_beets, os.path.isdir(args.path))
     if pf.is_terminal:
@@ -1453,10 +1418,6 @@ def main():
              f"(target skipped or preserve-source approved)")
 
     # --- Import ---
-    #
-    # ``stale_ids`` was validated earlier in main() — split-brain
-    # fail-fast already happened before any destructive pre-import
-    # work (Codex PR #131 round 4 P2). Here we just run the import.
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     rc, beets_lines, kept_duplicate, sibling_album_ids = run_import(
         args.path, mbid)
@@ -1470,37 +1431,15 @@ def main():
         _log(f"[ERROR] Import failed (rc={rc})")
         _emit_and_exit(r)
 
-    # --- Post-import cleanup: remove EVERY same-MBID row except the new one ---
+    # --- Post-import cleanup: remove every same-MBID row except the new one ---
     #
-    # Beets' ``album.id`` is SQLite AUTOINCREMENT — the row we just
-    # imported has the highest id of every same-MBID row. Any other
-    # same-MBID rows are stale (whether they existed at pre-flight
-    # enumerate, or were inserted by a racing process between that
-    # check and ``resolve_duplicate`` firing — Codex PR #131 round 5
-    # P2). Enumerate again, remove everything but the newest.
-    #
-    # This supersedes the round-3/4 ``stale_beets_id`` approach: by
-    # deriving the set-to-remove from the post-import state directly,
-    # we no longer depend on the pre-flight capture matching what
-    # ``resolve_duplicate`` sees. The intra-process race is closed.
-    #
-    # Cross-process race closed by issue #133 / #132 P1:
-    # ``dispatch_import_core`` takes ``ADVISORY_LOCK_NAMESPACE_RELEASE``
-    # keyed on a stable hash of ``mb_release_id`` for the duration of
-    # this subprocess. Previously ``max(post_import_ids)`` was
-    # vulnerable to a racing process inserting its own same-MBID row
-    # between ``run_import`` returning and this re-enumerate query;
-    # the release-level advisory lock serialises every entry point
-    # (auto cycle, web force-import, CLI manual-import) that spawns
-    # import_one.py so this window no longer exists. The non-blocking
-    # lock means a second caller returns early rather than queueing.
-    #
-    # Each removal uses ``beet remove -a -d id:<N>`` — primary-key
-    # scoped, cannot reach cross-MBID siblings. Any removal failure
-    # is an ``import_failed`` (same as round-2 P3 contract): the new
-    # album is on disk but leaving stale rows corrupts future upgrade
-    # captures. Operator must run ban-source before the request can
-    # be marked complete.
+    # ``album.id`` is SQLite AUTOINCREMENT, so the row we just imported
+    # has the highest id. Everything else matching this MBID is stale
+    # (a previous upgrade's old row, or a cycle whose cleanup was
+    # interrupted). Cross-process races are closed by
+    # ``ADVISORY_LOCK_NAMESPACE_RELEASE`` in ``dispatch_import_core``.
+    # Each removal is ``beet remove -a -d id:<N>`` — primary-key scoped,
+    # cannot reach cross-MBID siblings.
     post_import_ids = beets.get_all_album_ids_for_release(mbid)
     if not post_import_ids:
         r.exit_code = 2
