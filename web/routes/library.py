@@ -9,6 +9,42 @@ def _server():
     return server
 
 
+def _find_pipeline_request_for_release(
+    pipeline_id: int | None,
+    release_id: str,
+) -> dict | None:
+    """Resolve the pipeline request the UI wants purged, if any.
+
+    Prefer the explicit ``pipeline_id`` from the frontend when present;
+    fall back to the release ID so stale/missing row overlays do not turn
+    the delete into a ghost imported row again.
+    """
+    srv = _server()
+    if not srv.db:
+        return None
+
+    db = srv._db()
+    if pipeline_id is not None:
+        req = db.get_request(int(pipeline_id))
+        if req:
+            return req
+
+    release_id = release_id.strip()
+    if not release_id:
+        return None
+
+    req = db.get_request_by_mb_release_id(release_id)
+    if req:
+        return req
+
+    if release_id.isdigit():
+        req = db.get_request_by_discogs_release_id(release_id)
+        if req:
+            return req
+
+    return None
+
+
 def get_beets_search(h, params: dict[str, list[str]]) -> None:
     q = params.get("q", [""])[0].strip()
     if not q or len(q) < 2:
@@ -76,6 +112,9 @@ def get_beets_recent(h, params: dict[str, list[str]]) -> None:
 def post_beets_delete(h, body: dict) -> None:
     album_id = body.get("id")
     confirm = body.get("confirm")
+    purge_pipeline = bool(body.get("purge_pipeline"))
+    pipeline_id = body.get("pipeline_id")
+    release_id = str(body.get("release_id") or "").strip()
     if not album_id:
         h._error("Missing id")
         return
@@ -105,10 +144,23 @@ def post_beets_delete(h, body: dict) -> None:
             os.rmdir(album_dir)
         except OSError:
             pass  # not empty — other albums' files still there
+
+    deleted_pipeline_id = None
+    if purge_pipeline:
+        req = _find_pipeline_request_for_release(
+            int(pipeline_id) if pipeline_id is not None else None,
+            release_id,
+        )
+        if req:
+            srv._db().delete_request(int(req["id"]))
+            deleted_pipeline_id = int(req["id"])
+
     h._json({
         "status": "ok", "id": album_id,
         "album": album_name, "artist": artist_name,
         "deleted_files": deleted_files,
+        "pipeline_deleted": deleted_pipeline_id is not None,
+        "pipeline_id": deleted_pipeline_id,
     })
 
 

@@ -1,10 +1,39 @@
 // @ts-check
-import { API, toast, updatePipelineStatus } from './state.js';
+import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
+
+
+function refreshAfterBeetsDeletion(albumId) {
+  if (state.browseArtist) {
+    delete state.browseCache[state.browseArtist.id];
+  }
+
+  const browseArtist = document.getElementById('browse-artist');
+  if (browseArtist && browseArtist.style.display !== 'none' && state.browseArtist) {
+    window.switchSubView?.(state.browseSubView || 'discography');
+    return;
+  }
+
+  const activeTab = document.querySelector('.tab.active')?.textContent?.trim();
+  if (activeTab === 'Recents') {
+    window.loadRecents?.();
+    return;
+  }
+  if (activeTab === 'Pipeline') {
+    window.loadPipeline?.();
+    return;
+  }
+
+  const detail = document.getElementById('lib-' + albumId);
+  if (detail) {
+    detail.previousElementSibling?.remove();
+    detail.remove();
+  }
+}
 
 /**
  * Render library results into a target element (thin wrapper).
@@ -61,33 +90,38 @@ export function renderLibraryResults(albums, targetEl) {
     function renderAlbum(a) {
       const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
       const mbid = a.mb_albumid || '';
-      // Library row is always in_library by definition. beets_album_id is
-      // the row's beets DB id. Pipeline state comes from the route's
-      // _enrich step (pipeline_status / pipeline_id / upgrade_queued).
+      const inLibrary = a.in_library !== false;
+      const beetsAlbumId = a.beets_album_id || (inLibrary ? a.id : null);
+      const pipelineId = a.pipeline_id || null;
+      const detailId = inLibrary
+        ? `lib-${beetsAlbumId}`
+        : `lib-pipeline-${pipelineId || a.id}`;
+      const detailToggle = inLibrary && beetsAlbumId
+        ? `window.toggleLibDetail(${beetsAlbumId})`
+        : `window.toggleDetail('${detailId}', ${pipelineId || a.id})`;
+
       const toolbar = mbid ? renderActionToolbar({
         id: mbid,
-        in_library: true,
-        beets_album_id: a.id,
+        in_library: inLibrary,
+        beets_album_id: beetsAlbumId,
         pipeline_status: a.pipeline_status || null,
-        pipeline_id: a.pipeline_id || null,
+        pipeline_id: pipelineId,
         upgrade_queued: !!a.upgrade_queued,
         artist: a.artist || '',
         album: a.album || '',
         track_count: a.track_count || 0,
       }, { size: 'small' }) : '';
-      // Library rows are by definition in_library, so the unified
-      // renderer always emits the quality-aware badge — same code path
-      // discography/compare/analysis use.
+
       const badges = renderStatusBadges({
         id: a.mb_albumid,
-        in_library: true,
+        in_library: inLibrary,
         library_format: a.formats,
         library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
         library_rank: a.library_rank,
         pipeline_status: a.pipeline_status,
       });
       return `
-        <div class="lib-item" onclick="window.toggleLibDetail(${a.id})">
+        <div class="lib-item" onclick="${detailToggle}">
           <div class="p-top">
             <div>
               <div class="p-title">${esc(a.album)}${badges}</div>
@@ -104,7 +138,7 @@ export function renderLibraryResults(albums, targetEl) {
             <span>added ${added}</span>
           </div>
         </div>
-        <div class="lib-detail" id="lib-${a.id}"></div>
+        <div class="lib-detail" id="${detailId}"></div>
       `;
     }
 
@@ -234,7 +268,7 @@ export async function toggleLibDetail(id) {
         html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${data.mb_albumid}', this)">Upgrade${brLabel}</button>`;
       }
     }
-    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, '${esc(data.artist)}', '${esc(data.album)}', ${data.tracks ? data.tracks.length : 0})">Delete from beets</button>`;
+    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, '${esc(data.artist)}', '${esc(data.album)}', ${data.tracks ? data.tracks.length : 0}, ${data.pipeline_id ?? 'null'}, '${esc(data.mb_albumid || '')}')">Delete from beets</button>`;
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
@@ -371,17 +405,22 @@ export async function setIntent(pipelineId, intent) {
  * @param {string} artist
  * @param {string} album
  * @param {number} trackCount
+ * @param {number|null} [pipelineId]
+ * @param {string} [releaseId]
  */
-export function confirmDeleteBeets(id, artist, album, trackCount) {
+export function confirmDeleteBeets(id, artist, album, trackCount, pipelineId = null, releaseId = '') {
   const overlay = document.createElement('div');
   overlay.className = 'confirm-overlay';
+  const pipelineNote = releaseId
+    ? '<br>This also removes any matching pipeline request/history so the release is forgotten.'
+    : '';
   overlay.innerHTML = `
     <div class="confirm-box">
       <h3>Delete from beets?</h3>
-      <p>${artist} - ${album}<br>${trackCount} tracks will be permanently deleted from disk.</p>
+      <p>${artist} - ${album}<br>${trackCount} tracks will be permanently deleted from disk.${pipelineNote}</p>
       <div class="actions">
         <button class="p-btn" onclick="this.closest('.confirm-overlay').remove()">Cancel</button>
-        <button class="p-btn delete-beets" id="confirm-delete-btn" onclick="window.executeBeetsDeletion(${id}, this)">Yes, delete permanently</button>
+        <button class="p-btn delete-beets" id="confirm-delete-btn" onclick="window.executeBeetsDeletion(${id}, this, ${pipelineId ?? 'null'}, '${releaseId}')">Yes, delete permanently</button>
       </div>
     </div>
   `;
@@ -393,23 +432,33 @@ export function confirmDeleteBeets(id, artist, album, trackCount) {
  * Execute the beets deletion after confirmation.
  * @param {number} id
  * @param {HTMLButtonElement} btn
+ * @param {number|null} [pipelineId]
+ * @param {string} [releaseId]
  */
-export async function executeBeetsDeletion(id, btn) {
+export async function executeBeetsDeletion(id, btn, pipelineId = null, releaseId = '') {
   btn.disabled = true;
   btn.textContent = 'Deleting...';
   try {
     const r = await fetch(`${API}/api/beets/delete`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({id, confirm: 'DELETE'}),
+      body: JSON.stringify({
+        id,
+        confirm: 'DELETE',
+        purge_pipeline: true,
+        pipeline_id: pipelineId,
+        release_id: releaseId,
+      }),
     });
     const data = await r.json();
     document.querySelector('.confirm-overlay')?.remove();
     if (data.status === 'ok') {
-      toast(`Deleted: ${data.artist} - ${data.album} (${data.deleted_files} files)`);
-      // Remove the item from the DOM
-      const detail = document.getElementById('lib-' + id);
-      if (detail) { detail.previousElementSibling?.remove(); detail.remove(); }
+      if (data.pipeline_deleted && releaseId) {
+        updatePipelineStatus(releaseId, null, null);
+      }
+      const pipelineMsg = data.pipeline_deleted ? ', request removed' : '';
+      toast(`Deleted: ${data.artist} - ${data.album} (${data.deleted_files} files${pipelineMsg})`);
+      refreshAfterBeetsDeletion(id);
     } else {
       toast(data.error || 'Delete failed', true);
     }

@@ -55,6 +55,7 @@ clearStore();
   assertExcludes(html, '>Add request</button>', 'no Add request');
   assertExcludes(html, '>Remove request</button>', 'no Remove request');
   assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets enabled');
+  assertContains(html, ", null, 'rel-2')", 'release id passed to delete confirm');
   assertContains(html, "'Bodyjar'", 'artist passed to delete confirm');
   assertContains(html, "'Plastic Skies'", 'album passed to delete confirm');
 }
@@ -74,6 +75,7 @@ clearStore();
   assertExcludes(html, '>Upgrade</button>', 'no Upgrade — wanted wins');
   // Remove from beets still independent
   assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets still enabled');
+  assertContains(html, ", 1712, 'rel-3')", 'pipeline context passed to delete confirm');
 }
 
 console.log('Acquire button — not in library + wanted → Remove request');

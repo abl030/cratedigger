@@ -1715,6 +1715,8 @@ class TestBrowseRouteContracts(_WebServerCase):
         "id", "album", "artist", "year", "mb_albumid", "track_count",
         "mb_releasegroupid", "release_group_title", "added", "formats",
         "min_bitrate", "type", "label", "country", "source",
+        "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
+        "upgrade_queued", "library_rank",
     }
     RELEASE_GROUP_REQUIRED_FIELDS = {
         "id", "title", "country", "date", "format", "track_count", "status",
@@ -1797,7 +1799,8 @@ class TestBrowseRouteContracts(_WebServerCase):
             "country": "US",
             "source": "musicbrainz",
         }
-        with patch("web.server.get_library_artist", return_value=[album]):
+        with patch("web.server.get_library_artist", return_value=[album]), \
+                patch("web.server.check_pipeline", return_value={}):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -1806,6 +1809,45 @@ class TestBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, {"albums"}, "library artist response")
         _assert_required_fields(self, data["albums"][0], self.LIBRARY_ALBUM_REQUIRED_FIELDS,
                                 "library artist album")
+
+    def test_library_artist_route_includes_pipeline_only_requests(self):
+        from datetime import datetime, timezone
+
+        row = {
+            "id": 42,
+            "mb_release_id": self.RELEASE_ID,
+            "mb_release_group_id": self.RG_ID,
+            "artist_name": "Test Artist",
+            "album_title": "Wanted Album",
+            "year": 2024,
+            "country": "US",
+            "format": "CD",
+            "source": "request",
+            "status": "wanted",
+            "created_at": datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc),
+            "min_bitrate": 320,
+            "search_filetype_override": "flac",
+            "target_format": None,
+        }
+        orig_execute = self.mock_db._execute.return_value
+        self.mock_db._execute.return_value = MagicMock(
+            fetchall=MagicMock(return_value=[row]))
+        self.mock_db.get_track_counts.return_value = {42: 10}
+        try:
+            with patch("web.server.get_library_artist", return_value=[]):
+                status, data = self._get(
+                    f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
+                )
+        finally:
+            self.mock_db._execute.return_value = orig_execute
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["albums"]), 1)
+        self.assertEqual(data["albums"][0]["album"], "Wanted Album")
+        self.assertFalse(data["albums"][0]["in_library"])
+        self.assertEqual(data["albums"][0]["pipeline_status"], "wanted")
+        self.assertEqual(data["albums"][0]["pipeline_id"], 42)
+        self.assertIsNone(data["albums"][0]["beets_album_id"])
 
     def test_artist_compare_contract(self):
         """Compare endpoint returns mb_artist, discogs_artist, and three buckets."""
@@ -2291,6 +2333,76 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "beets delete response")
+
+    @patch("web.routes.library.os.path.isdir", return_value=False)
+    @patch("web.routes.library.os.path.isfile", return_value=False)
+    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB.delete_album")
+    def test_beets_delete_purges_explicit_pipeline_request(
+        self,
+        mock_delete,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        self._srv.beets_db_path = "/tmp/beets.db"
+        self.mock_db.delete_request.reset_mock()
+        self.mock_db.get_request.return_value = make_request_row(
+            id=42, status="imported", mb_release_id=self.RELEASE_ID,
+        )
+        mock_delete.return_value = (
+            "Test Album",
+            "Test Artist",
+            ["/music/Test Artist/Test Album/01 Track.mp3"],
+        )
+
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "pipeline_id": 42,
+            "release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["pipeline_deleted"])
+        self.assertEqual(data["pipeline_id"], 42)
+        self.mock_db.delete_request.assert_called_once_with(42)
+
+    @patch("web.routes.library.os.path.isdir", return_value=False)
+    @patch("web.routes.library.os.path.isfile", return_value=False)
+    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB.delete_album")
+    def test_beets_delete_purges_pipeline_request_by_release_id_fallback(
+        self,
+        mock_delete,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        self._srv.beets_db_path = "/tmp/beets.db"
+        self.mock_db.delete_request.reset_mock()
+        self.mock_db.get_request.return_value = None
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=99, status="imported", mb_release_id=self.RELEASE_ID,
+        )
+        mock_delete.return_value = (
+            "Test Album",
+            "Test Artist",
+            ["/music/Test Artist/Test Album/01 Track.mp3"],
+        )
+
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["pipeline_deleted"])
+        self.assertEqual(data["pipeline_id"], 99)
+        self.mock_db.delete_request.assert_called_once_with(99)
 
 
 class TestApplyPipelineBitrateOverride(unittest.TestCase):

@@ -51,6 +51,77 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if not name:
         h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
         return
+
+    def _pipeline_album_rows() -> list[dict[str, object]]:
+        if not srv.db:
+            return []
+
+        db = srv._db()
+        if mbid:
+            cur = db._execute(
+                """
+                SELECT id, mb_release_id, mb_release_group_id,
+                       artist_name, album_title, year, country, format,
+                       source, status, created_at, min_bitrate,
+                       search_filetype_override, target_format
+                FROM album_requests
+                WHERE mb_artist_id = %s
+                   OR (artist_name ILIKE %s
+                       AND (mb_artist_id IS NULL OR mb_artist_id = ''
+                            OR mb_artist_id NOT LIKE '%%-%%'))
+                ORDER BY year, album_title
+                """,
+                (mbid, f"%{name}%"),
+            )
+        else:
+            cur = db._execute(
+                """
+                SELECT id, mb_release_id, mb_release_group_id,
+                       artist_name, album_title, year, country, format,
+                       source, status, created_at, min_bitrate,
+                       search_filetype_override, target_format
+                FROM album_requests
+                WHERE artist_name ILIKE %s
+                ORDER BY year, album_title
+                """,
+                (f"%{name}%",),
+            )
+
+        rows = [dict(r) for r in cur.fetchall()]
+        track_counts = db.get_track_counts([int(r["id"]) for r in rows]) if rows else {}
+        result: list[dict[str, object]] = []
+        for row in rows:
+            created_at = row.get("created_at")
+            added = created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
+            min_br = row.get("min_bitrate")
+            result.append({
+                "id": int(row["id"]),
+                "beets_album_id": None,
+                "in_library": False,
+                "album": row["album_title"],
+                "artist": row["artist_name"],
+                "year": row.get("year"),
+                "mb_albumid": row.get("mb_release_id"),
+                "track_count": track_counts.get(int(row["id"]), 0),
+                "mb_releasegroupid": row.get("mb_release_group_id"),
+                "release_group_title": row["album_title"],
+                "added": added,
+                "formats": row.get("format") or "",
+                "min_bitrate": (int(min_br) * 1000) if isinstance(min_br, int) else None,
+                "type": "album",
+                "label": "",
+                "country": row.get("country"),
+                "source": row.get("source"),
+                "pipeline_status": row["status"],
+                "pipeline_id": int(row["id"]),
+                "upgrade_queued": (
+                    row["status"] == "wanted"
+                    and bool(row.get("search_filetype_override") or row.get("target_format"))
+                ),
+                "library_rank": "unknown",
+            })
+        return result
+
     albums = srv.get_library_artist(name, mbid)
     # Enrich with pipeline_status / pipeline_id / upgrade_queued so the
     # standardised action toolbar (Acquire / Remove from beets) shows
@@ -58,7 +129,11 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     # badge renderer can colour the in-library badge by codec-aware tier.
     mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
     in_pipeline = srv.check_pipeline(mbids) if mbids else {}
+    seen_release_ids: set[str] = set()
     for a in albums:
+        a["in_library"] = True
+        a["beets_album_id"] = a["id"]
+        a["upgrade_queued"] = False
         pi = in_pipeline.get(str(a.get("mb_albumid", "")))
         if pi:
             a["pipeline_status"] = pi["status"]
@@ -75,6 +150,16 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         br_bps = br_raw if isinstance(br_raw, int) else 0
         kbps = br_bps // 1000
         a["library_rank"] = srv.compute_library_rank(fmt, kbps)
+        rid = str(a.get("mb_albumid") or "")
+        if rid:
+            seen_release_ids.add(rid)
+
+    for req in _pipeline_album_rows():
+        rid = str(req.get("mb_albumid") or "")
+        if rid and rid in seen_release_ids:
+            continue
+        albums.append(req)
+
     h._json({"albums": albums})  # type: ignore[attr-defined]
 
 

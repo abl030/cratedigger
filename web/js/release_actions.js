@@ -14,7 +14,10 @@
  *                       other states' affordances are unreachable so
  *                       showing them as separate greyed buttons just
  *                       added noise.
- *   [Remove from beets] enabled when in library and beets album id known
+ *   [Remove from beets] enabled when in library and beets album id known.
+ *                       When clicked, the backend also purges the matching
+ *                       pipeline request/history so the release goes back to
+ *                       a clean "not requested" state.
  *
  * Acquire decision tree (highest priority first):
  *   1. pipeline_status in ('wanted', 'downloading') → "Remove request"
@@ -98,7 +101,7 @@ export function renderActionToolbar(item, opts = {}) {
 
   // Remove from beets — greyed out when not in library
   const removeBeetsBtn = canRemoveBeets
-    ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, '${artist}', '${album}', ${trackCount})">Remove from beets</button>`
+    ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, '${artist}', '${album}', ${trackCount}, ${pId ?? 'null'}, '${escId}')">Remove from beets</button>`
     : `<button class="btn" style="${baseStyle}" disabled>Remove from beets</button>`;
 
   return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeBeetsBtn}</span>`;
