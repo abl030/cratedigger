@@ -666,24 +666,36 @@ def run_import(path, mb_release_id):
                 #
                 # Live 2026-04-20 data-loss event (Shearwater "Palo Santo"):
                 # beets' ``find_duplicates()`` returned a cross-MBID sibling
-                # pressing even with ``duplicate_keys: [albumartist, album,
-                # mb_albumid]`` in config. The old "same-MBID → remove" branch
-                # then called beets' ``task.should_remove_duplicates = True``,
-                # which iterates ``duplicate_items()`` and calls
+                # pressing. The old "same-MBID → remove" branch then called
+                # beets' ``task.should_remove_duplicates = True``, which
+                # iterates ``duplicate_items()`` and calls
                 # ``util.remove(item.path)`` on every item in every found
                 # duplicate — blast radius is whatever find_duplicates chose,
                 # not what we asked for. The 11-track 2006 sibling (mb=
                 # 157b51f8...) lost every mp3 on disk when the 19-track 2007
                 # reissue (mb=168d7fea...) re-imported.
                 #
-                # Structural fix: the destructive branch is unrepresentable
-                # from here. If a stale same-MBID album exists, main()
-                # removes it AFTER the new album is successfully in beets,
-                # using the numeric primary-key selector ``id:<stale>``
-                # which cannot match any other row. At this callsite we
-                # unconditionally answer "keep" — preserving every album
-                # beets flagged, including legitimate different-MBID
-                # siblings we must not touch.
+                # Actual RC of the cross-MBID return (traced 2026-04-21): the
+                # user's ``duplicate_keys`` YAML block was at top level of
+                # ``~/.config/beets/config.yaml`` instead of under ``import:``.
+                # Beets reads strictly from
+                # ``config["import"]["duplicate_keys"]["album"]``
+                # (``beets/importer/tasks.py:385``); the misplaced block was
+                # silently ignored and beets used the default
+                # ``[albumartist, album]`` — no ``mb_albumid``. find_duplicates
+                # matched the sibling on album title alone. Not a beets bug.
+                # Fixed in ``beets.nix`` + startup assertion
+                # ``_assert_duplicate_keys_include_mb_albumid`` in
+                # ``harness/beets_harness.py``.
+                #
+                # Defense-in-depth: the destructive branch is unrepresentable
+                # from here even if the config regresses. If a stale same-MBID
+                # album exists, main() removes it AFTER the new album is
+                # successfully in beets, using the numeric primary-key
+                # selector ``id:<stale>`` which cannot match any other row.
+                # At this callsite we unconditionally answer "keep" —
+                # preserving every album beets flagged, including legitimate
+                # different-MBID siblings we must not touch.
                 #
                 # Sibling MBIDs (non-target hits) are collected so main()
                 # can re-run ``beet move`` on each after the import —

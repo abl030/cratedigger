@@ -71,14 +71,19 @@ covers cross-timer-cycle races).
 
 ### RELEASE — per-MBID lock
 
-**Why**: Issue #132 P1 / issue #133. The Palo Santo incident. Two
-processes (the auto cycle and a web force-import, or two racing
-force-import clicks on sibling requests for the same MBID) each held
-their own per-request lock while targeting the same MusicBrainz
-release. The harness's post-import `max(post_import_ids)` query then
-picked up the *other* process's newly-inserted beets row as "the album
-we just imported" and `beet remove -d`-ed it. Eleven FLAC tracks of
-Shearwater's *Palo Santo* 11-track edition disappeared from disk.
+**Why**: Issue #132 P1 / issue #133. Defends against a cross-process
+race that could cause Palo Santo-*class* data loss (the 2026-04-20
+incident itself had a different proximate cause — see `CLAUDE.md` §
+Resolved canonical RCs — but this race is a real independent vector
+worth closing).
+
+The race: two processes (the auto cycle and a web force-import, or
+two racing force-import clicks on sibling requests for the same MBID)
+each hold their own per-request lock while targeting the same
+MusicBrainz release. The harness's post-import `max(post_import_ids)`
+query then picks up the *other* process's newly-inserted beets row as
+"the album we just imported" and `beet remove -d`-es it — the wrong
+album's files vanish.
 
 **Scope**: Held for the duration of every `import_one.py` subprocess
 — that is, in every path that runs the harness. `dispatch_import_core`

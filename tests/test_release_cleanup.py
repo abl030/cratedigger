@@ -346,10 +346,17 @@ class TestRemoveAlbumBySelectorsSeam(unittest.TestCase):
     """``remove_album_by_selectors`` is the pure-beets primitive.
 
     The harness import_one.py needs to pre-remove a stale same-MBID
-    album BEFORE running the beets import so beets' ``find_duplicates``
-    doesn't drag in cross-MBID siblings (the Palo Santo data-loss bug).
+    album BEFORE running the beets import. Belt-and-suspenders against
+    the Palo Santo failure mode: even if the beets config regresses
+    (``import.duplicate_keys.album`` missing ``mb_albumid`` — the
+    actual 2026-04-20 RC, traced 2026-04-21) and ``find_duplicates()``
+    drags in cross-MBID siblings, the harness's ``resolve_duplicate``
+    always answers ``"keep"`` so the blast radius is defused. The
+    pre-flight surgical remove keeps the same-MBID cleanup path
+    working without needing the destructive ``"remove"`` answer.
+
     The harness has no PipelineDB on hand — it runs as a subprocess from
-    beets's own Python env — so the primitive can't couple to pipeline
+    beets' own Python env — so the primitive can't couple to pipeline
     state. ``remove_and_reset_release`` continues to wrap it for the
     ban-source route which does need to clear pipeline-side quality
     fields.

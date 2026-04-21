@@ -323,10 +323,19 @@ boundary.
 
 ## What this does NOT fix
 
-- The data-loss root cause is still in beets (`find_duplicates`
-  can return cross-MBID siblings in some scenarios we haven't
-  reproduced). The harness's `"keep"` workaround stays; the RPC
-  inherits it.
+- ~~The data-loss root cause is still in beets (`find_duplicates` can return
+  cross-MBID siblings in some scenarios we haven't reproduced).~~ **Revised
+  2026-04-21**: the Palo Santo data-loss RC was traced to the user's
+  `duplicate_keys` YAML block being at the top level of `config.yaml` instead
+  of under `import:` (beets reads strictly from
+  `config["import"]["duplicate_keys"]["album"]`; top-level is silently
+  ignored and falls back to the default `[albumartist, album]`). Not a beets
+  upstream bug. Fixed by `beets.nix` YAML relocation + startup assertion in
+  `harness/beets_harness.py::_assert_duplicate_keys_include_mb_albumid`. The
+  RPC redesign inherits the assertion trivially (run it at process start),
+  and the `03bfc63` defensive machinery (always-keep, pre-flight surgical
+  remove, sibling `beet move`) remains valuable as defense-in-depth +
+  `%aunique` correctness regardless of the RPC vs. subprocess model.
 - Quality decisions remain in `lib/quality.py`. The RPC is an IO
   boundary, not a decision layer.
 - Beets version upgrades can still break us if they change

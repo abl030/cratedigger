@@ -231,6 +231,11 @@ SQL
 - **Discogs analysis tab**: disambiguate/analysis tab requires MusicBrainz recording IDs; not available for Discogs-browsed artists (#81).
 - **Discogs cover art**: the CC0 dump has no images. Discogs-only releases have no cover art in browse UI (#82).
 
+## Resolved — canonical RCs (don't re-investigate)
+
+- **2026-04-20 Palo Santo data loss**: NOT a beets upstream bug. The user's `duplicate_keys` block was at the top level of `~/.config/beets/config.yaml` instead of under `import:`. Beets reads strictly from `config["import"]["duplicate_keys"]["album"]` (`beets/importer/tasks.py:385`); the misplaced block was silently ignored and beets fell back to the default `[albumartist, album]` — no `mb_albumid`. `find_duplicates()` then matched cross-MBID siblings on album title alone, the harness sent `{"action":"remove"}` thinking it was a same-MBID stale entry, and beets' `task.should_remove_duplicates` blast radius wiped the sibling. Fixed by `beets.nix` YAML relocation + harness startup assertion in `_assert_duplicate_keys_include_mb_albumid`. The `03bfc63` state machine (pre-flight surgical remove + always-keep + post-import sibling `beet move`) remains as defense-in-depth; the post-import `beet move` per sibling is independently required for `%aunique` re-disambiguation of legitimate different-MBID pressings.
+- **2026-04-14 Lucksmiths MBID drift**: NOT a bug. `tagging-workspace/scripts/fix_reissues.py` deliberately retagged "First Tape" to its cassette sibling via `harness --search-id`. The drift was invisible to cratedigger's audit trail because the harness was driven out-of-band. Mitigated by the harness MBID-swap audit log at `/mnt/virtio/Music/.harness-mutations.jsonl` (see `_mbid_swap_event`).
+
 ## Secrets
 
 - slskd API key: sops-managed, injected into `config.ini` at runtime via the `cratedigger-secrets-split` oneshot (see `docs/nixos-module.md`).

@@ -39,9 +39,12 @@ BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
 # recognisable in ``pg_locks`` during debugging.
 ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
 
-# Per-release lock — Palo Santo protection (issue #132 P1, issue #133).
-# Key = ``release_id_to_lock_key(mb_release_id)``. ``0x52454C45`` =
-# ASCII "RELE", recognisable alongside FIMP in ``pg_locks``.
+# Per-release lock — cross-process Palo Santo-class protection
+# (issue #132 P1, issue #133). Not the 04-20 incident's root cause
+# (that was YAML misconfig; see CLAUDE.md § Resolved canonical RCs)
+# but an independent vector that could produce similar data loss if
+# the lock were missing. Key = ``release_id_to_lock_key(mb_release_id)``.
+# ``0x52454C45`` = ASCII "RELE", recognisable alongside FIMP in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_RELEASE = 0x52454C45
 
 
@@ -61,8 +64,9 @@ def release_id_to_lock_key(mb_release_id: str) -> int:
     false-collision would serialise two unrelated releases, delaying
     the second by at most one import cycle (~minutes). Acceptable:
     losing a cycle of parallelism is cheap, whereas a missed lock on
-    the real race is how the Palo Santo 11-track edition lost every
-    mp3 on disk.
+    the real cross-process race could produce Palo Santo-*class* data
+    loss (an independent vector from the 04-20 incident's YAML-misconfig
+    root cause — see ``CLAUDE.md`` § Resolved canonical RCs).
 
     Input is ``.strip()``ed before hashing so a legacy DB row with
     stray leading/trailing whitespace (``"12856590 "`` vs

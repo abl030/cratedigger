@@ -622,7 +622,11 @@ def dispatch_import_core(
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
     # goes through (auto, force, manual), so the lock here closes the
-    # Palo Santo window (issues #132 P1 / #133) for every entry point.
+    # cross-process race that could produce Palo Santo-*class* data loss
+    # (issues #132 P1 / #133) for every entry point. The actual 04-20
+    # Palo Santo incident had a different proximate cause (YAML misconfig —
+    # see CLAUDE.md § Resolved canonical RCs); this lock defends against
+    # an independent race vector the original fix left open.
     # Auto path: ``_handle_valid_result`` has already acquired RELEASE
     # outer — this acquisition is a session-reentrant no-op. Force/
     # manual path: this is the first RELEASE acquisition, nested inside

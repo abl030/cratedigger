@@ -227,16 +227,23 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
 
     Beets' ``remove_duplicates()`` (``beets/importer/tasks.py``) deletes
     every item in every album returned by ``find_duplicates()`` — the
-    call cannot be scoped to one MBID from the harness side. In live
-    production (2026-04-20), ``find_duplicates()`` returned a cross-
-    MBID sibling pressing even with ``duplicate_keys: [albumartist,
-    album, mb_albumid]`` configured, so answering "remove" destroyed
-    the sibling's files on disk. The structural fix is to make the
-    "remove" branch *unrepresentable*: the only answer to
-    ``resolve_duplicate`` is ``"keep"`` (sibling preservation). Stale
-    same-MBID removal happens in pre-flight via a targeted
-    ``beet remove -d mb_albumid:<mbid>`` that only matches that one
-    album.
+    call cannot be scoped to one MBID from the harness side.
+
+    In the live 2026-04-20 Palo Santo data-loss event, ``find_duplicates()``
+    returned a cross-MBID sibling because the user's ``duplicate_keys``
+    block was at the TOP level of ``~/.config/beets/config.yaml`` instead
+    of under ``import:``. Beets reads strictly from
+    ``config["import"]["duplicate_keys"]["album"]`` (traced 2026-04-21 via
+    ``beets/importer/tasks.py:385``); the top-level key was silently
+    ignored and beets used the default ``[albumartist, album]``. Sibling
+    pressings matched on title alone. Fixed in ``beets.nix`` + startup
+    assertion in ``harness/beets_harness.py::_assert_duplicate_keys_include_mb_albumid``.
+
+    This invariant remains as defense-in-depth: even if the config
+    regresses, ``resolve_duplicate`` only ever answers ``"keep"`` (sibling
+    preservation). Stale same-MBID removal happens in pre-flight via a
+    targeted ``beet remove -d mb_albumid:<mbid>`` that only matches that
+    one album.
 
     Every sub-test asserts the same thing — ``"remove"`` never crosses
     the wire — under different dup_mbids shapes so a future accidental
