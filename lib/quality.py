@@ -1226,6 +1226,42 @@ def comparison_format_hint(
     return native_codec_family
 
 
+def _shared_spectral_bitrates(
+    new: AudioQualityMeasurement,
+    existing: AudioQualityMeasurement,
+    cfg: QualityRankConfig,
+) -> "tuple[Optional[int], Optional[int]] | None":
+    """Return ``(new_effective_br, existing_effective_br)`` when BOTH sides
+    carry a ``spectral_bitrate_kbps``, else ``None``.
+
+    The clamp takes ``min(selected_metric, spectral_bitrate)`` per side — the
+    spectral estimate becomes an upper bound on the "honest" bitrate for the
+    comparison. This is deliberately *narrow*: it only fires when new and
+    existing both measured a spectral floor, so a stale estimate on only one
+    side (Springsteen shape: existing CBR 320 genuine+96, new MP3 V0 240 no
+    spectral) keeps the container comparison — the rule that
+    ``test_springsteen_genuine_but_96kbps`` pins.
+
+    Grade-independent by design. ``compute_effective_override_bitrate`` gates
+    the clamp on ``SPECTRAL_TRANSCODE_GRADES`` because on a single-sided
+    override a genuine grade can't be distinguished from natural lo-fi
+    rolloff. Here, both sides agreeing on the same estimate IS the
+    independent corroboration that makes the floor trustworthy regardless of
+    each side's individual rollup grade (Eno case, ``download_log.id=3291``).
+    """
+    if (new.spectral_bitrate_kbps is None
+            or existing.spectral_bitrate_kbps is None):
+        return None
+    new_br = _selected_bitrate(new, cfg)
+    existing_br = _selected_bitrate(existing, cfg)
+    new_br = (min(new_br, new.spectral_bitrate_kbps)
+              if new_br is not None else new.spectral_bitrate_kbps)
+    existing_br = (min(existing_br, existing.spectral_bitrate_kbps)
+                   if existing_br is not None
+                   else existing.spectral_bitrate_kbps)
+    return new_br, existing_br
+
+
 def compare_quality(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
@@ -1245,10 +1281,24 @@ def compare_quality(
     - Same codec family, both bare codec names → compare the configured metric
       with cfg.within_rank_tolerance_kbps tolerance.
 
+    Shared-spectral clamp: when BOTH measurements carry ``spectral_bitrate_kbps``,
+    clamp each side's classified bitrate to ``min(selected_metric, spectral)``.
+    Two independent spectral estimates agreeing on the same audio floor is
+    stronger evidence than either alone — the clamp applies regardless of
+    grade. See ``_shared_spectral_bitrates`` for the narrow guard that keeps
+    the Springsteen case (single stale estimate) on the container path.
+
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
-    new_rank = measurement_rank(new, cfg)
-    existing_rank = measurement_rank(existing, cfg)
+    shared = _shared_spectral_bitrates(new, existing, cfg)
+    if shared is not None:
+        clamped_new_br, clamped_existing_br = shared
+        new_rank = quality_rank(new.format, clamped_new_br, new.is_cbr, cfg)
+        existing_rank = quality_rank(
+            existing.format, clamped_existing_br, existing.is_cbr, cfg)
+    else:
+        new_rank = measurement_rank(new, cfg)
+        existing_rank = measurement_rank(existing, cfg)
 
     if new_rank > existing_rank:
         return "better"
@@ -1273,8 +1323,16 @@ def compare_quality(
         return "equivalent"
 
     # Both bare codec names — compare the chosen metric with tolerance.
-    new_br = _selected_bitrate(new, cfg)
-    existing_br = _selected_bitrate(existing, cfg)
+    # Use the shared-spectral-clamped bitrates if the clamp fired, otherwise
+    # fall back to the raw selected metric. This keeps the tiebreaker in
+    # lockstep with the rank: if ranks were computed from clamped bitrates,
+    # the tiebreaker must be too (otherwise new avg=290 could still "beat"
+    # existing avg=128 after both ranks clamp to the same POOR tier).
+    if shared is not None:
+        new_br, existing_br = shared
+    else:
+        new_br = _selected_bitrate(new, cfg)
+        existing_br = _selected_bitrate(existing, cfg)
     if new_br is None or existing_br is None:
         return "equivalent"
     delta = new_br - existing_br
@@ -2526,6 +2584,9 @@ def get_decision_tree(
                     {"condition": "existing is VBR: override_min_bitrate drives min only; avg + median keep beets values",
                      "result": "preserved", "color": "green",
                      "effect": "real avg signal survives — a 152kbps transcode can't win against a genuine 225-avg VBR album"},
+                    {"condition": "BOTH new and existing have spectral_bitrate: compare_quality clamps each side to min(selected_metric, spectral_bitrate) — grade-independent",
+                     "result": "shared_spectral_clamp", "color": "amber",
+                     "effect": "two agreeing estimates corroborate the audio floor — 290-avg vs 128-avg with both spectral=96 compares as 96-vs-96 → equivalent (Eno case, download_log 3291)"},
                     {"condition": "new.verified_lossless = true AND compare_quality(new, existing) in {better,equivalent}",
                      "result": "import", "color": "green",
                      "effect": "verified-lossless imports only when it is not worse"},
@@ -2554,7 +2615,13 @@ def get_decision_tree(
                          "avg/median preserve beets values so the rank "
                          "comparison sees the real signal — the "
                          "loop-breaking fix for Unter Null - The Failure "
-                         "Epiphany (req 1749, 2026-04-21)."),
+                         "Epiphany (req 1749, 2026-04-21). The "
+                         "shared-spectral clamp is independent: it fires "
+                         "ONLY when both sides carry spectral_bitrate, so "
+                         "a single stale estimate (Springsteen shape — "
+                         "existing genuine 320 with spectral=96, new V0 "
+                         "240 with no spectral) still follows the "
+                         "container path."),
             },
             {
                 "id": "quality_gate",
@@ -2803,12 +2870,19 @@ def full_pipeline_decision(
         _effective_existing_avg = override_min_bitrate
     else:
         _effective_existing_avg = _raw_avg
+    # spectral_bitrate_kbps is passed through so compare_quality's
+    # shared-spectral clamp can fire in-sim (Eno case, req 1486). Production
+    # always populates this via build_existing_measurement in the harness —
+    # the simulator had been dropping it, which is exactly why
+    # test_eno_generative_music_shared_spectral_floor could never surface
+    # the bug until now.
     existing_m = (AudioQualityMeasurement(
                       min_bitrate_kbps=_effective_existing_min,
                       avg_bitrate_kbps=_effective_existing_avg,
                       median_bitrate_kbps=_effective_existing_avg,
                       format=effective_existing_format,
-                      is_cbr=existing_is_cbr)
+                      is_cbr=existing_is_cbr,
+                      spectral_bitrate_kbps=existing_spectral_bitrate)
                   if existing_min_bitrate is not None else None)
 
     if is_flac and target_format in ("flac", "lossless"):
@@ -2818,7 +2892,8 @@ def full_pipeline_decision(
             min_bitrate_kbps=min_bitrate,
             avg_bitrate_kbps=min_bitrate,
             median_bitrate_kbps=min_bitrate,
-            format=stage2_new_format)
+            format=stage2_new_format,
+            spectral_bitrate_kbps=spectral_bitrate)
         result["stage2_import"] = import_quality_decision(
             new_m, existing_m, cfg=cfg)
 
@@ -2856,7 +2931,8 @@ def full_pipeline_decision(
             avg_bitrate_kbps=import_br,
             median_bitrate_kbps=import_br,
             format=stage2_new_format,
-            verified_lossless=will_be_verified)
+            verified_lossless=will_be_verified,
+            spectral_bitrate_kbps=spectral_bitrate)
         result["stage2_import"] = import_quality_decision(
             new_m, existing_m, is_transcode, cfg=cfg)
 
@@ -2917,7 +2993,8 @@ def full_pipeline_decision(
             avg_bitrate_kbps=_mp3_avg,
             median_bitrate_kbps=_mp3_avg,
             format=stage2_new_format,
-            is_cbr=is_cbr)
+            is_cbr=is_cbr,
+            spectral_bitrate_kbps=spectral_bitrate)
         result["stage2_import"] = import_quality_decision(
             new_m, existing_m, cfg=cfg)
 

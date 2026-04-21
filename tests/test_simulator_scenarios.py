@@ -147,6 +147,18 @@ ALBUM_STATES = [
                "lossless,mp3 v0,mp3 320",
                avg_bitrate=225,
                existing_format="MP3"),
+    # Brian Eno - Generative Music I (req 1486). After a successful MP3
+    # 128kbps import (download_log 3284), beets held a uniform-128kbps MP3
+    # album. The album's spectral grade rolled up to ``genuine`` (only 25%
+    # of tracks were ``suspect``, below the 60% threshold) yet the album's
+    # ``spectral_bitrate`` — ``min`` across the per-track estimates — still
+    # reported a 96kbps cliff because several suspect tracks were detected.
+    # Captures the "genuine grade + low spectral estimate on existing" shape
+    # the pre-import comparison would then face on the next force-import.
+    AlbumState("eno_genuine_spectral96_mp3_128", 128, False,
+               "genuine", 96, False, None,
+               avg_bitrate=128,
+               existing_format="MP3"),
 ]
 
 ALBUM_MAP = {a.name: a for a in ALBUM_STATES}
@@ -210,6 +222,19 @@ DOWNLOAD_SCENARIOS = [
                      spectral_grade="genuine"),
     DownloadScenario("cbr_192_genuine", False, 192, True,
                      spectral_grade="genuine"),
+    # Brian Eno - Generative Music I (download_log 3291, 2026-04-12). Mixed
+    # bitrate MP3 album: min=128 (one track), avg=290, median=320 — most
+    # tracks are 320 CBR, one is a 128 outlier, so the set-of-bitrates
+    # check treats the album as non-CBR. Per-track spectral detects a
+    # cliff at 96kHz on several tracks; the album rolls up to ``genuine``
+    # (fewer than 60% suspect) but the ``min``-across-estimates still
+    # carries the 96 value. Paired with ``eno_genuine_spectral96_mp3_128``
+    # this is the exact force-import the pipeline accepted.
+    DownloadScenario("eno_mp3_mixed_avg_290_genuine_96", False, 128, False,
+                     avg_bitrate=290,
+                     is_vbr=True,
+                     spectral_grade="genuine",
+                     spectral_bitrate=96),
 ]
 
 DL_MAP = {s.name: s for s in DOWNLOAD_SCENARIOS}
@@ -565,6 +590,51 @@ class TestNamedRegressions(unittest.TestCase):
             r.stage2_import, "downgrade",
             "Stage 2 must return 'downgrade' — pins the AVG-metric "
             "rank comparison with VBR existing preserving its real avg")
+
+    def test_eno_generative_music_shared_spectral_floor(self):
+        """Shared 96k spectral floor on both sides — not an upgrade.
+
+        Live reproduction: Brian Eno - Generative Music I (req 1486),
+        force-import ``download_log.id=3291`` on 2026-04-12.
+
+        State at force-import time:
+          existing on disk (from prior import 3284): MP3, min/avg/median=128,
+            is_cbr=False, spectral_grade=genuine, spectral_bitrate=96.
+          new download: MP3, min=128, avg=290, median≈320, is_cbr=False,
+            spectral_grade=genuine, spectral_bitrate=96.
+
+        Both sides carry the same 96k spectral floor with the same grade.
+        ``compare_quality`` currently uses the configured bitrate metric
+        (AVG by default) and classifies new (290 → TRANSPARENT rank) over
+        existing (128 → ACCEPTABLE rank) → verdict ``better`` → stage 2
+        returns ``import``. The force-import proceeded on an album whose
+        underlying audio is the same 96k material, per the spectral signal
+        both sides agree on.
+
+        The spectral clamp that would catch this lives only in
+        ``gate_rank`` (post-import) and is gated on
+        ``SPECTRAL_TRANSCODE_GRADES`` (``suspect``/``likely_transcode``).
+        Both sides here are ``genuine`` → clamp never fires → 290-vs-128
+        comparison wins.
+
+        Expected after fix: when new and existing both carry a
+        ``spectral_bitrate`` at the same value, the comparison must treat
+        them as equivalent (i.e. not ``import``) — no perceptual upgrade
+        is possible when both sources agree on the audio floor.
+        """
+        album = ALBUM_MAP["eno_genuine_spectral96_mp3_128"]
+        r = simulate(album, DL_MAP["eno_mp3_mixed_avg_290_genuine_96"])
+
+        self.assertFalse(
+            r.imported,
+            "New download whose spectral floor matches existing's spectral "
+            "floor (both 96kbps) must not import — container-avg comparison "
+            "is misleading when spectral agrees on the underlying quality.")
+        self.assertNotEqual(
+            r.stage2_import, "import",
+            "Stage 2 must not return 'import' when new.spectral_bitrate == "
+            "existing.spectral_bitrate — no upgrade is possible at the same "
+            "spectral floor.")
 
     def test_unter_null_failure_epiphany_vbr_real_upgrade(self):
         """VBR existing (1749 shape) + genuine V0 upgrade still imports.

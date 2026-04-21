@@ -28,7 +28,14 @@ export function renderDownloadHistoryItem(h) {
   if (h.spectral_grade) {
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6' : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
     let sgLabel = h.spectral_grade;
-    if (h.spectral_bitrate && h.spectral_grade !== 'genuine') {
+    // Show the spectral floor whenever it's present — even when the album's
+    // rollup grade is `genuine`, a non-null spectral_bitrate means at least
+    // one track triggered a cliff and the min-across-tracks is this value.
+    // Hiding it makes "genuine + 96k floor" look indistinguishable from
+    // "genuine + no cliff" (Eno case, download_log 3291) — the user reads
+    // just "genuine" and doesn't see the partial-cliff signal that
+    // compare_quality's shared-spectral clamp now acts on.
+    if (h.spectral_bitrate) {
       sgLabel += ` (~${h.spectral_bitrate}kbps)`;
     }
     rows.push(['Spectral', `<span style="color:${sgColor};">${sgLabel}</span>`]);

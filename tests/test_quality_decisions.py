@@ -2156,6 +2156,117 @@ class TestCompareQuality(unittest.TestCase):
         self.assertEqual(compare_quality(new, existing, cfg_min), "worse")
 
 
+class TestCompareQualitySharedSpectralClamp(unittest.TestCase):
+    """Shared-spectral clamp: when BOTH measurements carry
+    ``spectral_bitrate_kbps``, the comparison clamps each side's classified
+    bitrate to ``min(selected_metric, spectral)``.
+
+    Independent spectral estimates that agree are stronger evidence than
+    either alone — the clamp is grade-independent here because the agreement
+    itself is the corroboration. A single stale estimate (only one side) does
+    NOT fire the clamp; that case still follows ``compute_effective_override_bitrate``'s
+    grade-gated rule elsewhere in the pipeline.
+
+    Regression guard for ``download_log.id=3291`` (Brian Eno - Generative
+    Music I): without the clamp, ``compare_quality`` picked "better" from
+    avg=290 vs avg=128 despite both sides measuring a 96 kbps spectral
+    floor, letting the force-import silently re-import equivalent audio.
+    """
+
+    def _m(self, **kwargs: Any) -> AudioQualityMeasurement:
+        return AudioQualityMeasurement(**kwargs)
+
+    # (description, new_kwargs, existing_kwargs, expected)
+    CASES = [
+        # --- Both sides agree on 96 kbps floor → equivalent ---
+        # The Eno case: inflated container avg on new, existing uniform
+        # at the floor, both spectral=96. Clamp drags both to 96 → same
+        # rank, same (clamped) bitrate → equivalent.
+        ("Eno shape: both spectral=96, new avg=290, existing avg=128",
+         dict(format="MP3", avg_bitrate_kbps=290, min_bitrate_kbps=128,
+              spectral_bitrate_kbps=96),
+         dict(format="MP3", avg_bitrate_kbps=128, min_bitrate_kbps=128,
+              spectral_bitrate_kbps=96),
+         "equivalent"),
+        ("both spectral=96, equal containers → still equivalent",
+         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         "equivalent"),
+
+        # --- Clamp propagates through the tiebreaker ---
+        # Same rank under clamp but the tiebreaker must also use the clamped
+        # bitrate. Otherwise new avg=290 "beats" existing avg=128 at the
+        # tiebreaker despite both clamping to 96 at the rank level.
+        ("new clamped bitrate == existing clamped bitrate → tiebreaker equivalent",
+         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=96),
+         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         "equivalent"),
+
+        # --- Different floors → clamped comparison decides ---
+        ("new spectral=160 > existing spectral=96 → better after clamp",
+         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=160),
+         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         "better"),
+        ("new spectral=64 < existing spectral=96 → worse after clamp",
+         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=64),
+         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         "worse"),
+
+        # --- Only one side has spectral: clamp does NOT fire ---
+        # Springsteen shape: existing CBR 320 has a stale 96 estimate, new
+        # MP3 V0 240 has no spectral. The container-based comparison wins
+        # and the existing 320 beats the 240 — test_springsteen_genuine_but_96kbps
+        # (simulator) pins this at the full-pipeline level; this confirms
+        # the rule holds inside compare_quality itself.
+        ("existing-only spectral → no clamp, container comparison",
+         dict(format="mp3 v0", avg_bitrate_kbps=240, is_cbr=False),
+         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
+              spectral_bitrate_kbps=96),
+         "equivalent"),  # V0 and 320 are same-rank different-family → equivalent
+        ("new-only spectral → no clamp either way",
+         dict(format="MP3", avg_bitrate_kbps=290, is_cbr=False,
+              spectral_bitrate_kbps=96),
+         dict(format="MP3", avg_bitrate_kbps=128, is_cbr=False),
+         "better"),  # Container comparison: 290 > 128
+
+        # --- Label equivalence short-circuits the clamp ---
+        # Within-rank label equivalence runs AFTER rank comparison. With the
+        # clamp dragging both sides to POOR, they're the same rank but both
+        # carry explicit labels → label-equivalence rule applies → equivalent.
+        ("both explicit labels + both spectral=96 → equivalent",
+         dict(format="mp3 v0", avg_bitrate_kbps=240,
+              spectral_bitrate_kbps=96),
+         dict(format="mp3 v0", avg_bitrate_kbps=245,
+              spectral_bitrate_kbps=96),
+         "equivalent"),
+    ]
+
+    def test_shared_spectral_clamp_table(self):
+        for desc, new_kw, existing_kw, expected in self.CASES:
+            with self.subTest(desc=desc):
+                result = compare_quality(
+                    self._m(**new_kw), self._m(**existing_kw), CFG)
+                self.assertEqual(
+                    result, expected,
+                    f"{desc}: new={new_kw} existing={existing_kw} "
+                    f"expected {expected!r} got {result!r}")
+
+    def test_clamp_requires_both_sides_not_grade(self):
+        """The clamp fires on both-sides-have-spectral, grade-independent.
+
+        Unlike ``compute_effective_override_bitrate`` (which gates on
+        SPECTRAL_TRANSCODE_GRADES), this rule doesn't consult grade — the
+        agreement between two independent estimates is the corroboration.
+        Verified by passing grade=genuine on both sides and confirming the
+        clamp still drags them to equivalent.
+        """
+        new = self._m(format="MP3", avg_bitrate_kbps=290,
+                      spectral_grade="genuine", spectral_bitrate_kbps=96)
+        existing = self._m(format="MP3", avg_bitrate_kbps=128,
+                           spectral_grade="genuine", spectral_bitrate_kbps=96)
+        self.assertEqual(compare_quality(new, existing, CFG), "equivalent")
+
+
 class TestQualityRankConfigFromIni(unittest.TestCase):
     """Parse [Quality Ranks] section from config.ini — exhaustive edge cases."""
 

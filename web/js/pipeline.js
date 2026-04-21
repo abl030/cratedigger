@@ -197,12 +197,16 @@ export async function toggleDetail(elId, requestId) {
       if (verified) {
         qualitySummary += ' <span style="color:#6d6;">verified lossless</span>';
       } else if (spectralGrade === 'suspect' || spectralGrade === 'likely_transcode') {
-        // Only warn when spectral says it's a transcode — genuine files
-        // can have low spectral bitrate estimates (e.g. quiet/lo-fi music)
         const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
         qualitySummary += ` <span style="color:#d88;">spectral: ${spectralGrade}${brStr}</span>`;
       } else if (spectralGrade === 'genuine') {
-        qualitySummary += ' <span style="color:#6d6;">spectral: genuine</span>';
+        // Show the spectral floor even on a genuine rollup. A non-null
+        // spectral_bitrate under genuine means some tracks tripped the
+        // cliff detector but the album-level grade stayed below the
+        // suspect-pct threshold — the 96k signal is what the shared-
+        // spectral clamp in compare_quality now consults (Eno case).
+        const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
+        qualitySummary += ` <span style="color:#6d6;">spectral: genuine${brStr}</span>`;
       }
       html += `<div class="p-detail-row"><span class="p-detail-label">Quality</span><span class="p-detail-value">${qualitySummary}</span></div>`;
     }
