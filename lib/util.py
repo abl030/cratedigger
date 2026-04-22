@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence, TYPE_CHECKING
 
+from lib.processing_paths import sanitize_processing_folder_name
+
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
@@ -86,8 +88,7 @@ def beets_subprocess_env() -> dict[str, str]:
 # === Filesystem utilities ===
 
 def sanitize_folder_name(folder_name: str) -> str:
-    valid_characters = re.sub(r'[<>:."/\\|?*]', "", folder_name)
-    return valid_characters.strip()
+    return sanitize_processing_folder_name(folder_name)
 
 
 _BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})

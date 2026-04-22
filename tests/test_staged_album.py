@@ -11,7 +11,7 @@ from tests.helpers import make_download_file, make_request_row
 class TestStageToAiPath(unittest.TestCase):
 
     def test_sanitizes_artist_and_title(self):
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
 
         dest = stage_to_ai_path(
             artist='Test: "Artist"',
@@ -22,7 +22,7 @@ class TestStageToAiPath(unittest.TestCase):
         self.assertEqual(dest, "/tmp/staging/Test Artist/AlbumTitle")
 
     def test_scopes_auto_import_paths_by_request_id(self):
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
 
         dest = stage_to_ai_path(
             artist="Test Artist",

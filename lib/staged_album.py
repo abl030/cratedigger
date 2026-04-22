@@ -8,8 +8,6 @@ import os
 import shutil
 from typing import Protocol, TYPE_CHECKING
 
-from lib.processing_paths import stage_to_ai_path, stage_to_ai_root
-
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
 

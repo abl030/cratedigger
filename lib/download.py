@@ -21,7 +21,11 @@ from lib.download_recovery import (
     resolve_missing_current_path,
 )
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.processing_paths import canonical_processing_path, directory_has_entries
+from lib.processing_paths import (
+    canonical_processing_path,
+    directory_has_entries,
+    stage_to_ai_path,
+)
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, ValidationResult,
                          decide_download_action,
@@ -31,8 +35,7 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core, finalize_request)
-from lib.staged_album import (StagedAlbum, stage_to_ai_path,
-                              stage_to_ai_root)
+from lib.staged_album import StagedAlbum
 from lib.transitions import apply_transition
 from lib.util import move_failed_import, log_validation_result
 
