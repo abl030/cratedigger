@@ -154,18 +154,13 @@ def resolve_failed_path(
 
 def stage_to_ai(album_data: GrabListEntry, source_path: str, staging_dir: str) -> str:
     """Move validated files from slskd download area to staging/{Artist}/{Album}/."""
+    from lib.staged_album import StagedAlbum
+
     artist_dir = sanitize_folder_name(album_data.artist)
     album_dir = sanitize_folder_name(album_data.title)
     dest = os.path.join(staging_dir, artist_dir, album_dir)
-    os.makedirs(dest, exist_ok=True)
-
-    for f in os.listdir(source_path):
-        src = os.path.join(source_path, f)
-        dst = os.path.join(dest, f)
-        shutil.move(src, dst)
-
-    shutil.rmtree(source_path, ignore_errors=True)
-    return dest
+    staged_album = StagedAlbum(current_path=source_path)
+    return staged_album.move_to(dest)
 
 
 # === Audio validation ===

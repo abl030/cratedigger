@@ -26,8 +26,9 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core, finalize_request)
+from lib.staged_album import StagedAlbum
 from lib.transitions import apply_transition
-from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
+from lib.util import (sanitize_folder_name, move_failed_import,
                       log_validation_result)
 
 if TYPE_CHECKING:
@@ -260,6 +261,38 @@ def _safe_getsize(path: str) -> int | None:
         return None
 
 
+def _canonical_import_folder_path_from_metadata(
+    *,
+    artist: str,
+    title: str,
+    year: str,
+    slskd_download_dir: str,
+) -> str:
+    """Return the canonical local processing directory for a completed album."""
+    import_folder_name = sanitize_folder_name(
+        f"{artist} - {title} ({year})")
+    return os.path.join(slskd_download_dir, import_folder_name)
+
+
+def _canonical_import_folder_path(
+    album_data: GrabListEntry,
+    slskd_download_dir: str,
+) -> str:
+    return _canonical_import_folder_path_from_metadata(
+        artist=album_data.artist,
+        title=album_data.title,
+        year=album_data.year,
+        slskd_download_dir=slskd_download_dir,
+    )
+
+
+def _stage_to_ai_path(album_data: GrabListEntry, staging_dir: str) -> str:
+    """Return the beets staging destination for a validated album."""
+    artist_dir = sanitize_folder_name(album_data.artist)
+    album_dir = sanitize_folder_name(album_data.title)
+    return os.path.join(staging_dir, artist_dir, album_dir)
+
+
 # === slskd transfer helpers ===
 
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
@@ -396,31 +429,34 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 # === Download completion processing ===
 
-def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: CratediggerContext) -> "bool | None":
-    """Process a fully-downloaded album: move files, tag, validate, stage/import.
+def _materialize_processing_dir(
+    album_data: GrabListEntry,
+    staged_album: StagedAlbum,
+    ctx: CratediggerContext,
+) -> bool:
+    """Ensure ``staged_album.current_path`` holds the album's local files."""
+    canonical_path = _canonical_import_folder_path(
+        album_data, ctx.cfg.slskd_download_dir)
+    db = (ctx.pipeline_db_source._get_db()
+          if ctx.pipeline_db_source is not None else None)
 
-    Returns three-valued ``bool | None``:
-    - ``True`` — files moved and tagged successfully. Auto-import (if
-      fired) either landed or recorded a rejection; outer caller flips
-      status to ``imported``.
-    - ``False`` — file moves failed; outer caller resets to ``wanted``.
-    - ``None`` — auto-import deferred because another process held the
-      release advisory lock. Files are staged, spectral state is set,
-      and request stays ``downloading``. Outer caller must NOT touch
-      status: the next ``poll_active_downloads`` cycle re-enters this
-      function and retries. Codex PR #136 R3 P2/P3.
-    """
-    import_folder_name = sanitize_folder_name(
-        f"{album_data.artist} - {album_data.title} ({album_data.year})")
-    import_folder_fullpath = os.path.join(ctx.cfg.slskd_download_dir, import_folder_name)
+    if os.path.abspath(staged_album.current_path) != os.path.abspath(canonical_path):
+        if not os.path.isdir(staged_album.current_path):
+            logger.error(f"Current staged path missing: {staged_album.current_path}")
+            return False
+        staged_album.bind_import_paths(album_data.files)
+        album_data.import_folder = staged_album.current_path
+        staged_album.persist_current_path(db)
+        return True
+
     rm_dirs: list[str] = []
     moved_files_history: list[tuple[str, str]] = []
-    if os.path.exists(import_folder_fullpath):
-        logger.info(f"Staging folder {import_folder_fullpath} already exists — "
+    if os.path.exists(canonical_path):
+        logger.info(f"Staging folder {canonical_path} already exists — "
                     f"resuming or reusing prior attempt")
     else:
-        os.mkdir(import_folder_fullpath)
+        os.mkdir(canonical_path)
+
     for file in album_data.files:
         # Destination filename keeps the remote basename (no ticks suffix,
         # even if slskd appended one on the source).
@@ -433,9 +469,7 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
         src_folder = os.path.dirname(src_file)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)
-        if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
-            filename = f"Disk {file.disk_no} - {filename}"
-        dst_file = os.path.join(import_folder_fullpath, filename)
+        dst_file = staged_album.import_path_for(file)
         file.import_path = dst_file
         if os.path.exists(dst_file) and not os.path.exists(src_file):
             # Resume safely after a crash that already moved this file.
@@ -452,85 +486,131 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
                 except Exception:
                     logger.exception(f"Critical failure during rollback: could not move {dst} back to {src}")
             try:
-                os.rmdir(import_folder_fullpath)
+                os.rmdir(canonical_path)
             except OSError:
-                logger.warning(f"Could not remove temp import directory {import_folder_fullpath}")
+                logger.warning(f"Could not remove temp import directory {canonical_path}")
             return False
-    else:  # Only runs if all files are successfully moved
-        for rm_dir in rm_dirs:
-            if rm_dir != import_folder_fullpath:
-                try:
-                    os.rmdir(rm_dir)
-                except OSError:
-                    logger.warning(f"Skipping removal of {rm_dir} because it's not empty.")
-        logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
-        for file in album_data.files:
-            try:
-                song = music_tag.load_file(file.import_path)
-                assert song is not None
-                if file.disk_no is not None:
-                    song["discnumber"] = file.disk_no
-                    song["totaldiscs"] = file.disk_count
-                song["albumartist"] = album_data.artist
-                song["album"] = album_data.title
-                song.save()
-            except Exception:
-                logger.exception(f"Error writing tags for: {file.import_path}")
-        if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
-            from lib.beets import beets_validate as _bv
-            from lib.preimport import run_preimport_gates
 
-            bv_result = _bv(ctx.cfg.beets_harness_path, import_folder_fullpath,
-                            album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
-            usernames_pre = set(f.username for f in album_data.files if f.username)
-            bv_result.soulseek_username = (
-                ", ".join(sorted(usernames_pre)) if usernames_pre else None
-            )
-            bv_result.download_folder = import_folder_fullpath
+    for rm_dir in rm_dirs:
+        if os.path.abspath(rm_dir) == os.path.abspath(canonical_path):
+            continue
+        try:
+            os.rmdir(rm_dir)
+        except OSError:
+            logger.warning(f"Skipping removal of {rm_dir} because it's not empty.")
 
-            if bv_result.valid:
-                dl_pre = _build_download_info(album_data)
-                db = (ctx.pipeline_db_source._get_db()
-                      if ctx.pipeline_db_source is not None else None)
-                preimport = run_preimport_gates(
-                    path=import_folder_fullpath,
-                    mb_release_id=album_data.mb_release_id or "",
-                    label=f"{album_data.artist} - {album_data.title}",
-                    download_filetype=dl_pre.filetype or "",
-                    download_min_bitrate_bps=dl_pre.bitrate,
-                    download_is_vbr=dl_pre.is_vbr,
-                    cfg=ctx.cfg,
-                    db=db,
-                    request_id=album_data.db_request_id,
-                    usernames=usernames_pre,
-                )
-                album_data.download_spectral = preimport.download_spectral
-                album_data.current_spectral = preimport.existing_spectral
-                album_data.current_min_bitrate = preimport.existing_min_bitrate
-                if not preimport.valid:
-                    bv_result.valid = False
-                    bv_result.scenario = preimport.scenario
-                    bv_result.detail = preimport.detail
-                    if preimport.corrupt_files:
-                        bv_result.corrupt_files = preimport.corrupt_files
-
-            if bv_result.valid:
-                outcome = _handle_valid_result(
-                    album_data, bv_result, import_folder_fullpath, ctx)
-                if outcome is not None and outcome.deferred:
-                    # Release-lock contention. Propagate ``None`` so
-                    # ``_run_completed_processing`` leaves the request's
-                    # status, active_download_state, and staged files
-                    # untouched for the next cycle to retry.
-                    return None
-            else:
-                _handle_rejected_result(
-                    album_data, bv_result, import_folder_fullpath, ctx)
-        return True
+    album_data.import_folder = staged_album.current_path
+    staged_album.persist_current_path(db)
+    return True
 
 
+def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
+                            ctx: CratediggerContext) -> "bool | None":
+    """Process a fully-downloaded album: move files, tag, validate, stage/import.
+
+    Returns three-valued ``bool | None``:
+    - ``True`` — files moved and tagged successfully. Auto-import (if
+      fired) either landed or recorded a rejection; outer caller flips
+      status to ``imported``.
+    - ``False`` — file moves failed; outer caller resets to ``wanted``.
+    - ``None`` — auto-import deferred because another process held the
+      release advisory lock. Files are staged, spectral state is set,
+      and request stays ``downloading``. Outer caller must NOT touch
+      status: the next ``poll_active_downloads`` cycle re-enters this
+      function and retries. Codex PR #136 R3 P2/P3.
+    """
+    staged_album = StagedAlbum.from_entry(
+        album_data,
+        default_path=_canonical_import_folder_path(
+            album_data, ctx.cfg.slskd_download_dir),
+    )
+    if not _materialize_processing_dir(album_data, staged_album, ctx):
+        return False
+
+    logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
+    for file in album_data.files:
+        try:
+            song = music_tag.load_file(file.import_path)
+            assert song is not None
+            if file.disk_no is not None:
+                song["discnumber"] = file.disk_no
+                song["totaldiscs"] = file.disk_count
+            song["albumartist"] = album_data.artist
+            song["album"] = album_data.title
+            song.save()
+        except Exception:
+            logger.exception(f"Error writing tags for: {file.import_path}")
+    if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
+        outcome = _process_beets_validation(
+            album_data, staged_album, ctx)
+        if outcome is not None and outcome.deferred:
+            # Release-lock contention. Propagate ``None`` so
+            # ``_run_completed_processing`` leaves the request's
+            # status, active_download_state, and staged files
+            # untouched for the next cycle to retry.
+            return None
+    return True
+
+
+def _process_beets_validation(album_data: GrabListEntry,
+                              staged_album: StagedAlbum,
+                              ctx: CratediggerContext) -> "DispatchOutcome | None":
+    """Beets validation sub-path of process_completed_album.
+
+    After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
+    for the shared audio + spectral gates. The force/manual-import path
+    (``dispatch_import_from_db``) calls the same function — only the beets
+    distance check is path-specific.
+
+    Returns the dispatch outcome when the auto-import path fires,
+    ``None`` when beets validation rejects (``_handle_rejected_result``
+    already handles the state transition) or when the non-auto
+    redownload path takes over in ``_handle_valid_result``. Caller
+    uses the ``deferred`` flag to decide whether to flip status.
+    """
+    from lib.beets import beets_validate as _bv
+    from lib.preimport import run_preimport_gates
+    current_path = staged_album.current_path
+    bv_result = _bv(ctx.cfg.beets_harness_path, current_path,
+                    album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
+    usernames_pre = set(f.username for f in album_data.files if f.username)
+    bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
+    bv_result.download_folder = current_path
+
+    if bv_result.valid:
+        dl_pre = _build_download_info(album_data)
+        db = (ctx.pipeline_db_source._get_db()
+              if ctx.pipeline_db_source is not None else None)
+        preimport = run_preimport_gates(
+            path=current_path,
+            mb_release_id=album_data.mb_release_id or "",
+            label=f"{album_data.artist} - {album_data.title}",
+            download_filetype=dl_pre.filetype or "",
+            download_min_bitrate_bps=dl_pre.bitrate,
+            download_is_vbr=dl_pre.is_vbr,
+            cfg=ctx.cfg,
+            db=db,
+            request_id=album_data.db_request_id,
+            usernames=usernames_pre,
+        )
+        album_data.download_spectral = preimport.download_spectral
+        album_data.current_spectral = preimport.existing_spectral
+        album_data.current_min_bitrate = preimport.existing_min_bitrate
+        if not preimport.valid:
+            bv_result.valid = False
+            bv_result.scenario = preimport.scenario
+            bv_result.detail = preimport.detail
+            if preimport.corrupt_files:
+                bv_result.corrupt_files = preimport.corrupt_files
+
+    if bv_result.valid:
+        return _handle_valid_result(
+            album_data, bv_result, staged_album, ctx)
+    _handle_rejected_result(
+        album_data, bv_result, current_path, ctx)
+    return None
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
-                         import_folder_fullpath: str,
+                         staged_album: StagedAlbum,
                          ctx: CratediggerContext) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -543,7 +623,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     contention path.
 
     This function acquires the RELEASE advisory lock outer for the
-    auto-import path *before* ``stage_to_ai`` runs, so contention
+    auto-import path *before* the staged move runs, so contention
     leaves files in their slskd-download location and the next
     cycle's resume guard in ``process_completed_album`` can
     idempotently re-enter. Redownload paths don't take the lock —
@@ -551,7 +631,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     cross-process race applies.
 
     See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
-    and contention behaviour (including the ``stage_to_ai`` rationale
+    and contention behaviour (including the staged-move rationale
     for acquiring at this level rather than inside
     ``dispatch_import_core``).
     """
@@ -575,7 +655,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
             error="missing_mbid",
         )
         failed_result.failed_path = move_failed_import(
-            import_folder_fullpath,
+            staged_album.current_path,
             scenario=failed_result.scenario,
         )
         logger.error(
@@ -623,8 +703,8 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 f"AUTO-IMPORT DEFERRED: {album_data.artist} - "
                 f"{album_data.title} — release lock held by another "
                 f"process (mbid={album_data.mb_release_id}); skipping "
-                "stage_to_ai and dispatch. Files stay at "
-                f"{import_folder_fullpath} so the next cycle can "
+                "the staged move and dispatch. Files stay at "
+                f"{staged_album.current_path} so the next cycle can "
                 "idempotently resume from process_completed_album.")
             return DispatchOutcome(
                 success=False,
@@ -633,8 +713,13 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 deferred=True,
             )
 
-        dest = stage_to_ai(
-            album_data, import_folder_fullpath, ctx.cfg.beets_staging_dir)
+        db = (ctx.pipeline_db_source._get_db()
+              if ctx.pipeline_db_source is not None else None)
+        dest = staged_album.move_to(
+            _stage_to_ai_path(album_data, ctx.cfg.beets_staging_dir),
+            db=db,
+        )
+        album_data.import_folder = dest
         log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
         logger.info(f"STAGED: {album_data.artist} - {album_data.title} "
                     f"(scenario={bv_result.scenario}, "
@@ -945,6 +1030,8 @@ def rederive_transfer_ids(
 def reconstruct_grab_list_entry(
     request: dict[str, Any],
     state: ActiveDownloadState,
+    *,
+    fallback_current_path: str | None = None,
 ) -> GrabListEntry:
     """Rebuild GrabListEntry from a DB row + persisted download state.
 
@@ -978,7 +1065,7 @@ def reconstruct_grab_list_entry(
         db_source=request.get("source"),
         db_search_filetype_override=request.get("search_filetype_override"),
         db_target_format=request.get("target_format"),
-        import_folder=state.current_path,
+        import_folder=state.current_path or fallback_current_path,
     )
 
 
@@ -1040,6 +1127,7 @@ def _persist_updated_download_state(
             enqueued_at=state.enqueued_at,
             last_progress_at=state.last_progress_at,
             processing_started_at=state.processing_started_at,
+            current_path=state.current_path or entry.import_folder,
         ).to_json(),
     )
 
@@ -1207,7 +1295,19 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_dict(raw_state)
         else:
             state = ActiveDownloadState.from_json(raw_state)
-        entry = reconstruct_grab_list_entry(row, state)
+        fallback_current_path = None
+        if state.current_path is None and state.processing_started_at is not None:
+            fallback_current_path = _canonical_import_folder_path_from_metadata(
+                artist=row["artist_name"],
+                title=row["album_title"],
+                year=str(row["year"] or ""),
+                slskd_download_dir=ctx.cfg.slskd_download_dir,
+            )
+        entry = reconstruct_grab_list_entry(
+            row,
+            state,
+            fallback_current_path=fallback_current_path,
+        )
 
         if state.processing_started_at is not None:
             _run_completed_processing(entry, request_id, state, db, ctx)

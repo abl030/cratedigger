@@ -781,6 +781,44 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             result = process_completed_album(album, [], ctx)
             self.assertFalse(result)
 
+    @patch("lib.download.music_tag")
+    def test_resumes_from_persisted_current_path(self, mock_mt):
+        """A post-move retry must process the persisted current_path, not slskd."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
+            os.makedirs(resumed_path)
+            resumed_file = os.path.join(resumed_path, "01 - Track.mp3")
+            with open(resumed_file, "w") as f:
+                f.write("fake audio")
+
+            files = [make_download_file(
+                filename="user1\\Music\\01 - Track.mp3",
+                file_dir="user1\\Music",
+                size=len("fake audio"),
+            )]
+            album = make_grab_list_entry(
+                files=files,
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_validation_enabled = False
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertEqual(files[0].import_path, resumed_file)
+            self.assertTrue(os.path.exists(resumed_file))
+
 
 class TestResolveSlskdLocalPath(unittest.TestCase):
     """Pure tests for the slskd on-disk path resolution helper.
@@ -1729,6 +1767,29 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertIsNotNone(persisted["processing_started_at"])
 
     @patch("lib.download.process_completed_album")
+    def test_poll_resume_processing_uses_persisted_current_path(self, mock_process):
+        """Resume path must reconstruct the post-move directory from persisted state."""
+        from lib.download import poll_active_downloads
+        current_path = "/tmp/staged/Test Artist/Test Album"
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": _utc_now_iso(),
+            "processing_started_at": _utc_now_iso(),
+            "current_path": current_path,
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ],
+        })
+        ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+
+        mock_process.return_value = True
+        poll_active_downloads(ctx)
+
+        entry = mock_process.call_args[0][0]
+        self.assertEqual(entry.import_folder, current_path)
+
+    @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):
         """Album stays 'downloading' during process_completed_album — no redownload window."""
         from lib.download import poll_active_downloads
@@ -2020,6 +2081,24 @@ class TestReconstructGrabListEntry(unittest.TestCase):
                    "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.import_folder, "/tmp/staged/A/B")
+
+    def test_reconstruct_fallback_current_path(self):
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="now",
+            files=[],
+        )
+        request = {"id": 10, "album_title": "B", "artist_name": "A",
+                   "year": 2020, "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+        entry = reconstruct_grab_list_entry(
+            request,
+            state,
+            fallback_current_path="/tmp/legacy/A/B",
+        )
+        self.assertEqual(entry.import_folder, "/tmp/legacy/A/B")
 
 
 # ============================================================================

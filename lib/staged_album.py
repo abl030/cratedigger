@@ -1,0 +1,89 @@
+"""Typed ownership of a staged album's current filesystem location."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+import shutil
+from typing import Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib.grab_list import DownloadFile, GrabListEntry
+
+
+class SupportsCurrentPathUpdate(Protocol):
+    """Minimal DB seam for persisting ``active_download_state.current_path``."""
+
+    def update_download_state_current_path(
+        self,
+        request_id: int,
+        current_path: str | None,
+    ) -> None:
+        ...
+
+
+def staged_filename(file: "DownloadFile") -> str:
+    """Return the local filename used once a track is under album staging."""
+    filename = file.filename.split("\\")[-1]
+    if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
+        return f"Disk {file.disk_no} - {filename}"
+    return filename
+
+
+@dataclass
+class StagedAlbum:
+    """Album directory whose current location is owned explicitly."""
+
+    current_path: str
+    request_id: int | None = None
+
+    @classmethod
+    def from_entry(
+        cls,
+        entry: "GrabListEntry",
+        *,
+        default_path: str,
+    ) -> "StagedAlbum":
+        return cls(
+            current_path=entry.import_folder or default_path,
+            request_id=entry.db_request_id,
+        )
+
+    def import_path_for(self, file: "DownloadFile") -> str:
+        return os.path.join(self.current_path, staged_filename(file))
+
+    def bind_import_paths(self, files: list["DownloadFile"]) -> None:
+        for file in files:
+            file.import_path = self.import_path_for(file)
+
+    def persist_current_path(
+        self,
+        db: SupportsCurrentPathUpdate | None,
+    ) -> None:
+        if self.request_id is None or db is None:
+            return
+        db.update_download_state_current_path(self.request_id, self.current_path)
+
+    def move_to(
+        self,
+        dest: str,
+        db: SupportsCurrentPathUpdate | None = None,
+    ) -> str:
+        """Move album contents into ``dest`` and persist the new location."""
+        source = os.path.abspath(self.current_path)
+        target = os.path.abspath(dest)
+
+        if source != target:
+            os.makedirs(target, exist_ok=True)
+            for entry in os.listdir(source):
+                shutil.move(
+                    os.path.join(source, entry),
+                    os.path.join(target, entry),
+                )
+            shutil.rmtree(source, ignore_errors=True)
+            self.current_path = target
+        else:
+            self.current_path = target
+
+        self.persist_current_path(db)
+        return self.current_path
