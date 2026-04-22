@@ -1853,6 +1853,27 @@ class TestBuildActiveDownloadState(unittest.TestCase):
         self.assertEqual(parsed.tzinfo, tz.utc)
         self.assertEqual(state.last_progress_at, state.enqueued_at)
 
+    def test_uses_import_folder_as_current_path(self):
+        from lib.download import build_active_download_state
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1,
+            filetype="flac",
+            title="T",
+            artist="A",
+            year="2020",
+            mb_release_id="mbid",
+            import_folder="/tmp/staged/A/T",
+            files=[
+                DownloadFile(
+                    filename="u\\M\\01.flac", id="tid-1",
+                    file_dir="u\\M", username="user1", size=1000,
+                ),
+            ],
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(state.current_path, "/tmp/staged/A/T")
+
 
 class TestReconstructGrabListEntry(unittest.TestCase):
     """Test reconstruct_grab_list_entry() — rebuild GrabListEntry from DB row + state."""
@@ -1984,6 +2005,21 @@ class TestReconstructGrabListEntry(unittest.TestCase):
                    "search_filetype_override": None, "target_format": None}
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.year, "")
+
+    def test_reconstruct_current_path_to_import_folder(self):
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="now",
+            current_path="/tmp/staged/A/B",
+            files=[],
+        )
+        request = {"id": 10, "album_title": "B", "artist_name": "A",
+                   "year": 2020, "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+        entry = reconstruct_grab_list_entry(request, state)
+        self.assertEqual(entry.import_folder, "/tmp/staged/A/B")
 
 
 # ============================================================================

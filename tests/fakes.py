@@ -502,6 +502,25 @@ class FakePipelineDB:
                 row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
 
+    def update_download_state_current_path(
+        self,
+        request_id: int,
+        current_path: str | None,
+    ) -> None:
+        row = self._requests.get(request_id)
+        if row:
+            state = row.get("active_download_state")
+            if isinstance(state, str):
+                try:
+                    state = json.loads(state)
+                except json.JSONDecodeError:
+                    state = {}
+            if not isinstance(state, dict):
+                state = {}
+            state["current_path"] = current_path
+            row["active_download_state"] = state
+            row["updated_at"] = _utcnow()
+
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
                      filetype: str | None = None,

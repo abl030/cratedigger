@@ -466,6 +466,26 @@ class PipelineDB:
         """, (state_json, now, request_id))
         self.conn.commit()
 
+    def update_download_state_current_path(
+        self,
+        request_id: int,
+        current_path: str | None,
+    ) -> None:
+        """Rewrite only ``active_download_state.current_path`` in JSONB."""
+        now = datetime.now(timezone.utc)
+        self._execute("""
+            UPDATE album_requests
+            SET active_download_state = jsonb_set(
+                    COALESCE(active_download_state, '{}'::jsonb),
+                    '{current_path}',
+                    to_jsonb(%s::text),
+                    true
+                ),
+                updated_at = %s
+            WHERE id = %s
+        """, (current_path, now, request_id))
+        self.conn.commit()
+
     def get_downloading(self) -> list[dict[str, Any]]:
         """Get all albums currently being downloaded."""
         cur = self._execute(

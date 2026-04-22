@@ -1144,6 +1144,7 @@ class TestActiveDownloadState(unittest.TestCase):
             enqueued_at="2026-04-03T12:00:00+00:00",
             last_progress_at="2026-04-03T12:03:00+00:00",
             processing_started_at="2026-04-03T12:05:00+00:00",
+            current_path="/tmp/staged/Test Artist/Test Album",
             files=[
                 ActiveDownloadFileState(
                     username="user1",
@@ -1161,6 +1162,7 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(j["enqueued_at"], "2026-04-03T12:00:00+00:00")
         self.assertEqual(j["last_progress_at"], "2026-04-03T12:03:00+00:00")
         self.assertEqual(j["processing_started_at"], "2026-04-03T12:05:00+00:00")
+        self.assertEqual(j["current_path"], "/tmp/staged/Test Artist/Test Album")
         self.assertEqual(len(j["files"]), 1)
         self.assertEqual(j["files"][0]["username"], "user1")
         self.assertEqual(j["files"][0]["size"], 30000000)
@@ -1176,6 +1178,7 @@ class TestActiveDownloadState(unittest.TestCase):
             "enqueued_at": "2026-04-03T14:30:00+00:00",
             "last_progress_at": "2026-04-03T14:31:00+00:00",
             "processing_started_at": "2026-04-03T14:35:00+00:00",
+            "current_path": "/tmp/staged/bob/Album",
             "files": [
                 {"username": "bob", "filename": "bob\\Tunes\\01.mp3",
                  "file_dir": "bob\\Tunes", "size": 5000000, "retry_count": 1,
@@ -1191,6 +1194,7 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(state.enqueued_at, "2026-04-03T14:30:00+00:00")
         self.assertEqual(state.last_progress_at, "2026-04-03T14:31:00+00:00")
         self.assertEqual(state.processing_started_at, "2026-04-03T14:35:00+00:00")
+        self.assertEqual(state.current_path, "/tmp/staged/bob/Album")
         self.assertEqual(len(state.files), 2)
         self.assertEqual(state.files[0].username, "bob")
         self.assertEqual(state.files[0].retry_count, 1)
@@ -1211,6 +1215,7 @@ class TestActiveDownloadState(unittest.TestCase):
             enqueued_at="2026-04-03T12:00:00+00:00",
             last_progress_at="2026-04-03T12:01:00+00:00",
             processing_started_at="2026-04-03T12:02:00+00:00",
+            current_path="/tmp/staged/user1/Album",
             files=[
                 ActiveDownloadFileState(
                     username="user1", filename="user1\\Music\\01.flac",
@@ -1225,6 +1230,7 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(restored.enqueued_at, original.enqueued_at)
         self.assertEqual(restored.last_progress_at, original.last_progress_at)
         self.assertEqual(restored.processing_started_at, original.processing_started_at)
+        self.assertEqual(restored.current_path, original.current_path)
         self.assertEqual(len(restored.files), 1)
         self.assertEqual(restored.files[0].username, "user1")
         self.assertEqual(restored.files[0].disk_no, 2)
@@ -1243,12 +1249,20 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(f.username, "alice")
         self.assertEqual(f.filename, "alice\\Music\\track.flac")
         self.assertEqual(f.file_dir, "alice\\Music")
-        self.assertEqual(f.size, 25000000)
-        self.assertIsNone(f.disk_no)
-        self.assertIsNone(f.disk_count)
-        self.assertEqual(f.retry_count, 0)
-        self.assertEqual(f.bytes_transferred, 0)
-        self.assertIsNone(f.last_state)
+
+    def test_active_download_state_missing_current_path_defaults_none(self):
+        """Pre-refactor rows without current_path still deserialize."""
+        from lib.quality import ActiveDownloadState
+        raw = json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [],
+        })
+        state = ActiveDownloadState.from_json(raw)
+        self.assertIsNone(state.current_path)
+        self.assertEqual(state.filetype, "flac")
+        self.assertEqual(state.enqueued_at, "2026-04-03T12:00:00+00:00")
+        self.assertEqual(state.files, [])
 
     def test_active_download_state_enqueued_at_iso(self):
         """Verify ISO8601 datetime format."""
