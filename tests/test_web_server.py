@@ -123,6 +123,7 @@ class _WebServerCase(unittest.TestCase):
 def _make_server():
     """Create a test server with mocked DB on a random port."""
     import web.server as srv
+    from lib.release_identity import detect_release_source, normalize_release_id
     # Mock the pipeline DB
     mock_db = MagicMock()
     mock_db.get_log.return_value = [
@@ -177,6 +178,18 @@ def _make_server():
     mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
     mock_db.clear_wrong_match_path.return_value = True
     mock_db.list_requests_by_artist.return_value = []
+
+    def _get_request_by_release_id(release_id):
+        normalized = normalize_release_id(release_id)
+        if not normalized:
+            return None
+        if detect_release_source(normalized) == "discogs":
+            req = mock_db.get_request_by_discogs_release_id(normalized)
+            if req:
+                return req
+        return mock_db.get_request_by_mb_release_id(normalized)
+
+    mock_db.get_request_by_release_id.side_effect = _get_request_by_release_id
 
     srv.db = mock_db
     srv.beets_db_path = None  # No beets DB in tests
@@ -1019,6 +1032,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     def setUp(self) -> None:
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
         self.mock_db.get_request_by_mb_release_id.return_value = None
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
         self.mock_db.add_request.return_value = 501
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
 
@@ -1150,6 +1164,53 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
                                 "pipeline set-quality response")
+
+    @patch("web.routes.pipeline.apply_transition")
+    def test_pipeline_set_quality_discogs_request_normalizes_and_falls_back(
+        self, _mock_transition,
+    ):
+        import web.server as srv
+
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=100,
+            status="imported",
+            mb_release_id="12856590",
+            discogs_release_id=None,
+        ))
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/set-quality",
+                {"mb_release_id": " 0012856590 ", "status": "manual", "min_bitrate": 245},
+            )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
+                                "pipeline set-quality response (discogs)")
+
+    @patch("web.routes.pipeline.apply_transition")
+    def test_pipeline_upgrade_normalizes_uppercase_uuid(self, mock_transition):
+        import web.server as srv
+
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=1704,
+            status="imported",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            min_bitrate=320,
+        ))
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/upgrade",
+                {"mb_release_id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"},
+            )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
+                                "pipeline upgrade response (uppercase)")
+        self.assertEqual(mock_transition.call_args.args[1], 1704)
 
     def test_pipeline_set_intent_contract(self):
         self.mock_db.get_request.return_value = make_request_row(id=100, status="wanted")
@@ -1338,7 +1399,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             # — the locate seam's contract is that selectors are driven by
             # the ID shape, so it's OK for tests to defer to it.
             if kind == "exact" and not selectors:
-                from lib.quality import detect_release_source
+                from lib.release_identity import detect_release_source
                 if detect_release_source(str(release_id)) == "discogs":
                     selectors = (f"discogs_albumid:{release_id}",
                                  f"mb_albumid:{release_id}")
@@ -1570,7 +1631,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
-            "mb_release_id": "12856590",
+            "mb_release_id": " 0012856590 ",
         })
 
         self.assertEqual(status, 200)
@@ -2198,6 +2259,35 @@ class TestBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["tracks"][0], self.RELEASE_TRACK_REQUIRED_FIELDS,
                                 "release detail track")
 
+    @patch("web.routes.browse.discogs_api.get_release")
+    def test_release_detail_numeric_id_forwards_to_discogs(self, mock_discogs_get):
+        self.mock_db.get_request_by_discogs_release_id.return_value = make_request_row(
+            id=42, status="wanted", mb_release_id="12856590", discogs_release_id="12856590",
+        )
+        mock_discogs_get.return_value = {
+            "id": "12856590",
+            "title": "Discogs Album",
+            "tracks": [
+                {
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Track",
+                    "length_seconds": 180,
+                },
+            ],
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value=set()):
+            status, data = self._get("/api/release/0012856590")
+
+        self.assertEqual(status, 200)
+        mock_discogs_get.assert_called_once_with(12856590)
+        mock_mb.get_release.assert_not_called()
+        _assert_required_fields(self, data, self.RELEASE_DETAIL_REQUIRED_FIELDS,
+                                "release detail response (discogs forward)")
+        _assert_required_fields(self, data["tracks"][0], self.RELEASE_TRACK_REQUIRED_FIELDS,
+                                "release detail track (discogs forward)")
+
     def test_artist_disambiguate_contract(self):
         fake_releases = [
             {
@@ -2416,6 +2506,7 @@ class TestBeetsRouteContracts(_WebServerCase):
             mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
         )
+        self.mock_db.get_request_by_discogs_release_id.return_value = None
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
@@ -2502,6 +2593,28 @@ class TestBeetsRouteContracts(_WebServerCase):
                                 "beets album detail")
         _assert_required_fields(self, data["tracks"][0], self.TRACK_REQUIRED_FIELDS,
                                 "beets album track")
+
+    def test_beets_album_detail_discogs_contract(self):
+        detail = self._album()
+        detail["mb_albumid"] = "12856590"
+        detail["source"] = "discogs"
+        detail["path"] = "/music/Test Artist/Test Album"
+        detail["tracks"] = [self._track()]
+        self.beets.get_album_detail.return_value = detail
+        self.mock_db.get_request_by_discogs_release_id.return_value = make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="12856590",
+            discogs_release_id="12856590",
+        )
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DETAIL_REQUIRED_FIELDS,
+                                "beets album detail (discogs)")
+        self.assertEqual(data["source"], "discogs")
+        self.assertEqual(data["mb_albumid"], "12856590")
 
     @patch("web.routes.library.os.path.isdir", return_value=False)
     @patch("web.routes.library.os.path.isfile", return_value=False)

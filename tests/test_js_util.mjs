@@ -131,11 +131,17 @@ assertEqual(
   'https://www.discogs.com/release/2048516',
   'Discogs numeric → discogs.com'
 );
+assertEqual(
+  externalReleaseUrl('not-a-real-id'),
+  '',
+  'unknown id → empty external URL'
+);
 
 // --- sourceLabel tests ---
 console.log('sourceLabel()');
 assertEqual(sourceLabel('89ad4ac3-39f7-470e-963a-56509c546377'), 'MusicBrainz', 'UUID → MusicBrainz');
 assertEqual(sourceLabel('2048516'), 'Discogs', 'numeric → Discogs');
+assertEqual(sourceLabel('not-a-real-id'), '', 'unknown id → empty source label');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

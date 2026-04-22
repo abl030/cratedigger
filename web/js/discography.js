@@ -1,6 +1,6 @@
 // @ts-check
-import { API, state, toast, updatePipelineStatus, pipelineStore } from './state.js';
-import { esc, externalReleaseUrl, sourceLabel, detectSource } from './util.js';
+import { API, state, toast, updatePipelineStatus, pipelineStore, pipelineStoreKey } from './state.js';
+import { esc, externalReleaseUrl, sourceLabel, detectSource, normalizeReleaseId } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
@@ -179,20 +179,22 @@ export async function loadReleaseGroup(id, el, opts = {}) {
  * @param {HTMLButtonElement} btn - The clicked button
  */
 export async function addRelease(mbid, btn) {
+  const releaseId = normalizeReleaseId(mbid);
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    const idField = detectSource(mbid) === 'discogs' ? 'discogs_release_id' : 'mb_release_id';
+    const requestId = releaseId || mbid;
+    const idField = detectSource(requestId) === 'discogs' ? 'discogs_release_id' : 'mb_release_id';
     const r = await fetch(`${API}/api/pipeline/add`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({[idField]: mbid}),
+      body: JSON.stringify({[idField]: requestId}),
     });
     const data = await r.json();
     if (data.status === 'added') {
       btn.textContent = 'Added';
       invalidateBrowseArtist();
-      updatePipelineStatus(mbid, 'wanted', data.id);
+      updatePipelineStatus(requestId, 'wanted', data.id);
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {
       if (data.current_status === 'wanted' && data.id) {
@@ -220,13 +222,14 @@ export async function addRelease(mbid, btn) {
  * @param {string} mbid - MusicBrainz release ID
  */
 export async function toggleReleaseDetail(mbid) {
+  const releaseId = normalizeReleaseId(mbid) || mbid;
   const el = document.getElementById('reldet-' + mbid);
   if (el.classList.contains('open')) { el.classList.remove('open'); return; }
   el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
   el.classList.add('open');
   try {
-    const isDiscogs = detectSource(mbid) === 'discogs';
-    const url = isDiscogs ? `${API}/api/discogs/release/${mbid}` : `${API}/api/release/${mbid}`;
+    const isDiscogs = detectSource(releaseId) === 'discogs';
+    const url = isDiscogs ? `${API}/api/discogs/release/${releaseId}` : `${API}/api/release/${releaseId}`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
@@ -260,11 +263,16 @@ export async function toggleReleaseDetail(mbid) {
 
     // Links and actions
     html += '<div class="release-links">';
-    html += `<a href="${externalReleaseUrl(mbid)}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${sourceLabel(mbid)}</a>`;
-    const detStored = pipelineStore.get(mbid);
+    const externalUrl = externalReleaseUrl(releaseId);
+    const label = sourceLabel(releaseId);
+    if (externalUrl && label) {
+      html += `<a href="${externalUrl}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${label}</a>`;
+    }
+    const storeKey = pipelineStoreKey(releaseId);
+    const detStored = storeKey ? pipelineStore.get(storeKey) : null;
     const canAdd = !data.in_library && !(detStored ? detStored.status : data.pipeline_status);
     if (canAdd) {
-      html += `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${mbid}', this)">Add to pipeline</button>`;
+      html += `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${releaseId}', this)">Add to pipeline</button>`;
     }
     html += '</div>';
 

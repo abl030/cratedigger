@@ -37,7 +37,7 @@
  */
 
 import { jsArg } from './util.js';
-import { pipelineStore } from './state.js';
+import { pipelineStore, pipelineStoreKey } from './state.js';
 
 /**
  * @typedef {Object} ActionItem
@@ -65,7 +65,8 @@ import { pipelineStore } from './state.js';
  * @returns {string}
  */
 export function renderRemoveFromBeetsButton(item, opts = {}) {
-  const stored = pipelineStore.get(item.id);
+  const releaseId = pipelineStoreKey(item.id);
+  const stored = releaseId ? pipelineStore.get(releaseId) : null;
   const pId = stored ? stored.id : (item.pipeline_id || null);
   const inLibrary = !!item.in_library;
   const beetsId = item.beets_album_id || null;
@@ -80,9 +81,10 @@ export function renderRemoveFromBeetsButton(item, opts = {}) {
   const artistArg = jsArg(item.artist || '');
   const albumArg = jsArg(item.album || '');
   const trackCount = item.track_count || 0;
+  const releaseArg = jsArg(releaseId);
 
   return canRemoveBeets
-    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${jsArg(item.id)})">${label}</button>`
+    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${releaseArg})">${label}</button>`
     : `<button class="${className}"${disabledStyle} disabled>${label}</button>`;
 }
 
@@ -97,7 +99,8 @@ export function renderRemoveFromBeetsButton(item, opts = {}) {
 export function renderActionToolbar(item, opts = {}) {
   // pipelineStore overlays the latest local pipeline state on top of the
   // backend snapshot — same pattern the existing pressing renderer uses.
-  const stored = pipelineStore.get(item.id);
+  const releaseId = pipelineStoreKey(item.id);
+  const stored = releaseId ? pipelineStore.get(releaseId) : null;
   const pStatus = stored ? stored.status : (item.pipeline_status || null);
   const pId = stored ? stored.id : (item.pipeline_id || null);
   const inLibrary = !!item.in_library;
@@ -107,7 +110,7 @@ export function renderActionToolbar(item, opts = {}) {
     : 'padding:4px 10px;font-size:0.78em;';
   const baseStyle = `${sizeStyle}white-space:nowrap;`;
 
-  const idArg = jsArg(item.id);
+  const idArg = jsArg(releaseId);
 
   // Acquire — single context-aware button. See module header for the
   // full priority order. The key invariant: at most one of Add/Upgrade/
@@ -119,9 +122,9 @@ export function renderActionToolbar(item, opts = {}) {
     // slskd transfer. Covers fresh add-requests, queued upgrades, and
     // mid-download cancels.
     acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;
-  } else if (inLibrary || pStatus === 'imported') {
+  } else if (releaseId && (inLibrary || pStatus === 'imported')) {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum(${idArg}, this)">Upgrade</button>`;
-  } else if (!inLibrary && !pStatus) {
+  } else if (releaseId && !inLibrary && !pStatus) {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease(${idArg}, this)">Add request</button>`;
   } else {
     // Manual review or other terminal/unknown state — no live action.

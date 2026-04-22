@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
+from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
 def _utcnow() -> datetime:
@@ -383,6 +384,23 @@ class FakePipelineDB:
             if row.get("discogs_release_id") == discogs_release_id:
                 return copy.deepcopy(row)
         return None
+
+    def get_request_by_release_id(self, release_id: object | None) -> dict[str, Any] | None:
+        normalized = normalize_release_id(release_id)
+        if not normalized:
+            return None
+
+        identity = ReleaseIdentity.from_fields(normalized)
+        if identity is None:
+            return self.get_request_by_mb_release_id(normalized)
+
+        if identity.source == "musicbrainz":
+            return self.get_request_by_mb_release_id(identity.release_id)
+
+        req = self.get_request_by_discogs_release_id(identity.release_id)
+        if req:
+            return req
+        return self.get_request_by_mb_release_id(identity.release_id)
 
     def update_status(self, request_id: int, status: str, **extra: Any) -> None:
         row = self._requests.get(request_id)

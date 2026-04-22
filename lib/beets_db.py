@@ -20,6 +20,7 @@ from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
     frontend_release_id,
+    normalize_release_id,
 )
 
 if TYPE_CHECKING:
@@ -162,11 +163,15 @@ class BeetsDB:
         UI for a legacy untagged album is 'not in library' — re-tag it
         or add the release to the pipeline.
         """
-        source = detect_release_source(release_id)
+        release_key = normalize_release_id(release_id)
+        if not release_key:
+            return ReleaseLocation(kind="absent", album_id=None, selectors=())
+
+        source = detect_release_source(release_key)
         numeric: int | None = None
         if source == "discogs":
             try:
-                numeric = int(release_id)
+                numeric = int(release_key)
             except ValueError:
                 numeric = None
 
@@ -176,14 +181,14 @@ class BeetsDB:
                 "SELECT id FROM albums "
                 "WHERE discogs_albumid = ? OR mb_albumid = ? "
                 "LIMIT 1",
-                (numeric, release_id),
+                (numeric, release_key),
             ).fetchone()
             if row:
                 album_id = row[0]
-        elif release_id:
+        elif release_key:
             row = self._conn.execute(
                 "SELECT id FROM albums WHERE mb_albumid = ?",
-                (release_id,),
+                (release_key,),
             ).fetchone()
             if row:
                 album_id = row[0]
@@ -191,11 +196,11 @@ class BeetsDB:
         if album_id is not None:
             if numeric is not None:
                 selectors: tuple[str, ...] = (
-                    f"discogs_albumid:{release_id}",
-                    f"mb_albumid:{release_id}",
+                    f"discogs_albumid:{release_key}",
+                    f"mb_albumid:{release_key}",
                 )
             else:
-                selectors = (f"mb_albumid:{release_id}",)
+                selectors = (f"mb_albumid:{release_key}",)
             return ReleaseLocation(
                 kind="exact", album_id=album_id, selectors=selectors)
 
@@ -218,13 +223,14 @@ class BeetsDB:
 
         Returns an empty list if the release is absent.
         """
-        if not release_id:
+        release_key = normalize_release_id(release_id)
+        if not release_key:
             return []
-        source = detect_release_source(release_id)
+        source = detect_release_source(release_key)
         numeric: int | None = None
         if source == "discogs":
             try:
-                numeric = int(release_id)
+                numeric = int(release_key)
             except ValueError:
                 numeric = None
 
@@ -233,13 +239,13 @@ class BeetsDB:
                 "SELECT id FROM albums "
                 "WHERE discogs_albumid = ? OR mb_albumid = ? "
                 "ORDER BY id",
-                (numeric, release_id),
+                (numeric, release_key),
             ).fetchall()
         else:
             rows = self._conn.execute(
                 "SELECT id FROM albums WHERE mb_albumid = ? "
                 "ORDER BY id",
-                (release_id,),
+                (release_key,),
             ).fetchall()
         return [int(r[0]) for r in rows]
 
@@ -253,7 +259,7 @@ class BeetsDB:
         queries — one against ``mb_albumid`` (covers UUIDs AND legacy
         Discogs numerics stored there), one against ``discogs_albumid``
         (new-layout Discogs numerics). Returns a dict keyed by the
-        input ID string.
+        canonical normalized release ID.
 
         Used by ``check_mbids`` and ``get_album_ids_by_mbids`` so they
         stay in sync without either falling into an N+1 pattern — the
@@ -270,17 +276,18 @@ class BeetsDB:
         mb_candidates: list[str] = []
         discogs_candidates: list[int] = []
         for rid in release_ids:
-            if not rid:
+            release_key = normalize_release_id(rid)
+            if not release_key:
                 continue
-            if detect_release_source(rid) == "discogs":
+            if detect_release_source(release_key) == "discogs":
                 try:
-                    discogs_candidates.append(int(rid))
+                    discogs_candidates.append(int(release_key))
                 except ValueError:
                     pass
                 # Also check mb_albumid as TEXT (legacy layout).
-                mb_candidates.append(rid)
+                mb_candidates.append(release_key)
             else:
-                mb_candidates.append(rid)
+                mb_candidates.append(release_key)
 
         result: dict[str, int] = {}
 
@@ -522,7 +529,6 @@ class BeetsDB:
         #   docs/webui-primer.md for the duality contract.
         # - Anything else falls through to ``mb_albumid`` (synthetic
         #   fixture strings, manual edits).
-        from lib.quality import detect_release_source
         mb_ids: list[str] = []
         discogs_ids: list[int] = []
         for raw in mbids:

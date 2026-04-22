@@ -48,6 +48,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
+from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
 
 MB_API = "http://192.168.1.35:5200/ws/2"
@@ -167,8 +168,7 @@ def cmd_list(db, args):
 
 
 def cmd_add(db, args):
-    from lib.quality import detect_release_source
-    release_id = args.mbid
+    release_id = normalize_release_id(args.mbid)
     source = args.source
     id_source = detect_release_source(release_id)
 
@@ -179,7 +179,7 @@ def cmd_add(db, args):
 
 def _cmd_add_mb(db, mbid, source):
     """Add a MusicBrainz release to the pipeline."""
-    existing = db.get_request_by_mb_release_id(mbid)
+    existing = db.get_request_by_release_id(mbid)
     if existing:
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
         return
@@ -219,9 +219,7 @@ def _cmd_add_mb(db, mbid, source):
 
 def _cmd_add_discogs(db, discogs_id, source):
     """Add a Discogs release to the pipeline."""
-    existing = db.get_request_by_discogs_release_id(discogs_id)
-    if not existing:
-        existing = db.get_request_by_mb_release_id(discogs_id)
+    existing = db.get_request_by_release_id(discogs_id)
     if existing:
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
         return

@@ -15,7 +15,7 @@
  * Falls back to plain "in library" when those fields are absent.
  */
 
-import { pipelineStore } from './state.js';
+import { pipelineStore, pipelineStoreKey } from './state.js';
 import { qualityLabelShort } from './util.js';
 
 /**
@@ -42,7 +42,8 @@ import { qualityLabelShort } from './util.js';
  * @returns {string}
  */
 export function renderStatusBadges(item) {
-  const stored = item.id ? pipelineStore.get(item.id) : null;
+  const key = item.id ? pipelineStoreKey(item.id) : '';
+  const stored = key ? pipelineStore.get(key) : null;
   const pStatus = stored ? stored.status : (item.pipeline_status || null);
 
   let html = '';

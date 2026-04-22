@@ -14,8 +14,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger("cratedigger")
 
-
-from lib.quality import detect_release_source
+from lib.release_identity import detect_release_source
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 DISCOGS_API_BASE = "https://discogs.ablz.au"

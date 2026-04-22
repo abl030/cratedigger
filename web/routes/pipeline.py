@@ -8,8 +8,8 @@ from web.classify import classify_log_entry, LogEntry
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
-                         get_decision_tree, full_pipeline_decision,
-                         detect_release_source)
+                         get_decision_tree, full_pipeline_decision)
+from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
 from lib.transitions import apply_transition
 from lib.util import resolve_failed_path
@@ -302,8 +302,8 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
 
 def post_pipeline_add(h, body: dict) -> None:
     s = _server()
-    mbid = body.get("mb_release_id", "").strip()
-    discogs_id = body.get("discogs_release_id", "").strip()
+    mbid = normalize_release_id(body.get("mb_release_id"))
+    discogs_id = normalize_release_id(body.get("discogs_release_id"))
     source = body.get("source", "request")
 
     if not mbid and not discogs_id:
@@ -312,9 +312,7 @@ def post_pipeline_add(h, body: dict) -> None:
 
     if discogs_id:
         # Discogs flow: store discogs ID in both columns for pipeline compat
-        existing = s._db().get_request_by_discogs_release_id(discogs_id)
-        if not existing:
-            existing = s._db().get_request_by_mb_release_id(discogs_id)
+        existing = s._db().get_request_by_release_id(discogs_id)
         if existing:
             h._json({
                 "status": "exists",
@@ -353,7 +351,7 @@ def post_pipeline_add(h, body: dict) -> None:
         return
 
     # MusicBrainz flow (unchanged)
-    existing = s._db().get_request_by_mb_release_id(mbid)
+    existing = s._db().get_request_by_release_id(mbid)
     if existing:
         h._json({
             "status": "exists",
@@ -435,7 +433,7 @@ def post_pipeline_update(h, body: dict) -> None:
 
 def post_pipeline_upgrade(h, body: dict) -> None:
     s = _server()
-    mbid = body.get("mb_release_id", "").strip()
+    mbid = normalize_release_id(body.get("mb_release_id"))
     if not mbid:
         h._error("Missing mb_release_id")
         return
@@ -447,9 +445,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
     if b:
         min_bitrate = b.get_min_bitrate(mbid)
 
-    existing = s._db().get_request_by_mb_release_id(mbid)
-    if not existing and source == "discogs":
-        existing = s._db().get_request_by_discogs_release_id(mbid)
+    existing = s._db().get_request_by_release_id(mbid)
     if existing:
         # Preserve a stricter existing override (e.g. "lossless" set by
         # the quality gate after a CBR 320 import) so clicking Upgrade
@@ -517,7 +513,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
 
 def post_pipeline_set_quality(h, body: dict) -> None:
     s = _server()
-    mbid = body.get("mb_release_id", "").strip()
+    mbid = normalize_release_id(body.get("mb_release_id"))
     new_status = body.get("status", "").strip()
     min_bitrate = body.get("min_bitrate")
 
@@ -525,7 +521,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
         h._error("Missing mb_release_id")
         return
 
-    existing = s._db().get_request_by_mb_release_id(mbid)
+    existing = s._db().get_request_by_release_id(mbid)
     if not existing:
         h._error("Not found in pipeline", 404)
         return
@@ -534,10 +530,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
 
     if min_bitrate is not None:
         min_bitrate = int(min_bitrate)
-        s._db()._execute(
-            "UPDATE album_requests SET min_bitrate = %s WHERE id = %s",
-            (min_bitrate, req_id),
-        )
+        s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
 
     if new_status:
         if new_status not in ("wanted", "imported", "manual"):
@@ -639,7 +632,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     s = _server()
     req_id = body.get("request_id")
     username = body.get("username", "").strip()
-    mb_release_id = body.get("mb_release_id", "").strip()
+    mb_release_id = normalize_release_id(body.get("mb_release_id"))
 
     if not req_id or not username:
         h._error("Missing request_id or username")

@@ -11,7 +11,11 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from lib.release_identity import ReleaseIdentity, frontend_release_id
+from lib.release_identity import (
+    ReleaseIdentity,
+    frontend_release_id,
+    normalize_release_id,
+)
 from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
@@ -139,6 +143,9 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     # badge renderer can colour the in-library badge by codec-aware tier.
     seen_release_ids: set[tuple[str, str]] = set()
     for a in albums:
+        # The frontend keys every row off the single ``mb_albumid`` field.
+        # For Discogs rows that field intentionally carries the numeric
+        # Discogs release id so browse/library/pipeline actions share one key.
         a["mb_albumid"] = frontend_release_id(
             a.get("mb_albumid"),
             a.get("discogs_albumid"),
@@ -364,17 +371,23 @@ def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], r
 
 def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release_id: str) -> None:
     srv = _server()
-    data = srv.mb_api.get_release(release_id)
-    data["in_library"] = bool(srv.check_beets_library([release_id]))
-    req = srv._db().get_request_by_mb_release_id(release_id)
+    normalized_id = normalize_release_id(release_id) or release_id.strip()
+    identity = ReleaseIdentity.from_id(normalized_id)
+    if identity and identity.source == "discogs":
+        get_discogs_release(h, params, identity.release_id)
+        return
+
+    data = srv.mb_api.get_release(normalized_id)
+    data["in_library"] = bool(srv.check_beets_library([normalized_id]))
+    req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
     # Include beets track info + album id + on-disk quality if in library
     b = srv._beets_db()
     if data["in_library"] and b:
-        beets_ids = b.get_album_ids_by_mbids([release_id])
-        data["beets_album_id"] = beets_ids.get(release_id)
-        quality = b.check_mbids_detail([release_id]).get(release_id) or {}
+        beets_ids = b.get_album_ids_by_mbids([normalized_id])
+        data["beets_album_id"] = beets_ids.get(normalized_id)
+        quality = b.check_mbids_detail([normalized_id]).get(normalized_id) or {}
         fmt_raw = quality.get("beets_format")
         fmt = fmt_raw if isinstance(fmt_raw, str) else ""
         br_raw = quality.get("beets_bitrate")
@@ -382,7 +395,7 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
         data["library_format"] = fmt
         data["library_min_bitrate"] = br
         data["library_rank"] = srv.compute_library_rank(fmt, br)
-        tracks = b.get_tracks_by_mb_release_id(release_id)
+        tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
     else:
@@ -455,18 +468,17 @@ def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
 
 def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release_id: str) -> None:
     srv = _server()
-    data = discogs_api.get_release(int(release_id))
-    data["in_library"] = bool(srv.check_beets_library([release_id]))
-    req = srv._db().get_request_by_mb_release_id(release_id)
-    if not req:
-        req = srv._db().get_request_by_discogs_release_id(release_id)
+    normalized_id = normalize_release_id(release_id) or release_id.strip()
+    data = discogs_api.get_release(int(normalized_id))
+    data["in_library"] = bool(srv.check_beets_library([normalized_id]))
+    req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
     b = srv._beets_db()
     if data["in_library"] and b:
-        beets_ids = b.get_album_ids_by_mbids([release_id])
-        data["beets_album_id"] = beets_ids.get(release_id)
-        quality = b.check_mbids_detail([release_id]).get(release_id) or {}
+        beets_ids = b.get_album_ids_by_mbids([normalized_id])
+        data["beets_album_id"] = beets_ids.get(normalized_id)
+        quality = b.check_mbids_detail([normalized_id]).get(normalized_id) or {}
         fmt_raw = quality.get("beets_format")
         fmt = fmt_raw if isinstance(fmt_raw, str) else ""
         br_raw = quality.get("beets_bitrate")
@@ -474,7 +486,7 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
         data["library_format"] = fmt
         data["library_min_bitrate"] = br
         data["library_rank"] = srv.compute_library_rank(fmt, br)
-        tracks = b.get_tracks_by_mb_release_id(release_id)
+        tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
     else:

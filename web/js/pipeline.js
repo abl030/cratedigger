@@ -173,7 +173,9 @@ export async function toggleDetail(elId, requestId) {
     if (req.mb_release_id) {
       const label = sourceLabel(req.mb_release_id);
       const url = externalReleaseUrl(req.mb_release_id);
-      html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${req.mb_release_id.slice(0,8)}...</a></span></div>`;
+      if (label && url) {
+        html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${req.mb_release_id.slice(0,8)}...</a></span></div>`;
+      }
     }
     if (req.imported_path) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Imported to</span><span class="p-detail-value" style="font-size:0.9em;">${esc(req.imported_path)}</span></div>`;

@@ -427,6 +427,27 @@ class TestFakePipelineDBDiscogs(unittest.TestCase):
         db.seed_request(make_request_row(id=1, discogs_release_id="12345"))
         self.assertIsNone(db.get_request_by_discogs_release_id("99999"))
 
+    def test_get_request_by_release_id_normalizes_uppercase_uuid(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        result = db.get_request_by_release_id("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")
+        assert result is not None
+        self.assertEqual(result["id"], 1)
+
+    def test_get_request_by_release_id_falls_back_to_legacy_numeric_mb_column(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            mb_release_id="12856590",
+            discogs_release_id=None,
+        ))
+        result = db.get_request_by_release_id("0012856590")
+        assert result is not None
+        self.assertEqual(result["id"], 1)
+
 
 class TestFakePipelineDBNewStubs(unittest.TestCase):
     """Self-tests for fake methods retroactively added under issue #140.

@@ -2716,7 +2716,7 @@ class TestDetectReleaseSource(unittest.TestCase):
     ]
 
     def test_detect_release_source(self):
-        from lib.quality import detect_release_source
+        from lib.release_identity import detect_release_source
         for desc, id_string, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(detect_release_source(id_string), expected)

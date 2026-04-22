@@ -4,8 +4,6 @@ import logging
 import os
 import re
 
-from lib.release_identity import ReleaseIdentity
-
 log = logging.getLogger("cratedigger-web")
 
 
@@ -37,22 +35,7 @@ def _find_pipeline_request_for_release(
     release_id = release_id.strip()
     if not release_id:
         return None
-
-    identity = ReleaseIdentity.from_fields(release_id)
-    if identity is None:
-        return None
-
-    if identity.source == "musicbrainz":
-        return db.get_request_by_mb_release_id(identity.release_id)
-
-    req = db.get_request_by_discogs_release_id(identity.release_id)
-    if req:
-        return req
-    req = db.get_request_by_mb_release_id(identity.release_id)
-    if req:
-        return req
-
-    return None
+    return db.get_request_by_release_id(release_id)
 
 
 def get_beets_search(h, params: dict[str, list[str]]) -> None:

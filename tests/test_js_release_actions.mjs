@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_release_actions.mjs
  */
 
-import { pipelineStore } from '../web/js/state.js';
+import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
 import { renderActionToolbar, renderRemoveFromBeetsButton } from '../web/js/release_actions.js';
 
 let passed = 0;
@@ -128,6 +128,19 @@ pipelineStore.set('rel-7', { status: 'wanted', id: 500 });
     pipeline_status: null, pipeline_id: null,
   });
   assertContains(html, 'window.disambRemove(500', 'pipelineStore overrides backend');
+}
+
+console.log('Acquire button — updatePipelineStatus normalizes UUID keys');
+clearStore();
+updatePipelineStatus(' AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA ', 'wanted', 700);
+{
+  const html = renderActionToolbar({
+    id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    in_library: false,
+    pipeline_status: null,
+    pipeline_id: null,
+  });
+  assertContains(html, 'window.disambRemove(700', 'normalized store key overrides backend');
 }
 
 console.log('Remove from beets — apostrophes stay JS-safe inside onclick');

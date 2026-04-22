@@ -348,6 +348,21 @@ class TestLocate(unittest.TestCase):
             set(loc.selectors),
             {"discogs_albumid:5555555", "mb_albumid:5555555"})
 
+    def test_locate_normalizes_uuid_and_discogs_inputs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            uuid_loc = db.locate(" AAA0BBB0-CCCC-DDDD-EEEE-FFFFFFFFFFFF ")
+            discogs_loc = db.locate(" 0012856590 ")
+        self.assertEqual(uuid_loc.kind, "exact")
+        self.assertEqual(uuid_loc.album_id, 1)
+        self.assertEqual(
+            uuid_loc.selectors,
+            ("mb_albumid:aaa0bbb0-cccc-dddd-eeee-ffffffffffff",))
+        self.assertEqual(discogs_loc.kind, "exact")
+        self.assertEqual(discogs_loc.album_id, 2)
+        self.assertEqual(
+            set(discogs_loc.selectors),
+            {"discogs_albumid:12856590", "mb_albumid:12856590"})
+
     def test_locate_absent(self) -> None:
         """No ID hit + no artist/album → absent with empty selectors."""
         with BeetsDB(self.db_path) as db:
@@ -554,6 +569,10 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
             {"bitrate": 320000, "path": "/m/l/01.mp3", "format": "MP3",
              "samplerate": 44100, "bitdepth": 0},
         ])
+        _insert_album_full(self.db_path, 5, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [
+            {"bitrate": 320000, "path": "/m/u/01.mp3", "format": "MP3",
+             "samplerate": 44100, "bitdepth": 0},
+        ])
 
     def test_resolves_mixed_batch(self) -> None:
         with BeetsDB(self.db_path) as db:
@@ -562,6 +581,15 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
         self.assertEqual(result, {
             "aaa-111": 1, "bbb-222": 2,
             "12856590": 3, "5555555": 4,
+        })
+
+    def test_resolves_normalized_batch_inputs(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            result = db._batch_lookup_album_ids(
+                [" AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA ", "0012856590"])
+        self.assertEqual(result, {
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": 5,
+            "12856590": 3,
         })
 
     def test_uses_at_most_two_queries(self) -> None:
@@ -1387,6 +1415,26 @@ class TestAlbumRowSource(unittest.TestCase):
         self.assertEqual(len(discogs), 1)
         self.assertEqual(discogs[0]["source"], "discogs")
         self.assertEqual(discogs[0]["discogs_albumid"], "67890")
+
+    def test_discogs_zero_sentinel_normalized_away(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO albums (id, mb_albumid, album, albumartist, discogs_albumid) "
+            "VALUES (3, '', 'Unknown Album', 'Artist', 0)"
+        )
+        conn.execute(
+            "INSERT INTO items (album_id, bitrate, path) VALUES (3, 192000, X'2F632E6D7033')"
+        )
+        conn.commit()
+        conn.close()
+
+        with BeetsDB(self.db_path) as db:
+            albums = db.get_albums_by_artist("Artist")
+        unknown = [a for a in albums if a["album"] == "Unknown Album"]
+        self.assertEqual(len(unknown), 1)
+        self.assertIsNone(unknown[0]["mb_albumid"])
+        self.assertIsNone(unknown[0]["discogs_albumid"])
+        self.assertEqual(unknown[0]["source"], "unknown")
 
 
 if __name__ == "__main__":

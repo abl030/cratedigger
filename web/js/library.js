@@ -205,7 +205,9 @@ export async function toggleLibDetail(id) {
     if (releaseId) {
       const label = sourceLabel(releaseId);
       const url = externalReleaseUrl(releaseId);
-      html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${releaseId.slice(0,8)}...</a></span></div>`;
+      if (label && url) {
+        html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${releaseId.slice(0,8)}...</a></span></div>`;
+      }
     }
     if (data.label) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(data.label)}</span></div>`;
@@ -331,7 +333,8 @@ export async function banSource(requestId, username, mbid) {
  */
 export async function setLibQuality(mbid, status, minBitrate, detailId) {
   try {
-    const body = {mb_release_id: mbid};
+    const releaseId = normalizeReleaseId(mbid) || mbid;
+    const body = {mb_release_id: releaseId};
     if (status) body.status = status;
     if (minBitrate != null) body.min_bitrate = minBitrate;
     const r = await fetch(`${API}/api/pipeline/set-quality`, {
@@ -363,20 +366,21 @@ export async function setLibQuality(mbid, status, minBitrate, detailId) {
  * @param {HTMLButtonElement} btn
  */
 export async function upgradeAlbum(mbid, btn) {
+  const releaseId = normalizeReleaseId(mbid) || mbid;
   btn.disabled = true;
   btn.textContent = 'Queuing...';
   try {
     const r = await fetch(`${API}/api/pipeline/upgrade`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mb_release_id: mbid}),
+      body: JSON.stringify({mb_release_id: releaseId}),
     });
     const data = await r.json();
     if (data.status === 'upgrade_queued') {
       btn.textContent = 'Queued';
       btn.style.borderColor = '#6a9';
       btn.style.color = '#6a9';
-      updatePipelineStatus(mbid, 'wanted', data.id);
+      updatePipelineStatus(releaseId, 'wanted', data.id);
       const br = data.min_bitrate ? ` from ${data.min_bitrate}kbps` : '';
       const tiers = data.search_filetype_override || 'default';
       toast(`Upgrade queued${br} — searching ${tiers}`);

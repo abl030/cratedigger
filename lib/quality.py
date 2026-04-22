@@ -12,14 +12,9 @@ from enum import IntEnum, StrEnum
 from typing import Any, Literal, Optional
 
 import msgspec
-from lib.release_identity import detect_release_source as _detect_release_source
 
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
 QUALITY_LOSSLESS = "lossless"
-
-def detect_release_source(id_str: str) -> Literal["musicbrainz", "discogs", "unknown"]:
-    """Backward-compatible alias for the shared release-identity seam."""
-    return _detect_release_source(id_str)
 
 # Deprecated aliases — keep for old code that references them
 QUALITY_FLAC_ONLY = QUALITY_LOSSLESS

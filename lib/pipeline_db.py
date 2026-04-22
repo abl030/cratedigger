@@ -21,6 +21,7 @@ import psycopg2
 import psycopg2.extras
 
 from lib.quality import CooldownConfig, SpectralMeasurement, should_cooldown
+from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
 
@@ -228,6 +229,31 @@ class PipelineDB:
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def get_request_by_release_id(self, release_id: object | None) -> dict[str, Any] | None:
+        """Resolve a pipeline row through the shared exact-release seam.
+
+        - MB UUIDs query ``mb_release_id``.
+        - Discogs numerics prefer ``discogs_release_id`` and then fall back to
+          ``mb_release_id`` for legacy rows that stored the numeric there.
+        - Unknown non-empty strings fall back to ``mb_release_id`` so tests and
+          synthetic/manual fixture IDs still round-trip without special casing.
+        """
+        normalized = normalize_release_id(release_id)
+        if not normalized:
+            return None
+
+        identity = ReleaseIdentity.from_fields(normalized)
+        if identity is None:
+            return self.get_request_by_mb_release_id(normalized)
+
+        if identity.source == "musicbrainz":
+            return self.get_request_by_mb_release_id(identity.release_id)
+
+        req = self.get_request_by_discogs_release_id(identity.release_id)
+        if req:
+            return req
+        return self.get_request_by_mb_release_id(identity.release_id)
 
     def delete_request(self, request_id):
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))

@@ -188,6 +188,8 @@ function renderLatestImport(d) {
 function renderGroup(g) {
   const groupId = `wm-group-${g.request_id}`;
   const count = g.pending_count || (g.entries ? g.entries.length : 0);
+  const externalUrl = g.mb_release_id ? externalReleaseUrl(g.mb_release_id) : '';
+  const releaseLabel = g.mb_release_id ? sourceLabel(g.mb_release_id) : '';
   const libBadge = g.in_library
     ? '<span class="badge" style="background:#2a4a2a;color:#6d6;">in library</span>'
     : '';
@@ -208,7 +210,7 @@ function renderGroup(g) {
         ${renderQualityBadges(g)}
       </div>
       <div class="p-meta">
-        ${g.mb_release_id ? `<span>${sourceLabel(g.mb_release_id)}: <a href="${externalReleaseUrl(g.mb_release_id)}" target="_blank" style="color:#6af;" onclick="event.stopPropagation();">${esc(g.mb_release_id)}</a></span>` : ''}
+        ${g.mb_release_id && externalUrl && releaseLabel ? `<span>${releaseLabel}: <a href="${externalUrl}" target="_blank" style="color:#6af;" onclick="event.stopPropagation();">${esc(g.mb_release_id)}</a></span>` : ''}
       </div>
     </div>`;
 
