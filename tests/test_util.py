@@ -130,6 +130,7 @@ class TestMoveFailedImport(unittest.TestCase):
         assert result is not None
         self.assertNotIn("bad_files", result)
 
+
 class TestRepairMp3Headers(unittest.TestCase):
 
     def test_calls_mp3val_on_mp3_files(self):

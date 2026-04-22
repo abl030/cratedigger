@@ -819,6 +819,46 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             self.assertEqual(files[0].import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
+    @patch("lib.download.music_tag")
+    def test_resumes_multi_disc_from_persisted_current_path(self, mock_mt):
+        """Resume must preserve the staged multi-disc filenames on disk."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
+            os.makedirs(resumed_path)
+            resumed_file = os.path.join(resumed_path, "Disk 2 - 01 - Track.flac")
+            with open(resumed_file, "w") as f:
+                f.write("fake audio")
+
+            file = make_download_file(
+                filename="user1\\CD2\\01 - Track.flac",
+                file_dir="user1\\CD2",
+                size=len("fake audio"),
+            )
+            file.disk_no = 2
+            file.disk_count = 2
+            album = make_grab_list_entry(
+                files=[file],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_validation_enabled = False
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertEqual(file.import_path, resumed_file)
+            self.assertTrue(os.path.exists(resumed_file))
+
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
         from lib.download import process_completed_album

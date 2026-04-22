@@ -438,11 +438,12 @@ def _materialize_processing_dir(
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
         staged_album.bind_import_paths(album_data.files)
-        missing_paths = [
-            file.import_path
-            for file in album_data.files
-            if file.import_path is not None and not os.path.isfile(file.import_path)
-        ]
+        missing_paths: list[str] = []
+        for file in album_data.files:
+            import_path = file.import_path
+            assert import_path is not None
+            if not os.path.isfile(import_path):
+                missing_paths.append(import_path)
         if missing_paths:
             logger.error(
                 "Current staged path is missing tracked files: %s",
@@ -611,7 +612,7 @@ def _process_beets_validation(album_data: GrabListEntry,
         return _handle_valid_result(
             album_data, bv_result, staged_album, ctx)
     _handle_rejected_result(
-        album_data, bv_result, current_path, ctx)
+        album_data, bv_result, staged_album, ctx)
     return None
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          staged_album: StagedAlbum,
@@ -627,16 +628,17 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     contention path.
 
     This function acquires the RELEASE advisory lock outer for the
-    auto-import path *before* the staged move runs, so contention
-    leaves files in their slskd-download location and the next
-    cycle's resume guard in ``process_completed_album`` can
-    idempotently re-enter. Redownload paths don't take the lock —
-    they stage-and-mark-done without running the harness, so no
-    cross-process race applies.
+    auto-import path *before* ``StagedAlbum.move_to`` runs, so
+    contention is a true no-op: files stay at their current local
+    processing path, ``active_download_state.current_path`` stays
+    unchanged, and the next cycle can idempotently re-enter without
+    any extra filesystem churn. Redownload paths don't take the lock
+    — they just move into staging and mark done, so no cross-process
+    race applies.
 
     See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
-    and contention behaviour (including the staged-move rationale
-    for acquiring at this level rather than inside
+    and contention behaviour (including the staged-move rationale for
+    acquiring at this level rather than inside
     ``dispatch_import_core``).
     """
     from contextlib import nullcontext
@@ -707,7 +709,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 f"AUTO-IMPORT DEFERRED: {album_data.artist} - "
                 f"{album_data.title} — release lock held by another "
                 f"process (mbid={album_data.mb_release_id}); skipping "
-                "the staged move and dispatch. Files stay at "
+                "staged move and dispatch. Files stay at "
                 f"{staged_album.current_path} so the next cycle can "
                 "idempotently resume from process_completed_album.")
             return DispatchOutcome(
@@ -780,10 +782,15 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
-                            import_folder_fullpath: str,
+                            staged_album: StagedAlbum,
                             ctx: CratediggerContext) -> None:
     """Handle a rejected beets validation result."""
-    failed_dest = move_failed_import(import_folder_fullpath, scenario=bv_result.scenario)
+    failed_dest = move_failed_import(
+        staged_album.current_path,
+        scenario=bv_result.scenario,
+    )
+    if failed_dest is not None:
+        staged_album.current_path = failed_dest
     bv_result.failed_path = failed_dest
     log_validation_result(album_data, bv_result, ctx.cfg)
     usernames = set(f.username for f in album_data.files)
@@ -893,7 +900,11 @@ def build_active_download_state(
         last_progress_at=last_progress_at or enqueued_at_value,
         files=files,
         processing_started_at=processing_started_at,
-        current_path=current_path or entry.import_folder,
+        current_path=(
+            current_path
+            if current_path is not None
+            else entry.import_folder
+        ),
     )
 
 
