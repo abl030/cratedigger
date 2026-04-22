@@ -16,6 +16,11 @@ from typing import Any, Callable, TYPE_CHECKING
 
 import music_tag
 
+from lib.download_recovery import (
+    canonical_processing_path,
+    classify_processing_path,
+    resolve_missing_current_path,
+)
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, ValidationResult,
@@ -29,8 +34,7 @@ from lib.import_dispatch import (DispatchOutcome, _build_download_info,
 from lib.staged_album import (StagedAlbum, stage_to_ai_path,
                               stage_to_ai_root)
 from lib.transitions import apply_transition
-from lib.util import (sanitize_folder_name, move_failed_import,
-                      log_validation_result)
+from lib.util import move_failed_import, log_validation_result
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -270,9 +274,12 @@ def _canonical_import_folder_path_from_metadata(
     slskd_download_dir: str,
 ) -> str:
     """Return the canonical local processing directory for a completed album."""
-    import_folder_name = sanitize_folder_name(
-        f"{artist} - {title} ({year})")
-    return os.path.join(slskd_download_dir, import_folder_name)
+    return canonical_processing_path(
+        artist=artist,
+        title=title,
+        year=year,
+        slskd_download_dir=slskd_download_dir,
+    )
 
 
 def _canonical_import_folder_path(
@@ -423,18 +430,6 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 # === Download completion processing ===
 
-def _path_is_within(path: str, root: str) -> bool:
-    """Return True when ``path`` is located under ``root``."""
-    if not root:
-        return False
-    abs_path = os.path.realpath(path)
-    abs_root = os.path.realpath(root)
-    try:
-        return os.path.commonpath([abs_path, abs_root]) == abs_root
-    except ValueError:
-        return False
-
-
 def _directory_has_entries(path: str) -> bool:
     """Return True when ``path`` exists and contains at least one entry."""
     if not os.path.isdir(path):
@@ -458,32 +453,6 @@ def _log_post_move_resume_blocked(
         current_path,
         detail,
     )
-
-
-def _is_auto_import_staged_path(path: str, staging_dir: str) -> bool:
-    return _path_is_within(
-        path,
-        stage_to_ai_root(staging_dir=staging_dir, auto_import=True),
-    )
-
-
-def _is_legacy_shared_staged_path(
-    path: str,
-    *,
-    artist: str,
-    title: str,
-    staging_dir: str,
-) -> bool:
-    return _path_is_within(
-        path,
-        stage_to_ai_path(
-            artist=artist,
-            title=title,
-            staging_dir=staging_dir,
-        ),
-    )
-
-
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -494,22 +463,28 @@ def _materialize_processing_dir(
         album_data, ctx.cfg.slskd_download_dir)
     db = (ctx.pipeline_db_source._get_db()
           if ctx.pipeline_db_source is not None else None)
+    current_path_location = classify_processing_path(
+        current_path=staged_album.current_path,
+        artist=album_data.artist,
+        title=album_data.title,
+        year=album_data.year,
+        request_id=album_data.db_request_id or 0,
+        staging_dir=ctx.cfg.beets_staging_dir,
+        slskd_download_dir=ctx.cfg.slskd_download_dir,
+    )
 
-    if os.path.realpath(staged_album.current_path) != os.path.realpath(canonical_path):
-        is_auto_import_staged_retry = _is_auto_import_staged_path(
-            staged_album.current_path,
-            ctx.cfg.beets_staging_dir,
-        )
+    if current_path_location.kind != "canonical":
         if not os.path.isdir(staged_album.current_path):
-            if is_auto_import_staged_retry:
+            if current_path_location.blocks_post_move_retry:
                 _log_post_move_resume_blocked(
                     album_data,
                     current_path=staged_album.current_path,
                     detail=(
-                        "already lives under the auto-import staging root but "
-                        "the directory is missing. Automatic retry is disabled "
-                        "because beets may already have consumed the staged "
-                        "folder; manual recovery is required."
+                        "already lives at the request-scoped auto-import "
+                        "staged path but the directory is missing. "
+                        "Automatic retry is disabled because beets may "
+                        "already have consumed the staged folder; manual "
+                        "recovery is required."
                     ),
                 )
                 return None
@@ -523,13 +498,13 @@ def _materialize_processing_dir(
             if not os.path.isfile(import_path):
                 missing_paths.append(import_path)
         if missing_paths:
-            if is_auto_import_staged_retry:
+            if current_path_location.blocks_post_move_retry:
                 _log_post_move_resume_blocked(
                     album_data,
                     current_path=staged_album.current_path,
                     detail=(
-                        "already lives under the auto-import staging root but "
-                        f"tracked files are missing ({', '.join(missing_paths)}). "
+                        "already lives at the request-scoped auto-import "
+                        f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
                         "Automatic retry is disabled because import may "
                         "already have started; manual recovery is required."
                     ),
@@ -540,14 +515,14 @@ def _materialize_processing_dir(
                 ", ".join(missing_paths),
             )
             return False
-        if is_auto_import_staged_retry:
+        if current_path_location.blocks_post_move_retry:
             _log_post_move_resume_blocked(
                 album_data,
                 current_path=staged_album.current_path,
                 detail=(
-                    "already lives under the auto-import staging root. "
-                    "Automatic retry is disabled to avoid duplicate import; "
-                    "manual recovery is required."
+                    "already lives at the request-scoped auto-import staged "
+                    "path. Automatic retry is disabled to avoid duplicate "
+                    "import; manual recovery is required."
                 ),
             )
             return None
@@ -751,6 +726,15 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     wants_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
+    current_path_location = classify_processing_path(
+        current_path=staged_album.current_path,
+        artist=album_data.artist,
+        title=album_data.title,
+        year=album_data.year,
+        request_id=request_id or 0,
+        staging_dir=ctx.cfg.beets_staging_dir,
+        slskd_download_dir=ctx.cfg.slskd_download_dir,
+    )
 
     if wants_auto_import and not album_data.mb_release_id:
         detail = "Request auto-import requires a MusicBrainz release ID"
@@ -797,24 +781,13 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
     if (
         will_auto_import
-        and (
-            _is_auto_import_staged_path(
-                staged_album.current_path,
-                ctx.cfg.beets_staging_dir,
-            )
-            or _is_legacy_shared_staged_path(
-                staged_album.current_path,
-                artist=album_data.artist,
-                title=album_data.title,
-                staging_dir=ctx.cfg.beets_staging_dir,
-            )
-        )
+        and current_path_location.blocks_auto_import_dispatch
     ):
         _log_post_move_resume_blocked(
             album_data,
             current_path=staged_album.current_path,
             detail=(
-                "already lives under beets staging on the auto-import path. "
+                f"already lives at the {current_path_location.display_name}. "
                 "Automatic retry is disabled to avoid duplicate import; "
                 "manual recovery is required."
             ),
@@ -1443,51 +1416,19 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_json(raw_state)
         fallback_current_path = None
         if state.current_path is None and state.processing_started_at is not None:
-            canonical_fallback = _canonical_import_folder_path_from_metadata(
+            recovery_decision = resolve_missing_current_path(
                 artist=row["artist_name"],
                 title=row["album_title"],
                 year=str(row["year"] or ""),
-                slskd_download_dir=ctx.cfg.slskd_download_dir,
-            )
-            request_scoped_staged_candidates = [
-                (
-                    "auto-import",
-                    stage_to_ai_path(
-                        artist=row["artist_name"],
-                        title=row["album_title"],
-                        staging_dir=ctx.cfg.beets_staging_dir,
-                        request_id=request_id,
-                        auto_import=True,
-                    ),
-                ),
-                (
-                    "post-validation",
-                    stage_to_ai_path(
-                        artist=row["artist_name"],
-                        title=row["album_title"],
-                        staging_dir=ctx.cfg.beets_staging_dir,
-                        request_id=request_id,
-                        auto_import=False,
-                    ),
-                ),
-            ]
-            staged_fallback = stage_to_ai_path(
-                artist=row["artist_name"],
-                title=row["album_title"],
+                request_id=request_id,
                 staging_dir=ctx.cfg.beets_staging_dir,
+                slskd_download_dir=ctx.cfg.slskd_download_dir,
+                has_entries=_directory_has_entries,
             )
-            populated_candidates: list[tuple[str, str]] = []
-            if _directory_has_entries(canonical_fallback):
-                populated_candidates.append(("canonical", canonical_fallback))
-            for label, candidate in request_scoped_staged_candidates:
-                if _directory_has_entries(candidate):
-                    populated_candidates.append((label, candidate))
-            if _directory_has_entries(staged_fallback):
-                populated_candidates.append(("legacy-shared", staged_fallback))
-
-            if len(populated_candidates) > 1:
+            if recovery_decision.blocked_reason == "multiple_populated_paths":
                 rendered_candidates = ", ".join(
-                    f"{label}={path}" for label, path in populated_candidates
+                    f"{location.short_label}={location.path}"
+                    for location in recovery_decision.populated_locations
                 )
                 logger.error(
                     "MID-PROCESS RESUME BLOCKED: request_id=%s %s - %s "
@@ -1499,24 +1440,21 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                     rendered_candidates,
                 )
                 continue
-            if len(populated_candidates) == 1:
-                candidate_label, candidate_path = populated_candidates[0]
-                if candidate_label == "legacy-shared":
-                    logger.error(
-                        "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
-                        "current_path is missing, canonical_path=%s has no files, "
-                        "and staged_path=%s is ambiguous across editions. "
-                        "Manual recovery is required.",
-                        request_id,
-                        row["artist_name"],
-                        row["album_title"],
-                        canonical_fallback,
-                        staged_fallback,
-                    )
-                    continue
-                fallback_current_path = candidate_path
-            else:
-                fallback_current_path = canonical_fallback
+            if recovery_decision.blocked_reason == "legacy_shared_only":
+                logger.error(
+                    "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
+                    "current_path is missing, canonical_path=%s has no files, "
+                    "and staged_path=%s is ambiguous across editions. "
+                    "Manual recovery is required.",
+                    request_id,
+                    row["artist_name"],
+                    row["album_title"],
+                    recovery_decision.canonical_path,
+                    recovery_decision.legacy_shared_path,
+                )
+                continue
+            assert recovery_decision.selected_location is not None
+            fallback_current_path = recovery_decision.selected_location.path
             state.current_path = fallback_current_path
         entry = reconstruct_grab_list_entry(
             row,

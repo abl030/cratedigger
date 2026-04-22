@@ -13,6 +13,8 @@ from typing import Any, Literal, Optional
 
 import msgspec
 
+from lib.download_recovery import classify_processing_path
+
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
 QUALITY_LOSSLESS = "lossless"
 
@@ -3056,6 +3058,8 @@ def find_orphaned_downloads(
     active_transfers: set[tuple[str, str]],
     *,
     existing_local_paths: set[str] | None = None,
+    staging_dir: str | None = None,
+    slskd_download_dir: str | None = None,
 ) -> list[OrphanInfo]:
     """Detect downloading rows whose slskd transfers no longer exist. Pure — no I/O.
 
@@ -3065,6 +3069,10 @@ def find_orphaned_downloads(
         existing_local_paths: optional set of persisted ``current_path`` values
             that still exist on disk, supplied by the caller when local
             filesystem visibility is available.
+        staging_dir: optional staging root for classifying persisted
+            ``current_path`` values in repair output.
+        slskd_download_dir: optional download root for classifying persisted
+            ``current_path`` values in repair output.
 
     Returns OrphanInfo for each downloading row where NONE of its files
     appear in active_transfers, plus ``blocked_post_move`` when a row is
@@ -3094,10 +3102,24 @@ def find_orphaned_downloads(
                 and existing_local_paths is not None
                 and current_path not in existing_local_paths
             ):
+                path_detail = "processing path"
+                if staging_dir and slskd_download_dir:
+                    path_detail = classify_processing_path(
+                        current_path=current_path,
+                        artist=str(row.get("artist_name") or ""),
+                        title=str(row.get("album_title") or ""),
+                        year=str(row.get("year") or ""),
+                        request_id=int(row["id"]),
+                        staging_dir=staging_dir,
+                        slskd_download_dir=slskd_download_dir,
+                    ).display_name
                 issues.append(OrphanInfo(
                     request_id=row["id"],
                     issue_type="blocked_post_move",
-                    detail=f"persisted current_path missing after local processing: {current_path}",
+                    detail=(
+                        f"persisted {path_detail} missing after local processing: "
+                        f"{current_path}"
+                    ),
                 ))
             # Local processing continues after slskd has finished, so
             # transferless rows in this phase are not ordinary orphans.
