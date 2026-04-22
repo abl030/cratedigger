@@ -134,13 +134,18 @@ class TestFindOrphanedDownloads(unittest.TestCase):
 
     def test_skips_local_processing_rows_without_active_transfers(self):
         """Rows already in local processing are not orphaned downloads."""
+        current_path = "/tmp/staging/auto-import/Test/Album [request-1]"
         rows = [{"id": 1, "status": "downloading",
                  "active_download_state": {
                      "filetype": "flac",
                      "processing_started_at": "2026-04-22T00:00:00+00:00",
-                     "current_path": "/tmp/staging/auto-import/Test/Album [request-1]",
+                     "current_path": current_path,
                      "files": [{"username": "user1", "filename": "track.flac"}]}}]
-        issues = find_orphaned_downloads(rows, set())
+        issues = find_orphaned_downloads(
+            rows,
+            set(),
+            existing_local_paths={current_path},
+        )
         self.assertEqual(len(issues), 0)
 
     def test_processing_started_without_current_path_is_still_orphaned(self):
@@ -154,12 +159,33 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].issue_type, "orphaned_download")
 
+    def test_reports_missing_local_processing_path_for_manual_review(self):
+        """Blocked post-move rows should be surfaced to repair tooling."""
+        rows = [{"id": 1, "status": "downloading",
+                 "active_download_state": {
+                     "filetype": "flac",
+                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                     "current_path": "/tmp/staging/auto-import/Test/Album [request-1]",
+                     "files": [{"username": "user1", "filename": "track.flac"}]}}]
+        issues = find_orphaned_downloads(rows, set(), existing_local_paths=set())
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].issue_type, "blocked_post_move")
+
     def test_suggest_repair_orphaned(self):
         """Orphaned download should suggest reset_to_wanted."""
         issue = OrphanInfo(request_id=1, issue_type="orphaned_download",
                            detail="transfers gone")
         action = suggest_repair(issue)
         self.assertEqual(action.action, "reset_to_wanted")
+
+    def test_suggest_repair_blocked_post_move(self):
+        issue = OrphanInfo(
+            request_id=1,
+            issue_type="blocked_post_move",
+            detail="missing staged path",
+        )
+        action = suggest_repair(issue)
+        self.assertEqual(action.action, "manual_review")
 
 
 class TestSuggestRepair(unittest.TestCase):
