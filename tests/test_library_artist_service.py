@@ -48,12 +48,12 @@ def _beets_album(**overrides: object) -> dict[str, object]:
 class _StubLibraryLookup:
     def __init__(self, albums: list[dict[str, object]]) -> None:
         self._albums = albums
-        self.calls: list[tuple[str, str | None]] = []
+        self.calls: list[tuple[str, str]] = []
 
     def get_library_artist(
         self,
         artist_name: str,
-        mb_artist_id: str | None = None,
+        mb_artist_id: str = "",
     ) -> list[dict[str, object]]:
         self.calls.append((artist_name, mb_artist_id))
         return list(self._albums)
@@ -99,6 +99,23 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].pipeline_id, 42)
         self.assertFalse(rows[0].in_library)
         self.assertTrue(rows[0].upgrade_queued)
+
+    def test_list_library_artist_rows_allows_missing_pipeline_db(self) -> None:
+        lookup = _StubLibraryLookup([_beets_album()])
+
+        rows = list_library_artist_rows(
+            library_lookup=lookup,
+            pipeline_db=None,
+            artist_name="Test Artist",
+            mb_artist_id=ARTIST_ID,
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(lookup.calls, [("Test Artist", ARTIST_ID)])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].id, 7)
+        self.assertTrue(rows[0].in_library)
+        self.assertIsNone(rows[0].pipeline_id)
 
     def test_build_library_artist_rows_overlays_pipeline_state_on_beets_row(self) -> None:
         rows = build_library_artist_rows(

@@ -103,12 +103,15 @@ def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dic
     return b.check_mbids_detail([str(m) for m in mbids]) if b else {}
 
 
-def get_library_artist(artist_name, mb_artist_id=None):
+def get_library_artist(
+    artist_name: str,
+    mb_artist_id: str = "",
+) -> list[dict[str, object]]:
     """Get albums by an artist from the beets library."""
     b = _beets_db()
     if not b:
         return []
-    return b.get_albums_by_artist(artist_name, mb_artist_id or "")
+    return b.get_albums_by_artist(artist_name, mb_artist_id)
 
 
 def check_pipeline(mbids):

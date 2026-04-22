@@ -32,7 +32,7 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, object]]:
         ...
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
@@ -77,10 +77,9 @@ def _request_id(row: Mapping[str, object]) -> int:
     raw = row["id"]
     if isinstance(raw, int):
         return raw
-    if isinstance(raw, str):
-        return int(raw)
     raise TypeError(
-        "Pipeline request rows for /api/library/artist must carry an int id"
+        "Pipeline request rows for /api/library/artist must carry an int id, "
+        f"got {type(raw).__name__}"
     )
 
 
@@ -134,17 +133,17 @@ def list_library_artist_rows(
 ) -> list[LibraryAlbumRow]:
     """Load and shape `/api/library/artist` rows for one artist."""
     library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
-    pipeline_rows = (
-        pipeline_db.list_requests_by_artist(artist_name, mb_artist_id)
-        if pipeline_db is not None
-        else []
-    )
+    if pipeline_db is None:
+        return build_library_artist_rows(
+            library_albums=library_albums,
+            pipeline_rows=[],
+            track_counts={},
+            rank_fn=rank_fn,
+        )
+
+    pipeline_rows = pipeline_db.list_requests_by_artist(artist_name, mb_artist_id)
     request_ids = [_request_id(row) for row in pipeline_rows]
-    track_counts = (
-        pipeline_db.get_track_counts(request_ids)
-        if request_ids and pipeline_db is not None
-        else {}
-    )
+    track_counts = pipeline_db.get_track_counts(request_ids) if request_ids else {}
     return build_library_artist_rows(
         library_albums=library_albums,
         pipeline_rows=pipeline_rows,
