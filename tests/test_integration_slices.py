@@ -1729,15 +1729,6 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         ))
 
         from tests.helpers import make_ctx_with_fake_db
-        cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-            beets_distance_threshold=0.15,
-            beets_staging_dir=os.path.join(
-                tempfile.gettempdir(),
-                "unused-beets-staging",
-            ),
-        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             processing_dir = os.path.join(tmpdir, "processing")

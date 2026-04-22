@@ -819,6 +819,59 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             self.assertEqual(files[0].import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
+    def test_returns_false_when_persisted_current_path_missing_dir(self):
+        """Resume must fail closed when the persisted directory no longer exists."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+            )
+            album.import_folder = os.path.join(tmpdir, "missing")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_validation_enabled = False
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertFalse(result)
+
+    def test_returns_false_when_persisted_current_path_missing_file(self):
+        """Resume dir must contain every tracked file before processing continues."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
+            os.makedirs(resumed_path)
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_validation_enabled = False
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertFalse(result)
+
 
 class TestResolveSlskdLocalPath(unittest.TestCase):
     """Pure tests for the slskd on-disk path resolution helper.
@@ -1788,6 +1841,54 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         entry = mock_process.call_args[0][0]
         self.assertEqual(entry.import_folder, current_path)
+
+    @patch("lib.download.process_completed_album")
+    def test_poll_legacy_processing_row_uses_canonical_fallback(self, mock_process):
+        """Legacy mid-processing rows without current_path still resume canonically."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": _utc_now_iso(),
+            "processing_started_at": _utc_now_iso(),
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ],
+        })
+        ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+        cfg = cast(Any, ctx.cfg)
+        cfg.slskd_download_dir = "/tmp/downloads"
+
+        mock_process.return_value = True
+        poll_active_downloads(ctx)
+
+        entry = mock_process.call_args[0][0]
+        self.assertEqual(
+            entry.import_folder,
+            "/tmp/downloads/Test Artist - Test Album (2020)",
+        )
+
+    def test_poll_missing_persisted_current_path_resets_to_wanted(self):
+        """Missing persisted staging dirs should fail closed back to wanted."""
+        from lib.download import poll_active_downloads
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": os.path.join(tmpdir, "missing"),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "wanted")
+            self.assertIn((1, "wanted"), fake_db.status_history)
 
     @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):

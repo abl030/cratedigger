@@ -27,7 +27,8 @@ import cratedigger
 from lib.beets import beets_validate
 from lib.grab_list import GrabListEntry
 from lib.quality import ValidationResult
-from lib.util import stage_to_ai, log_validation_result, sanitize_folder_name
+from lib.staged_album import StagedAlbum, stage_to_ai_path
+from lib.util import log_validation_result, sanitize_folder_name
 
 
 def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
@@ -441,8 +442,8 @@ def _make_album_data(**overrides):
     return GrabListEntry(**defaults)  # type: ignore[arg-type]
 
 
-class TestStageToAi(unittest.TestCase):
-    """Test stage_to_ai() function."""
+class TestStagedAlbumMoveTo(unittest.TestCase):
+    """Test staging-path construction plus directory move semantics."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -461,7 +462,13 @@ class TestStageToAi(unittest.TestCase):
             open(os.path.join(source, name), "w").close()
 
         album_data = _make_album_data(artist="Test Artist", title="Test Album")
-        dest = stage_to_ai(album_data, source, staging)
+        dest = stage_to_ai_path(
+            artist=album_data.artist,
+            title=album_data.title,
+            staging_dir=staging,
+        )
+        staged_album = StagedAlbum(current_path=source)
+        staged_album.move_to(dest)
 
         self.assertEqual(dest, os.path.join(staging, "Test Artist", "Test Album"))
         self.assertTrue(os.path.exists(os.path.join(dest, "01 - Track.flac")))
@@ -477,7 +484,12 @@ class TestStageToAi(unittest.TestCase):
         open(os.path.join(source, "track.flac"), "w").close()
 
         album_data = _make_album_data(artist="Artist", title="Album")
-        stage_to_ai(album_data, source, staging)
+        dest = stage_to_ai_path(
+            artist=album_data.artist,
+            title=album_data.title,
+            staging_dir=staging,
+        )
+        StagedAlbum(current_path=source).move_to(dest)
 
         self.assertFalse(os.path.exists(source))
 
@@ -490,7 +502,12 @@ class TestStageToAi(unittest.TestCase):
         open(os.path.join(source, "track.flac"), "w").close()
 
         album_data = _make_album_data(artist='Test: "Artist"', title="Album/Title?")
-        dest = stage_to_ai(album_data, source, staging)
+        dest = stage_to_ai_path(
+            artist=album_data.artist,
+            title=album_data.title,
+            staging_dir=staging,
+        )
+        StagedAlbum(current_path=source).move_to(dest)
 
         # sanitize_folder_name removes <>:"/\|?*
         self.assertNotIn(":", os.path.basename(os.path.dirname(dest)))

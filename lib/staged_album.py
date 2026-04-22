@@ -30,6 +30,15 @@ def staged_filename(file: "DownloadFile") -> str:
     return filename
 
 
+def stage_to_ai_path(*, artist: str, title: str, staging_dir: str) -> str:
+    """Return the beets staging destination for an album."""
+    from lib.util import sanitize_folder_name
+
+    artist_dir = sanitize_folder_name(artist)
+    album_dir = sanitize_folder_name(title)
+    return os.path.join(staging_dir, artist_dir, album_dir)
+
+
 @dataclass
 class StagedAlbum:
     """Album directory whose current location is owned explicitly."""
