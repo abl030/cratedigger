@@ -1,27 +1,12 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
 import re
+from typing import assert_never
 
 
 def _server():
     from web import server
     return server
-
-
-def _find_pipeline_request_for_release(
-    pipeline_id: int | None,
-    release_id: str,
-) -> dict | None:
-    """Resolve one pipeline row through the shared library lookup seam."""
-    from lib.library_delete_service import resolve_pipeline_request
-
-    srv = _server()
-    return resolve_pipeline_request(
-        srv.db,
-        pipeline_id=pipeline_id,
-        release_id=release_id,
-    )
-
 
 def get_beets_search(h, params: dict[str, list[str]]) -> None:
     q = params.get("q", [""])[0].strip()
@@ -38,6 +23,8 @@ def get_beets_search(h, params: dict[str, list[str]]) -> None:
 
 
 def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
+    from lib.library_delete_service import resolve_pipeline_request
+
     album_id = int(album_id_str)
     b = _server()._beets_db()
     if not b:
@@ -52,7 +39,11 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
     mb_id = detail.get("mb_albumid")
     srv = _server()
     if mb_id and srv.db:
-        req = _find_pipeline_request_for_release(None, str(mb_id))
+        req = resolve_pipeline_request(
+            srv.db,
+            pipeline_id=None,
+            release_id=str(mb_id),
+        )
         if req:
             history = srv._db().get_download_history(req["id"])
             result["pipeline_id"] = req["id"]
@@ -115,7 +106,7 @@ def post_beets_delete(h, body: dict) -> None:
             if body.get("pipeline_id") is not None
             else None
         ),
-        release_id=str(body.get("release_id") or "").strip(),
+        release_id=str(body.get("release_id") or ""),
     )
     srv = _server()
     result = delete_release_from_library(
@@ -156,8 +147,11 @@ def post_beets_delete(h, body: dict) -> None:
         )
         return
 
-    assert isinstance(result, DeleteBeetsFailure)
-    h._error("Delete from beets failed", 500)
+    if isinstance(result, DeleteBeetsFailure):
+        h._error("Delete from beets failed", 500)
+        return
+
+    assert_never(result)
 
 
 GET_ROUTES: dict[str, object] = {
