@@ -7,7 +7,7 @@ import os
 from typing import Callable, Literal
 
 from lib.processing_paths import (
-    canonical_processing_path as shared_canonical_processing_path,
+    canonical_processing_path,
     normalize_processing_path,
     stage_to_ai_path,
 )
@@ -89,24 +89,6 @@ class BlockedRecoveryIssue:
 
     request_id: int
     detail: str
-
-
-def canonical_processing_path(
-    *,
-    artist: str,
-    title: str,
-    year: str,
-    slskd_download_dir: str,
-) -> str:
-    """Return the canonical local processing directory for a completed album."""
-    return shared_canonical_processing_path(
-        artist=artist,
-        title=title,
-        year=year,
-        slskd_download_dir=slskd_download_dir,
-    )
-
-
 def classify_processing_path(
     *,
     current_path: str,
