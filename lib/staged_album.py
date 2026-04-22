@@ -82,17 +82,28 @@ class StagedAlbum:
         source = os.path.abspath(self.current_path)
         target = os.path.abspath(dest)
 
-        if source != target:
-            os.makedirs(target, exist_ok=True)
+        if source == target:
+            self.current_path = target
+            self.persist_current_path(db)
+            return self.current_path
+
+        moved_entries: list[tuple[str, str]] = []
+        os.makedirs(target, exist_ok=True)
+        try:
             for entry in os.listdir(source):
-                shutil.move(
-                    os.path.join(source, entry),
-                    os.path.join(target, entry),
-                )
+                source_entry = os.path.join(source, entry)
+                target_entry = os.path.join(target, entry)
+                shutil.move(source_entry, target_entry)
+                moved_entries.append((source_entry, target_entry))
             shutil.rmtree(source, ignore_errors=True)
             self.current_path = target
-        else:
-            self.current_path = target
-
-        self.persist_current_path(db)
-        return self.current_path
+            self.persist_current_path(db)
+            return self.current_path
+        except Exception:
+            if moved_entries:
+                os.makedirs(source, exist_ok=True)
+                for source_entry, target_entry in reversed(moved_entries):
+                    if os.path.exists(target_entry):
+                        shutil.move(target_entry, source_entry)
+            self.current_path = source
+            raise

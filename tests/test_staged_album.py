@@ -81,6 +81,34 @@ class TestStagedAlbum(unittest.TestCase):
                 target,
             )
 
+    def test_move_to_rolls_back_when_db_persist_fails(self):
+        from lib.staged_album import StagedAlbum
+
+        class ExplodingDB:
+            def update_download_state_current_path(
+                self,
+                request_id: int,
+                current_path: str | None,
+            ) -> None:
+                raise RuntimeError("db boom")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
+            os.makedirs(source)
+            source_file = os.path.join(source, "track.mp3")
+            with open(source_file, "w") as fp:
+                fp.write("audio")
+
+            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
+            staged_album = StagedAlbum(current_path=source, request_id=42)
+
+            with self.assertRaisesRegex(RuntimeError, "db boom"):
+                staged_album.move_to(dest, ExplodingDB())
+
+            self.assertEqual(staged_album.current_path, source)
+            self.assertTrue(os.path.exists(source_file))
+            self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
+
     def test_persist_current_path_noop_without_request_id(self):
         from lib.staged_album import StagedAlbum
 
