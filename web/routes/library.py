@@ -1,7 +1,10 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
+import logging
 import os
 import re
+
+log = logging.getLogger("cratedigger-web")
 
 
 def _server():
@@ -127,6 +130,33 @@ def post_beets_delete(h, body: dict) -> None:
         return
     from lib.beets_db import BeetsDB
     try:
+        with BeetsDB(srv.beets_db_path) as beets:
+            if not beets.get_album_detail(int(album_id)):
+                h._error("Album not found", 404)
+                return
+    except FileNotFoundError:
+        h._error("Beets DB not available")
+        return
+
+    deleted_pipeline_id = None
+    if purge_pipeline:
+        req = _find_pipeline_request_for_release(
+            int(pipeline_id) if pipeline_id is not None else None,
+            release_id,
+        )
+        if req:
+            try:
+                srv._db().delete_request(int(req["id"]))
+            except Exception:
+                log.exception(
+                    "Failed to purge pipeline request %s before beets delete",
+                    req.get("id"),
+                )
+                h._error("Failed to purge pipeline request", 500)
+                return
+            deleted_pipeline_id = int(req["id"])
+
+    try:
         album_name, artist_name, file_paths = BeetsDB.delete_album(srv.beets_db_path, int(album_id))
     except ValueError:
         h._error("Album not found", 404)
@@ -144,16 +174,6 @@ def post_beets_delete(h, body: dict) -> None:
             os.rmdir(album_dir)
         except OSError:
             pass  # not empty — other albums' files still there
-
-    deleted_pipeline_id = None
-    if purge_pipeline:
-        req = _find_pipeline_request_for_release(
-            int(pipeline_id) if pipeline_id is not None else None,
-            release_id,
-        )
-        if req:
-            srv._db().delete_request(int(req["id"]))
-            deleted_pipeline_id = int(req["id"])
 
     h._json({
         "status": "ok", "id": album_id,
