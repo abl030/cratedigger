@@ -21,6 +21,22 @@ class TestStageToAiPath(unittest.TestCase):
 
         self.assertEqual(dest, "/tmp/staging/Test Artist/AlbumTitle")
 
+    def test_scopes_auto_import_paths_by_request_id(self):
+        from lib.staged_album import stage_to_ai_path
+
+        dest = stage_to_ai_path(
+            artist="Test Artist",
+            title="Album",
+            staging_dir="/tmp/staging",
+            request_id=42,
+            auto_import=True,
+        )
+
+        self.assertEqual(
+            dest,
+            "/tmp/staging/auto-import/Test Artist/Album [request-42]",
+        )
+
 
 class TestStagedAlbum(unittest.TestCase):
 
