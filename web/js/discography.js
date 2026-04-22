@@ -1,8 +1,9 @@
 // @ts-check
-import { API, state, toast, updatePipelineStatus, pipelineStore, pipelineStoreKey } from './state.js';
+import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource, normalizeReleaseId } from './util.js';
 import { renderTypedSections } from './grouping.js';
-import { renderActionToolbar } from './release_actions.js';
+import { buildReleaseActionState } from './release_action_state.js';
+import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
 
@@ -139,13 +140,12 @@ export async function loadReleaseGroup(id, el, opts = {}) {
 
     function renderRelease(rel) {
       const badges = renderStatusBadges(rel);
-      // Hand the standardised toolbar all the context it needs;
-      // it decides which button is the live action.
-      const toolbar = renderActionToolbar({
+      const actionState = buildReleaseActionState({
         ...rel,
         artist: state.browseArtist?.name || '',
         album: rel.title,
-      }, { size: 'small' });
+      });
+      const toolbar = renderActionToolbar(actionState, { size: 'small' });
       return `
         <div class="release" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
@@ -268,12 +268,25 @@ export async function toggleReleaseDetail(mbid) {
     if (externalUrl && label) {
       html += `<a href="${externalUrl}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${label}</a>`;
     }
-    const storeKey = pipelineStoreKey(releaseId);
-    const detStored = storeKey ? pipelineStore.get(storeKey) : null;
-    const canAdd = !data.in_library && !(detStored ? detStored.status : data.pipeline_status);
-    if (canAdd) {
-      html += `<button class="btn btn-add" onclick="event.stopPropagation(); window.addRelease('${releaseId}', this)">Add to pipeline</button>`;
-    }
+    const actionState = buildReleaseActionState({
+      id: releaseId,
+      in_library: data.in_library,
+      beets_album_id: data.beets_album_id,
+      pipeline_status: data.pipeline_status,
+      pipeline_id: data.pipeline_id,
+      artist: data.artist_name || state.browseArtist?.name || '',
+      album: data.title || '',
+      track_count: tracks.length,
+    });
+    html += renderAcquireActionButton(actionState, {
+      addLabel: 'Add to pipeline',
+      stopPropagation: true,
+      hideDisabled: true,
+    });
+    html += renderRemoveFromBeetsButton(actionState, {
+      stopPropagation: true,
+      hideDisabled: true,
+    });
     html += '</div>';
 
     el.innerHTML = html;

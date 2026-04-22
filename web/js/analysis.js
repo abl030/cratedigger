@@ -2,6 +2,7 @@
 import { state, API, toast, updatePipelineStatus } from './state.js';
 import { esc } from './util.js';
 import { renderTypedSections } from './grouping.js';
+import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
@@ -124,8 +125,7 @@ export function toggleDisambRGTracks(rgId) {
         library_rank: p.library_rank,
         pipeline_status: p.pipeline_status,
       });
-      // Same standardised 4-button toolbar as Discography / Library / Compare.
-      const toolbar = renderActionToolbar({
+      const actionState = buildReleaseActionState({
         id: p.release_id,
         in_library: p.in_library,
         beets_album_id: p.beets_album_id,
@@ -134,7 +134,8 @@ export function toggleDisambRGTracks(rgId) {
         artist: state.disambData?.artist_name || '',
         album: p.title || '',
         track_count: p.track_count || 0,
-      }, { size: 'small' });
+      });
+      const toolbar = renderActionToolbar(actionState, { size: 'small' });
 
       const exCount = pressingExclusiveCounts[i];
       const uLabel = exCount > 0 ? `<span style="color:${color};font-weight:600;margin-left:6px;">${exCount} exclusive</span>` : '';

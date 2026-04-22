@@ -1,10 +1,15 @@
 /**
- * Unit tests for web/js/release_actions.js — pure toolbar HTML rendering.
+ * Unit tests for the shared browse action state + pure HTML renderers.
  * Run with: node tests/test_js_release_actions.mjs
  */
 
 import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
-import { renderActionToolbar, renderRemoveFromBeetsButton } from '../web/js/release_actions.js';
+import { buildReleaseActionState } from '../web/js/release_action_state.js';
+import {
+  renderActionToolbar,
+  renderAcquireActionButton,
+  renderRemoveFromBeetsButton,
+} from '../web/js/release_actions.js';
 
 let passed = 0;
 let failed = 0;
@@ -27,6 +32,15 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
+function assertEqual(actual, expected, msg) {
+  if (actual === expected) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`  FAIL: ${msg} — expected '${expected}', got '${actual}'`);
+  }
+}
+
 function clearStore() {
   pipelineStore.clear();
 }
@@ -34,7 +48,8 @@ function clearStore() {
 console.log('Acquire button — fresh row → Add request enabled');
 clearStore();
 {
-  const html = renderActionToolbar({ id: 'rel-1', in_library: false });
+  const state = buildReleaseActionState({ id: 'rel-1', in_library: false });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Add request</button>', 'shows Add request label');
   assertContains(html, 'window.addRelease(&quot;rel-1&quot;', 'Add wired up');
   assertExcludes(html, '>Upgrade</button>', 'no Upgrade in this state');
@@ -46,10 +61,15 @@ clearStore();
 console.log('Acquire button — in library, no pipeline → Upgrade enabled');
 clearStore();
 {
-  const html = renderActionToolbar({
-    id: 'rel-2', in_library: true, beets_album_id: 42,
-    artist: 'Bodyjar', album: 'Plastic Skies', track_count: 12,
+  const state = buildReleaseActionState({
+    id: 'rel-2',
+    in_library: true,
+    beets_album_id: 42,
+    artist: 'Bodyjar',
+    album: 'Plastic Skies',
+    track_count: 12,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Upgrade</button>', 'shows Upgrade label');
   assertContains(html, 'window.upgradeAlbum(&quot;rel-2&quot;', 'Upgrade wired up');
   assertExcludes(html, '>Add request</button>', 'no Add request');
@@ -60,20 +80,20 @@ clearStore();
   assertContains(html, '&quot;Plastic Skies&quot;', 'album passed to delete confirm');
 }
 
-console.log('Acquire button — in library + wanted → Remove request (the user-reported bug)');
+console.log('Acquire button — in library + wanted → Remove request');
 clearStore();
 {
-  // Plastic Skies on Bodyjar: in_library=true, pipeline_status='wanted'.
-  // Old behaviour incorrectly showed Upgrade green; new behaviour shows
-  // Remove request because the album is already in the pipeline.
-  const html = renderActionToolbar({
-    id: 'rel-3', in_library: true, beets_album_id: 42,
-    pipeline_status: 'wanted', pipeline_id: 1712,
+  const state = buildReleaseActionState({
+    id: 'rel-3',
+    in_library: true,
+    beets_album_id: 42,
+    pipeline_status: 'wanted',
+    pipeline_id: 1712,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Remove request</button>', 'wanted → Remove request');
   assertContains(html, 'window.disambRemove(1712', 'Remove wired up');
   assertExcludes(html, '>Upgrade</button>', 'no Upgrade — wanted wins');
-  // Remove from beets still independent
   assertContains(html, 'window.confirmDeleteBeets(42', 'Remove from beets still enabled');
   assertContains(html, ', 1712, &quot;rel-3&quot;)', 'pipeline context passed to delete confirm');
 }
@@ -81,26 +101,28 @@ clearStore();
 console.log('Acquire button — not in library + wanted → Remove request');
 clearStore();
 {
-  const html = renderActionToolbar({
-    id: 'rel-4', in_library: false,
-    pipeline_status: 'wanted', pipeline_id: 200,
+  const state = buildReleaseActionState({
+    id: 'rel-4',
+    in_library: false,
+    pipeline_status: 'wanted',
+    pipeline_id: 200,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Remove request</button>', 'wanted (no library) → Remove request');
   assertContains(html, 'window.disambRemove(200', 'Remove wired up');
   assertExcludes(html, '>Add request</button>', 'no Add request when wanted');
 }
 
-console.log('Acquire button — downloading → Remove request enabled (cancellable)');
+console.log('Acquire button — downloading → Remove request enabled');
 clearStore();
 {
-  // User report: "downloading" pressing showed Remove request greyed
-  // out. The backend's /api/pipeline/delete handles any status, so
-  // there's no reason to disable. Cratedigger's next poll cycle drops
-  // any orphan slskd transfer when the row is gone.
-  const html = renderActionToolbar({
-    id: 'rel-5', in_library: false,
-    pipeline_status: 'downloading', pipeline_id: 300,
+  const state = buildReleaseActionState({
+    id: 'rel-5',
+    in_library: false,
+    pipeline_status: 'downloading',
+    pipeline_id: 300,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Remove request</button>', 'downloading shows Remove request label');
   assertContains(html, 'window.disambRemove(300', 'Remove request enabled mid-download');
 }
@@ -108,10 +130,13 @@ clearStore();
 console.log('Acquire button — pipeline=imported (no library) → Upgrade enabled');
 clearStore();
 {
-  const html = renderActionToolbar({
-    id: 'rel-6', in_library: false,
-    pipeline_status: 'imported', pipeline_id: 400,
+  const state = buildReleaseActionState({
+    id: 'rel-6',
+    in_library: false,
+    pipeline_status: 'imported',
+    pipeline_id: 400,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Upgrade</button>', 'imported → Upgrade');
   assertContains(html, 'window.upgradeAlbum', 'Upgrade wired up');
   assertExcludes(html, '>Remove request</button>', 'no Remove request when imported');
@@ -121,12 +146,13 @@ console.log('Acquire button — pipelineStore overlay');
 clearStore();
 pipelineStore.set('rel-7', { status: 'wanted', id: 500 });
 {
-  // Backend snapshot says no pipeline; pipelineStore (live mutation
-  // overlay) says wanted. Store wins.
-  const html = renderActionToolbar({
-    id: 'rel-7', in_library: false,
-    pipeline_status: null, pipeline_id: null,
+  const state = buildReleaseActionState({
+    id: 'rel-7',
+    in_library: false,
+    pipeline_status: null,
+    pipeline_id: null,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, 'window.disambRemove(500', 'pipelineStore overrides backend');
 }
 
@@ -134,19 +160,20 @@ console.log('Acquire button — updatePipelineStatus normalizes UUID keys');
 clearStore();
 updatePipelineStatus(' AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA ', 'wanted', 700);
 {
-  const html = renderActionToolbar({
+  const state = buildReleaseActionState({
     id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     in_library: false,
     pipeline_status: null,
     pipeline_id: null,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, 'window.disambRemove(700', 'normalized store key overrides backend');
 }
 
 console.log('Remove from beets — apostrophes stay JS-safe inside onclick');
 clearStore();
 {
-  const html = renderActionToolbar({
+  const state = buildReleaseActionState({
     id: "rel-10'oops",
     in_library: true,
     beets_album_id: 77,
@@ -154,6 +181,7 @@ clearStore();
     album: "Some of the 12th Man's Greatest Hits",
     track_count: 14,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '&quot;rel-10&#39;oops&quot;', 'release id encoded as JS string arg');
   assertContains(html, '&quot;Some of the 12th Man&#39;s Greatest Hits&quot;', 'album encoded as JS string arg');
   assertContains(html, 'window.confirmDeleteBeets(77', 'delete handler still rendered');
@@ -162,7 +190,7 @@ clearStore();
 console.log('Remove from beets helper — shared renderer supports detail view styling');
 clearStore();
 {
-  const html = renderRemoveFromBeetsButton({
+  const state = buildReleaseActionState({
     id: "rel-11'oops",
     in_library: true,
     beets_album_id: 88,
@@ -170,7 +198,8 @@ clearStore();
     artist: 'Mum & Dad',
     album: "Kid A's <special>",
     track_count: 10,
-  }, {
+  });
+  const html = renderRemoveFromBeetsButton(state, {
     className: 'p-btn delete-beets',
     label: 'Delete from beets',
     stopPropagation: true,
@@ -180,13 +209,70 @@ clearStore();
   assertContains(html, '&quot;Kid A&#39;s &lt;special&gt;&quot;', 'album encoded safely');
 }
 
+console.log('Acquire helper — detail view can override add label');
+clearStore();
+{
+  const state = buildReleaseActionState({ id: 'rel-12', in_library: false });
+  const html = renderAcquireActionButton(state, {
+    addLabel: 'Add to pipeline',
+    stopPropagation: true,
+    hideDisabled: true,
+  });
+  assertContains(html, '>Add to pipeline</button>', 'detail add label override supported');
+  assertContains(html, 'event.stopPropagation(); window.addRelease(&quot;rel-12&quot;', 'detail add action uses same state contract');
+}
+
+console.log('Acquire helper — detail view can override upgrade label');
+clearStore();
+{
+  const state = buildReleaseActionState({
+    id: 'rel-13',
+    in_library: true,
+    beets_album_id: 13,
+  });
+  const html = renderAcquireActionButton(state, {
+    className: 'p-btn',
+    upgradeClassName: 'p-btn upgrade-btn',
+    upgradeLabel: 'Upgrade (lowest: 192kbps)',
+    stopPropagation: true,
+    hideDisabled: true,
+  });
+  assertContains(html, 'class="p-btn upgrade-btn"', 'detail upgrade class override supported');
+  assertContains(html, '>Upgrade (lowest: 192kbps)</button>', 'detail upgrade label override supported');
+  assertContains(html, 'window.upgradeAlbum(&quot;rel-13&quot;', 'detail upgrade action uses same state contract');
+}
+
+console.log('Acquire helper — disabled states can be hidden in detail views');
+clearStore();
+{
+  const state = buildReleaseActionState({
+    id: 'rel-14',
+    in_library: false,
+    pipeline_status: 'manual',
+    pipeline_id: 600,
+  });
+  const html = renderAcquireActionButton(state, { hideDisabled: true });
+  assertEqual(html, '', 'detail disabled action can be omitted');
+}
+
+console.log('Remove helper — disabled delete button can be hidden in detail views');
+clearStore();
+{
+  const state = buildReleaseActionState({ id: 'rel-15', in_library: false });
+  const html = renderRemoveFromBeetsButton(state, { hideDisabled: true });
+  assertEqual(html, '', 'detail disabled delete action can be omitted');
+}
+
 console.log('Acquire button — manual review → disabled Add request');
 clearStore();
 {
-  const html = renderActionToolbar({
-    id: 'rel-8', in_library: false,
-    pipeline_status: 'manual', pipeline_id: 600,
+  const state = buildReleaseActionState({
+    id: 'rel-8',
+    in_library: false,
+    pipeline_status: 'manual',
+    pipeline_id: 600,
   });
+  const html = renderActionToolbar(state);
   assertContains(html, '>Add request</button>', 'manual falls through to disabled Add request');
   assertExcludes(html, 'window.addRelease', 'Add disabled in manual state');
   assertExcludes(html, 'window.disambRemove', 'no Remove handler in manual state');
@@ -195,7 +281,8 @@ clearStore();
 console.log('Acquire button — minimal input never crashes');
 clearStore();
 {
-  const html = renderActionToolbar({ id: 'rel-9' });
+  const state = buildReleaseActionState({ id: 'rel-9' });
+  const html = renderActionToolbar(state);
   assertContains(html, 'action-toolbar', 'toolbar wrapper present');
   assertContains(html, '>Add request</button>', 'falls back to Add request');
   assertContains(html, '>Remove from beets</button>', 'Remove from beets always present');

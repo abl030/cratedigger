@@ -2,7 +2,8 @@
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, normalizeReleaseId, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
-import { renderActionToolbar, renderRemoveFromBeetsButton } from './release_actions.js';
+import { buildReleaseActionState } from './release_action_state.js';
+import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
 
@@ -100,17 +101,17 @@ export function renderLibraryResults(albums, targetEl) {
         ? `window.toggleLibDetail(${beetsAlbumId})`
         : `window.toggleDetail('${detailId}', ${pipelineId || a.id})`;
 
-      const toolbar = mbid ? renderActionToolbar({
+      const actionState = mbid ? buildReleaseActionState({
         id: mbid,
         in_library: inLibrary,
         beets_album_id: beetsAlbumId,
         pipeline_status: a.pipeline_status || null,
         pipeline_id: pipelineId,
-        upgrade_queued: !!a.upgrade_queued,
         artist: a.artist || '',
         album: a.album || '',
         track_count: a.track_count || 0,
-      }, { size: 'small' }) : '';
+      }) : null;
+      const toolbar = actionState ? renderActionToolbar(actionState, { size: 'small' }) : '';
 
       const badges = renderStatusBadges({
         id: mbid,
@@ -261,25 +262,33 @@ export async function toggleLibDetail(id) {
         </select>
       </div>`;
     }
-    // Upgrade + Delete buttons
-    html += '<div class="p-actions" style="margin-top:6px;">';
-    if (releaseId) {
-      const bitrates = (data.tracks || []).map(t => t.bitrate).filter(b => b && b > 0);
-      const minBr = bitrates.length > 0 ? Math.round(Math.min(...bitrates) / 1000) : null;
-      const brLabel = minBr ? ` (lowest: ${minBr}kbps)` : '';
-      if (!data.upgrade_queued) {
-        html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${releaseId}', this)">Upgrade${brLabel}</button>`;
-      }
-    }
-    html += renderRemoveFromBeetsButton({
+    const actionState = buildReleaseActionState({
       id: releaseId || '',
       in_library: true,
       beets_album_id: id,
+      pipeline_status: data.pipeline_status || null,
       pipeline_id: data.pipeline_id || null,
       artist: data.artist || '',
       album: data.album || '',
       track_count: data.tracks ? data.tracks.length : 0,
-    }, {
+    });
+
+    // Acquire + Delete buttons share the same action-state seam as rows.
+    html += '<div class="p-actions" style="margin-top:6px;">';
+    const bitrates = (data.tracks || []).map(t => t.bitrate).filter(b => b && b > 0);
+    const minBr = bitrates.length > 0 ? Math.round(Math.min(...bitrates) / 1000) : null;
+    const brLabel = minBr ? ` (lowest: ${minBr}kbps)` : '';
+    html += renderAcquireActionButton(actionState, {
+      className: 'p-btn',
+      addClassName: 'p-btn upgrade-btn',
+      upgradeClassName: 'p-btn upgrade-btn',
+      removeClassName: 'p-btn delete-beets',
+      disabledClassName: 'p-btn upgrade-btn',
+      upgradeLabel: `Upgrade${brLabel}`,
+      stopPropagation: true,
+      hideDisabled: true,
+    });
+    html += renderRemoveFromBeetsButton(actionState, {
       className: 'p-btn delete-beets',
       label: 'Delete from beets',
       stopPropagation: true,

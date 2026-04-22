@@ -1,76 +1,110 @@
 // @ts-check
 
 /**
- * Standardised 2-button action toolbar for any release/album row across
- * the browse sub-tabs (Discography, Library, Analysis, Compare).
- *
- * Buttons:
- *   [Acquire]           one context-aware button. The three actionable
- *                       states are mutually exclusive — at any moment a
- *                       row is either "not yet wanted" (Add request),
- *                       "owned and could be improved" (Upgrade), or
- *                       "queued" (Remove request to cancel). Whichever
- *                       fits the current state is the live label; the
- *                       other states' affordances are unreachable so
- *                       showing them as separate greyed buttons just
- *                       added noise.
- *   [Remove from beets] enabled when in library and beets album id known.
- *                       When clicked, the backend also purges the matching
- *                       pipeline request/history so the release goes back to
- *                       a clean "not requested" state.
- *
- * Acquire decision tree (highest priority first):
- *   1. pipeline_status in ('wanted', 'downloading') → "Remove request"
- *      enabled. Backend's /api/pipeline/delete handles any status —
- *      it removes the row and cratedigger's next poll cycle ignores the
- *      orphaned slskd transfer. User's mental model: "if it's in the
- *      pipeline, I can remove it".
- *   2. in_library OR pipeline_status === 'imported' → "Upgrade" enabled
- *      (own it / previously imported — re-queue for higher quality)
- *   3. !in_library AND no pipeline_status → "Add request" enabled
- *      (fresh request)
- *   4. else (manual review, etc) → "Add request" disabled
- *
- * Action handlers are window-bound globals (addRelease, upgradeAlbum,
- * disambRemove, confirmDeleteBeets) — defined elsewhere; this module
- * just decides who gets clicked.
+ * Pure renderers for the shared browse-tab release action state.
+ * Action handlers remain window-bound globals defined elsewhere.
  */
 
 import { jsArg } from './util.js';
-import { pipelineStore, pipelineStoreKey } from './state.js';
+
+/** @typedef {import('./release_action_state.js').ReleaseActionState} ReleaseActionState */
 
 /**
- * @typedef {Object} ActionItem
- * @property {string} id - Release ID (MB UUID or numeric Discogs)
- * @property {boolean} [in_library]
- * @property {number|null} [beets_album_id]
- * @property {string|null} [pipeline_status]
- * @property {number|null} [pipeline_id]
- * @property {boolean} [upgrade_queued]
- * @property {string} [artist] - For delete-from-beets confirmation
- * @property {string} [album] - For delete-from-beets confirmation
- * @property {number} [track_count] - For delete-from-beets confirmation
+ * @typedef {Object} AcquireActionButtonOptions
+ * @property {string} [className]
+ * @property {string} [addClassName]
+ * @property {string} [upgradeClassName]
+ * @property {string} [removeClassName]
+ * @property {string} [disabledClassName]
+ * @property {string} [style]
+ * @property {string} [addStyle]
+ * @property {string} [upgradeStyle]
+ * @property {string} [removeStyle]
+ * @property {string} [disabledStyle]
+ * @property {string} [addLabel]
+ * @property {string} [upgradeLabel]
+ * @property {string} [removeLabel]
+ * @property {string} [disabledLabel]
+ * @property {boolean} [stopPropagation]
+ * @property {boolean} [hideDisabled]
  */
+
+/**
+ * @param {AcquireActionButtonOptions} opts
+ * @param {'addClassName'|'upgradeClassName'|'removeClassName'|'disabledClassName'} key
+ * @param {string} fallback
+ * @returns {string}
+ */
+function buttonClass(opts, key, fallback) {
+  return opts[key] || opts.className || fallback;
+}
+
+/**
+ * @param {AcquireActionButtonOptions} opts
+ * @param {'addStyle'|'upgradeStyle'|'removeStyle'|'disabledStyle'} key
+ * @returns {string}
+ */
+function buttonStyle(opts, key) {
+  const style = opts[key] || opts.style || '';
+  return style ? ` style="${style}"` : '';
+}
+
+/**
+ * Render the shared acquire action button from a release action state.
+ *
+ * @param {ReleaseActionState} state
+ * @param {AcquireActionButtonOptions} [opts]
+ * @returns {string}
+ */
+export function renderAcquireActionButton(state, opts = {}) {
+  const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+  const releaseArg = jsArg(state.releaseId);
+
+  if (state.acquireKind === 'remove_request' && state.pipelineId) {
+    const label = opts.removeLabel || 'Remove request';
+    const className = buttonClass(opts, 'removeClassName', 'btn');
+    const style = buttonStyle(opts, 'removeStyle');
+    return `<button class="${className}"${style} onclick="${stopPropagation}window.disambRemove(${state.pipelineId}, this)">${label}</button>`;
+  }
+
+  if (state.acquireKind === 'upgrade' && state.releaseId) {
+    const label = opts.upgradeLabel || 'Upgrade';
+    const className = buttonClass(opts, 'upgradeClassName', 'btn btn-add');
+    const style = buttonStyle(opts, 'upgradeStyle');
+    return `<button class="${className}"${style} onclick="${stopPropagation}window.upgradeAlbum(${releaseArg}, this)">${label}</button>`;
+  }
+
+  if (state.acquireKind === 'add' && state.releaseId) {
+    const label = opts.addLabel || 'Add request';
+    const className = buttonClass(opts, 'addClassName', 'btn btn-add');
+    const style = buttonStyle(opts, 'addStyle');
+    return `<button class="${className}"${style} onclick="${stopPropagation}window.addRelease(${releaseArg}, this)">${label}</button>`;
+  }
+
+  if (opts.hideDisabled) {
+    return '';
+  }
+
+  const label = opts.disabledLabel || 'Add request';
+  const className = buttonClass(opts, 'disabledClassName', 'btn btn-add');
+  const style = buttonStyle(opts, 'disabledStyle');
+  return `<button class="${className}"${style} disabled>${label}</button>`;
+}
 
 /**
  * Render the shared delete-from-beets button for browse-tab surfaces.
  *
- * @param {ActionItem} item
+ * @param {ReleaseActionState} state
  * @param {Object} [opts]
  * @param {string} [opts.className]
  * @param {string} [opts.enabledStyle]
  * @param {string} [opts.disabledStyle]
  * @param {string} [opts.label]
  * @param {boolean} [opts.stopPropagation]
+ * @param {boolean} [opts.hideDisabled]
  * @returns {string}
  */
-export function renderRemoveFromBeetsButton(item, opts = {}) {
-  const releaseId = pipelineStoreKey(item.id);
-  const stored = releaseId ? pipelineStore.get(releaseId) : null;
-  const pId = stored ? stored.id : (item.pipeline_id || null);
-  const inLibrary = !!item.in_library;
-  const beetsId = item.beets_album_id || null;
-  const canRemoveBeets = inLibrary && !!beetsId;
+export function renderRemoveFromBeetsButton(state, opts = {}) {
   const className = opts.className || 'btn';
   const label = opts.label || 'Remove from beets';
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
@@ -78,60 +112,40 @@ export function renderRemoveFromBeetsButton(item, opts = {}) {
   const enabledStyle = opts.enabledStyle ? ` style="${opts.enabledStyle}"` : '';
   const disabledStyle = opts.disabledStyle ? ` style="${opts.disabledStyle}"` : '';
 
-  const artistArg = jsArg(item.artist || '');
-  const albumArg = jsArg(item.album || '');
-  const trackCount = item.track_count || 0;
-  const releaseArg = jsArg(releaseId);
+  const artistArg = jsArg(state.artist);
+  const albumArg = jsArg(state.album);
+  const releaseArg = jsArg(state.releaseId);
 
-  return canRemoveBeets
-    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${releaseArg})">${label}</button>`
+  if (!state.canRemoveBeets && opts.hideDisabled) {
+    return '';
+  }
+
+  return state.canRemoveBeets
+    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${state.beetsAlbumId}, ${artistArg}, ${albumArg}, ${state.trackCount}, ${state.pipelineId ?? 'null'}, ${releaseArg})">${label}</button>`
     : `<button class="${className}"${disabledStyle} disabled>${label}</button>`;
 }
 
 /**
  * Render the toolbar HTML for one row.
  *
- * @param {ActionItem} item
+ * @param {ReleaseActionState} state
  * @param {Object} [opts]
  * @param {string} [opts.size] - 'normal' or 'small' for compact layouts
  * @returns {string}
  */
-export function renderActionToolbar(item, opts = {}) {
-  // pipelineStore overlays the latest local pipeline state on top of the
-  // backend snapshot — same pattern the existing pressing renderer uses.
-  const releaseId = pipelineStoreKey(item.id);
-  const stored = releaseId ? pipelineStore.get(releaseId) : null;
-  const pStatus = stored ? stored.status : (item.pipeline_status || null);
-  const pId = stored ? stored.id : (item.pipeline_id || null);
-  const inLibrary = !!item.in_library;
-
+export function renderActionToolbar(state, opts = {}) {
   const sizeStyle = opts.size === 'small'
     ? 'padding:2px 8px;font-size:0.7em;'
     : 'padding:4px 10px;font-size:0.78em;';
   const baseStyle = `${sizeStyle}white-space:nowrap;`;
-
-  const idArg = jsArg(releaseId);
-
-  // Acquire — single context-aware button. See module header for the
-  // full priority order. The key invariant: at most one of Add/Upgrade/
-  // Remove request is meaningful at any time, so we collapse them.
-  let acquireBtn;
-  if ((pStatus === 'wanted' || pStatus === 'downloading') && pId) {
-    // Cancellable. Backend deletes the row regardless of status; if a
-    // download is in flight, cratedigger's next poll ignores the orphan
-    // slskd transfer. Covers fresh add-requests, queued upgrades, and
-    // mid-download cancels.
-    acquireBtn = `<button class="btn" style="${baseStyle}background:#5a2a2a;color:#f88;" onclick="event.stopPropagation(); window.disambRemove(${pId}, this)">Remove request</button>`;
-  } else if (releaseId && (inLibrary || pStatus === 'imported')) {
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.upgradeAlbum(${idArg}, this)">Upgrade</button>`;
-  } else if (releaseId && !inLibrary && !pStatus) {
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" onclick="event.stopPropagation(); window.addRelease(${idArg}, this)">Add request</button>`;
-  } else {
-    // Manual review or other terminal/unknown state — no live action.
-    acquireBtn = `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
-  }
-
-  const removeBeetsBtn = renderRemoveFromBeetsButton(item, {
+  const acquireBtn = renderAcquireActionButton(state, {
+    addStyle: baseStyle,
+    upgradeStyle: baseStyle,
+    removeStyle: `${baseStyle}background:#5a2a2a;color:#f88;`,
+    disabledStyle: baseStyle,
+    stopPropagation: true,
+  });
+  const removeBeetsBtn = renderRemoveFromBeetsButton(state, {
     className: 'btn',
     enabledStyle: `${baseStyle}background:#3a2a2a;color:#f88;`,
     disabledStyle: baseStyle,
