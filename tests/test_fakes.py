@@ -76,6 +76,20 @@ class TestFakePipelineDB(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["active_download_state"]["current_path"], "/tmp/staged")
 
+    def test_update_download_state_current_path_noop_when_not_downloading(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            active_download_state=None,
+        ))
+
+        db.update_download_state_current_path(42, "/tmp/staged")
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["active_download_state"])
+
     def test_update_spectral_state(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
