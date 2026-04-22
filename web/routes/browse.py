@@ -113,6 +113,9 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
             created_at = row.get("created_at")
             added = created_at.timestamp() if isinstance(created_at, datetime) else 0.0
             min_br = row.get("min_bitrate")
+            # Frontend keys every library row by `mb_albumid`, then routes MB
+            # UUIDs vs numeric Discogs IDs via detectSource(). Pipeline rows do
+            # not have a second canonical release-id slot, so overload it here.
             release_id = str(
                 row.get("mb_release_id") or row.get("discogs_release_id") or ""
             ).strip()
@@ -125,6 +128,8 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
                 "year": row.get("year"),
                 "mb_albumid": release_id or None,
                 "track_count": track_counts.get(int(row["id"]), 0),
+                # Pipeline rows do not carry RG titles; mirror the album title
+                # so the library subview can render a stable group heading.
                 "mb_releasegroupid": row.get("mb_release_group_id"),
                 "release_group_title": row["album_title"],
                 "added": added,
@@ -134,6 +139,10 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
                 "label": "",
                 "country": row.get("country"),
                 "source": row.get("source"),
+                # Keep the row shape uniform with beets-backed entries; badges
+                # ignore this when `in_library` is false, but the route contract
+                # expects every album row to carry the same keys.
+                "library_rank": None,
                 "pipeline_status": row["status"],
                 "pipeline_id": int(row["id"]),
                 "upgrade_queued": (
@@ -150,6 +159,9 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     # badge renderer can colour the in-library badge by codec-aware tier.
     seen_release_ids: set[tuple[str, str]] = set()
     for a in albums:
+        # Beets rows also overload `mb_albumid` with numeric Discogs IDs when
+        # the library lacks an MB UUID so the frontend can use one release-id
+        # field and still disambiguate by source.
         if not a.get("mb_albumid") and a.get("discogs_albumid"):
             a["mb_albumid"] = a["discogs_albumid"]
         a["in_library"] = True

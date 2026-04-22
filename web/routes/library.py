@@ -140,6 +140,8 @@ def post_beets_delete(h, body: dict) -> None:
 
     deleted_pipeline_id = None
     if purge_pipeline:
+        # Purge the pipeline row before the destructive beets delete so a
+        # failing DB write cannot recreate the original ghost-imported bug.
         req = _find_pipeline_request_for_release(
             int(pipeline_id) if pipeline_id is not None else None,
             release_id,
@@ -157,23 +159,45 @@ def post_beets_delete(h, body: dict) -> None:
             deleted_pipeline_id = int(req["id"])
 
     try:
-        album_name, artist_name, file_paths = BeetsDB.delete_album(srv.beets_db_path, int(album_id))
+        album_name, artist_name, file_paths = BeetsDB.delete_album(
+            srv.beets_db_path,
+            int(album_id),
+        )
+        album_dir = os.path.dirname(file_paths[0]) if file_paths else None
+        # Delete individual files from disk (safe — won't destroy shared directories)
+        deleted_files = 0
+        for path in file_paths:
+            if os.path.isfile(path):
+                os.remove(path)
+                deleted_files += 1
+        # Remove directory only if now empty (other albums may share it)
+        if album_dir and os.path.isdir(album_dir):
+            try:
+                os.rmdir(album_dir)
+            except OSError:
+                pass  # not empty — other albums' files still there
     except ValueError:
         h._error("Album not found", 404)
         return
-    album_dir = os.path.dirname(file_paths[0]) if file_paths else None
-    # Delete individual files from disk (safe — won't destroy shared directories)
-    deleted_files = 0
-    for path in file_paths:
-        if os.path.isfile(path):
-            os.remove(path)
-            deleted_files += 1
-    # Remove directory only if now empty (other albums may share it)
-    if album_dir and os.path.isdir(album_dir):
-        try:
-            os.rmdir(album_dir)
-        except OSError:
-            pass  # not empty — other albums' files still there
+    except Exception:
+        if deleted_pipeline_id is not None:
+            # Deliberate failure mode split: at this point the pipeline row is
+            # already gone, so callers need a more specific error than a
+            # generic 500 to understand the partial-success state.
+            log.exception(
+                "Beets delete failed after purging pipeline request %s for album %s",
+                deleted_pipeline_id,
+                album_id,
+            )
+            h._error(
+                "Pipeline request was removed, but delete from beets failed; "
+                "check logs and disk state",
+                500,
+            )
+            return
+        log.exception("Beets delete failed for album %s", album_id)
+        h._error("Delete from beets failed", 500)
+        return
 
     h._json({
         "status": "ok", "id": album_id,
