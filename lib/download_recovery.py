@@ -89,6 +89,98 @@ class BlockedRecoveryIssue:
 
     request_id: int
     detail: str
+
+
+def _recovery_candidates(
+    *,
+    artist: str,
+    title: str,
+    year: str,
+    request_id: int,
+    staging_dir: str,
+    slskd_download_dir: str,
+) -> tuple[ProcessingPathLocation, ...]:
+    canonical_path = canonical_processing_path(
+        artist=artist,
+        title=title,
+        year=year,
+        slskd_download_dir=slskd_download_dir,
+    )
+    return (
+        ProcessingPathLocation(path=canonical_path, kind="canonical"),
+        ProcessingPathLocation(
+            path=stage_to_ai_path(
+                artist=artist,
+                title=title,
+                staging_dir=staging_dir,
+                request_id=request_id,
+                auto_import=True,
+            ),
+            kind="request_scoped_auto_import_staged",
+        ),
+        ProcessingPathLocation(
+            path=stage_to_ai_path(
+                artist=artist,
+                title=title,
+                staging_dir=staging_dir,
+                request_id=request_id,
+                auto_import=False,
+            ),
+            kind="request_scoped_post_validation_staged",
+        ),
+        ProcessingPathLocation(
+            path=stage_to_ai_path(
+                artist=artist,
+                title=title,
+                staging_dir=staging_dir,
+            ),
+            kind="legacy_shared_staged",
+        ),
+    )
+
+
+def _resolve_recovery_candidates(
+    candidates: tuple[ProcessingPathLocation, ...],
+    *,
+    has_entries: Callable[[str], bool],
+) -> ResumeRecoveryDecision:
+    populated_locations = tuple(
+        candidate
+        for candidate in candidates
+        if has_entries(candidate.path)
+    )
+    canonical_path = candidates[0].path
+    legacy_shared_path = candidates[-1].path
+    if len(populated_locations) > 1:
+        return ResumeRecoveryDecision(
+            canonical_path=canonical_path,
+            legacy_shared_path=legacy_shared_path,
+            populated_locations=populated_locations,
+            blocked_reason="multiple_populated_paths",
+        )
+    if len(populated_locations) == 1:
+        selected_location = populated_locations[0]
+        if selected_location.kind == "legacy_shared_staged":
+            return ResumeRecoveryDecision(
+                canonical_path=canonical_path,
+                legacy_shared_path=selected_location.path,
+                populated_locations=populated_locations,
+                blocked_reason="legacy_shared_only",
+            )
+        return ResumeRecoveryDecision(
+            canonical_path=canonical_path,
+            legacy_shared_path=legacy_shared_path,
+            populated_locations=populated_locations,
+            selected_location=selected_location,
+        )
+    return ResumeRecoveryDecision(
+        canonical_path=canonical_path,
+        legacy_shared_path=legacy_shared_path,
+        populated_locations=(),
+        selected_location=candidates[0],
+    )
+
+
 def classify_processing_path(
     *,
     current_path: str,
@@ -162,75 +254,72 @@ def resolve_missing_current_path(
     has_entries: Callable[[str], bool],
 ) -> ResumeRecoveryDecision:
     """Resolve a missing current_path by probing the known recovery locations."""
-    canonical_path = canonical_processing_path(
+    candidates = _recovery_candidates(
         artist=artist,
         title=title,
         year=year,
+        request_id=request_id,
+        staging_dir=staging_dir,
         slskd_download_dir=slskd_download_dir,
     )
-    candidates = (
-        ProcessingPathLocation(path=canonical_path, kind="canonical"),
-        ProcessingPathLocation(
-            path=stage_to_ai_path(
-                artist=artist,
-                title=title,
-                staging_dir=staging_dir,
-                request_id=request_id,
-                auto_import=True,
-            ),
-            kind="request_scoped_auto_import_staged",
-        ),
-        ProcessingPathLocation(
-            path=stage_to_ai_path(
-                artist=artist,
-                title=title,
-                staging_dir=staging_dir,
-                request_id=request_id,
-                auto_import=False,
-            ),
-            kind="request_scoped_post_validation_staged",
-        ),
-        ProcessingPathLocation(
-            path=stage_to_ai_path(
-                artist=artist,
-                title=title,
-                staging_dir=staging_dir,
-            ),
-            kind="legacy_shared_staged",
-        ),
+    return _resolve_recovery_candidates(
+        candidates,
+        has_entries=has_entries,
     )
-    populated_locations = tuple(
-        candidate
-        for candidate in candidates
-        if has_entries(candidate.path)
+
+
+def reconcile_processing_current_path(
+    *,
+    current_path: str | None,
+    artist: str,
+    title: str,
+    year: str,
+    request_id: int,
+    staging_dir: str,
+    slskd_download_dir: str,
+    has_entries: Callable[[str], bool],
+) -> ResumeRecoveryDecision:
+    """Resolve the best local path for a row already in local processing.
+
+    If the persisted ``current_path`` is missing, this is the ordinary
+    mid-process recovery path. If it still points at the canonical
+    processing dir but that dir no longer holds the album, probe the
+    staged candidates before the poll loop re-materializes a stale
+    canonical path and strands the moved files.
+    """
+    candidates = _recovery_candidates(
+        artist=artist,
+        title=title,
+        year=year,
+        request_id=request_id,
+        staging_dir=staging_dir,
+        slskd_download_dir=slskd_download_dir,
     )
-    if len(populated_locations) > 1:
-        return ResumeRecoveryDecision(
-            canonical_path=canonical_path,
-            legacy_shared_path=candidates[-1].path,
-            populated_locations=populated_locations,
-            blocked_reason="multiple_populated_paths",
+    if current_path is None:
+        return _resolve_recovery_candidates(
+            candidates,
+            has_entries=has_entries,
         )
-    if len(populated_locations) == 1:
-        selected_location = populated_locations[0]
-        if selected_location.kind == "legacy_shared_staged":
-            return ResumeRecoveryDecision(
-                canonical_path=canonical_path,
-                legacy_shared_path=selected_location.path,
-                populated_locations=populated_locations,
-                blocked_reason="legacy_shared_only",
-            )
+
+    current_location = classify_processing_path(
+        current_path=current_path,
+        artist=artist,
+        title=title,
+        year=year,
+        request_id=request_id,
+        staging_dir=staging_dir,
+        slskd_download_dir=slskd_download_dir,
+    )
+    if current_location.kind != "canonical" or has_entries(current_location.path):
         return ResumeRecoveryDecision(
-            canonical_path=canonical_path,
+            canonical_path=candidates[0].path,
             legacy_shared_path=candidates[-1].path,
-            populated_locations=populated_locations,
-            selected_location=selected_location,
+            populated_locations=(),
+            selected_location=current_location,
         )
-    return ResumeRecoveryDecision(
-        canonical_path=canonical_path,
-        legacy_shared_path=candidates[-1].path,
-        populated_locations=(),
-        selected_location=candidates[0],
+    return _resolve_recovery_candidates(
+        candidates,
+        has_entries=has_entries,
     )
 
 
@@ -354,7 +443,10 @@ def find_blocked_processing_path_issues(
             staging_dir=staging_dir,
             slskd_download_dir=slskd_download_dir,
         )
-        if not location.blocks_auto_import_dispatch:
+        # Request-scoped auto-import staged paths are expected while the
+        # import subprocess is still running. Only the legacy shared
+        # staged path is unambiguously blocked from automatic resume.
+        if location.kind != "legacy_shared_staged":
             continue
         issues.append(BlockedRecoveryIssue(
             request_id=request_id,

@@ -91,9 +91,9 @@ class StagedAlbum:
                 target_entry = os.path.join(target, entry)
                 shutil.move(source_entry, target_entry)
                 moved_entries.append((source_entry, target_entry))
-            shutil.rmtree(source, ignore_errors=True)
             self.current_path = target
             self.persist_current_path(db)
+            shutil.rmtree(source, ignore_errors=True)
             return self.current_path
         except Exception:
             if moved_entries:

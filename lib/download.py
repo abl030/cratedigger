@@ -18,7 +18,7 @@ import music_tag
 
 from lib.download_recovery import (
     classify_processing_path,
-    resolve_missing_current_path,
+    reconcile_processing_current_path,
 )
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.processing_paths import (
@@ -1404,8 +1404,9 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_dict(raw_state)
         else:
             state = ActiveDownloadState.from_json(raw_state)
-        if state.current_path is None and state.processing_started_at is not None:
-            recovery_decision = resolve_missing_current_path(
+        if state.processing_started_at is not None:
+            recovery_decision = reconcile_processing_current_path(
+                current_path=state.current_path,
                 artist=row["artist_name"],
                 title=row["album_title"],
                 year=str(row["year"] or ""),
@@ -1432,19 +1433,26 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             if recovery_decision.blocked_reason == "legacy_shared_only":
                 logger.error(
                     "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
-                    "current_path is missing, canonical_path=%s has no files, "
+                    "persisted current_path=%s could not be resumed, "
+                    "canonical_path=%s has no files, "
                     "and staged_path=%s is ambiguous across editions. "
                     "Manual recovery is required.",
                     request_id,
                     row["artist_name"],
                     row["album_title"],
+                    state.current_path,
                     recovery_decision.canonical_path,
                     recovery_decision.legacy_shared_path,
                 )
                 continue
             assert recovery_decision.selected_location is not None
-            state.current_path = recovery_decision.selected_location.path
-            db.update_download_state_current_path(request_id, state.current_path)
+            selected_path = recovery_decision.selected_location.path
+            if selected_path != state.current_path:
+                state.current_path = selected_path
+                db.update_download_state_current_path(
+                    request_id,
+                    state.current_path,
+                )
         entry = reconstruct_grab_list_entry(row, state)
 
         if state.processing_started_at is not None:
