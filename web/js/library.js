@@ -1,6 +1,6 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
-import { esc, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
+import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
@@ -91,7 +91,7 @@ export function renderLibraryResults(albums, targetEl) {
       const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
       const mbid = a.mb_albumid || '';
       const inLibrary = a.in_library !== false;
-      const beetsAlbumId = a.beets_album_id || (inLibrary ? a.id : null);
+      const beetsAlbumId = a.beets_album_id ?? null;
       const pipelineId = a.pipeline_id || null;
       const detailId = inLibrary
         ? `lib-${beetsAlbumId}`
@@ -268,7 +268,7 @@ export async function toggleLibDetail(id) {
         html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${data.mb_albumid}', this)">Upgrade${brLabel}</button>`;
       }
     }
-    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, '${esc(data.artist)}', '${esc(data.album)}', ${data.tracks ? data.tracks.length : 0}, ${data.pipeline_id ?? 'null'}, '${esc(data.mb_albumid || '')}')">Delete from beets</button>`;
+    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, ${jsArg(data.artist || '')}, ${jsArg(data.album || '')}, ${data.tracks ? data.tracks.length : 0}, ${data.pipeline_id ?? 'null'}, ${jsArg(data.mb_albumid || '')})">Delete from beets</button>`;
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
@@ -400,6 +400,33 @@ export async function setIntent(pipelineId, intent) {
 }
 
 /**
+ * Build the confirmation overlay HTML for deleting an album from beets.
+ * @param {number} id
+ * @param {string} artist
+ * @param {string} album
+ * @param {number} trackCount
+ * @param {number|null} [pipelineId]
+ * @param {string} [releaseId]
+ */
+export function buildDeleteConfirmHtml(id, artist, album, trackCount, pipelineId = null, releaseId = '') {
+  const parsedTrackCount = Number(trackCount);
+  const safeTrackCount = Number.isFinite(parsedTrackCount) ? parsedTrackCount : 0;
+  const pipelineNote = releaseId
+    ? '<br>This also removes any matching pipeline request/history so the release is forgotten.'
+    : '';
+  return `
+    <div class="confirm-box">
+      <h3>Delete from beets?</h3>
+      <p>${esc(artist)} - ${esc(album)}<br>${safeTrackCount} tracks will be permanently deleted from disk.${pipelineNote}</p>
+      <div class="actions">
+        <button class="p-btn" onclick="this.closest('.confirm-overlay').remove()">Cancel</button>
+        <button class="p-btn delete-beets" id="confirm-delete-btn" onclick="window.executeBeetsDeletion(${id}, this, ${pipelineId ?? 'null'}, ${jsArg(releaseId)})">Yes, delete permanently</button>
+      </div>
+    </div>
+  `;
+}
+
+/**
  * Show a confirmation overlay for deleting an album from beets.
  * @param {number} id
  * @param {string} artist
@@ -411,19 +438,9 @@ export async function setIntent(pipelineId, intent) {
 export function confirmDeleteBeets(id, artist, album, trackCount, pipelineId = null, releaseId = '') {
   const overlay = document.createElement('div');
   overlay.className = 'confirm-overlay';
-  const pipelineNote = releaseId
-    ? '<br>This also removes any matching pipeline request/history so the release is forgotten.'
-    : '';
-  overlay.innerHTML = `
-    <div class="confirm-box">
-      <h3>Delete from beets?</h3>
-      <p>${artist} - ${album}<br>${trackCount} tracks will be permanently deleted from disk.${pipelineNote}</p>
-      <div class="actions">
-        <button class="p-btn" onclick="this.closest('.confirm-overlay').remove()">Cancel</button>
-        <button class="p-btn delete-beets" id="confirm-delete-btn" onclick="window.executeBeetsDeletion(${id}, this, ${pipelineId ?? 'null'}, '${releaseId}')">Yes, delete permanently</button>
-      </div>
-    </div>
-  `;
+  overlay.innerHTML = buildDeleteConfirmHtml(
+    id, artist, album, trackCount, pipelineId, releaseId,
+  );
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }

@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -101,6 +101,11 @@ assertEqual(overrideToIntent('lossless'), 'lossless', '"lossless" → lossless')
 assertEqual(overrideToIntent('flac'), 'lossless', '"flac" (backward compat) → lossless');
 assertEqual(overrideToIntent('flac,mp3 v0,mp3 320'), 'default', 'CSV → default');
 assertEqual(overrideToIntent('unknown'), 'default', 'unknown → default');
+
+// --- jsArg tests ---
+console.log('jsArg()');
+assertEqual(jsArg("Kid A's"), '&quot;Kid A&#39;s&quot;', 'encodes apostrophes inside JS string literal');
+assertEqual(jsArg(null), '&quot;&quot;', 'null becomes empty string literal');
 
 // --- detectSource tests ---
 console.log('detectSource()');

@@ -542,6 +542,8 @@ class PipelineDB:
         name fallback for older pipeline rows that predate artist-id
         population or store a non-MB value there.
         """
+        # Pair with `ESCAPE '\'` below so literal `%` / `_` in artist names
+        # do not expand into wildcard matches on PostgreSQL.
         name_pattern = f"%{_escape_like_pattern(artist_name.strip())}%"
         if mb_artist_id:
             cur = self._execute(
