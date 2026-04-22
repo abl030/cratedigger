@@ -306,6 +306,7 @@ class FakePipelineDB:
         self.recorded_attempts: list[tuple[int, str]] = []
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
+        self.update_download_state_current_path_calls: list[tuple[int, str | None]] = []
         self.clear_download_state_calls: list[int] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self.closed = False
@@ -507,6 +508,9 @@ class FakePipelineDB:
         request_id: int,
         current_path: str | None,
     ) -> None:
+        self.update_download_state_current_path_calls.append(
+            (request_id, current_path),
+        )
         row = self._requests.get(request_id)
         if row:
             state = row.get("active_download_state")

@@ -433,6 +433,14 @@ def _path_is_within(path: str, root: str) -> bool:
     except ValueError:
         return False
 
+
+def _directory_has_entries(path: str) -> bool:
+    """Return True when ``path`` exists and contains at least one entry."""
+    if not os.path.isdir(path):
+        return False
+    with os.scandir(path) as entries:
+        return any(True for _ in entries)
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -450,7 +458,8 @@ def _materialize_processing_dir(
                 "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
                 "current_path=%s already lives under beets staging. "
                 "Automatic retry is disabled to avoid duplicate import; "
-                "manual recovery is required.",
+                "manual recovery is required. See "
+                "docs/advisory-locks.md.",
                 album_data.db_request_id,
                 album_data.artist,
                 album_data.title,
@@ -1330,17 +1339,30 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_json(raw_state)
         fallback_current_path = None
         if state.current_path is None and state.processing_started_at is not None:
-            fallback_current_path = _canonical_import_folder_path_from_metadata(
+            canonical_fallback = _canonical_import_folder_path_from_metadata(
                 artist=row["artist_name"],
                 title=row["album_title"],
                 year=str(row["year"] or ""),
                 slskd_download_dir=ctx.cfg.slskd_download_dir,
             )
+            staged_fallback = stage_to_ai_path(
+                artist=row["artist_name"],
+                title=row["album_title"],
+                staging_dir=ctx.cfg.beets_staging_dir,
+            )
+            if (not _directory_has_entries(canonical_fallback)
+                    and os.path.isdir(staged_fallback)):
+                fallback_current_path = staged_fallback
+            else:
+                fallback_current_path = canonical_fallback
+            state.current_path = fallback_current_path
         entry = reconstruct_grab_list_entry(
             row,
             state,
             fallback_current_path=fallback_current_path,
         )
+        if fallback_current_path is not None:
+            _persist_updated_download_state(db, request_id, entry, state)
 
         if state.processing_started_at is not None:
             _run_completed_processing(entry, request_id, state, db, ctx)
