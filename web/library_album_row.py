@@ -26,7 +26,9 @@ def _timestamp(value: object | None) -> float:
         return value
     if isinstance(value, int):
         return float(value)
-    return 0.0
+    raise TypeError(
+        f"LibraryAlbumRow timestamp fields must be datetime|float|int, got {type(value).__name__}"
+    )
 
 
 def _bitrate_kbps(min_bitrate_bps: object | None) -> int | None:
@@ -50,7 +52,8 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     - ``source`` keeps the historical row-provenance semantics: beets-backed
       rows expose release origin (``musicbrainz`` / ``discogs`` / ``unknown``),
       while pipeline-only rows mirror the pipeline request source
-      (``request`` / ``redownload``).
+      (``request`` / ``redownload``), with ``"unknown"`` as the explicit
+      fallback when a malformed pipeline row has no source.
     """
 
     id: int
@@ -77,6 +80,8 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
 
     @property
     def identity(self) -> ReleaseIdentity | None:
+        # ``mb_albumid`` is already the canonical frontend release key; both
+        # constructors collapse MB/discogs source IDs into this one field.
         return ReleaseIdentity.from_id(self.mb_albumid)
 
     def to_dict(self) -> dict[str, object]:
@@ -146,17 +151,16 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
             row.get("discogs_release_id"),
         )
         min_bitrate = row.get("min_bitrate")
-        album_title = str(row["album_title"])
         return msgspec.convert(
             {
                 "id": row["id"],
-                "album": album_title,
+                "album": row["album_title"],
                 "artist": row["artist_name"],
                 "year": row.get("year"),
                 "mb_albumid": release_id,
                 "track_count": track_count,
                 "mb_releasegroupid": row.get("mb_release_group_id"),
-                "release_group_title": album_title,
+                "release_group_title": row["album_title"],
                 "added": _timestamp(row.get("created_at")),
                 "formats": str(row.get("format") or ""),
                 "min_bitrate": min_bitrate * 1000 if isinstance(min_bitrate, int) else None,

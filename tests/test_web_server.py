@@ -6,6 +6,7 @@ verifying response codes, JSON structure, and error handling.
 """
 
 import copy
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -1885,6 +1886,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             source="request",
             status="wanted",
             min_bitrate=320,
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
             search_filetype_override="flac",
         ))
         fake_db.set_tracks(42, [
@@ -1922,6 +1924,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             artist_name="Test Artist",
             album_title="Duplicate Pipeline Row",
             status="wanted",
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
         ))
         beets_album = {
             "id": 7,
@@ -1969,6 +1972,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             album_title="Discogs Import",
             source="request",
             status="wanted",
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
         ))
         beets_album = {
             "id": 8,
@@ -2048,6 +2052,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             album_title="Older Request",
             year=1997,
             status="wanted",
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
         ))
         beets_album = {
             "id": 9,
