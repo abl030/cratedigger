@@ -976,6 +976,57 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
     @patch("lib.preimport.run_preimport_gates")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
+    def test_returns_none_for_legacy_shared_staged_retry(
+        self,
+        mock_mt,
+        mock_beets_validate,
+        mock_run_preimport_gates,
+    ):
+        """Legacy shared staged retries must stop before validation reruns."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = os.path.join(staging_root, "Artist", "Album")
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="test-mbid",
+                db_request_id=42,
+                db_source="request",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+            cfg.beets_validation_enabled = True
+            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+            mock_run_preimport_gates.return_value = MagicMock(valid=True)
+
+            with patch("lib.download.dispatch_import") as mock_dispatch, \
+                 self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(album, [], ctx)
+
+            self.assertIsNone(result)
+            mock_beets_validate.assert_not_called()
+            mock_dispatch.assert_not_called()
+            self.assertIn("legacy shared staged path", "\n".join(logs.output))
+
+    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.beets.beets_validate")
+    @patch("lib.download.music_tag")
     def test_retries_post_move_redownload_path_without_blocking(
         self,
         mock_mt,
@@ -2661,16 +2712,13 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         state = ActiveDownloadState(
             filetype="flac",
             enqueued_at="now",
+            current_path="/tmp/legacy/A/B",
             files=[],
         )
         request = {"id": 10, "album_title": "B", "artist_name": "A",
                    "year": 2020, "mb_release_id": "mbid", "source": "request",
                    "search_filetype_override": None, "target_format": None}
-        entry = reconstruct_grab_list_entry(
-            request,
-            state,
-            fallback_current_path="/tmp/legacy/A/B",
-        )
+        entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.import_folder, "/tmp/legacy/A/B")
 
 

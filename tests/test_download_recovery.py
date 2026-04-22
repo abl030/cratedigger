@@ -3,6 +3,7 @@
 import unittest
 
 from lib.download_recovery import (
+    find_blocked_processing_path_issues,
     find_blocked_recovery_issues,
     classify_processing_path,
     resolve_missing_current_path,
@@ -224,3 +225,34 @@ class TestFindBlockedRecoveryIssues(unittest.TestCase):
         )
 
         self.assertEqual(issues, [])
+
+
+class TestFindBlockedProcessingPathIssues(unittest.TestCase):
+
+    def test_reports_legacy_shared_current_path_as_blocked(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "current_path": "/tmp/staging/Test Artist/Test Album",
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            existing_local_paths={"/tmp/staging/Test Artist/Test Album"},
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("legacy shared staged path", issues[0].detail)
