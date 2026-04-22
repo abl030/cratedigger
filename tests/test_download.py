@@ -914,10 +914,17 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
         """Post-move auto-import retries must stop before re-dispatch."""
         from lib.download import process_completed_album
         from lib.quality import ValidationResult
+        from lib.staged_album import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = os.path.join(staging_root, "Artist", "Album")
+            resumed_path = stage_to_ai_path(
+                artist="Artist",
+                title="Album",
+                staging_dir=staging_root,
+                request_id=42,
+                auto_import=True,
+            )
             os.makedirs(resumed_path)
             with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
                 f.write("fake audio")
@@ -978,10 +985,17 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
         """Post-move non-auto retries should re-enter and finish mark_done."""
         from lib.download import process_completed_album
         from lib.quality import ValidationResult
+        from lib.staged_album import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = os.path.join(staging_root, "Artist", "Album")
+            resumed_path = stage_to_ai_path(
+                artist="Artist",
+                title="Album",
+                staging_dir=staging_root,
+                request_id=42,
+                auto_import=False,
+            )
             os.makedirs(resumed_path)
             with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
                 f.write("fake audio")
@@ -2034,7 +2048,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_resume_processing_uses_persisted_current_path(self, mock_process):
         """Resume path must reconstruct the post-move directory from persisted state."""
         from lib.download import poll_active_downloads
-        current_path = "/tmp/staged/Test Artist/Test Album"
+        current_path = "/tmp/staged/auto-import/Test Artist/Test Album [request-1]"
         row = self._make_downloading_row(state_dict={
             "filetype": "flac",
             "enqueued_at": _utc_now_iso(),
@@ -2145,10 +2159,17 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_post_move_staged_path_without_validation_completes(self):
         """Staged retries still finish when the auto-import branch is unavailable."""
         from lib.download import poll_active_downloads
+        from lib.staged_album import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = os.path.join(staging_root, "Test Artist", "Test Album")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=False,
+            )
             os.makedirs(resumed_path)
             with open(os.path.join(resumed_path, "01.flac"), "w") as fp:
                 fp.write("audio")
@@ -2176,10 +2197,17 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_post_move_staged_path_with_missing_file_leaves_row_downloading(self):
         """Missing files under a staged current_path must block, not requeue."""
         from lib.download import poll_active_downloads
+        from lib.staged_album import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = os.path.join(staging_root, "Test Artist", "Test Album")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
             os.makedirs(resumed_path)
 
             row = self._make_downloading_row(state_dict={

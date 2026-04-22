@@ -1821,8 +1821,9 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             self.assertTrue(outcome.success)
             staged_path = os.path.join(
                 cfg.beets_staging_dir,
+                "auto-import",
                 "Test Artist",
-                "Test Album",
+                "Test Album [request-42]",
             )
             self.assertEqual(staged_album.current_path, staged_path)
             self.assertTrue(os.path.exists(os.path.join(staged_path, "01 - Track.mp3")))

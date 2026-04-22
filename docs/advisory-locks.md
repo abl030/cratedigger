@@ -133,22 +133,26 @@ AUTO (_handle_valid_result in lib/download.py)
 
 **Why RELEASE outer at `_handle_valid_result`, not at
 `dispatch_import_core`?** The staged move now mutates both filesystem
-state (`slskd_download_dir/<import_folder>/` → `beets_staging_dir/`)
-and `active_download_state.current_path`. Resume is safe even after a
-completed move, but acquiring RELEASE first still keeps contention as a
-true no-op: no directory churn, no extra JSONB write, and no
-cross-process ambiguity about which local path currently owns the
+state (`slskd_download_dir/<import_folder>/` →
+`beets_staging_dir/<mode>/<artist>/<album> [request-N]`) and
+`active_download_state.current_path`. The staged path is request-scoped
+and branch-scoped (`auto-import/` vs `post-validation/`) so crash
+recovery can tell whether a row may already have launched an import
+subprocess, and two same-name editions can never collide on the same
+persisted `current_path`. Acquiring RELEASE first still keeps
+contention as a true no-op: no directory churn, no extra JSONB write,
+and no cross-process ambiguity about which local path currently owns the
 album. On contention, files stay where `process_completed_album`
 expects them and the next cycle simply re-enters with the same
 `current_path`.
 
-If the process dies after moving into `beets_staging_dir`, the next poll
-cycle only blocks when validation proves the retry is on the
-auto-import path. That is the branch where an import subprocess may
-already have started, so automatic retry stays disabled there to avoid
-duplicate import. Redownload / non-auto staging retries still re-enter
-normally because `StagedAlbum.move_to(...)` is idempotent when the album
-is already at the staged destination. For blocked auto-import rows,
+If the process dies after moving into `beets_staging_dir`, the persisted
+staging root tells the next poll whether the row is on the
+`auto-import/` or `post-validation/` branch. `auto-import/` retries are
+blocked for manual recovery because an import subprocess may already
+have started; `post-validation/` retries re-enter normally because
+`StagedAlbum.move_to(...)` is idempotent when the album is already at
+the staged destination. For blocked auto-import rows,
 operator recovery should inspect the staged path and either finish the
 import manually or reset the request explicitly.
 

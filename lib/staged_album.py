@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
+AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
+POST_VALIDATION_STAGING_SUBDIR = "post-validation"
+
 
 class SupportsCurrentPathUpdate(Protocol):
     """Minimal DB seam for persisting ``active_download_state.current_path``."""
@@ -36,11 +39,40 @@ def staged_filename(file: "DownloadFile") -> str:
     return filename
 
 
-def stage_to_ai_path(*, artist: str, title: str, staging_dir: str) -> str:
+def stage_to_ai_root(
+    *,
+    staging_dir: str,
+    auto_import: bool | None = None,
+) -> str:
+    """Return the root staging directory for a given validation branch."""
+    if auto_import is None:
+        return staging_dir
+    subdir = (
+        AUTO_IMPORT_STAGING_SUBDIR
+        if auto_import
+        else POST_VALIDATION_STAGING_SUBDIR
+    )
+    return os.path.join(staging_dir, subdir)
+
+
+def stage_to_ai_path(
+    *,
+    artist: str,
+    title: str,
+    staging_dir: str,
+    request_id: int | None = None,
+    auto_import: bool | None = None,
+) -> str:
     """Return the beets staging destination for an album."""
     artist_dir = sanitize_folder_name(artist)
     album_dir = sanitize_folder_name(title)
-    return os.path.join(staging_dir, artist_dir, album_dir)
+    if request_id is not None:
+        album_dir = f"{album_dir} [request-{request_id}]"
+    return os.path.join(
+        stage_to_ai_root(staging_dir=staging_dir, auto_import=auto_import),
+        artist_dir,
+        album_dir,
+    )
 
 
 @dataclass

@@ -26,7 +26,8 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core, finalize_request)
-from lib.staged_album import StagedAlbum, stage_to_ai_path
+from lib.staged_album import (StagedAlbum, stage_to_ai_path,
+                              stage_to_ai_root)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import,
                       log_validation_result)
@@ -459,6 +460,13 @@ def _log_post_move_resume_blocked(
     )
 
 
+def _is_auto_import_staged_path(path: str, staging_dir: str) -> bool:
+    return _path_is_within(
+        path,
+        stage_to_ai_root(staging_dir=staging_dir, auto_import=True),
+    )
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -471,23 +479,22 @@ def _materialize_processing_dir(
           if ctx.pipeline_db_source is not None else None)
 
     if os.path.realpath(staged_album.current_path) != os.path.realpath(canonical_path):
-        is_staged_retry = _path_is_within(
+        is_auto_import_staged_retry = _is_auto_import_staged_path(
             staged_album.current_path,
             ctx.cfg.beets_staging_dir,
         )
+        if is_auto_import_staged_retry:
+            _log_post_move_resume_blocked(
+                album_data,
+                current_path=staged_album.current_path,
+                detail=(
+                    "already lives under the auto-import staging root. "
+                    "Automatic retry is disabled to avoid duplicate import; "
+                    "manual recovery is required."
+                ),
+            )
+            return None
         if not os.path.isdir(staged_album.current_path):
-            if is_staged_retry:
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=staged_album.current_path,
-                    detail=(
-                        "is already under beets staging but the directory is "
-                        "missing. Automatic retry is disabled because import "
-                        "may already have consumed the files; manual recovery "
-                        "is required."
-                    ),
-                )
-                return None
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
         staged_album.bind_import_paths(album_data.files)
@@ -498,19 +505,6 @@ def _materialize_processing_dir(
             if not os.path.isfile(import_path):
                 missing_paths.append(import_path)
         if missing_paths:
-            if is_staged_retry:
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=staged_album.current_path,
-                    detail=(
-                        "is already under beets staging but tracked files are "
-                        f"missing ({', '.join(missing_paths)}). Automatic "
-                        "retry is disabled because import may already have "
-                        "partially consumed the album; manual recovery is "
-                        "required."
-                    ),
-                )
-                return None
             logger.error(
                 "Current staged path is missing tracked files: %s",
                 ", ".join(missing_paths),
@@ -813,6 +807,8 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 artist=album_data.artist,
                 title=album_data.title,
                 staging_dir=ctx.cfg.beets_staging_dir,
+                request_id=request_id,
+                auto_import=will_auto_import,
             ),
             db=db,
         )
