@@ -20,8 +20,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.import_dispatch import transition_request as _transition_request
 from lib.config import read_runtime_config
+from lib.download_recovery import find_blocked_recovery_issues
 from lib.pipeline_db import PipelineDB
-from lib.quality import find_inconsistencies, find_orphaned_downloads, suggest_repair
+from lib.quality import (OrphanInfo, find_inconsistencies,
+                         find_orphaned_downloads, suggest_repair)
+from lib.transitions import apply_transition
 
 DEFAULT_DSN = os.environ.get(
     "PIPELINE_DB_DSN",
@@ -50,10 +53,10 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     slskd_key: str | None) -> list:
     """Collect all issues: DB inconsistencies + optional orphaned downloads."""
     rows = _get_all_rows(db)
-    cfg = read_runtime_config()
     issues = find_inconsistencies(rows)
     if slskd_host and slskd_key:
         try:
+            cfg = read_runtime_config()
             active = _get_slskd_active_transfers(slskd_host, slskd_key)
             existing_local_paths = {
                 current_path
@@ -70,8 +73,23 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                 staging_dir=cfg.beets_staging_dir,
                 slskd_download_dir=cfg.slskd_download_dir,
             )
+            blocked_recovery_issues = [
+                OrphanInfo(
+                    request_id=issue.request_id,
+                    issue_type="blocked_recovery",
+                    detail=issue.detail,
+                )
+                for issue in find_blocked_recovery_issues(
+                    rows,
+                    active,
+                    staging_dir=cfg.beets_staging_dir,
+                    slskd_download_dir=cfg.slskd_download_dir,
+                    has_entries=_directory_has_entries,
+                )
+            ]
             issues.extend(orphans)
-            if not orphans:
+            issues.extend(blocked_recovery_issues)
+            if not orphans and not blocked_recovery_issues:
                 print(f"  slskd: checked {len(active)} active transfers, no orphans.")
         except Exception as e:
             print(f"  slskd: could not check orphans: {e}")
@@ -136,6 +154,13 @@ def _get_all_rows(db: PipelineDB) -> list:
         "FROM album_requests ORDER BY id"
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def _directory_has_entries(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    with os.scandir(path) as entries:
+        return any(True for _ in entries)
 
 
 def main():

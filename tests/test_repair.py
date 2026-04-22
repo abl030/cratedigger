@@ -200,6 +200,15 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         action = suggest_repair(issue)
         self.assertEqual(action.action, "manual_review")
 
+    def test_suggest_repair_blocked_recovery(self):
+        issue = OrphanInfo(
+            request_id=1,
+            issue_type="blocked_recovery",
+            detail="ambiguous legacy shared staged path",
+        )
+        action = suggest_repair(issue)
+        self.assertEqual(action.action, "manual_review")
+
 
 class TestSuggestRepair(unittest.TestCase):
     """Map issues to repair actions."""

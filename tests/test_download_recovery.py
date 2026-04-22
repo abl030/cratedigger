@@ -3,6 +3,7 @@
 import unittest
 
 from lib.download_recovery import (
+    find_blocked_recovery_issues,
     canonical_processing_path,
     classify_processing_path,
     resolve_missing_current_path,
@@ -165,3 +166,61 @@ class TestResolveMissingCurrentPath(unittest.TestCase):
             [location.short_label for location in decision.populated_locations],
             ["canonical", "legacy-shared"],
         )
+
+
+class TestFindBlockedRecoveryIssues(unittest.TestCase):
+
+    def test_reports_legacy_shared_only_recovery_as_blocked(self):
+        issues = find_blocked_recovery_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: path == "/tmp/staging/Test Artist/Test Album",
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("ambiguous legacy shared staged path", issues[0].detail)
+
+    def test_skips_rows_with_recoverable_request_scoped_stage(self):
+        issues = find_blocked_recovery_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
+        )
+
+        self.assertEqual(issues, [])

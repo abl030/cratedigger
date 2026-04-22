@@ -512,7 +512,11 @@ class FakePipelineDB:
             (request_id, current_path),
         )
         row = self._requests.get(request_id)
-        if row and row.get("status") == "downloading":
+        if (
+            row
+            and row.get("status") == "downloading"
+            and row.get("active_download_state") is not None
+        ):
             state = row.get("active_download_state")
             if isinstance(state, str):
                 try:

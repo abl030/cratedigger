@@ -2043,6 +2043,10 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(len(fake_db.update_download_state_calls), 1)
         persisted = self._download_state(fake_db)
         self.assertIsNotNone(persisted["processing_started_at"])
+        self.assertEqual(
+            persisted["current_path"],
+            "/tmp/test_downloads/Test Artist - Test Album (2020)",
+        )
 
     @patch("lib.download.process_completed_album")
     def test_poll_resume_processing_uses_persisted_current_path(self, mock_process):

@@ -484,6 +484,7 @@ class PipelineDB:
                 updated_at = %s
             WHERE id = %s
               AND status = 'downloading'
+              AND active_download_state IS NOT NULL
         """, (current_path, now, request_id))
         self.conn.commit()
 
