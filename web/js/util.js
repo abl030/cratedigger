@@ -105,6 +105,16 @@ export function esc(s) {
 }
 
 /**
+ * Encode a JS string literal for embedding inside a double-quoted HTML attribute.
+ * Returns HTML-escaped JSON, e.g. `&quot;Kid A&quot;`.
+ * @param {string|null|undefined} value
+ * @returns {string}
+ */
+export function jsArg(value) {
+  return esc(JSON.stringify(String(value ?? '')));
+}
+
+/**
  * Detect whether a release ID is MusicBrainz (UUID) or Discogs (numeric).
  * @param {string|null|undefined} id
  * @returns {'musicbrainz'|'discogs'|'unknown'}

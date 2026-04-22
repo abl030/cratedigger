@@ -36,18 +36,8 @@
  * just decides who gets clicked.
  */
 
-import { esc } from './util.js';
+import { jsArg } from './util.js';
 import { pipelineStore } from './state.js';
-
-/**
- * Encode a JS string literal for embedding inside a double-quoted HTML attribute.
- * Returns HTML-escaped JSON, e.g. `&quot;Kid A&quot;`.
- * @param {string|null|undefined} value
- * @returns {string}
- */
-function jsArg(value) {
-  return esc(JSON.stringify(String(value ?? '')));
-}
 
 /**
  * @typedef {Object} ActionItem
