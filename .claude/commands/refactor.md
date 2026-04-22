@@ -109,21 +109,16 @@ For Codex, use:
 ```bash
 rm -f /tmp/codex-self-review.txt
 codex exec review --base main -o /tmp/codex-self-review.txt
-deadline=$((SECONDS + 900))
-while pgrep -f "codex-raw exec review" > /dev/null; do
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "Codex review still running after 15 minutes; keep waiting unless you have evidence it is wedged."
-    break
-  fi
-  sleep 30
-done
 cat /tmp/codex-self-review.txt
 ```
 
 Notes:
 
 - Do not pass a positional prompt with `--base`.
-- When invoking this from an outer tool wrapper, give it a long wait window. Codex review can stay silent for 5-15 minutes on larger diffs.
+- If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
+- Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.
+- Do **not** interrupt a quiet review just because the output file is still empty. Codex often writes only at the end.
+- When the session exits, read `/tmp/codex-self-review.txt` and continue from the completed review.
 - Treat every real finding as pre-review work. Do **not** count this as satisfying the partner review.
 
 #### Delegated same-engine review
@@ -161,21 +156,16 @@ The partner engine should review the branch only after the same-engine pre-revie
 ```bash
 rm -f /tmp/codex-review.txt
 codex exec review --base main -o /tmp/codex-review.txt
-deadline=$((SECONDS + 900))
-while pgrep -f "codex-raw exec review" > /dev/null; do
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "Codex review still running after 15 minutes; keep waiting unless you have evidence it is wedged."
-    break
-  fi
-  sleep 30
-done
 cat /tmp/codex-review.txt
 ```
 
 Notes:
 
 - Do not pass a positional prompt with `--base`.
-- When invoking this from an outer tool wrapper, give it a long wait window. Codex review can stay silent for 5-15 minutes on larger diffs.
+- If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
+- Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.
+- Do **not** interrupt a quiet review just because the output file is still empty. Codex often writes only at the end.
+- When the session exits, read `/tmp/codex-review.txt` and continue from the completed review.
 - Treat every real finding as a fixable issue, not as commentary.
 - If Codex is also available as the current engine's native pre-review, run that first and only then ask Claude or Codex to do the partner pass.
 
@@ -217,8 +207,10 @@ Notes:
 - `--bare` is great for scripted runs, but it skips stored login/keychain state; in this repo's current setup that can fail with `Not logged in`.
 - Do **not** swap in `bypassPermissions` / `--dangerously-skip-permissions` here. Per Claude's docs, bypass mode ignores the allowlist and approves every tool, which defeats the constrained-review setup.
 - Do **not** give the reviewer edit authority in this pass. If you want the partner engine to patch findings itself, do that as a separate worker step after the review, not inside the review command.
-- If the review is still running after several minutes and `/tmp/claude-review.txt` is still empty, that is not by itself a bug — Claude often writes only once the full review completes.
-- When invoking this from an outer tool wrapper, use a long wait window. Claude reviews also regularly stay silent for 5-15 minutes before they write the final result.
+- If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
+- Do **not** poll `/tmp/claude-review.txt`, tail logs, or narrate the empty file while the review is running.
+- Do **not** interrupt a quiet review just because the output file is still empty. Claude often writes only once the full review completes.
+- When the session exits, read `/tmp/claude-review.txt` and continue from the completed review.
 - If Codex is the current engine, the normal sequence is Codex self-review first, then Claude partner review. Do not make Claude spend a round finding grep-level stragglers.
 
 For commit-scoped review, tighten the allowed diff command and prompt to `HEAD~1..HEAD`. For final branch review, keep `main...HEAD`.
