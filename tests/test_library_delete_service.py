@@ -85,6 +85,24 @@ class TestResolvePipelineRequest(unittest.TestCase):
         assert result is not None
         self.assertEqual(result["id"], 99)
 
+    def test_missing_pipeline_id_can_fall_through_to_different_release_row(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=77,
+            status="wanted",
+            mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ))
+
+        result = resolve_pipeline_request(
+            fake_db,
+            pipeline_id=42,
+            release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["id"], 77)
+
     def test_blank_release_id_returns_none(self) -> None:
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
@@ -162,6 +180,24 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         self.assertIsNone(fake_db.get_request(42))
         with BeetsDB(self.db_path) as beets:
             self.assertIsNone(beets.get_album_detail(7))
+
+    @patch("lib.library_delete_service.os.rmdir", side_effect=OSError("not empty"))
+    def test_success_ignores_non_empty_directory_cleanup_failure(
+        self,
+        _mock_rmdir: MagicMock,
+    ) -> None:
+        track_path = self._seed_album()
+
+        result = delete_release_from_library(
+            beets_db_path=self.db_path,
+            pipeline_db=FakePipelineDB(),
+            request=DeleteRequest(album_id=7),
+        )
+
+        self.assertIsInstance(result, DeleteSuccess)
+        assert isinstance(result, DeleteSuccess)
+        self.assertEqual(result.deleted_files, 1)
+        self.assertFalse(os.path.exists(track_path))
 
     def test_missing_album_returns_preflight_failure(self) -> None:
         result = delete_release_from_library(
