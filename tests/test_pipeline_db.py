@@ -1224,6 +1224,31 @@ class TestDownloadingStatus(unittest.TestCase):
         self.assertEqual(ads["current_path"], "/tmp/staged")
         self.assertEqual(ads["filetype"], "flac")
 
+    def test_update_download_state_current_path_noop_when_not_downloading(self):
+        """update_download_state_current_path() does not recreate cleared state."""
+        req_id = self.db.add_request(
+            mb_release_id="udscp-noop-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.set_downloading(
+            req_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
+                "files": [],
+            }),
+        )
+        self.db.update_status(req_id, "imported")
+
+        self.db.update_download_state_current_path(req_id, "/tmp/staged")
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "imported")
+        self.assertIsNone(req["active_download_state"])
+
     def test_clear_download_state(self):
         """clear_download_state() nulls the JSONB column."""
         req_id = self.db.add_request(

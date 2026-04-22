@@ -471,7 +471,7 @@ class PipelineDB:
         request_id: int,
         current_path: str | None,
     ) -> None:
-        """Rewrite only ``active_download_state.current_path`` in JSONB."""
+        """Rewrite only ``active_download_state.current_path`` on downloading rows."""
         now = datetime.now(timezone.utc)
         self._execute("""
             UPDATE album_requests
@@ -483,6 +483,7 @@ class PipelineDB:
                 ),
                 updated_at = %s
             WHERE id = %s
+              AND status = 'downloading'
         """, (current_path, now, request_id))
         self.conn.commit()
 
