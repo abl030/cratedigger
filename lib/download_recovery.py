@@ -305,6 +305,67 @@ def find_blocked_recovery_issues(
     return issues
 
 
+def find_blocked_processing_path_issues(
+    db_rows: list[dict[str, object]],
+    active_transfers: set[tuple[str, str]],
+    *,
+    existing_local_paths: set[str],
+    staging_dir: str,
+    slskd_download_dir: str,
+) -> list[BlockedRecoveryIssue]:
+    """Find persisted processing paths that block automatic resume."""
+    issues: list[BlockedRecoveryIssue] = []
+    for row in db_rows:
+        if row.get("status") != "downloading":
+            continue
+        state = row.get("active_download_state")
+        if not isinstance(state, dict):
+            continue
+        if state.get("processing_started_at") is None:
+            continue
+        current_path = state.get("current_path")
+        if not isinstance(current_path, str) or not current_path:
+            continue
+        if current_path not in existing_local_paths:
+            continue
+        files = state.get("files")
+        if not isinstance(files, list) or not files:
+            continue
+        has_active = any(
+            (
+                str(file_state.get("username") or ""),
+                str(file_state.get("filename") or ""),
+            ) in active_transfers
+            for file_state in files
+            if isinstance(file_state, dict)
+        )
+        if has_active:
+            continue
+
+        request_id = row.get("id")
+        if not isinstance(request_id, int) or isinstance(request_id, bool):
+            continue
+        location = classify_processing_path(
+            current_path=current_path,
+            artist=str(row.get("artist_name") or ""),
+            title=str(row.get("album_title") or ""),
+            year=str(row.get("year") or ""),
+            request_id=request_id,
+            staging_dir=staging_dir,
+            slskd_download_dir=slskd_download_dir,
+        )
+        if not location.blocks_auto_import_dispatch:
+            continue
+        issues.append(BlockedRecoveryIssue(
+            request_id=request_id,
+            detail=(
+                f"persisted {location.display_name} blocks automatic resume: "
+                f"{location.path}"
+            ),
+        ))
+    return issues
+
+
 def _path_is_within(path: str, root: str) -> bool:
     """Return True when ``path`` is located under ``root``."""
     if not root:

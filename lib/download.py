@@ -495,15 +495,22 @@ def _materialize_processing_dir(
                 ", ".join(missing_paths),
             )
             return False
-        if current_path_location.blocks_post_move_retry:
+        if current_path_location.blocks_auto_import_dispatch:
+            detail = (
+                "already lives at the request-scoped auto-import staged "
+                "path. Automatic retry is disabled to avoid duplicate "
+                "import; manual recovery is required."
+            )
+            if current_path_location.kind == "legacy_shared_staged":
+                detail = (
+                    "already lives at the legacy shared staged path. "
+                    "Automatic retry is disabled because the path is "
+                    "ambiguous across editions; manual recovery is required."
+                )
             _log_post_move_resume_blocked(
                 album_data,
                 current_path=staged_album.current_path,
-                detail=(
-                    "already lives at the request-scoped auto-import staged "
-                    "path. Automatic retry is disabled to avoid duplicate "
-                    "import; manual recovery is required."
-                ),
+                detail=detail,
             )
             return None
         album_data.import_folder = staged_album.current_path
@@ -1135,8 +1142,6 @@ def rederive_transfer_ids(
 def reconstruct_grab_list_entry(
     request: dict[str, Any],
     state: ActiveDownloadState,
-    *,
-    fallback_current_path: str | None = None,
 ) -> GrabListEntry:
     """Rebuild GrabListEntry from a DB row + persisted download state.
 
@@ -1170,7 +1175,7 @@ def reconstruct_grab_list_entry(
         db_source=request.get("source"),
         db_search_filetype_override=request.get("search_filetype_override"),
         db_target_format=request.get("target_format"),
-        import_folder=state.current_path or fallback_current_path,
+        import_folder=state.current_path,
     )
 
 
@@ -1399,7 +1404,6 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_dict(raw_state)
         else:
             state = ActiveDownloadState.from_json(raw_state)
-        fallback_current_path = None
         if state.current_path is None and state.processing_started_at is not None:
             recovery_decision = resolve_missing_current_path(
                 artist=row["artist_name"],
@@ -1439,15 +1443,9 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                 )
                 continue
             assert recovery_decision.selected_location is not None
-            fallback_current_path = recovery_decision.selected_location.path
-            state.current_path = fallback_current_path
-        entry = reconstruct_grab_list_entry(
-            row,
-            state,
-            fallback_current_path=fallback_current_path,
-        )
-        if fallback_current_path is not None:
-            db.update_download_state_current_path(request_id, fallback_current_path)
+            state.current_path = recovery_decision.selected_location.path
+            db.update_download_state_current_path(request_id, state.current_path)
+        entry = reconstruct_grab_list_entry(row, state)
 
         if state.processing_started_at is not None:
             _run_completed_processing(entry, request_id, state, db, ctx)

@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.import_dispatch import transition_request as _transition_request
 from lib.config import read_runtime_config
-from lib.download_recovery import find_blocked_recovery_issues
+from lib.download_recovery import (find_blocked_processing_path_issues,
+                                   find_blocked_recovery_issues)
 from lib.pipeline_db import PipelineDB
 from lib.processing_paths import directory_has_entries
 from lib.quality import (OrphanInfo, find_inconsistencies,
@@ -62,16 +63,30 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
             existing_local_paths = {
                 current_path
                 for row in rows
-                for current_path in [
-                    (row.get("active_download_state") or {}).get("current_path"),
-                ]
-                if current_path and os.path.exists(current_path)
+                for state in [row.get("active_download_state")]
+                if isinstance(state, dict)
+                for current_path in [state.get("current_path")]
+                if isinstance(current_path, str) and os.path.exists(current_path)
             }
             orphans = find_orphaned_downloads(
                 rows,
                 active,
                 existing_local_paths=existing_local_paths,
             )
+            blocked_processing_path_issues = [
+                OrphanInfo(
+                    request_id=issue.request_id,
+                    issue_type="blocked_post_move",
+                    detail=issue.detail,
+                )
+                for issue in find_blocked_processing_path_issues(
+                    rows,
+                    active,
+                    existing_local_paths=existing_local_paths,
+                    staging_dir=cfg.beets_staging_dir,
+                    slskd_download_dir=cfg.slskd_download_dir,
+                )
+            ]
             blocked_recovery_issues = [
                 OrphanInfo(
                     request_id=issue.request_id,
@@ -87,8 +102,9 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                 )
             ]
             issues.extend(orphans)
+            issues.extend(blocked_processing_path_issues)
             issues.extend(blocked_recovery_issues)
-            if not orphans and not blocked_recovery_issues:
+            if not orphans and not blocked_processing_path_issues and not blocked_recovery_issues:
                 print(f"  slskd: checked {len(active)} active transfers, no orphans.")
         except Exception as e:
             print(f"  slskd: could not check orphans: {e}")
