@@ -44,6 +44,12 @@ If you cannot do this cleanly, you are not holding a refactor yet.
 
 Grep every call site, type, route, SQL query, column, or JS consumer that participates in the invariant. The ad hoc count is always wrong.
 
+- Read each hit to confirm it is a real instance, not a lookalike.
+- Write down the list before touching code.
+- If the grep spans more than three files and more than two call shapes, run
+  one minimal-context explorer or delegated search pass to hunt the pattern,
+  not to validate your conclusion.
+
 For wire-boundary, DB-coupled, or subprocess-crossing refactors, probe the real shape before editing:
 
 - table schemas and FK behavior
@@ -52,7 +58,22 @@ For wire-boundary, DB-coupled, or subprocess-crossing refactors, probe the real 
 - live rows that already exist in production data
 - every reader of the fields you plan to reshape
 
+Concrete probes that have paid for themselves repeatedly in this repo:
+
+- SQLite column types: `sqlite3 path/to/db ".schema <table>"`
+- Postgres column types and constraints: `psql -c "\d+ <table>"`
+- FK delete behavior: `grep -n 'ON DELETE' migrations/`
+- external API response keys: `curl $URL | jq 'keys'`
+- subprocess stdout: run the actual subprocess with representative input and
+  capture the real output shape
+- JSONB blobs: `SELECT jsonb_pretty(<col>) FROM <table> LIMIT 3`
+- production readers of the shape: grep every caller that indexes or
+  destructures the fields you are reshaping, for example
+  `grep -rn "req\['beets_distance'\]" scripts/ lib/`
+
 Declared types lie. Production readers lie less.
+
+Do not skip this step for refactors that cross a process, DB, or wire boundary.
 
 ### 4. Plan 2-5 feature commits and a surface matrix
 
@@ -75,7 +96,8 @@ Do not pre-plan the review-fix commits. They are part of the audit trail.
 
 ### 5. Run the per-commit cycle
 
-For each feature commit:
+For each feature commit. Reviews are cheap; default to running them, not
+skipping them because "the next commit touches the same area anyway."
 
 1. Write RED tests first.
 2. Implement the structural change.
@@ -146,7 +168,9 @@ Notes:
 
 #### Delegated same-engine review
 
-If there is no native review command but the platform supports delegated review, run one fresh reviewer with minimal context:
+If there is no native review command, or the change is broad enough that a
+second disjoint pass is worth it, run one adversarial same-engine reviewer with
+minimal context:
 
 - point it at the commit or diff
 - describe the invariant and the claimed scope
@@ -154,6 +178,39 @@ If there is no native review command but the platform supports delegated review,
 - do not feed it your conclusions
 
 This pass is for disjoint signal, not agreement.
+
+When the platform supports it, prefer a concrete adversarial-review prompt over
+an informal "take a look". A good generic shape is:
+
+```text
+You are an adversarial code reviewer.
+
+Read CLAUDE.md and directly relevant rule files if needed.
+Review the current commit or branch diff.
+
+What the change claims: <one sentence>.
+Out of scope: <what later commits still plan to do>.
+
+Focus on:
+- correctness bugs
+- missing tests
+- wire-boundary / live-data shape drift
+- unfinished wiring
+- stale docs or docstrings
+- duplicated or diverging invariants
+
+Use file:line references where possible.
+Order findings as CRITICAL, HIGH, MEDIUM, LOW, NIT.
+Do not edit code.
+```
+
+Triage the result explicitly:
+
+- fix every CRITICAL and HIGH before moving on
+- fix MEDIUM inline unless there is a clear reason not to
+- either fix LOW findings or mention them in the review-fix audit trail
+- every real finding gets a pinning regression test or a documented
+  equivalence argument
 
 #### Invariant grep gate
 
@@ -258,13 +315,22 @@ If you reach six real review rounds on the same branch, stop. Document the remai
 After every feature commit and review-fix commit has landed:
 
 - rerun the same-engine pre-review or grep gate on the full branch
+- run one holistic adversarial review over `git diff main..HEAD` and ask:
+  - do the feature commits fit together cleanly
+  - is anything still unwired
+  - is any helper, config, docstring, or comment now stale
+  - does the acceptance checklist still match what shipped
 - run the mandatory partner-engine review on the full branch
 - converge on zero unfixed correctness findings or explicitly documented follow-ups
+
+If a final branch-wide review round is still finding real bugs at round 6, stop
+and document follow-up work instead of pretending the branch is converged.
 
 ### 10. Open the PR, merge, deploy, verify
 
 1. Open a PR with the acceptance checklist.
-2. Record the review rounds and what each review-fix commit addressed.
+2. Post a PR comment listing every review round, what each review-fix commit
+   addressed, and the final convergence verdict for the branch.
 3. Merge with rebase.
 4. Deploy.
 5. Verify the deployed code contains a unique signature from the refactor.
