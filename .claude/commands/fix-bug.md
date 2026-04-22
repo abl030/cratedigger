@@ -5,7 +5,7 @@ description: Fix a Cratedigger bug end-to-end with root-cause analysis, structur
 
 # Fix Bug Pipeline
 
-End-to-end bug fix: confirm the bug, find the structural cause, write RED tests, fix the seam, run partner-engine review, and present the finished PR for approval.
+End-to-end bug fix: confirm the bug, find the structural cause, write RED tests, fix the seam, run a self-review gate, run partner-engine review, and present the finished PR for approval.
 
 **Usage**: `/fix-bug <description of the problem>`
 
@@ -51,6 +51,12 @@ If the driver platform supports delegated review and the bug smells broader than
 
 Whether you use a delegated reviewer or not, the goal is the same: fix the structure that allowed the bug, not only the visible output.
 
+Also build a short bug-class surface list:
+
+- every sibling path that asks the same broken question
+- every old helper or fallback chain that could still answer it differently
+- every ingress contract test that should exist once the fix lands
+
 ### 4. Write RED tests first
 
 Add failing tests that lock in:
@@ -75,9 +81,26 @@ Then run:
 - `pyright` on every touched file
 - broader verification when the change crosses multiple layers
 
-### 6. Run the mandatory partner-engine review
+### 6. Run a same-engine pre-review, then the mandatory partner-engine review
 
-Run the partner review on the branch before presenting the fix.
+Before the partner engine reviews the branch, force one disjoint pass from the current engine. Use the strongest option the current platform supports:
+
+1. a native branch-review command
+2. a fresh same-engine delegated reviewer with minimal context
+3. a bug-class grep gate over the old helper names, raw fallback chains, and sibling ingress paths
+
+This does **not** replace the partner review. Its job is to catch obvious stragglers before the other engine spends a round on them.
+
+If the current engine is Codex, use the native review command first:
+
+```bash
+rm -f /tmp/codex-self-review.txt
+codex exec review --base main -o /tmp/codex-self-review.txt
+while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+cat /tmp/codex-self-review.txt
+```
+
+Run the partner review on the branch only after that pre-review and grep gate are clean.
 
 #### If Claude is the primary driver, use Codex as partner reviewer
 
@@ -95,11 +118,8 @@ Do not pass a positional prompt with `--base`.
 ```bash
 rm -f /tmp/claude-review.txt
 cat <<'EOF' | claude -p --model opus \
-  --allowed-tools 'Bash(git status --short --branch)' \
-                  'Bash(git diff main...HEAD)' \
-                  'Bash(git show --stat --summary HEAD)' \
-                  'Bash(rg *)' \
-                  'Bash(sed *)' \
+  --permission-mode dontAsk \
+  --allowedTools "Bash(git status --short --branch),Bash(git diff main...HEAD),Bash(git show --stat --summary HEAD),Bash(rg *),Bash(sed *)" \
   > /tmp/claude-review.txt
 You are an adversarial code reviewer.
 
@@ -120,7 +140,13 @@ EOF
 cat /tmp/claude-review.txt
 ```
 
-Use stdin for the prompt. In this environment that is the reliable `claude -p` path when `--allowed-tools` is present.
+Use stdin for the prompt. In this environment that is the reliable `claude -p` path when the allowlist is present.
+
+Notes:
+
+- keep normal `claude -p` auth resolution; do **not** add `--bare` unless auth comes from `ANTHROPIC_API_KEY` or explicit `--settings`
+- do **not** use `bypassPermissions` / `--dangerously-skip-permissions` for review, because that defeats the constrained allowlist
+- if `/tmp/claude-review.txt` stays empty while the process is still running, Claude may still be working; it often writes once at completion
 
 Fix every real finding, add the missing regression coverage, and rerun review if the branch changed materially.
 

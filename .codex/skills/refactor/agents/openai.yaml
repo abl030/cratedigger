@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cratedigger Refactor"
+  short_description: "Drive a structural refactor in Cratedigger"
+  default_prompt: "Use $refactor to drive a structural refactor in this repo, keep it staged, and run the mandatory partner review."

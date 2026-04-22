@@ -5,7 +5,7 @@ description: Drive a structural refactor in Cratedigger with an explicit invaria
 
 # Refactor Pipeline
 
-Large structural refactor: invariant -> inventory -> live probe -> staged commits -> review loops -> PR -> merge -> deploy -> reflect.
+Large structural refactor: invariant -> inventory -> live probe -> staged commits -> self-review gate -> partner review -> PR -> merge -> deploy -> reflect.
 
 **Usage**: `/refactor <description of the refactor>`
 
@@ -54,7 +54,15 @@ For wire-boundary, DB-coupled, or subprocess-crossing refactors, probe the real 
 
 Declared types lie. Production readers lie less.
 
-### 4. Plan 2-5 feature commits
+### 4. Plan 2-5 feature commits and a surface matrix
+
+Before coding, list the surfaces that must end up on the seam in this batch:
+
+- every route, CLI path, job, script, or frontend flow that asks the invariant question
+- every old helper, accessor, raw branch, or fallback chain that the seam should replace
+- every ingress contract test you need once the seam exists
+
+Partner review should not be the first place you discover an obvious unwired surface. Do this grep-and-list work now.
 
 Each feature commit must:
 
@@ -82,9 +90,37 @@ Every real review finding later in the cycle gets either:
 
 Do not silently drop findings.
 
-### 6. Use an independent same-engine reviewer when it helps
+### 6. Run a same-engine pre-review before partner review
 
-If the driver platform supports delegated review and the change is broad enough to justify it, run one fresh reviewer with minimal context:
+Before the partner engine reviews the branch, force one disjoint pass from the current engine. Use the strongest option the current platform supports:
+
+1. a native branch-review command
+2. a fresh same-engine delegated reviewer with minimal context
+3. the invariant grep gate below, if the platform lacks review support
+
+This pre-review does **not** replace the partner review. Its job is to catch obvious stragglers before the other engine spends a round on them.
+
+#### Native same-engine review
+
+If the current engine has a native review command, run it before the partner review.
+
+For Codex, use:
+
+```bash
+rm -f /tmp/codex-self-review.txt
+codex exec review --base main -o /tmp/codex-self-review.txt
+while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+cat /tmp/codex-self-review.txt
+```
+
+Notes:
+
+- Do not pass a positional prompt with `--base`.
+- Treat every real finding as pre-review work. Do **not** count this as satisfying the partner review.
+
+#### Delegated same-engine review
+
+If there is no native review command but the platform supports delegated review, run one fresh reviewer with minimal context:
 
 - point it at the commit or diff
 - describe the invariant and the claimed scope
@@ -93,9 +129,24 @@ If the driver platform supports delegated review and the change is broad enough 
 
 This pass is for disjoint signal, not agreement.
 
+#### Invariant grep gate
+
+Before partner review, build one grep pack from the invariant and clear the obvious stragglers yourself. Search for:
+
+- old helper names or deprecated module imports being replaced by the seam
+- raw source or ID-shape branches (`isdigit`, `detect_release_source`, direct source-string comparisons, hand-rolled fallback chains)
+- direct DB, JSON, or route-level field reads the seam should supersede
+- frontend state reads or writes that bypass the new helper, key normalizer, or store seam
+
+Every remaining match must be:
+
+- migrated to the seam
+- deleted
+- or explicitly justified in code or the follow-up note
+
 ### 7. Run the mandatory partner-engine review
 
-The partner engine should review the branch after each meaningful commit or review-fix batch, and again once at the end.
+The partner engine should review the branch only after the same-engine pre-review and grep gate are clean for the current batch. Review after each meaningful commit or review-fix batch, and again once at the end.
 
 #### If Claude is the primary driver, use Codex as partner reviewer
 
@@ -110,6 +161,7 @@ Notes:
 
 - Do not pass a positional prompt with `--base`.
 - Treat every real finding as a fixable issue, not as commentary.
+- If Codex is also available as the current engine's native pre-review, run that first and only then ask Claude or Codex to do the partner pass.
 
 #### If Codex is the primary driver, use Claude as partner reviewer
 
@@ -149,6 +201,7 @@ Notes:
 - `--bare` is great for scripted runs, but it skips stored login/keychain state; in this repo's current setup that can fail with `Not logged in`.
 - Do **not** swap in `bypassPermissions` / `--dangerously-skip-permissions` here. Per Claude's docs, bypass mode ignores the allowlist and approves every tool, which defeats the constrained-review setup.
 - If the review is still running after several minutes and `/tmp/claude-review.txt` is still empty, that is not by itself a bug — Claude often writes only once the full review completes.
+- If Codex is the current engine, the normal sequence is Codex self-review first, then Claude partner review. Do not make Claude spend a round finding grep-level stragglers.
 
 For commit-scoped review, tighten the allowed diff command and prompt to `HEAD~1..HEAD`. For final branch review, keep `main...HEAD`.
 
@@ -171,7 +224,7 @@ If you reach six real review rounds on the same branch, stop. Document the remai
 
 After every feature commit and review-fix commit has landed:
 
-- run one holistic independent review if the driver platform supports it
+- rerun the same-engine pre-review or grep gate on the full branch
 - run the mandatory partner-engine review on the full branch
 - converge on zero unfixed correctness findings or explicitly documented follow-ups
 
@@ -192,6 +245,7 @@ Once the change is live, write a short note for the next refactor:
 - what the same-engine reviewer caught that the partner engine did not
 - what the partner engine caught that the same-engine reviewer did not
 - whether the stop-and-refactor trigger fired
+- what grep or surface-matrix item should have happened earlier
 - what live probe should have happened earlier
 
 Keep it short and specific.

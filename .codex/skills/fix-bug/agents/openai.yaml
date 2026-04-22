@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cratedigger Fix Bug"
+  short_description: "Fix a Cratedigger bug end-to-end"
+  default_prompt: "Use $fix-bug to reproduce a bug in this repo, fix the structural cause, and run the mandatory partner review."
