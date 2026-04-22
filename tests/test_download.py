@@ -2098,6 +2098,50 @@ class TestPollActiveDownloads(unittest.TestCase):
             _fake_db.update_download_state_calls[0][1],
         )
 
+    @patch("lib.download.process_completed_album")
+    def test_poll_mid_processing_row_uses_request_scoped_staging_fallback(self, mock_process):
+        """Move/persist crashes should recover from request-scoped staged dirs."""
+        from lib.download import poll_active_downloads
+        from lib.staged_album import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            staged_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+
+            mock_process.return_value = None
+            poll_active_downloads(ctx)
+
+            entry = mock_process.call_args[0][0]
+            self.assertEqual(entry.import_folder, staged_path)
+            self.assertEqual(
+                fake_db.request(1)["active_download_state"]["current_path"],
+                staged_path,
+            )
+            self.assertEqual(fake_db.status_history, [])
+
     def test_poll_legacy_processing_row_blocks_on_ambiguous_staged_dir(self):
         """Legacy rows must not guess a shared staged dir as current_path."""
         from lib.download import poll_active_downloads
