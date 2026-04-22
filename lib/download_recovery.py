@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import re
 from typing import Callable, Literal
 
-AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
-POST_VALIDATION_STAGING_SUBDIR = "post-validation"
+from lib.processing_paths import (
+    canonical_processing_path as shared_canonical_processing_path,
+    normalize_processing_path,
+    stage_to_ai_path,
+)
 
 ProcessingPathKind = Literal[
     "canonical",
@@ -97,8 +99,12 @@ def canonical_processing_path(
     slskd_download_dir: str,
 ) -> str:
     """Return the canonical local processing directory for a completed album."""
-    import_folder_name = _sanitize_folder_name(f"{artist} - {title} ({year})")
-    return os.path.join(slskd_download_dir, import_folder_name)
+    return shared_canonical_processing_path(
+        artist=artist,
+        title=title,
+        year=year,
+        slskd_download_dir=slskd_download_dir,
+    )
 
 
 def classify_processing_path(
@@ -118,10 +124,12 @@ def classify_processing_path(
         year=year,
         slskd_download_dir=slskd_download_dir,
     )
-    if os.path.realpath(current_path) == os.path.realpath(canonical_path):
+    if normalize_processing_path(current_path) == normalize_processing_path(
+        canonical_path,
+    ):
         return ProcessingPathLocation(path=current_path, kind="canonical")
 
-    request_scoped_auto_import = _stage_to_ai_path(
+    request_scoped_auto_import = stage_to_ai_path(
         artist=artist,
         title=title,
         staging_dir=staging_dir,
@@ -134,7 +142,7 @@ def classify_processing_path(
             kind="request_scoped_auto_import_staged",
         )
 
-    request_scoped_post_validation = _stage_to_ai_path(
+    request_scoped_post_validation = stage_to_ai_path(
         artist=artist,
         title=title,
         staging_dir=staging_dir,
@@ -147,7 +155,7 @@ def classify_processing_path(
             kind="request_scoped_post_validation_staged",
         )
 
-    legacy_shared_path = _stage_to_ai_path(
+    legacy_shared_path = stage_to_ai_path(
         artist=artist,
         title=title,
         staging_dir=staging_dir,
@@ -181,7 +189,7 @@ def resolve_missing_current_path(
     candidates = (
         ProcessingPathLocation(path=canonical_path, kind="canonical"),
         ProcessingPathLocation(
-            path=_stage_to_ai_path(
+            path=stage_to_ai_path(
                 artist=artist,
                 title=title,
                 staging_dir=staging_dir,
@@ -191,7 +199,7 @@ def resolve_missing_current_path(
             kind="request_scoped_auto_import_staged",
         ),
         ProcessingPathLocation(
-            path=_stage_to_ai_path(
+            path=stage_to_ai_path(
                 artist=artist,
                 title=title,
                 staging_dir=staging_dir,
@@ -201,7 +209,7 @@ def resolve_missing_current_path(
             kind="request_scoped_post_validation_staged",
         ),
         ProcessingPathLocation(
-            path=_stage_to_ai_path(
+            path=stage_to_ai_path(
                 artist=artist,
                 title=title,
                 staging_dir=staging_dir,
@@ -321,47 +329,9 @@ def _path_is_within(path: str, root: str) -> bool:
     """Return True when ``path`` is located under ``root``."""
     if not root:
         return False
-    abs_path = os.path.abspath(os.path.normpath(path))
-    abs_root = os.path.abspath(os.path.normpath(root))
+    abs_path = normalize_processing_path(path)
+    abs_root = normalize_processing_path(root)
     try:
         return os.path.commonpath([abs_path, abs_root]) == abs_root
     except ValueError:
         return False
-
-
-def _stage_to_ai_path(
-    *,
-    artist: str,
-    title: str,
-    staging_dir: str,
-    request_id: int | None = None,
-    auto_import: bool | None = None,
-) -> str:
-    artist_dir = _sanitize_folder_name(artist)
-    album_dir = _sanitize_folder_name(title)
-    if request_id is not None:
-        album_dir = f"{album_dir} [request-{request_id}]"
-    return os.path.join(
-        _stage_to_ai_root(staging_dir=staging_dir, auto_import=auto_import),
-        artist_dir,
-        album_dir,
-    )
-
-
-def _stage_to_ai_root(
-    *,
-    staging_dir: str,
-    auto_import: bool | None = None,
-) -> str:
-    if auto_import is None:
-        return staging_dir
-    subdir = (
-        AUTO_IMPORT_STAGING_SUBDIR
-        if auto_import
-        else POST_VALIDATION_STAGING_SUBDIR
-    )
-    return os.path.join(staging_dir, subdir)
-
-
-def _sanitize_folder_name(folder_name: str) -> str:
-    return re.sub(r'[<>:."/\\|?*]', "", folder_name).strip()

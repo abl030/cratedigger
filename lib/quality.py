@@ -3077,6 +3077,9 @@ def find_orphaned_downloads(
     Returns OrphanInfo for each downloading row where NONE of its files
     appear in active_transfers, plus ``blocked_post_move`` when a row is
     already in local processing but its persisted ``current_path`` is gone.
+    Rows with ``processing_started_at`` set are treated as local-processing
+    rows even when ``current_path`` is missing; caller-side blocked recovery
+    detection owns that ambiguity.
     """
     issues: list[OrphanInfo] = []
     for row in db_rows:
@@ -3093,12 +3096,10 @@ def find_orphaned_downloads(
             for f in files
         )
         current_path = state.get("current_path")
-        if (
-            state.get("processing_started_at") is not None
-            and current_path
-        ):
+        if state.get("processing_started_at") is not None:
             if (
-                not has_active
+                current_path
+                and not has_active
                 and existing_local_paths is not None
                 and current_path not in existing_local_paths
             ):

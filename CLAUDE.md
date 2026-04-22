@@ -42,7 +42,7 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
 | `/mnt/virtio/cratedigger/postgres` | shared | PostgreSQL data dir |
 | `/mnt/virtio/Music/beets-library.db` | shared | Beets library DB |
 | `/mnt/virtio/Music/Beets` | shared | Beets library (tagged files) |
-| `/mnt/virtio/Music/Incoming` | shared | Staging area for validated downloads |
+| `/mnt/virtio/Music/Incoming` | shared | Staging root for validated downloads (`auto-import/` for request imports, `post-validation/` for manual redownload review) |
 | `/mnt/virtio/Music/Re-download` | shared | READMEs for redownload targets |
 | `/mnt/virtio/music/slskd` | doc2 | slskd download directory |
 | `/var/lib/cratedigger` | doc2 | Runtime state (config.ini, lock, denylists) |
@@ -125,12 +125,12 @@ Web UI (music.ablz.au)               CLI
       /Beets/       (cleanup /Incoming on success)
 ```
 
-**All validated downloads stage to `/Incoming` first.** For `source=request`, `import_one.py` auto-imports from `/Incoming` to `/Beets` and cleans up. For `source=redownload`, files stay in `/Incoming` for manual review. Don't assume files in `/Incoming` are redownloads — they may be mid-import.
+**All validated downloads stage under `/Incoming` first.** Request auto-imports stage under `/Incoming/auto-import`, while redownload/manual-review paths stage under `/Incoming/post-validation`. Don't assume a path under `/Incoming` is a redownload — request imports can be mid-move or mid-import there too.
 
 ### Two-track pipeline
 
-- **Requests** (`source='request'`) — user-added via CLI or web UI. Auto-imported to beets if validation passes at distance ≤ 0.15. Converts FLAC→V0 (or target format), imports, cleans up `/Incoming`.
-- **Redownloads** (`source='redownload'`) — replacing bad source material. Always staged to `/Incoming` for manual review, never auto-imported.
+- **Requests** (`source='request'`) — user-added via CLI or web UI. Auto-imported to beets if validation passes at distance ≤ 0.15. Converts FLAC→V0 (or target format), imports from `/Incoming/auto-import`, and cleans up.
+- **Redownloads** (`source='redownload'`) — replacing bad source material. Always staged to `/Incoming/post-validation` for manual review, never auto-imported.
 
 Schema fields, JSONB audit blobs, search_log outcomes, and the force-import flow live in `docs/pipeline-db-schema.md`.
 

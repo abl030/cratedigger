@@ -126,7 +126,7 @@ fetchart:
 | `/mnt/virtio/Music/beets-library.db` | SQLite database — the DB source of truth |
 | `/mnt/virtio/Music/beets-import.log` | Import log |
 | `/mnt/virtio/Music/AI` | Staging area — raw copies from `/Me`, pre-import |
-| `/mnt/virtio/Music/Incoming` | Re-download staging — Cratedigger-validated downloads awaiting conversion and import |
+| `/mnt/virtio/Music/Incoming` | Processing staging root — `/Incoming/auto-import` for request auto-imports, `/Incoming/post-validation` for redownload/manual-review staging |
 | `/mnt/virtio/Music/Re-download` | Re-download queue — each album has a README.md explaining why |
 
 ### File Organization

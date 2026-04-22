@@ -148,16 +148,15 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         )
         self.assertEqual(len(issues), 0)
 
-    def test_processing_started_without_current_path_is_still_orphaned(self):
-        """Rows that never persisted a local path should still be repairable."""
+    def test_processing_started_without_current_path_is_not_orphaned(self):
+        """Recovery-owned rows must not be reset ahead of poll recovery."""
         rows = [{"id": 1, "status": "downloading",
                  "active_download_state": {
                      "filetype": "flac",
                      "processing_started_at": "2026-04-22T00:00:00+00:00",
                      "files": [{"username": "user1", "filename": "track.flac"}]}}]
         issues = find_orphaned_downloads(rows, set())
-        self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].issue_type, "orphaned_download")
+        self.assertEqual(issues, [])
 
     def test_reports_missing_local_processing_path_for_manual_review(self):
         """Blocked post-move rows should be surfaced to repair tooling."""
