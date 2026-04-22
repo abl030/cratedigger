@@ -1386,6 +1386,7 @@ class TestAlbumRowSource(unittest.TestCase):
         discogs = [a for a in albums if a["album"] == "Discogs Album"]
         self.assertEqual(len(discogs), 1)
         self.assertEqual(discogs[0]["source"], "discogs")
+        self.assertEqual(discogs[0]["discogs_albumid"], "67890")
 
 
 if __name__ == "__main__":

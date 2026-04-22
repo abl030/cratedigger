@@ -758,4 +758,5 @@ class BeetsDB:
             "added": r[10], "mb_releasegroupid": r[11],
             "release_group_title": r[12], "min_bitrate": r[13],
             "source": source,
+            "discogs_albumid": str(r[14]) if r[14] is not None else None,
         }

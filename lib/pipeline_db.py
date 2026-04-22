@@ -550,6 +550,8 @@ class PipelineDB:
                 FROM album_requests
                 WHERE mb_artist_id = %s
                    OR (artist_name ILIKE %s ESCAPE '\\'
+                       -- Hyphen-free ids (e.g. legacy numerics / Discogs ids)
+                       -- deliberately fall back to the artist-name match.
                        AND (mb_artist_id IS NULL OR mb_artist_id = ''
                             OR mb_artist_id NOT LIKE '%%-%%'))
                 ORDER BY year, album_title
