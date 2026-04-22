@@ -1397,13 +1397,57 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                 year=str(row["year"] or ""),
                 slskd_download_dir=ctx.cfg.slskd_download_dir,
             )
+            request_scoped_staged_candidates = [
+                (
+                    "auto-import",
+                    stage_to_ai_path(
+                        artist=row["artist_name"],
+                        title=row["album_title"],
+                        staging_dir=ctx.cfg.beets_staging_dir,
+                        request_id=request_id,
+                        auto_import=True,
+                    ),
+                ),
+                (
+                    "post-validation",
+                    stage_to_ai_path(
+                        artist=row["artist_name"],
+                        title=row["album_title"],
+                        staging_dir=ctx.cfg.beets_staging_dir,
+                        request_id=request_id,
+                        auto_import=False,
+                    ),
+                ),
+            ]
             staged_fallback = stage_to_ai_path(
                 artist=row["artist_name"],
                 title=row["album_title"],
                 staging_dir=ctx.cfg.beets_staging_dir,
             )
-            if (not _directory_has_entries(canonical_fallback)
-                    and os.path.isdir(staged_fallback)):
+            populated_candidates: list[tuple[str, str]] = []
+            if _directory_has_entries(canonical_fallback):
+                populated_candidates.append(("canonical", canonical_fallback))
+            for label, candidate in request_scoped_staged_candidates:
+                if _directory_has_entries(candidate):
+                    populated_candidates.append((label, candidate))
+
+            if len(populated_candidates) > 1:
+                rendered_candidates = ", ".join(
+                    f"{label}={path}" for label, path in populated_candidates
+                )
+                logger.error(
+                    "MID-PROCESS RESUME BLOCKED: request_id=%s %s - %s "
+                    "found multiple populated recovery paths (%s). "
+                    "Manual recovery is required.",
+                    request_id,
+                    row["artist_name"],
+                    row["album_title"],
+                    rendered_candidates,
+                )
+                continue
+            if len(populated_candidates) == 1:
+                fallback_current_path = populated_candidates[0][1]
+            elif _directory_has_entries(staged_fallback):
                 logger.error(
                     "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
                     "current_path is missing, canonical_path=%s has no files, "
@@ -1416,7 +1460,8 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                     staged_fallback,
                 )
                 continue
-            fallback_current_path = canonical_fallback
+            else:
+                fallback_current_path = canonical_fallback
             state.current_path = fallback_current_path
         entry = reconstruct_grab_list_entry(
             row,

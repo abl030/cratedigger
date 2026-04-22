@@ -132,6 +132,17 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         issues = find_orphaned_downloads(rows, active)
         self.assertEqual(len(issues), 0)
 
+    def test_skips_local_processing_rows_without_active_transfers(self):
+        """Rows already in local processing are not orphaned downloads."""
+        rows = [{"id": 1, "status": "downloading",
+                 "active_download_state": {
+                     "filetype": "flac",
+                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                     "current_path": "/tmp/staging/auto-import/Test/Album [request-1]",
+                     "files": [{"username": "user1", "filename": "track.flac"}]}}]
+        issues = find_orphaned_downloads(rows, set())
+        self.assertEqual(len(issues), 0)
+
     def test_suggest_repair_orphaned(self):
         """Orphaned download should suggest reset_to_wanted."""
         issue = OrphanInfo(request_id=1, issue_type="orphaned_download",
