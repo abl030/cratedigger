@@ -500,6 +500,7 @@ class ActiveDownloadState:
     files: list[ActiveDownloadFileState]
     last_progress_at: str | None = None
     processing_started_at: str | None = None
+    current_path: str | None = None
 
     def to_json(self) -> str:
         data: dict[str, object] = {
@@ -511,6 +512,8 @@ class ActiveDownloadState:
             data["last_progress_at"] = self.last_progress_at
         if self.processing_started_at is not None:
             data["processing_started_at"] = self.processing_started_at
+        if self.current_path is not None:
+            data["current_path"] = self.current_path
         return json.dumps(data)
 
     @staticmethod
@@ -529,6 +532,11 @@ class ActiveDownloadState:
             processing_started_at=(
                 str(d["processing_started_at"])
                 if d.get("processing_started_at") is not None
+                else None
+            ),
+            current_path=(
+                str(d["current_path"])
+                if d.get("current_path") is not None
                 else None
             ),
         )

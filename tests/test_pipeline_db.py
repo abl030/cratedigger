@@ -1197,6 +1197,33 @@ class TestDownloadingStatus(unittest.TestCase):
         assert ads is not None
         self.assertEqual(ads["processing_started_at"], "2026-04-03T12:05:00+00:00")
 
+    def test_update_download_state_current_path(self):
+        """update_download_state_current_path() rewrites only the path field."""
+        req_id = self.db.add_request(
+            mb_release_id="udscp-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.set_downloading(
+            req_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
+                "files": [],
+            }),
+        )
+
+        self.db.update_download_state_current_path(req_id, "/tmp/staged")
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "downloading")
+        ads = req["active_download_state"]
+        assert ads is not None
+        self.assertEqual(ads["current_path"], "/tmp/staged")
+        self.assertEqual(ads["filetype"], "flac")
+
     def test_clear_download_state(self):
         """clear_download_state() nulls the JSONB column."""
         req_id = self.db.add_request(

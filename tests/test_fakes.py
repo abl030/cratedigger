@@ -63,6 +63,19 @@ class TestFakePipelineDB(unittest.TestCase):
             [(42, '{"filetype":"flac"}')],
         )
 
+    def test_update_download_state_current_path_rewrites_nested_path(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"filetype": "flac", "files": []},
+        ))
+
+        db.update_download_state_current_path(42, "/tmp/staged")
+
+        row = db.request(42)
+        self.assertEqual(row["active_download_state"]["current_path"], "/tmp/staged")
+
     def test_update_spectral_state(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))

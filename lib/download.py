@@ -772,6 +772,7 @@ def build_active_download_state(
     enqueued_at: str | None = None,
     last_progress_at: str | None = None,
     processing_started_at: str | None = None,
+    current_path: str | None = None,
 ) -> ActiveDownloadState:
     """Build an ActiveDownloadState from a GrabListEntry.
 
@@ -799,6 +800,7 @@ def build_active_download_state(
         last_progress_at=last_progress_at or enqueued_at_value,
         files=files,
         processing_started_at=processing_started_at,
+        current_path=current_path or entry.import_folder,
     )
 
 
@@ -976,6 +978,7 @@ def reconstruct_grab_list_entry(
         db_source=request.get("source"),
         db_search_filetype_override=request.get("search_filetype_override"),
         db_target_format=request.get("target_format"),
+        import_folder=state.current_path,
     )
 
 
