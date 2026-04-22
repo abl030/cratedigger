@@ -1858,8 +1858,7 @@ class TestBrowseRouteContracts(_WebServerCase):
             "country": "US",
             "source": "musicbrainz",
         }
-        with patch("web.server.get_library_artist", return_value=[album]), \
-                patch("web.server.check_pipeline", return_value={}):
+        with patch("web.server.get_library_artist", return_value=[album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -1945,10 +1944,7 @@ class TestBrowseRouteContracts(_WebServerCase):
         }
 
         with patch.object(srv, "db", fake_db), \
-                patch("web.server.get_library_artist", return_value=[beets_album]), \
-                patch("web.server.check_pipeline", return_value={
-                    self.RELEASE_ID: {"id": 42, "status": "wanted"},
-                }):
+                patch("web.server.get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )

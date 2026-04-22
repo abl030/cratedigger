@@ -117,6 +117,15 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertTrue(rows[0].in_library)
         self.assertIsNone(rows[0].pipeline_id)
 
+    def test_build_library_artist_rows_rejects_non_int_request_id(self) -> None:
+        with self.assertRaisesRegex(TypeError, "int id"):
+            build_library_artist_rows(
+                library_albums=[],
+                pipeline_rows=[make_request_row(id="42")],
+                track_counts={},
+                rank_fn=_rank,
+            )
+
     def test_build_library_artist_rows_overlays_pipeline_state_on_beets_row(self) -> None:
         rows = build_library_artist_rows(
             library_albums=[_beets_album()],
