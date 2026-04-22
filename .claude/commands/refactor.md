@@ -83,12 +83,35 @@ For each feature commit:
 4. Run `pyright` on every touched file.
 5. Commit with a message that states what structural change this commit delivers.
 
+For review-fix commits, preserve the review round in the subject instead of
+collapsing everything into a generic follow-up. Preferred patterns:
+
+- `review(r3 p2): document equivalence + pin observed prod shapes (codex)`
+- `review(r2 adversarial): stale docs + pre-48914ca mbid pin test`
+- `review(final holistic): delete dead helper + fix stale refs`
+
+The subject should name the actual finding or invariant closed, not just say
+`address review`.
+
 Every real review finding later in the cycle gets either:
 
 - a pinning regression test, or
 - a documented equivalence argument in the review-fix commit
 
-Do not silently drop findings.
+Do not silently drop findings. The review-fix body is part of the audit trail
+and should be as detailed as needed to explain:
+
+- who found the issue and in which round
+- what real breakage, drift, or risk they identified
+- why the fix or documented-equivalence argument is correct
+- what verification ran after the change
+
+If the right answer is "the stricter contract is already correct for every
+observed production shape", say that explicitly in the body instead of adding a
+hedge that weakens the invariant.
+
+Keep agent-specific attribution trailers in the engine-local rules rather than
+hardcoding them into this shared workflow.
 
 ### 6. Run a same-engine pre-review before partner review
 

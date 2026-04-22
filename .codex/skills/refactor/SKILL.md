@@ -11,4 +11,4 @@ This wrapper exists so Codex can discover the shared refactor workflow as a real
 2. Treat that file as the authoritative workflow definition.
 3. Follow it end-to-end.
 4. Keep the partner-engine review mandatory and preserve the staged commit and review-fix audit trail.
-5. When committing from Codex, also follow `../../CODEX.md` for commit-message style.
+5. When committing from Codex, also follow `../../CODEX.md` for Codex-specific attribution and local additions to the shared commit-message style.
