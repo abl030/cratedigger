@@ -53,7 +53,19 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
     if slskd_host and slskd_key:
         try:
             active = _get_slskd_active_transfers(slskd_host, slskd_key)
-            orphans = find_orphaned_downloads(rows, active)
+            existing_local_paths = {
+                current_path
+                for row in rows
+                for current_path in [
+                    (row.get("active_download_state") or {}).get("current_path"),
+                ]
+                if current_path and os.path.exists(current_path)
+            }
+            orphans = find_orphaned_downloads(
+                rows,
+                active,
+                existing_local_paths=existing_local_paths,
+            )
             issues.extend(orphans)
             if not orphans:
                 print(f"  slskd: checked {len(active)} active transfers, no orphans.")

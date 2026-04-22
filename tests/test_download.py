@@ -2178,6 +2178,45 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "\n".join(logs.output),
             )
 
+    def test_poll_legacy_processing_row_blocks_when_canonical_and_legacy_stage_both_exist(self):
+        """Split legacy state must not pick one side and requeue the other."""
+        from lib.download import poll_active_downloads
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical_path = os.path.join(
+                tmpdir, "downloads", "Test Artist - Test Album (2020)")
+            os.makedirs(canonical_path)
+            with open(os.path.join(canonical_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+
+            staging_root = os.path.join(tmpdir, "staging")
+            staged_path = os.path.join(staging_root, "Test Artist", "Test Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertIsNone(fake_db.request(1)["active_download_state"].get("current_path"))
+            self.assertEqual(fake_db.update_download_state_calls, [])
+            self.assertIn("MID-PROCESS RESUME BLOCKED", "\n".join(logs.output))
+
     def test_poll_missing_persisted_current_path_resets_to_wanted(self):
         """Missing persisted staging dirs should fail closed back to wanted."""
         from lib.download import poll_active_downloads

@@ -3039,7 +3039,7 @@ def full_pipeline_decision(
 class OrphanInfo:
     """A detected inconsistency in pipeline DB state."""
     request_id: int
-    issue_type: str  # "corrupt_downloading", "orphaned_download"
+    issue_type: str  # "corrupt_downloading" | "orphaned_download" | "blocked_post_move"
     detail: str
 
 
@@ -3054,15 +3054,21 @@ class RepairAction:
 def find_orphaned_downloads(
     db_rows: list[dict[str, Any]],
     active_transfers: set[tuple[str, str]],
+    *,
+    existing_local_paths: set[str] | None = None,
 ) -> list[OrphanInfo]:
     """Detect downloading rows whose slskd transfers no longer exist. Pure — no I/O.
 
     Args:
         db_rows: album_requests rows (must include status, active_download_state).
         active_transfers: set of (username, filename) tuples from slskd API.
+        existing_local_paths: optional set of persisted ``current_path`` values
+            that still exist on disk, supplied by the caller when local
+            filesystem visibility is available.
 
     Returns OrphanInfo for each downloading row where NONE of its files
-    appear in active_transfers.
+    appear in active_transfers, plus ``blocked_post_move`` when a row is
+    already in local processing but its persisted ``current_path`` is gone.
     """
     issues: list[OrphanInfo] = []
     for row in db_rows:
@@ -3071,13 +3077,6 @@ def find_orphaned_downloads(
         state = row.get("active_download_state")
         if not state:
             continue  # corrupt_downloading — handled by find_inconsistencies
-        if (
-            state.get("processing_started_at") is not None
-            and state.get("current_path")
-        ):
-            # Local processing continues after slskd has finished, so
-            # transferless rows in this phase are not orphaned downloads.
-            continue
         files = state.get("files", [])
         if not files:
             continue
@@ -3085,6 +3084,24 @@ def find_orphaned_downloads(
             (f.get("username"), f.get("filename")) in active_transfers
             for f in files
         )
+        current_path = state.get("current_path")
+        if (
+            state.get("processing_started_at") is not None
+            and current_path
+        ):
+            if (
+                not has_active
+                and existing_local_paths is not None
+                and current_path not in existing_local_paths
+            ):
+                issues.append(OrphanInfo(
+                    request_id=row["id"],
+                    issue_type="blocked_post_move",
+                    detail=f"persisted current_path missing after local processing: {current_path}",
+                ))
+            # Local processing continues after slskd has finished, so
+            # transferless rows in this phase are not ordinary orphans.
+            continue
         if not has_active:
             usernames = sorted(set(f.get("username", "?") for f in files))
             issues.append(OrphanInfo(
@@ -3128,6 +3145,12 @@ def suggest_repair(issue: OrphanInfo) -> RepairAction:
             request_id=issue.request_id,
             action="reset_to_wanted",
             detail="Reset downloading row to wanted (transfers gone)")
+    if issue.issue_type == "blocked_post_move":
+        return RepairAction(
+            request_id=issue.request_id,
+            action="manual_review",
+            detail="Inspect blocked post-move row and finish or reset it explicitly",
+        )
     else:
         return RepairAction(
             request_id=issue.request_id,

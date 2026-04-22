@@ -1482,6 +1482,8 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             for label, candidate in request_scoped_staged_candidates:
                 if _directory_has_entries(candidate):
                     populated_candidates.append((label, candidate))
+            if _directory_has_entries(staged_fallback):
+                populated_candidates.append(("legacy-shared", staged_fallback))
 
             if len(populated_candidates) > 1:
                 rendered_candidates = ", ".join(
@@ -1498,20 +1500,21 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                 )
                 continue
             if len(populated_candidates) == 1:
-                fallback_current_path = populated_candidates[0][1]
-            elif _directory_has_entries(staged_fallback):
-                logger.error(
-                    "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
-                    "current_path is missing, canonical_path=%s has no files, "
-                    "and staged_path=%s is ambiguous across editions. "
-                    "Manual recovery is required.",
-                    request_id,
-                    row["artist_name"],
-                    row["album_title"],
-                    canonical_fallback,
-                    staged_fallback,
-                )
-                continue
+                candidate_label, candidate_path = populated_candidates[0]
+                if candidate_label == "legacy-shared":
+                    logger.error(
+                        "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
+                        "current_path is missing, canonical_path=%s has no files, "
+                        "and staged_path=%s is ambiguous across editions. "
+                        "Manual recovery is required.",
+                        request_id,
+                        row["artist_name"],
+                        row["album_title"],
+                        canonical_fallback,
+                        staged_fallback,
+                    )
+                    continue
+                fallback_current_path = candidate_path
             else:
                 fallback_current_path = canonical_fallback
             state.current_path = fallback_current_path
