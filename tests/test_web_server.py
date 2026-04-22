@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from web.download_history_view import DownloadHistoryViewRow
+from web.library_album_detail_service import LibraryAlbumDetail, LibraryAlbumTrack
 from web.library_album_row import LibraryAlbumRow
 
 _MOCK_PIPELINE_REQUEST = make_request_row(
@@ -2500,18 +2502,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         "mb_releasegroupid", "release_group_title", "added", "formats",
         "min_bitrate", "type", "label", "country", "source",
     }
-    DETAIL_REQUIRED_FIELDS = (
-        ALBUM_REQUIRED_FIELDS | {
-            "path", "tracks", "pipeline_id", "pipeline_status",
-            "pipeline_source", "pipeline_min_bitrate",
-            "search_filetype_override", "target_format", "upgrade_queued",
-            "download_history",
-        }
-    )
-    TRACK_REQUIRED_FIELDS = {
-        "disc", "track", "title", "length", "format", "bitrate",
-        "samplerate", "bitdepth",
-    }
+    DETAIL_REQUIRED_FIELDS = set(LibraryAlbumDetail.__struct_fields__)
+    TRACK_REQUIRED_FIELDS = set(LibraryAlbumTrack.__struct_fields__)
+    HISTORY_REQUIRED_FIELDS = set(DownloadHistoryViewRow.__struct_fields__)
     DELETE_REQUIRED_FIELDS = {
         "status", "id", "album", "artist", "deleted_files",
         "pipeline_deleted", "pipeline_id",
@@ -2621,6 +2614,12 @@ class TestBeetsRouteContracts(_WebServerCase):
                                 "beets album detail")
         _assert_required_fields(self, data["tracks"][0], self.TRACK_REQUIRED_FIELDS,
                                 "beets album track")
+        _assert_required_fields(
+            self,
+            data["download_history"][0],
+            self.HISTORY_REQUIRED_FIELDS,
+            "beets album detail history",
+        )
 
     def test_beets_album_detail_discogs_contract(self):
         detail = self._album()
@@ -2641,6 +2640,12 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DETAIL_REQUIRED_FIELDS,
                                 "beets album detail (discogs)")
+        _assert_required_fields(
+            self,
+            data["download_history"][0],
+            self.HISTORY_REQUIRED_FIELDS,
+            "beets album detail history (discogs)",
+        )
         self.assertEqual(data["source"], "discogs")
         self.assertEqual(data["mb_albumid"], "12856590")
 

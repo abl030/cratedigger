@@ -23,49 +23,23 @@ def get_beets_search(h, params: dict[str, list[str]]) -> None:
 
 
 def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
-    from lib.library_delete_service import resolve_pipeline_request
+    from web.library_album_detail_service import load_library_album_detail
 
     album_id = int(album_id_str)
-    b = _server()._beets_db()
+    srv = _server()
+    b = srv._beets_db()
     if not b:
         h._error("Beets DB not available")
         return
-    detail = b.get_album_detail(album_id)
+    detail = load_library_album_detail(
+        library_lookup=b,
+        pipeline_db=srv.db,
+        album_id=album_id,
+    )
     if not detail:
         h._error("Not found", 404)
         return
-    result: dict[str, object] = dict(detail)
-    # Include pipeline download history if available
-    mb_id = detail.get("mb_albumid")
-    srv = _server()
-    if mb_id and srv.db:
-        req = resolve_pipeline_request(
-            srv.db,
-            pipeline_id=None,
-            release_id=str(mb_id),
-        )
-        if req:
-            history = srv._db().get_download_history(req["id"])
-            result["pipeline_id"] = req["id"]
-            result["pipeline_status"] = req["status"]
-            result["pipeline_source"] = req.get("source")
-            result["pipeline_min_bitrate"] = req.get("min_bitrate")
-            result["search_filetype_override"] = req.get("search_filetype_override")
-            result["target_format"] = req.get("target_format")
-            result["upgrade_queued"] = (
-                req["status"] == "wanted" and bool(req.get("search_filetype_override") or req.get("target_format"))
-            )
-            from web.classify import classify_log_entry as _clf, LogEntry as _LE
-            dh = []
-            for h_entry in history:
-                he = _LE.from_row(h_entry)
-                hi = he.to_json_dict()
-                _c = _clf(he)
-                hi["verdict"] = _c.verdict
-                hi["downloaded_label"] = _c.downloaded_label
-                dh.append(hi)
-            result["download_history"] = dh
-    h._json(result)
+    h._json(detail.to_dict())
 
 
 def get_beets_recent(h, params: dict[str, list[str]]) -> None:
