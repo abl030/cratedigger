@@ -1,186 +1,198 @@
+---
+name: refactor
+description: Drive a structural refactor in Cratedigger with an explicit invariant, live probes, staged commits, RED/GREEN verification, and mandatory partner-engine review so either Claude or Codex can lead the work.
+---
+
 # Refactor Pipeline
 
-Large structural refactor: invariant → inventory → probe-live → staged commits with cheap review gates at every step → PR → merge → deploy → reflect.
+Large structural refactor: invariant -> inventory -> live probe -> staged commits -> review loops -> PR -> merge -> deploy -> reflect.
 
 **Usage**: `/refactor <description of the refactor>`
 
-The argument `$ARGUMENTS` is what the user wants restructured. Scope tends to be "extract abstraction X from N drifting callsites" or "plumb type Y through path Z" — structural, correctness-motivated, multi-commit.
+The argument `$ARGUMENTS` is the user-visible structural change. Scope should be "extract abstraction X from N drifting call sites" or "push contract Y through path Z". If you cannot state the invariant in one sentence, stop and scope down.
 
-Sibling skills: `/fix-bug` for single-site corrections (same review machinery, narrower scope); `/deploy` for step 7; `.claude/rules/scope.md` for the "clean as you go" philosophy.
+## Roles
 
-## Why this skill exists
+- **Primary driver**: whichever engine is executing the workflow right now.
+- **Partner reviewer**: the other engine. This review is mandatory.
+- **Independent reviewer**: an optional same-engine delegated reviewer if the current platform supports it and the task merits it. Use minimal context only. Never replace the partner review with this.
 
-PR #136 (BeetsAlbumOp + release lock + sibling propagation) shipped clean after an in-process adversarial reviewer caught architecture issues and Codex caught runtime/type bugs across 5 rounds. The two reviewers find **disjoint classes of bugs** — the agent reasons about "does this look right?"; Codex reasons about "does this actually work against the declared types?". Running both, liberally, at every commit is cheap compared to a bad merge.
+## Workflow
 
-## Pipeline
+### 1. Load repo context first
 
-### 1. Define the invariant
+Read the project rules before making structural decisions:
+
+1. `CLAUDE.md`
+2. `.claude/rules/code-quality.md`
+3. `.claude/rules/scope.md`
+4. Any path-scoped rules for the touched area
+
+If the refactor touches DB schemas, subprocess output, HTTP payloads, or deployment behavior, read the matching rule files before planning commits.
+
+### 2. Define the invariant
 
 Write down, in one sentence, what the refactor enforces. Examples:
-- "Every `beet remove`/`beet move` subprocess op routes through one typed wrapper."
-- "Every wire-boundary type validates its fields via `msgspec` at the decoder."
-- "Every dispatch outcome propagates back to the caller that triggered it."
 
-If you can't write it in one sentence, you don't have a refactor — you have a redesign. Stop and scope down.
+- "Every `beet remove` and `beet move` operation routes through one typed wrapper."
+- "Every library row returned to the frontend conforms to one shared contract."
+- "Every exact release identity decision goes through one helper."
 
-### 2. Inventory every site
+If you cannot do this cleanly, you are not holding a refactor yet.
 
-Grep for every callsite, type, function, or DB column that touches the invariant. The ad-hoc count is always wrong.
+### 3. Inventory every site and probe the live shape
 
-- Read each hit to confirm it's really an instance (not a lookalike).
-- Write down the list before touching code.
-- If the grep spans > 3 files and > 2 call shapes, spawn an Explore agent with **minimal context** — brief it on the pattern to hunt, not your conclusion.
+Grep every call site, type, route, SQL query, column, or JS consumer that participates in the invariant. The ad hoc count is always wrong.
 
-### 3. Probe the live system
+For wire-boundary, DB-coupled, or subprocess-crossing refactors, probe the real shape before editing:
 
-**Non-optional for wire-boundary / DB-coupled / subprocess-crossing refactors.** Declared types lie; what ships lies less. Examples of what to probe:
+- table schemas and FK behavior
+- representative JSON payloads
+- subprocess stdout
+- live rows that already exist in production data
+- every reader of the fields you plan to reshape
 
-- SQLite column types: `ssh <host> 'sqlite3 path/to/db ".schema <table>"'`
-- Postgres column types + constraints: `ssh <host> 'psql -c "\d+ <table>"'`
-- Postgres foreign-key behaviour: `grep -n 'ON DELETE' migrations/` — a fake mirroring a delete needs to cascade, and this is often missed because it's not in the column signature.
-- External API response shapes: `curl $URL | jq 'keys'`
-- Subprocess stdout: run the actual subprocess with representative input, capture the output shape.
-- JSONB blobs: query `SELECT jsonb_pretty(<col>) FROM <table> LIMIT 3`.
-- **Production readers of the data shape**: `grep` every caller that indexes the columns the refactor produces (e.g. `grep -rn "req\['beets_distance'\]" scripts/ lib/`). Fakes and wire-boundary types that omit a DB-defaulted column will pass every typed-assertion test but raise `KeyError` the moment a real reader exercises the path. Issue #140's partial-row-shape bug (codex's final pass) would have shown up here in 10 seconds.
+Declared types lie. Production readers lie less.
 
-Every missed wire-boundary bug in PR #136 (the `discogs_albumid INTEGER` one) could have been caught with a 30-second probe here. **Do not skip this step** for any refactor that touches data crossing a process/type boundary.
+### 4. Plan 2-5 feature commits
 
-### 4. Plan the commits
+Each feature commit must:
 
-Split into 2-5 feature commits. Each must:
-- Stand alone (suite passes, pyright clean, app boots).
-- Land on top of a known-safe baseline (main, or the previous feature + its review fixes).
-- Carry a 1-sentence "delivers X" summary.
+- stand alone
+- keep tests green
+- keep `pyright` clean
+- deliver one sentence worth of structural value
 
-Do NOT plan the review-fix commits — those emerge from the reviews and preserve the audit trail on a rebase merge.
+Do not pre-plan the review-fix commits. They are part of the audit trail.
 
-Make a feature branch. Track the commit plan with `TaskCreate`, one task per feature commit + one task per review round.
+### 5. Run the per-commit cycle
 
-### 5. Per-commit review cycle
+For each feature commit:
 
-**For each feature commit**, run this sequence. Reviews are cheap — default to running them, not skipping.
+1. Write RED tests first.
+2. Implement the structural change.
+3. Run focused tests for the touched modules.
+4. Run `pyright` on every touched file.
+5. Commit with a message that states what structural change this commit delivers.
 
-#### 5a. Implement + test (TDD per `.claude/rules/code-quality.md`)
+Every real review finding later in the cycle gets either:
 
-- Write RED tests first, then fix.
-- `nix-shell --run "python3 -m unittest tests.<module> -v"` for the affected modules.
-- `nix-shell --run "pyright <touched files>"` — must be 0 errors.
-- Commit with a clear message stating what structural change this delivers.
+- a pinning regression test, or
+- a documented equivalence argument in the review-fix commit
 
-#### 5b. Adversarial in-process review
+Do not silently drop findings.
 
-Spawn an Opus agent with minimal context:
+### 6. Use an independent same-engine reviewer when it helps
 
-```
-Subagent: general-purpose, model: opus
-Prompt: "You are an adversarial code reviewer. Find correctness bugs, test-coverage
-gaps, behavior drift. Be harsh. Don't congratulate the author.
+If the driver platform supports delegated review and the change is broad enough to justify it, run one fresh reviewer with minimal context:
 
-Read CLAUDE.md for orientation. The commit to review is HEAD (title: '<commit msg>').
-Parent is <sha>.
+- point it at the commit or diff
+- describe the invariant and the claimed scope
+- ask for correctness bugs, missing tests, unwired paths, stale contracts, and duplicated logic
+- do not feed it your conclusions
 
-What the commit claims: <1-sentence summary>. Out of scope: <other feature commits
-still to come>.
+This pass is for disjoint signal, not agreement.
 
-Investigate:
-- git diff HEAD~1
-- gh issue view <N>
-- Read the new module(s), the migrated callsites, the new tests
+### 7. Run the mandatory partner-engine review
 
-Look for: <point at the specific invariant, edge cases, test coverage gaps,
-wire-boundary type issues, backwards compat with old JSONB rows, dead parameters
-or fields, stale docstrings>. Use file:line citations. Order findings CRITICAL >
-HIGH > MEDIUM > LOW > NIT with concrete recommendations. Under 1200 words.
-Do NOT fix — only report."
-```
+The partner engine should review the branch after each meaningful commit or review-fix batch, and again once at the end.
 
-- Fix every CRITICAL and HIGH before moving on.
-- Fix MEDIUMs inline (they're cheap).
-- Note LOWs in the commit message; fix the ones that clarify the next reviewer.
-- **Every finding gets a pinning regression test OR documented equivalence** in the review-fix commit. Never silently drop.
-
-Commit fixes as `review(commit N): <short summary>`. Multiple review-fix commits per feature commit are fine.
-
-#### 5c. Codex review
+#### If Claude is the primary driver, use Codex as partner reviewer
 
 ```bash
 rm -f /tmp/codex-review.txt
 codex exec review --base main -o /tmp/codex-review.txt
+while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+cat /tmp/codex-review.txt
 ```
 
-**Argument parsing quirk** (same as `/fix-bug`): `codex exec review` rejects a positional `[PROMPT]` argument when `--base <BRANCH>` is used. Don't pass a prompt with `--base` — codex picks up project review config automatically.
+Notes:
 
-Wait for the real process exit (not the file becoming non-empty — codex writes partial output mid-run):
+- Do not pass a positional prompt with `--base`.
+- Treat every real finding as a fixable issue, not as commentary.
+
+#### If Codex is the primary driver, use Claude as partner reviewer
+
+Use stdin for the prompt. In this environment, `claude -p` is reliable with stdin even when `--allowed-tools` is present.
 
 ```bash
-# Monitor until codex-raw process truly exits:
-while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+rm -f /tmp/claude-review.txt
+cat <<'EOF' | claude -p --model opus \
+  --allowed-tools 'Bash(git status --short --branch)' \
+                  'Bash(git diff main...HEAD)' \
+                  'Bash(git show --stat --summary HEAD)' \
+                  'Bash(rg *)' \
+                  'Bash(sed *)' \
+  > /tmp/claude-review.txt
+You are an adversarial code reviewer.
+
+Read CLAUDE.md and any directly relevant .claude/rules/*.md files if needed.
+Review the current branch against main.
+
+Focus on:
+- correctness bugs
+- missing tests
+- type or route-contract drift
+- unfinished wiring
+- duplicated or diverging invariants
+
+Use file:line references where possible.
+Order findings by severity.
+Do not edit code.
+EOF
+cat /tmp/claude-review.txt
 ```
 
-Read `/tmp/codex-review.txt`. Expect:
-- 0-2 findings per commit, usually P1/P2 correctness.
-- Often runtime/type bugs the in-process agent missed (e.g. SQLite column type vs declared dataclass type).
+For commit-scoped review, tighten the allowed diff command and prompt to `HEAD~1..HEAD`. For final branch review, keep `main...HEAD`.
 
-Each finding gets a commit: pinning regression test + fix. Push. Re-run codex. Repeat until clean.
+### 8. Stop and refactor when reviews keep circling the same seam
 
-#### 5d. Stop-and-refactor trigger
+If two review rounds on the branch keep finding real issues around the same invariant, do not keep patching leaves.
 
-**If two review rounds across this branch both flag findings on the same invariant or same pair of collaborators** (not style nits — genuine correctness findings), stop patching leaves. This rule is adapted from `/fix-bug`'s round-2 rule but widened to *any* review round (in-process or codex), not just codex-specific.
+Do this before the next round:
 
-Signals:
-- Round N reveals a case round N-1 didn't cover; fix is "apply the same pattern to one more call site."
-- Two sibling functions disagree on the same invariant (ID dispatch, presence check, cleanup contract).
-- Your fix in round N contradicts your fix in round N-1 (over-tightened, now relaxing).
+1. Write down the invariant the reviews keep circling.
+2. Grep every site that asks that question.
+3. Extract one typed seam that owns the invariant.
+4. Migrate callers to the seam.
+5. Test around the seam, not around each leaf.
+6. Resume reviews.
 
-When you see them, do this before the next round:
+If you reach six real review rounds on the same branch, stop. Document the remaining issues as follow-up work instead of pretending the scope is still stable.
 
-1. **Write down the invariant the reviews keep circling.** One sentence.
-2. **Grep every site that asks that question.** There will be more than you found in step 2.
-3. **Extract one typed seam** — a function/method/type that owns the invariant. Every site routes through it.
-4. **Migrate call sites; test around the seam, not around each migrated site.**
-5. **Resume reviews.**
+### 9. Run one final branch-wide pass
 
-The PR #136 R3 refactor (`DispatchOutcome.deferred` plumbing) is the canonical example: three findings (R2 P1 + R3 P2 + R3 P3) were all leaves of *"contention = deferred retry; leave everything resumable."* Extracting the seam fixed all three AND set up R4 for a clean catch the next round.
+After every feature commit and review-fix commit has landed:
 
-Hard cap: **6 review rounds per commit**. At round 6, document remaining findings as follow-up issues and proceed.
+- run one holistic independent review if the driver platform supports it
+- run the mandatory partner-engine review on the full branch
+- converge on zero unfixed correctness findings or explicitly documented follow-ups
 
-### 6. Final review pass
+### 10. Open the PR, merge, deploy, verify
 
-After every feature commit has passed its own cycle:
+1. Open a PR with the acceptance checklist.
+2. Record the review rounds and what each review-fix commit addressed.
+3. Merge with rebase.
+4. Deploy.
+5. Verify the deployed code contains a unique signature from the refactor.
 
-**6a. Holistic adversarial review.** Spawn an agent with the full branch diff (`git diff main..HEAD`). Ask:
-- Do the feature commits fit together?
-- Anything unwired (new dataclass constructed but never produced, new config option nobody sets)?
-- Dead code or stale docs/comments?
-- Does the issue's acceptance checklist actually match what shipped?
+Use the repo's deploy workflow rather than improvising one.
 
-**6b. Final codex pass.** Run codex on the final branch. **Convergence = codex returns no findings.** If R6 is still finding real bugs, call it: ship with documented follow-ups, don't loop into round 7.
+### 11. Reflect
 
-### 7. Open PR, merge, deploy
+Once the change is live, write a short note for the next refactor:
 
-- `gh pr create` with acceptance checklist from the issue.
-- Post a PR comment listing every review round (in-process + codex), each finding's fix commit sha, and the final codex verdict. This is the audit trail for a rebase-merged refactor; losing it to a squash is the reason squash is disabled.
-- `gh pr merge <N> --rebase`.
-- Run `/deploy` (skill). Verify deployed code has a unique signature from the refactor (grep `/nix/store/*/lib/*.py` on the target host).
+- what the same-engine reviewer caught that the partner engine did not
+- what the partner engine caught that the same-engine reviewer did not
+- whether the stop-and-refactor trigger fired
+- what live probe should have happened earlier
 
-### 8. Reflect
-
-Once deployed and verified live, write a short reflection. Target audience is the next refactor, not the user. Cover:
-
-- **What the in-process agent caught that codex didn't.** Usually architecture, type system, docstring lies.
-- **What codex caught that the agent didn't.** Usually runtime, declared-vs-actual type drift, cross-module data shapes.
-- **Did stop-and-refactor trigger?** On which invariant? How many rounds did the seam save?
-- **What should you probe earlier next time?** (Step 3's miss, almost always.)
-
-One paragraph each, max. Be specific; don't perform.
+Keep it short and specific.
 
 ## Rules
 
-- Run the full pipeline autonomously. Do NOT ask for confirmation between steps.
-- Stop and ask if: you can't write the invariant in one sentence, or step 3 reveals the live system contradicts the task description.
-- The in-process agent in step 5b must be truly independent — **minimal context, don't lead it to your conclusion**. Specifically don't paste your analysis into the prompt.
-- Every review finding gets a pinning test OR documented equivalence in the commit that addresses it. Never silently drop a finding.
-- Rebase-merge only (`--rebase`). Squash loses the review-fix audit trail that made this pipeline valuable.
-- **Reviews are cheap. Run them.** If you're unsure whether a change is risky, run a codex round — 2 minutes vs the cost of a bad merge. Between commit N and N+1 if tempted to skip review because "the next commit changes the same area anyway" — run it anyway, the findings sharpen the next commit's scope.
-- If codex finds a runtime bug that the in-process agent missed (or vice versa), note it in the reflection. Those gaps inform when to spawn which review in future.
-- Follow all `.claude/rules/code-quality.md` requirements: typed dataclasses, TDD, no parallel code paths, finish what you start, wire-boundary types use `msgspec.convert` at the decoder.
+- Run the workflow autonomously. Do not ask for confirmation between internal steps unless the live system contradicts the task.
+- The partner-engine review is required. Do not skip it because the diff looks small.
+- Minimal context for independent reviewers is a hard rule. Do not preload them with your diagnosis.
+- Every structural change must satisfy `.claude/rules/code-quality.md`: RED/GREEN tests, typed boundaries, `pyright` clean, no parallel code paths.
+- Rebase merge only. Squash drops the review-fix audit trail that makes this workflow useful.
