@@ -1,10 +1,6 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
-import logging
-import os
 import re
-
-log = logging.getLogger("cratedigger-web")
 
 
 def _server():
@@ -103,99 +99,74 @@ def get_beets_recent(h, params: dict[str, list[str]]) -> None:
 
 
 def post_beets_delete(h, body: dict) -> None:
+    from lib.library_delete_service import (
+        DeleteBeetsFailure,
+        DeletePipelinePurgeFailure,
+        DeletePostPurgeBeetsFailure,
+        DeletePreflightFailure,
+        DeleteRequest,
+        DeleteSuccess,
+        delete_release_from_library,
+    )
+
     album_id = body.get("id")
     confirm = body.get("confirm")
-    purge_pipeline = bool(body.get("purge_pipeline"))
-    pipeline_id = body.get("pipeline_id")
-    release_id = str(body.get("release_id") or "").strip()
     if not album_id:
         h._error("Missing id")
         return
     if confirm != "DELETE":
         h._error("Must send confirm: 'DELETE'")
         return
+    request = DeleteRequest(
+        album_id=int(album_id),
+        purge_pipeline=bool(body.get("purge_pipeline")),
+        pipeline_id=(
+            int(body["pipeline_id"])
+            if body.get("pipeline_id") is not None
+            else None
+        ),
+        release_id=str(body.get("release_id") or "").strip(),
+    )
     srv = _server()
-    if not srv.beets_db_path or not os.path.exists(srv.beets_db_path):
-        h._error("Beets DB not available")
-        return
-    from lib.beets_db import BeetsDB
-    try:
-        with BeetsDB(srv.beets_db_path) as beets:
-            if not beets.get_album_detail(int(album_id)):
-                h._error("Album not found", 404)
-                return
-    except FileNotFoundError:
-        h._error("Beets DB not available")
+    result = delete_release_from_library(
+        beets_db_path=srv.beets_db_path,
+        pipeline_db=srv.db,
+        request=request,
+    )
+
+    if isinstance(result, DeleteSuccess):
+        h._json({
+            "status": "ok",
+            "id": result.album_id,
+            "album": result.album_name,
+            "artist": result.artist_name,
+            "deleted_files": result.deleted_files,
+            "pipeline_deleted": result.pipeline_deleted,
+            "pipeline_id": result.deleted_pipeline_id,
+        })
         return
 
-    deleted_pipeline_id = None
-    if purge_pipeline:
-        # Purge the pipeline row before the destructive beets delete so a
-        # failing DB write cannot recreate the original ghost-imported bug.
-        req = _find_pipeline_request_for_release(
-            int(pipeline_id) if pipeline_id is not None else None,
-            release_id,
-        )
-        if req:
-            try:
-                srv._db().delete_request(int(req["id"]))
-            except Exception:
-                log.exception(
-                    "Failed to purge pipeline request %s before beets delete",
-                    req.get("id"),
-                )
-                h._error("Failed to purge pipeline request", 500)
-                return
-            deleted_pipeline_id = int(req["id"])
-
-    try:
-        album_name, artist_name, file_paths = BeetsDB.delete_album(
-            srv.beets_db_path,
-            int(album_id),
-        )
-        album_dir = os.path.dirname(file_paths[0]) if file_paths else None
-        # Delete individual files from disk (safe — won't destroy shared directories)
-        deleted_files = 0
-        for path in file_paths:
-            if os.path.isfile(path):
-                os.remove(path)
-                deleted_files += 1
-        # Remove directory only if now empty (other albums may share it)
-        if album_dir and os.path.isdir(album_dir):
-            try:
-                os.rmdir(album_dir)
-            except OSError:
-                pass  # not empty — other albums' files still there
-    except ValueError:
-        h._error("Album not found", 404)
-        return
-    except Exception:
-        if deleted_pipeline_id is not None:
-            # Deliberate failure mode split: at this point the pipeline row is
-            # already gone, so callers need a more specific error than a
-            # generic 500 to understand the partial-success state.
-            log.exception(
-                "Beets delete failed after purging pipeline request %s for album %s",
-                deleted_pipeline_id,
-                album_id,
-            )
-            h._error(
-                "Pipeline request was removed, but delete from beets failed; "
-                "check logs and disk state",
-                500,
-            )
+    if isinstance(result, DeletePreflightFailure):
+        if result.reason == "album_not_found":
+            h._error("Album not found", 404)
             return
-        log.exception("Beets delete failed for album %s", album_id)
-        h._error("Delete from beets failed", 500)
+        h._error("Beets DB not available")
         return
 
-    h._json({
-        "status": "ok", "id": album_id,
-        "album": album_name, "artist": artist_name,
-        "deleted_files": deleted_files,
-        "pipeline_deleted": deleted_pipeline_id is not None,
-        "pipeline_id": deleted_pipeline_id,
-    })
+    if isinstance(result, DeletePipelinePurgeFailure):
+        h._error("Failed to purge pipeline request", 500)
+        return
+
+    if isinstance(result, DeletePostPurgeBeetsFailure):
+        h._error(
+            "Pipeline request was removed, but delete from beets failed; "
+            "check logs and disk state",
+            500,
+        )
+        return
+
+    assert isinstance(result, DeleteBeetsFailure)
+    h._error("Delete from beets failed", 500)
 
 
 GET_ROUTES: dict[str, object] = {

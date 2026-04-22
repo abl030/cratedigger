@@ -2617,9 +2617,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["source"], "discogs")
         self.assertEqual(data["mb_albumid"], "12856590")
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_contract(
         self,
@@ -2637,9 +2637,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "beets delete response")
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_explicit_pipeline_request(
         self,
@@ -2671,9 +2671,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["pipeline_id"], 42)
         self.assertIsNone(fake_db.get_request(42))
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_pipeline_request_by_release_id_fallback(
         self,
@@ -2704,9 +2704,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["pipeline_id"], 99)
         self.assertIsNone(fake_db.get_request(99))
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_pipeline_request_by_uppercase_release_id(
         self,
@@ -2737,9 +2737,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["pipeline_id"], 98)
         self.assertIsNone(fake_db.get_request(98))
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_without_purge_pipeline_leaves_request_intact(
         self,
@@ -2768,9 +2768,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertIsNone(data["pipeline_id"])
         self.assertIsNotNone(fake_db.get_request(42))
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purge_with_no_pipeline_context_is_noop(
         self,
@@ -2796,9 +2796,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertFalse(data["pipeline_deleted"])
         self.assertIsNone(data["pipeline_id"])
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_discogs_request_by_numeric_release_id_fallback(
         self,
@@ -2832,9 +2832,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["pipeline_id"], 77)
         self.assertIsNone(fake_db.get_request(77))
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_pipeline_failure_aborts_before_beets_delete(
         self,
@@ -2866,9 +2866,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertIn("error", data)
         mock_beets_cls.delete_album.assert_not_called()
 
-    @patch("web.routes.library.os.path.isdir", return_value=False)
-    @patch("web.routes.library.os.path.isfile", return_value=False)
-    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
+    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
+    @patch("lib.library_delete_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_failure_after_pipeline_purge_returns_targeted_error(
         self,
