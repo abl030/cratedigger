@@ -143,6 +143,17 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         issues = find_orphaned_downloads(rows, set())
         self.assertEqual(len(issues), 0)
 
+    def test_processing_started_without_current_path_is_still_orphaned(self):
+        """Rows that never persisted a local path should still be repairable."""
+        rows = [{"id": 1, "status": "downloading",
+                 "active_download_state": {
+                     "filetype": "flac",
+                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                     "files": [{"username": "user1", "filename": "track.flac"}]}}]
+        issues = find_orphaned_downloads(rows, set())
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].issue_type, "orphaned_download")
+
     def test_suggest_repair_orphaned(self):
         """Orphaned download should suggest reset_to_wanted."""
         issue = OrphanInfo(request_id=1, issue_type="orphaned_download",
