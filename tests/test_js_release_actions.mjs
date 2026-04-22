@@ -4,7 +4,7 @@
  */
 
 import { pipelineStore } from '../web/js/state.js';
-import { renderActionToolbar } from '../web/js/release_actions.js';
+import { renderActionToolbar, renderRemoveFromBeetsButton } from '../web/js/release_actions.js';
 
 let passed = 0;
 let failed = 0;
@@ -144,6 +144,27 @@ clearStore();
   assertContains(html, '&quot;rel-10&#39;oops&quot;', 'release id encoded as JS string arg');
   assertContains(html, '&quot;Some of the 12th Man&#39;s Greatest Hits&quot;', 'album encoded as JS string arg');
   assertContains(html, 'window.confirmDeleteBeets(77', 'delete handler still rendered');
+}
+
+console.log('Remove from beets helper — shared renderer supports detail view styling');
+clearStore();
+{
+  const html = renderRemoveFromBeetsButton({
+    id: "rel-11'oops",
+    in_library: true,
+    beets_album_id: 88,
+    pipeline_id: 900,
+    artist: 'Mum & Dad',
+    album: "Kid A's <special>",
+    track_count: 10,
+  }, {
+    className: 'p-btn delete-beets',
+    label: 'Delete from beets',
+    stopPropagation: true,
+  });
+  assertContains(html, 'class="p-btn delete-beets"', 'custom class supported');
+  assertContains(html, 'event.stopPropagation(); window.confirmDeleteBeets(88', 'stopPropagation wiring supported');
+  assertContains(html, '&quot;Kid A&#39;s &lt;special&gt;&quot;', 'album encoded safely');
 }
 
 console.log('Acquire button — manual review → disabled Add request');
