@@ -3041,7 +3041,7 @@ def full_pipeline_decision(
 class OrphanInfo:
     """A detected inconsistency in pipeline DB state."""
     request_id: int
-    issue_type: str  # "corrupt_downloading" | "orphaned_download" | "blocked_post_move"
+    issue_type: str  # "corrupt_downloading" | "orphaned_download" | "blocked_post_move" | "blocked_recovery"
     detail: str
 
 
@@ -3167,11 +3167,11 @@ def suggest_repair(issue: OrphanInfo) -> RepairAction:
             request_id=issue.request_id,
             action="reset_to_wanted",
             detail="Reset downloading row to wanted (transfers gone)")
-    if issue.issue_type == "blocked_post_move":
+    if issue.issue_type in ("blocked_post_move", "blocked_recovery"):
         return RepairAction(
             request_id=issue.request_id,
             action="manual_review",
-            detail="Inspect blocked post-move row and finish or reset it explicitly",
+            detail="Inspect blocked local-processing row and finish or reset it explicitly",
         )
     else:
         return RepairAction(

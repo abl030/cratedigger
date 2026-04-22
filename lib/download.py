@@ -1310,6 +1310,11 @@ def _run_completed_processing(
 ) -> None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
+        if entry.import_folder is None:
+            entry.import_folder = _canonical_import_folder_path(
+                entry,
+                ctx.cfg.slskd_download_dir,
+            )
         state.processing_started_at = datetime.now(timezone.utc).isoformat()
         _persist_updated_download_state(db, request_id, entry, state)
 
