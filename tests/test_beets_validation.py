@@ -575,7 +575,7 @@ class TestLogValidationResult(unittest.TestCase):
 
 
 class TestSanitizeFolderName(unittest.TestCase):
-    """Verify sanitize_folder_name works correctly for stage_to_ai."""
+    """Verify sanitize_folder_name works correctly for staged album paths."""
 
     def test_removes_special_chars(self):
         self.assertEqual(sanitize_folder_name('Test: "Artist"'), 'Test Artist')
