@@ -2279,6 +2279,46 @@ class TestPollActiveDownloads(unittest.TestCase):
             )
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
+    def test_poll_post_move_auto_import_path_with_missing_dir_leaves_row_downloading(self):
+        """Missing auto-import staging dirs must block, not requeue."""
+        from lib.download import poll_active_downloads
+        from lib.staged_album import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(
+                fake_db.request(1)["active_download_state"]["current_path"],
+                resumed_path,
+            )
+            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
+
     @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):
         """Album stays 'downloading' during process_completed_album — no redownload window."""

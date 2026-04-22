@@ -483,6 +483,46 @@ def _materialize_processing_dir(
             staged_album.current_path,
             ctx.cfg.beets_staging_dir,
         )
+        if not os.path.isdir(staged_album.current_path):
+            if is_auto_import_staged_retry:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=staged_album.current_path,
+                    detail=(
+                        "already lives under the auto-import staging root but "
+                        "the directory is missing. Automatic retry is disabled "
+                        "because beets may already have consumed the staged "
+                        "folder; manual recovery is required."
+                    ),
+                )
+                return None
+            logger.error(f"Current staged path missing: {staged_album.current_path}")
+            return False
+        staged_album.bind_import_paths(album_data.files)
+        missing_paths: list[str] = []
+        for file in album_data.files:
+            import_path = file.import_path
+            assert import_path is not None
+            if not os.path.isfile(import_path):
+                missing_paths.append(import_path)
+        if missing_paths:
+            if is_auto_import_staged_retry:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=staged_album.current_path,
+                    detail=(
+                        "already lives under the auto-import staging root but "
+                        f"tracked files are missing ({', '.join(missing_paths)}). "
+                        "Automatic retry is disabled because import may "
+                        "already have started; manual recovery is required."
+                    ),
+                )
+                return None
+            logger.error(
+                "Current staged path is missing tracked files: %s",
+                ", ".join(missing_paths),
+            )
+            return False
         if is_auto_import_staged_retry:
             _log_post_move_resume_blocked(
                 album_data,
@@ -494,22 +534,6 @@ def _materialize_processing_dir(
                 ),
             )
             return None
-        if not os.path.isdir(staged_album.current_path):
-            logger.error(f"Current staged path missing: {staged_album.current_path}")
-            return False
-        staged_album.bind_import_paths(album_data.files)
-        missing_paths: list[str] = []
-        for file in album_data.files:
-            import_path = file.import_path
-            assert import_path is not None
-            if not os.path.isfile(import_path):
-                missing_paths.append(import_path)
-        if missing_paths:
-            logger.error(
-                "Current staged path is missing tracked files: %s",
-                ", ".join(missing_paths),
-            )
-            return False
         album_data.import_folder = staged_album.current_path
         return True
 

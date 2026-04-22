@@ -3071,7 +3071,10 @@ def find_orphaned_downloads(
         state = row.get("active_download_state")
         if not state:
             continue  # corrupt_downloading — handled by find_inconsistencies
-        if state.get("processing_started_at") is not None:
+        if (
+            state.get("processing_started_at") is not None
+            and state.get("current_path")
+        ):
             # Local processing continues after slskd has finished, so
             # transferless rows in this phase are not orphaned downloads.
             continue
