@@ -23,12 +23,83 @@ from lib.library_delete_service import (
     DeleteRequest,
     DeleteSuccess,
     delete_release_from_library,
+    resolve_pipeline_request,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_beets_db import _create_test_db, _insert_album
 
 RELEASE_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+class TestResolvePipelineRequest(unittest.TestCase):
+    """Shared pipeline-request lookup seam for album detail and delete."""
+
+    def test_returns_none_without_pipeline_db(self) -> None:
+        self.assertIsNone(
+            resolve_pipeline_request(
+                None,
+                pipeline_id=42,
+                release_id=RELEASE_UUID,
+            ),
+        )
+
+    def test_prefers_explicit_pipeline_id(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            mb_release_id=RELEASE_UUID,
+        ))
+        fake_db.seed_request(make_request_row(
+            id=99,
+            status="wanted",
+            mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ))
+
+        result = resolve_pipeline_request(
+            fake_db,
+            pipeline_id=42,
+            release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["id"], 42)
+
+    def test_falls_back_to_release_id_when_pipeline_id_missing(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=99,
+            status="imported",
+            mb_release_id=RELEASE_UUID,
+        ))
+
+        result = resolve_pipeline_request(
+            fake_db,
+            pipeline_id=42,
+            release_id=RELEASE_UUID.upper(),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["id"], 99)
+
+    def test_blank_release_id_returns_none(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            mb_release_id=RELEASE_UUID,
+        ))
+
+        result = resolve_pipeline_request(
+            fake_db,
+            pipeline_id=None,
+            release_id="   ",
+        )
+
+        self.assertIsNone(result)
 
 
 class TestDeleteReleaseFromLibrary(unittest.TestCase):

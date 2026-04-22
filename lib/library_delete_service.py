@@ -25,7 +25,7 @@ class SupportsLibraryPipelineLookupDB(Protocol):
 
     def get_request_by_release_id(
         self,
-        release_id: str | None,
+        release_id: object | None,
     ) -> dict[str, Any] | None:
         ...
 
@@ -203,19 +203,19 @@ def delete_release_from_library(
         return preflight
 
     deleted_pipeline_id: int | None = None
+    db = pipeline_db
     if request.purge_pipeline:
         # Purge before the destructive beets delete so a later DB write
         # cannot resurrect the ghost-imported row this route used to leak.
         req = resolve_pipeline_request(
-            pipeline_db,
+            db,
             pipeline_id=request.pipeline_id,
             release_id=request.release_id,
         )
-        if req:
+        if req and db is not None:
             deleted_pipeline_id = int(req["id"])
             try:
-                assert pipeline_db is not None
-                pipeline_db.delete_request(deleted_pipeline_id)
+                db.delete_request(deleted_pipeline_id)
             except Exception:
                 log.exception(
                     "Failed to purge pipeline request %s before beets delete",
@@ -226,10 +226,12 @@ def delete_release_from_library(
                     pipeline_request_id=deleted_pipeline_id,
                 )
 
-    assert beets_db_path is not None
+    db_path = beets_db_path
+    if db_path is None:
+        return DeleteBeetsDbUnavailable(album_id=request.album_id)
     try:
         album_name, artist_name, file_paths = beets_db.BeetsDB.delete_album(
-            beets_db_path,
+            db_path,
             request.album_id,
         )
         deleted_files = _delete_album_files(file_paths)
