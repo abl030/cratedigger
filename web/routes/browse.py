@@ -17,7 +17,7 @@ from lib.release_identity import (
 from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
-from web.library_album_row import LibraryAlbumRow
+from web.library_artist_service import list_library_artist_rows
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -32,23 +32,6 @@ def _server():
     """
     from web import server
     return server
-
-
-def _library_album_sort_key(row: LibraryAlbumRow) -> tuple[bool, int, str, str, int, int]:
-    """Deterministic chronological-ish ordering for merged library rows."""
-    year_num = row.year if isinstance(row.year, int) else 0
-    album = row.album
-    country = row.country or ""
-    beets_key = row.beets_album_id if isinstance(row.beets_album_id, int) else -1
-    pipeline_key = row.pipeline_id if isinstance(row.pipeline_id, int) else -1
-    return (
-        row.year is None,
-        year_num,
-        album.casefold(),
-        country.casefold(),
-        beets_key,
-        pipeline_key,
-    )
 
 
 def get_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
@@ -74,52 +57,13 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
         return
 
-    pipeline_rows = srv._db().list_requests_by_artist(name, mbid) if srv.db else []
-    track_counts = (
-        srv._db().get_track_counts([int(r["id"]) for r in pipeline_rows])
-        if pipeline_rows and srv.db else {}
+    albums = list_library_artist_rows(
+        library_lookup=srv,
+        pipeline_db=srv.db,
+        artist_name=name,
+        mb_artist_id=mbid,
+        rank_fn=srv.compute_library_rank,
     )
-    pipeline_by_identity: dict[tuple[str, str], dict[str, object]] = {}
-    for row in pipeline_rows:
-        identity = ReleaseIdentity.from_fields(
-            row.get("mb_release_id"),
-            row.get("discogs_release_id"),
-        )
-        if identity is None:
-            continue
-        pipeline_by_identity[identity.key] = row
-
-    def _pipeline_album_rows() -> list[LibraryAlbumRow]:
-        return [
-            LibraryAlbumRow.from_pipeline_request(
-                row,
-                track_count=track_counts.get(int(row["id"]), 0),
-            )
-            for row in pipeline_rows
-        ]
-
-    albums: list[LibraryAlbumRow] = []
-    seen_release_ids: set[tuple[str, str]] = set()
-    for album in srv.get_library_artist(name, mbid):
-        identity = ReleaseIdentity.from_fields(
-            album.get("mb_albumid"),
-            album.get("discogs_albumid"),
-        )
-        row = LibraryAlbumRow.from_beets_album_with_pipeline(
-            album,
-            pipeline_row=pipeline_by_identity.get(identity.key) if identity else None,
-            rank_fn=srv.compute_library_rank,
-        )
-        albums.append(row)
-        if row.identity:
-            seen_release_ids.add(row.identity.key)
-
-    for req in _pipeline_album_rows():
-        if req.identity and req.identity.key in seen_release_ids:
-            continue
-        albums.append(req)
-
-    albums.sort(key=_library_album_sort_key)
     h._json({"albums": [row.to_dict() for row in albums]})  # type: ignore[attr-defined]
 
 
