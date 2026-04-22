@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import types
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -70,8 +71,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "current_spectral_grade": None,
         "current_spectral_bitrate": None,
         "active_download_state": None,
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
+        "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }
     row.update(overrides)
     return row

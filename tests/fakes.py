@@ -28,12 +28,11 @@ _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 def _as_datetime(value: Any) -> datetime:
     """Normalise a timestamp-ish value to an aware ``datetime``.
 
-    ``make_request_row`` seeds ISO-string ``created_at``/``updated_at``
-    columns while ``FakePipelineDB.add_request`` stores datetimes.
-    Sorting with a mixed key would raise ``TypeError``; this helper
-    collapses both shapes to a comparable datetime (aware, UTC) and
-    uses ``_EPOCH`` as the sentinel for missing values so ordering
-    stays deterministic.
+    Most test rows now carry real datetimes via ``make_request_row``,
+    but older hand-rolled fixtures still use ISO strings. Sorting with a
+    mixed key would raise ``TypeError``; this helper collapses both
+    shapes to a comparable datetime (aware, UTC) and uses ``_EPOCH`` as
+    the sentinel for missing values so ordering stays deterministic.
     """
     if value is None:
         return _EPOCH
