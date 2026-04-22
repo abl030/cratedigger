@@ -859,6 +859,43 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             self.assertEqual(file.import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
+    @patch("lib.download._process_beets_validation")
+    def test_returns_none_for_post_move_beets_staging_retry(self, mock_process_validation):
+        """Post-move beets staging paths must not auto-revalidate on retry."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = os.path.join(staging_root, "Artist", "Album")
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="test-mbid",
+                db_request_id=42,
+                db_source="request",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+            cfg.beets_validation_enabled = True
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertIsNone(result)
+            mock_process_validation.assert_not_called()
+
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
         from lib.download import process_completed_album
@@ -1929,6 +1966,36 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             self.assertEqual(fake_db.request(1)["status"], "wanted")
             self.assertIn((1, "wanted"), fake_db.status_history)
+
+    def test_poll_post_move_beets_staging_path_leaves_row_downloading(self):
+        """Post-move staging paths must stay untouched until manual recovery."""
+        from lib.download import poll_active_downloads
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = os.path.join(staging_root, "Test Artist", "Test Album")
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
 
     @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):

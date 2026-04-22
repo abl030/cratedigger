@@ -422,11 +422,20 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 # === Download completion processing ===
 
+def _path_is_within(path: str, root: str) -> bool:
+    """Return True when ``path`` is located under ``root``."""
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(root)
+    try:
+        return os.path.commonpath([abs_path, abs_root]) == abs_root
+    except ValueError:
+        return False
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
-) -> bool:
+) -> bool | None:
     """Ensure ``staged_album.current_path`` holds the album's local files."""
     canonical_path = _canonical_import_folder_path(
         album_data, ctx.cfg.slskd_download_dir)
@@ -434,6 +443,14 @@ def _materialize_processing_dir(
           if ctx.pipeline_db_source is not None else None)
 
     if os.path.abspath(staged_album.current_path) != os.path.abspath(canonical_path):
+        if _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir):
+            logger.error(
+                "Current staged path already lives under beets staging: %s. "
+                "Refusing automatic retry from a post-move path; manual "
+                "recovery is required to avoid duplicate import.",
+                staged_album.current_path,
+            )
+            return None
         if not os.path.isdir(staged_album.current_path):
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
@@ -518,19 +535,19 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
       fired) either landed or recorded a rejection; outer caller flips
       status to ``imported``.
     - ``False`` — file moves failed; outer caller resets to ``wanted``.
-    - ``None`` — auto-import deferred because another process held the
-      release advisory lock. Files are staged, spectral state is set,
-      and request stays ``downloading``. Outer caller must NOT touch
-      status: the next ``poll_active_downloads`` cycle re-enters this
-      function and retries. Codex PR #136 R3 P2/P3.
+    - ``None`` — processing left the row untouched. This covers both
+      release-lock contention and post-move staged paths that must not
+      be auto-retried because they already live under
+      ``beets_staging_dir``. Outer caller must NOT touch status.
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
         default_path=_canonical_import_folder_path(
             album_data, ctx.cfg.slskd_download_dir),
     )
-    if not _materialize_processing_dir(album_data, staged_album, ctx):
-        return False
+    materialized = _materialize_processing_dir(album_data, staged_album, ctx)
+    if materialized is not True:
+        return materialized
 
     logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
     for file in album_data.files:
@@ -789,8 +806,6 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         staged_album.current_path,
         scenario=bv_result.scenario,
     )
-    if failed_dest is not None:
-        staged_album.current_path = failed_dest
     bv_result.failed_path = failed_dest
     log_validation_result(album_data, bv_result, ctx.cfg)
     usernames = set(f.username for f in album_data.files)
@@ -1219,16 +1234,13 @@ def _run_completed_processing(
     #   'imported' if status is still 'downloading'.
     # - False → file moves failed; reset to 'wanted' (genuine failure
     #   that DOES deserve a backoff-scored attempt).
-    # - None  → release-lock contention deferred the import. Files are
-    #   staged, spectral state is populated, status stays
-    #   'downloading'. ``poll_active_downloads`` re-enters this
-    #   function on the next cycle and retries — do NOT touch state
-    #   here. Issue #132 P1 / Codex PR #136 R3 P2/P3.
+    # - None  → leave the row untouched. This covers both release-lock
+    #   contention and guarded post-move staged paths where auto-retry
+    #   would risk duplicate import. Do NOT touch state here.
     if outcome is None:
         logger.info(
-            f"  process_completed_album deferred (release lock held) — "
-            "leaving state untouched; poll_active_downloads retries "
-            "next cycle")
+            "  process_completed_album left state untouched; "
+            "poll_active_downloads will retry or await manual recovery")
         return
 
     refreshed = db.get_request(request_id)
