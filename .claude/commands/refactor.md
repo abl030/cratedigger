@@ -113,16 +113,17 @@ Notes:
 
 #### If Codex is the primary driver, use Claude as partner reviewer
 
-Use stdin for the prompt. In this environment, `claude -p` is reliable with stdin even when `--allowed-tools` is present.
+Use stdin for the prompt. In this environment, the reliable headless shape is:
+
+- keep normal `claude -p` auth resolution (do **not** add `--bare` unless auth comes from `ANTHROPIC_API_KEY` or explicit `--settings`)
+- add `--permission-mode dontAsk` so an out-of-policy tool request fails instead of hanging on an unseen prompt
+- keep the allowlist narrow to the read-only Bash commands needed for review
 
 ```bash
 rm -f /tmp/claude-review.txt
 cat <<'EOF' | claude -p --model opus \
-  --allowed-tools 'Bash(git status --short --branch)' \
-                  'Bash(git diff main...HEAD)' \
-                  'Bash(git show --stat --summary HEAD)' \
-                  'Bash(rg *)' \
-                  'Bash(sed *)' \
+  --permission-mode dontAsk \
+  --allowedTools "Bash(git status --short --branch),Bash(git diff main...HEAD),Bash(git show --stat --summary HEAD),Bash(rg *),Bash(sed *)" \
   > /tmp/claude-review.txt
 You are an adversarial code reviewer.
 
@@ -142,6 +143,12 @@ Do not edit code.
 EOF
 cat /tmp/claude-review.txt
 ```
+
+Notes:
+
+- `--bare` is great for scripted runs, but it skips stored login/keychain state; in this repo's current setup that can fail with `Not logged in`.
+- Do **not** swap in `bypassPermissions` / `--dangerously-skip-permissions` here. Per Claude's docs, bypass mode ignores the allowlist and approves every tool, which defeats the constrained-review setup.
+- If the review is still running after several minutes and `/tmp/claude-review.txt` is still empty, that is not by itself a bug — Claude often writes only once the full review completes.
 
 For commit-scoped review, tighten the allowed diff command and prompt to `HEAD~1..HEAD`. For final branch review, keep `main...HEAD`.
 
