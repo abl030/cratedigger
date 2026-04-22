@@ -7,29 +7,19 @@ Used by cratedigger.py and import_one.py, tested directly against real audio fix
 import configparser
 import enum
 import json
-import re
 from dataclasses import dataclass, field, asdict
 from enum import IntEnum, StrEnum
 from typing import Any, Literal, Optional
 
 import msgspec
+from lib.release_identity import detect_release_source as _detect_release_source
 
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
 QUALITY_LOSSLESS = "lossless"
 
-_UUID_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
-_NUMERIC_RE = re.compile(r"^\d+$")
-
-
 def detect_release_source(id_str: str) -> Literal["musicbrainz", "discogs", "unknown"]:
-    """Detect whether a release ID is MusicBrainz (UUID) or Discogs (numeric)."""
-    if not id_str:
-        return "unknown"
-    if _UUID_RE.match(id_str):
-        return "musicbrainz"
-    if _NUMERIC_RE.match(id_str):
-        return "discogs"
-    return "unknown"
+    """Backward-compatible alias for the shared release-identity seam."""
+    return _detect_release_source(id_str)
 
 # Deprecated aliases — keep for old code that references them
 QUALITY_FLAC_ONLY = QUALITY_LOSSLESS

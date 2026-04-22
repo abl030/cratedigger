@@ -2703,10 +2703,13 @@ class TestDetectReleaseSource(unittest.TestCase):
         # desc, id_string, expected
         ("MB UUID", "89ad4ac3-39f7-470e-963a-56509c546377", "musicbrainz"),
         ("MB UUID uppercase", "89AD4AC3-39F7-470E-963A-56509C546377", "musicbrainz"),
+        ("MB UUID uppercase with whitespace", " 89AD4AC3-39F7-470E-963A-56509C546377 ", "musicbrainz"),
         ("Discogs numeric", "2048516", "discogs"),
         ("Discogs large numeric", "13524141", "discogs"),
         ("Discogs single digit", "1", "discogs"),
+        ("Discogs numeric with whitespace", " 2048516 ", "discogs"),
         ("empty string", "", "unknown"),
+        ("zero sentinel", "0", "unknown"),
         ("NONE string", "NONE", "unknown"),
         ("random text", "not-a-valid-id", "unknown"),
         ("partial UUID no hyphens", "89ad4ac339f7470e963a56509c546377", "unknown"),
