@@ -16,7 +16,11 @@ import statistics
 from dataclasses import dataclass
 from typing import Literal, Optional, TYPE_CHECKING
 
-from lib.quality import detect_release_source
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    frontend_release_id,
+)
 
 if TYPE_CHECKING:
     from lib.quality import QualityRankConfig
@@ -598,7 +602,7 @@ class BeetsDB:
         """Get full album metadata + track list. Returns None if not found."""
         album = self._conn.execute(
             "SELECT id, album, albumartist, year, mb_albumid, albumtype, "
-            "       label, country, artpath, added "
+            "       label, country, artpath, added, discogs_albumid "
             "FROM albums WHERE id = ?", (album_id,)
         ).fetchone()
         if not album:
@@ -615,12 +619,16 @@ class BeetsDB:
             "path": self._decode_path(i[10]) if i[10] else None,
         } for i in items]
         album_path = os.path.dirname(tracks[0]["path"]) if tracks and tracks[0]["path"] else None
+        identity = ReleaseIdentity.from_fields(album[4], album[10])
         return {
             "id": album[0], "album": album[1], "artist": album[2],
-            "year": album[3], "mb_albumid": album[4], "type": album[5],
+            "year": album[3],
+            "mb_albumid": identity.release_id if identity else None,
+            "type": album[5],
             "label": album[6], "country": album[7],
             "artpath": self._decode_path(album[8]) if album[8] else None,
             "added": album[9], "tracks": tracks, "path": album_path,
+            "source": identity.source if identity else "unknown",
         }
 
     _ALBUM_SELECT = (
@@ -747,16 +755,19 @@ class BeetsDB:
         Column order must match _ALBUM_SELECT (indices 0-14).
         Field names here are the API contract — the frontend depends on them.
         """
-        mb_id = r[4] or ""
-        source = detect_release_source(str(mb_id))
-        if source == "unknown" and bool(r[14]):
-            source = "discogs"
+        frontend_id = frontend_release_id(r[4], r[14])
+        source = detect_release_source(frontend_id)
+        discogs_identity = ReleaseIdentity.from_id(r[14])
         return {
             "id": r[0], "album": r[1], "artist": r[2], "year": r[3],
-            "mb_albumid": r[4], "type": r[5], "label": r[6],
+            "mb_albumid": frontend_id, "type": r[5], "label": r[6],
             "country": r[7], "track_count": r[8], "formats": r[9],
             "added": r[10], "mb_releasegroupid": r[11],
             "release_group_title": r[12], "min_bitrate": r[13],
             "source": source,
-            "discogs_albumid": str(r[14]) if r[14] is not None else None,
+            "discogs_albumid": (
+                discogs_identity.release_id
+                if discogs_identity and discogs_identity.source == "discogs"
+                else None
+            ),
         }

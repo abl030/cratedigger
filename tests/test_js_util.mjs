@@ -110,8 +110,11 @@ assertEqual(jsArg(null), '&quot;&quot;', 'null becomes empty string literal');
 // --- detectSource tests ---
 console.log('detectSource()');
 assertEqual(detectSource('89ad4ac3-39f7-470e-963a-56509c546377'), 'musicbrainz', 'UUID → musicbrainz');
+assertEqual(detectSource(' 89AD4AC3-39F7-470E-963A-56509C546377 '), 'musicbrainz', 'UUID whitespace/case normalizes');
 assertEqual(detectSource('2048516'), 'discogs', 'numeric → discogs');
+assertEqual(detectSource(' 0012856590 '), 'discogs', 'numeric whitespace/leading zeros normalize');
 assertEqual(detectSource(''), 'unknown', 'empty → unknown');
+assertEqual(detectSource('0'), 'unknown', 'zero sentinel → unknown');
 assertEqual(detectSource(null), 'unknown', 'null → unknown');
 assertEqual(detectSource(undefined), 'unknown', 'undefined → unknown');
 assertEqual(detectSource('NONE'), 'unknown', 'NONE → unknown');

@@ -4,6 +4,8 @@ import logging
 import os
 import re
 
+from lib.release_identity import ReleaseIdentity
+
 log = logging.getLogger("cratedigger-web")
 
 
@@ -36,14 +38,19 @@ def _find_pipeline_request_for_release(
     if not release_id:
         return None
 
-    req = db.get_request_by_mb_release_id(release_id)
+    identity = ReleaseIdentity.from_fields(release_id)
+    if identity is None:
+        return None
+
+    if identity.source == "musicbrainz":
+        return db.get_request_by_mb_release_id(identity.release_id)
+
+    req = db.get_request_by_discogs_release_id(identity.release_id)
     if req:
         return req
-
-    if release_id.isdigit():
-        req = db.get_request_by_discogs_release_id(release_id)
-        if req:
-            return req
+    req = db.get_request_by_mb_release_id(identity.release_id)
+    if req:
+        return req
 
     return None
 
@@ -77,7 +84,7 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
     mb_id = detail.get("mb_albumid")
     srv = _server()
     if mb_id and srv.db:
-        req = srv._db().get_request_by_mb_release_id(mb_id)
+        req = _find_pipeline_request_for_release(None, str(mb_id))
         if req:
             history = srv._db().get_download_history(req["id"])
             result["pipeline_id"] = req["id"]

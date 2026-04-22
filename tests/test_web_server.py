@@ -1945,6 +1945,39 @@ class TestBrowseRouteContracts(_WebServerCase):
         self.assertEqual(data["albums"][0]["pipeline_id"], 55)
         self.assertTrue(data["albums"][0]["in_library"])
 
+    def test_library_artist_route_ignores_discogs_zero_sentinel_on_blank_row(self):
+        import web.server as srv
+
+        beets_album = {
+            "id": 10,
+            "album": "Unknown Import",
+            "artist": "Test Artist",
+            "year": 2002,
+            "mb_albumid": "",
+            "discogs_albumid": "0",
+            "track_count": 8,
+            "mb_releasegroupid": None,
+            "release_group_title": "Unknown Import",
+            "added": 1773651904.0,
+            "formats": "MP3",
+            "min_bitrate": 192000,
+            "type": "album",
+            "label": "Test Label",
+            "country": "AU",
+            "source": "unknown",
+        }
+
+        with patch.object(srv, "db", FakePipelineDB()), \
+                patch("web.server.get_library_artist", return_value=[beets_album]):
+            status, data = self._get(
+                f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["albums"]), 1)
+        self.assertIsNone(data["albums"][0]["mb_albumid"])
+        self.assertIsNone(data["albums"][0]["pipeline_id"])
+
     def test_library_artist_route_sorts_merged_rows_after_dedup(self):
         import web.server as srv
 
@@ -2556,6 +2589,39 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertTrue(data["pipeline_deleted"])
         self.assertEqual(data["pipeline_id"], 99)
         self.assertIsNone(fake_db.get_request(99))
+
+    @patch("web.routes.library.os.path.isdir", return_value=False)
+    @patch("web.routes.library.os.path.isfile", return_value=False)
+    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB")
+    def test_beets_delete_purges_pipeline_request_by_uppercase_release_id(
+        self,
+        mock_beets_cls,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        import web.server as srv
+
+        self._srv.beets_db_path = "/tmp/beets.db"
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=98, status="imported", mb_release_id=self.RELEASE_ID,
+        ))
+        self._configure_beets_delete_mock(mock_beets_cls)
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post("/api/beets/delete", {
+                "id": 7,
+                "confirm": "DELETE",
+                "purge_pipeline": True,
+                "release_id": self.RELEASE_ID.upper(),
+            })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["pipeline_deleted"])
+        self.assertEqual(data["pipeline_id"], 98)
+        self.assertIsNone(fake_db.get_request(98))
 
     @patch("web.routes.library.os.path.isdir", return_value=False)
     @patch("web.routes.library.os.path.isfile", return_value=False)

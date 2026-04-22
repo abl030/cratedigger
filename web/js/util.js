@@ -115,14 +115,34 @@ export function jsArg(value) {
 }
 
 /**
+ * Normalize the single release-id field the frontend keys on.
+ * @param {string|null|undefined} id
+ * @returns {string}
+ */
+export function normalizeReleaseId(id) {
+  if (!id) return '';
+  const value = String(id).trim();
+  if (!value) return '';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0 ? String(numeric) : '';
+  }
+  return value;
+}
+
+/**
  * Detect whether a release ID is MusicBrainz (UUID) or Discogs (numeric).
  * @param {string|null|undefined} id
  * @returns {'musicbrainz'|'discogs'|'unknown'}
  */
 export function detectSource(id) {
-  if (!id) return 'unknown';
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return 'musicbrainz';
-  if (/^\d+$/.test(id)) return 'discogs';
+  const normalized = normalizeReleaseId(id);
+  if (!normalized) return 'unknown';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)) return 'musicbrainz';
+  if (/^\d+$/.test(normalized)) return 'discogs';
   return 'unknown';
 }
 
@@ -132,9 +152,11 @@ export function detectSource(id) {
  * @returns {string}
  */
 export function externalReleaseUrl(id) {
-  return detectSource(id) === 'musicbrainz'
-    ? `https://musicbrainz.org/release/${id}`
-    : `https://www.discogs.com/release/${id}`;
+  const normalized = normalizeReleaseId(id);
+  const source = detectSource(normalized);
+  if (source === 'musicbrainz') return `https://musicbrainz.org/release/${normalized}`;
+  if (source === 'discogs') return `https://www.discogs.com/release/${normalized}`;
+  return '';
 }
 
 /**
@@ -143,5 +165,8 @@ export function externalReleaseUrl(id) {
  * @returns {string}
  */
 export function sourceLabel(id) {
-  return detectSource(id) === 'musicbrainz' ? 'MusicBrainz' : 'Discogs';
+  const source = detectSource(id);
+  if (source === 'musicbrainz') return 'MusicBrainz';
+  if (source === 'discogs') return 'Discogs';
+  return '';
 }

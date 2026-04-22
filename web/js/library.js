@@ -1,6 +1,6 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
-import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
+import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, normalizeReleaseId, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar, renderRemoveFromBeetsButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
@@ -89,7 +89,7 @@ export function renderLibraryResults(albums, targetEl) {
 
     function renderAlbum(a) {
       const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
-      const mbid = a.mb_albumid || '';
+      const mbid = normalizeReleaseId(a.mb_albumid);
       const inLibrary = a.in_library !== false;
       const beetsAlbumId = a.beets_album_id ?? null;
       const pipelineId = a.pipeline_id || null;
@@ -113,7 +113,7 @@ export function renderLibraryResults(albums, targetEl) {
       }, { size: 'small' }) : '';
 
       const badges = renderStatusBadges({
-        id: a.mb_albumid,
+        id: mbid,
         in_library: inLibrary,
         library_format: a.formats,
         library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
@@ -197,14 +197,15 @@ export async function toggleLibDetail(id) {
     const r = await fetch(`${API}/api/beets/album/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
+    const releaseId = normalizeReleaseId(data.mb_albumid);
     let html = '';
     if (data.path) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.85em;word-break:break-all;">${esc(data.path)}</span></div>`;
     }
-    if (data.mb_albumid) {
-      const label = sourceLabel(data.mb_albumid);
-      const url = externalReleaseUrl(data.mb_albumid);
-      html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${data.mb_albumid.slice(0,8)}...</a></span></div>`;
+    if (releaseId) {
+      const label = sourceLabel(releaseId);
+      const url = externalReleaseUrl(releaseId);
+      html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${releaseId.slice(0,8)}...</a></span></div>`;
     }
     if (data.label) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(data.label)}</span></div>`;
@@ -235,19 +236,19 @@ export async function toggleLibDetail(id) {
       html += `<div class="p-detail-row"><span class="p-detail-label">Pipeline</span><span class="p-detail-value">${data.pipeline_status} (${data.pipeline_source || '?'})</span></div>`;
     }
     // Pipeline controls (status + quality override)
-    if (data.mb_albumid && data.pipeline_id) {
+    if (releaseId && data.pipeline_id) {
       const pStatus = data.pipeline_status || '';
       html += `<div class="p-actions" style="margin-top:10px;">
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
-        <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${data.mb_albumid}', 'wanted', null)">wanted</button>
-        <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${data.mb_albumid}', 'imported', null)">imported</button>
-        <button class="p-btn ${pStatus === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${data.mb_albumid}', 'manual', null)">manual</button>
+        <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'wanted', null)">wanted</button>
+        <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'imported', null)">imported</button>
+        <button class="p-btn ${pStatus === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'manual', null)">manual</button>
       </div>`;
       html += `<div class="p-actions" style="margin-top:6px;">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
         <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality('${data.mb_albumid}', null, parseInt(v))">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality('${data.mb_albumid}', 'imported', null)">Accept</button>
+        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality('${releaseId}', null, parseInt(v))">Set</button>
+        <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'imported', null)">Accept</button>
       </div>`;
       const currentIntent = overrideToIntent(data.target_format);
       html += `<div class="p-actions" style="margin-top:6px;">
@@ -260,16 +261,16 @@ export async function toggleLibDetail(id) {
     }
     // Upgrade + Delete buttons
     html += '<div class="p-actions" style="margin-top:6px;">';
-    if (data.mb_albumid) {
+    if (releaseId) {
       const bitrates = (data.tracks || []).map(t => t.bitrate).filter(b => b && b > 0);
       const minBr = bitrates.length > 0 ? Math.round(Math.min(...bitrates) / 1000) : null;
       const brLabel = minBr ? ` (lowest: ${minBr}kbps)` : '';
       if (!data.upgrade_queued) {
-        html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${data.mb_albumid}', this)">Upgrade${brLabel}</button>`;
+        html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${releaseId}', this)">Upgrade${brLabel}</button>`;
       }
     }
     html += renderRemoveFromBeetsButton({
-      id: data.mb_albumid || '',
+      id: releaseId || '',
       in_library: true,
       beets_album_id: id,
       pipeline_id: data.pipeline_id || null,

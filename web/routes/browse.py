@@ -11,10 +11,10 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from lib.release_identity import ReleaseIdentity, frontend_release_id
 from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
-from lib.quality import detect_release_source
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -29,24 +29,6 @@ def _server():
     """
     from web import server
     return server
-
-
-def _release_identity(
-    release_id: object | None,
-    discogs_release_id: object | None = None,
-) -> tuple[str, str] | None:
-    """Stable identity for a row keyed by exact release, MB or Discogs."""
-    rid = str(release_id or "").strip()
-    if rid:
-        source = detect_release_source(rid)
-        if source == "musicbrainz":
-            return ("mb", rid)
-        if source == "discogs":
-            return ("discogs", rid)
-    discogs_id = str(discogs_release_id or "").strip()
-    if discogs_id:
-        return ("discogs", discogs_id)
-    return None
 
 
 def _library_album_sort_key(row: dict[str, object]) -> tuple[bool, int, str, str, int, int]:
@@ -99,13 +81,13 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     )
     pipeline_by_identity: dict[tuple[str, str], dict[str, object]] = {}
     for row in pipeline_rows:
-        identity = _release_identity(
+        identity = ReleaseIdentity.from_fields(
             row.get("mb_release_id"),
             row.get("discogs_release_id"),
         )
         if identity is None:
             continue
-        pipeline_by_identity[identity] = row
+        pipeline_by_identity[identity.key] = row
 
     def _pipeline_album_rows() -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -113,12 +95,10 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
             created_at = row.get("created_at")
             added = created_at.timestamp() if isinstance(created_at, datetime) else 0.0
             min_br = row.get("min_bitrate")
-            # Frontend keys every library row by `mb_albumid`, then routes MB
-            # UUIDs vs numeric Discogs IDs via detectSource(). Pipeline rows do
-            # not have a second canonical release-id slot, so overload it here.
-            release_id = str(
-                row.get("mb_release_id") or row.get("discogs_release_id") or ""
-            ).strip()
+            release_id = frontend_release_id(
+                row.get("mb_release_id"),
+                row.get("discogs_release_id"),
+            )
             result.append({
                 "id": int(row["id"]),
                 "beets_album_id": None,
@@ -126,7 +106,7 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
                 "album": row["album_title"],
                 "artist": row["artist_name"],
                 "year": row.get("year"),
-                "mb_albumid": release_id or None,
+                "mb_albumid": release_id,
                 "track_count": track_counts.get(int(row["id"]), 0),
                 # Pipeline rows do not carry RG titles; mirror the album title
                 # so the library subview can render a stable group heading.
@@ -159,16 +139,18 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     # badge renderer can colour the in-library badge by codec-aware tier.
     seen_release_ids: set[tuple[str, str]] = set()
     for a in albums:
-        # Beets rows also overload `mb_albumid` with numeric Discogs IDs when
-        # the library lacks an MB UUID so the frontend can use one release-id
-        # field and still disambiguate by source.
-        if not a.get("mb_albumid") and a.get("discogs_albumid"):
-            a["mb_albumid"] = a["discogs_albumid"]
+        a["mb_albumid"] = frontend_release_id(
+            a.get("mb_albumid"),
+            a.get("discogs_albumid"),
+        )
         a["in_library"] = True
         a["beets_album_id"] = a["id"]
         a["upgrade_queued"] = False
-        identity = _release_identity(a.get("mb_albumid"), a.get("discogs_albumid"))
-        pi = pipeline_by_identity.get(identity) if identity else None
+        identity = ReleaseIdentity.from_fields(
+            a.get("mb_albumid"),
+            a.get("discogs_albumid"),
+        )
+        pi = pipeline_by_identity.get(identity.key) if identity else None
         if pi:
             a["pipeline_status"] = pi["status"]
             a["pipeline_id"] = pi["id"]
@@ -185,12 +167,12 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         kbps = br_bps // 1000
         a["library_rank"] = srv.compute_library_rank(fmt, kbps)
         if identity:
-            seen_release_ids.add(identity)
+            seen_release_ids.add(identity.key)
         a.pop("discogs_albumid", None)
 
     for req in _pipeline_album_rows():
-        identity = _release_identity(req.get("mb_albumid"))
-        if identity and identity in seen_release_ids:
+        identity = ReleaseIdentity.from_fields(req.get("mb_albumid"))
+        if identity and identity.key in seen_release_ids:
             continue
         albums.append(req)
 
