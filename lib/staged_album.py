@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 import shutil
 from typing import Protocol, TYPE_CHECKING
@@ -11,6 +12,9 @@ from lib.util import sanitize_folder_name
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
+
+
+logger = logging.getLogger("cratedigger")
 
 
 class SupportsCurrentPathUpdate(Protocol):
@@ -105,7 +109,14 @@ class StagedAlbum:
                 os.makedirs(source, exist_ok=True)
                 for source_entry, target_entry in reversed(moved_entries):
                     if os.path.exists(target_entry):
-                        shutil.move(target_entry, source_entry)
+                        try:
+                            shutil.move(target_entry, source_entry)
+                        except Exception:
+                            logger.exception(
+                                "Failed to roll back staged move %s -> %s",
+                                target_entry,
+                                source_entry,
+                            )
             elif not target_preexisted and os.path.isdir(target) and not os.listdir(target):
                 shutil.rmtree(target, ignore_errors=True)
             self.current_path = source

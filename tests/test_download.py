@@ -2042,6 +2042,10 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")
             self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(
+                fake_db.request(1)["active_download_state"]["current_path"],
+                resumed_path,
+            )
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
     @patch("lib.download.process_completed_album")
