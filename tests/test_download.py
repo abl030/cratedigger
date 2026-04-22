@@ -902,10 +902,18 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
                 os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
             )
 
-    @patch("lib.download._process_beets_validation")
-    def test_returns_none_for_post_move_beets_staging_retry(self, mock_process_validation):
-        """Post-move beets staging paths must not auto-revalidate on retry."""
+    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.beets.beets_validate")
+    @patch("lib.download.music_tag")
+    def test_returns_none_for_post_move_auto_import_retry(
+        self,
+        mock_mt,
+        mock_beets_validate,
+        mock_run_preimport_gates,
+    ):
+        """Post-move auto-import retries must stop before re-dispatch."""
         from lib.download import process_completed_album
+        from lib.quality import ValidationResult
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -932,14 +940,95 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_staging_dir = staging_root
             cfg.beets_validation_enabled = True
+            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+            mock_beets_validate.return_value = ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )
+            mock_run_preimport_gates.return_value = MagicMock(
+                valid=True,
+                scenario=None,
+                detail=None,
+                corrupt_files=[],
+                download_spectral=None,
+                existing_spectral=None,
+                existing_min_bitrate=None,
+            )
 
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
+            with patch("lib.download.dispatch_import") as mock_dispatch, \
+                 self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx)
 
             self.assertIsNone(result)
-            mock_process_validation.assert_not_called()
+            mock_dispatch.assert_not_called()
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
+
+    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.beets.beets_validate")
+    @patch("lib.download.music_tag")
+    def test_retries_post_move_redownload_path_without_blocking(
+        self,
+        mock_mt,
+        mock_beets_validate,
+        mock_run_preimport_gates,
+    ):
+        """Post-move non-auto retries should re-enter and finish mark_done."""
+        from lib.download import process_completed_album
+        from lib.quality import ValidationResult
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = os.path.join(staging_root, "Artist", "Album")
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="test-mbid",
+                db_request_id=42,
+                db_source="redownload",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+            cfg.beets_validation_enabled = True
+            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+            mock_beets_validate.return_value = ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )
+            mock_run_preimport_gates.return_value = MagicMock(
+                valid=True,
+                scenario=None,
+                detail=None,
+                corrupt_files=[],
+                download_spectral=None,
+                existing_spectral=None,
+                existing_min_bitrate=None,
+            )
+
+            with patch("lib.download.dispatch_import") as mock_dispatch:
+                result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            mock_dispatch.assert_not_called()
+            mark_done = cast(Any, ctx.pipeline_db_source.mark_done)
+            mark_done.assert_called_once()
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""

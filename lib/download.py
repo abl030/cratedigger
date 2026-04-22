@@ -453,19 +453,6 @@ def _materialize_processing_dir(
           if ctx.pipeline_db_source is not None else None)
 
     if os.path.realpath(staged_album.current_path) != os.path.realpath(canonical_path):
-        if _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir):
-            logger.error(
-                "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
-                "current_path=%s already lives under beets staging. "
-                "Automatic retry is disabled to avoid duplicate import; "
-                "manual recovery is required. See "
-                "docs/advisory-locks.md.",
-                album_data.db_request_id,
-                album_data.artist,
-                album_data.title,
-                staged_album.current_path,
-            )
-            return None
         if not os.path.isdir(staged_album.current_path):
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
@@ -726,7 +713,31 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     will_auto_import = wants_auto_import
     pdb = None
 
-    if will_auto_import:
+    if (
+        will_auto_import
+        and _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir)
+    ):
+        logger.error(
+            "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
+            "current_path=%s already lives under beets staging on the "
+            "auto-import path. Automatic retry is disabled to avoid "
+            "duplicate import; manual recovery is required. See "
+            "docs/advisory-locks.md.",
+            request_id,
+            album_data.artist,
+            album_data.title,
+            staged_album.current_path,
+        )
+        return DispatchOutcome(
+            success=False,
+            message=(
+                "Auto-import may already have started for this staged "
+                f"album ({album_data.mb_release_id})"
+            ),
+            deferred=True,
+        )
+
+    if will_auto_import and album_data.mb_release_id:
         pdb = ctx.pipeline_db_source._get_db()
         lock_ctx = pdb.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_RELEASE,

@@ -142,12 +142,15 @@ album. On contention, files stay where `process_completed_album`
 expects them and the next cycle simply re-enters with the same
 `current_path`.
 
-If the process dies after moving into `beets_staging_dir` but before the
-import path updates pipeline state, the next poll cycle logs
-`POST-MOVE RESUME BLOCKED` and leaves the row in `downloading`.
-Automatic retry is intentionally disabled there to avoid replaying an
-already-started import. Operator recovery should inspect the staged path
-and either finish the import manually or reset the request explicitly.
+If the process dies after moving into `beets_staging_dir`, the next poll
+cycle only blocks when validation proves the retry is on the
+auto-import path. That is the branch where an import subprocess may
+already have started, so automatic retry stays disabled there to avoid
+duplicate import. Redownload / non-auto staging retries still re-enter
+normally because `StagedAlbum.move_to(...)` is idempotent when the album
+is already at the staged destination. For blocked auto-import rows,
+operator recovery should inspect the staged path and either finish the
+import manually or reset the request explicitly.
 
 To list candidate blocked rows, query for `status='downloading'` entries
 whose persisted `current_path` already points at your staging root:
