@@ -11,6 +11,10 @@ Run the full Cratedigger PR workflow end-to-end: load repo context, inspect the 
 
 Prefer GitHub connector data for PR metadata, patch text, and comments. Prefer local `git` and the checked-out repo for file context, edits, tests, and pushing.
 
+When committing from Codex during this workflow, also follow `../../CODEX.md`
+for commit-message style so local commits match the repo's existing Claude-like
+history.
+
 ## Workflow
 
 ### 1. Load repo context first
