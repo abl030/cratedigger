@@ -256,11 +256,11 @@ clearStore();
     className: 'p-btn',
     addClassName: 'p-btn upgrade-btn',
     upgradeClassName: 'p-btn upgrade-btn',
-    removeClassName: 'p-btn delete-beets',
+    removeClassName: 'p-btn remove-request',
     stopPropagation: true,
     hideDisabled: true,
   });
-  assertContains(html, 'class="p-btn delete-beets"', 'wanted detail button uses remove styling');
+  assertContains(html, 'class="p-btn remove-request"', 'wanted detail button uses distinct cancel styling');
   assertContains(html, '>Remove request</button>', 'wanted detail button switches away from Upgrade');
   assertContains(html, 'window.disambRemove(913', 'wanted detail button removes queued request');
 }
