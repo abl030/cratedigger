@@ -90,7 +90,7 @@ class TestFindOrphanedDownloads(unittest.TestCase):
                      "filetype": "flac",
                      "files": [{"username": "user1", "filename": "track.flac"}]}}]
         active = set()  # no active transfers
-        issues = find_orphaned_downloads(rows, active)
+        issues = find_orphaned_downloads(rows, active, existing_local_paths=None)
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].issue_type, "orphaned_download")
         self.assertEqual(issues[0].request_id, 1)
@@ -102,21 +102,21 @@ class TestFindOrphanedDownloads(unittest.TestCase):
                      "filetype": "flac",
                      "files": [{"username": "user1", "filename": "track.flac"}]}}]
         active = {("user1", "track.flac")}
-        issues = find_orphaned_downloads(rows, active)
+        issues = find_orphaned_downloads(rows, active, existing_local_paths=None)
         self.assertEqual(len(issues), 0)
 
     def test_skips_non_downloading_rows(self):
         """Only downloading rows should be checked."""
         rows = [{"id": 1, "status": "wanted",
                  "active_download_state": None}]
-        issues = find_orphaned_downloads(rows, set())
+        issues = find_orphaned_downloads(rows, set(), existing_local_paths=None)
         self.assertEqual(len(issues), 0)
 
     def test_skips_downloading_without_state(self):
         """corrupt_downloading (no state) handled by find_inconsistencies."""
         rows = [{"id": 1, "status": "downloading",
                  "active_download_state": None}]
-        issues = find_orphaned_downloads(rows, set())
+        issues = find_orphaned_downloads(rows, set(), existing_local_paths=None)
         self.assertEqual(len(issues), 0)
 
     def test_partial_match_not_orphaned(self):
@@ -129,7 +129,7 @@ class TestFindOrphanedDownloads(unittest.TestCase):
                          {"username": "user1", "filename": "02.flac"},
                      ]}}]
         active = {("user1", "02.flac")}  # only 1 of 2 still active
-        issues = find_orphaned_downloads(rows, active)
+        issues = find_orphaned_downloads(rows, active, existing_local_paths=None)
         self.assertEqual(len(issues), 0)
 
     def test_skips_local_processing_rows_without_active_transfers(self):
@@ -155,7 +155,7 @@ class TestFindOrphanedDownloads(unittest.TestCase):
                      "filetype": "flac",
                      "processing_started_at": "2026-04-22T00:00:00+00:00",
                      "files": [{"username": "user1", "filename": "track.flac"}]}}]
-        issues = find_orphaned_downloads(rows, set())
+        issues = find_orphaned_downloads(rows, set(), existing_local_paths=None)
         self.assertEqual(issues, [])
 
     def test_reports_missing_local_processing_path_for_manual_review(self):
@@ -173,15 +173,10 @@ class TestFindOrphanedDownloads(unittest.TestCase):
             rows,
             set(),
             existing_local_paths=set(),
-            staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
         )
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].issue_type, "blocked_post_move")
-        self.assertIn(
-            "request-scoped auto-import staged path",
-            issues[0].detail,
-        )
+        self.assertIn("persisted processing path missing", issues[0].detail)
 
     def test_suggest_repair_orphaned(self):
         """Orphaned download should suggest reset_to_wanted."""

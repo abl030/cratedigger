@@ -302,8 +302,6 @@ def find_blocked_recovery_issues(
                 ),
             ))
             continue
-        if recovery_decision.populated_locations:
-            continue
     return issues
 
 

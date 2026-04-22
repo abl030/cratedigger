@@ -914,7 +914,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
         """Post-move auto-import retries must stop before re-dispatch."""
         from lib.download import process_completed_album
         from lib.quality import ValidationResult
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -985,7 +985,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
         """Post-move non-auto retries should re-enter and finish mark_done."""
         from lib.download import process_completed_album
         from lib.quality import ValidationResult
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -2106,7 +2106,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_mid_processing_row_uses_request_scoped_staging_fallback(self, mock_process):
         """Move/persist crashes should recover from request-scoped staged dirs."""
         from lib.download import poll_active_downloads
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -2246,7 +2246,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_post_move_staged_path_without_validation_completes(self):
         """Staged retries still finish when the auto-import branch is unavailable."""
         from lib.download import poll_active_downloads
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -2284,7 +2284,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_post_move_staged_path_with_missing_file_leaves_row_downloading(self):
         """Missing files under a staged current_path must block, not requeue."""
         from lib.download import poll_active_downloads
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -2325,7 +2325,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_post_move_auto_import_path_with_missing_dir_leaves_row_downloading(self):
         """Missing auto-import staging dirs must block, not requeue."""
         from lib.download import poll_active_downloads
-        from lib.staged_album import stage_to_ai_path
+        from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")

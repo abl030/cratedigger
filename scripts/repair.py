@@ -71,8 +71,6 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                 rows,
                 active,
                 existing_local_paths=existing_local_paths,
-                staging_dir=cfg.beets_staging_dir,
-                slskd_download_dir=cfg.slskd_download_dir,
             )
             blocked_recovery_issues = [
                 OrphanInfo(

@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cratedigger
 from lib.beets import beets_validate
 from lib.grab_list import GrabListEntry
+from lib.processing_paths import stage_to_ai_path
 from lib.quality import ValidationResult
-from lib.staged_album import StagedAlbum, stage_to_ai_path
+from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result, sanitize_folder_name
 
 
