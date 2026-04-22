@@ -188,6 +188,27 @@ class TestLibraryArtistService(unittest.TestCase):
                 rank_fn=_rank,
             )
 
+    def test_build_library_artist_rows_keeps_pipeline_row_without_release_identity(self) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[],
+            pipeline_rows=[make_request_row(
+                id=77,
+                mb_release_id=None,
+                discogs_release_id=None,
+                artist_name="Test Artist",
+                album_title="Unidentified Request",
+                status="wanted",
+            )],
+            track_counts={77: 3},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].pipeline_id, 77)
+        self.assertIsNone(rows[0].mb_albumid)
+        self.assertFalse(rows[0].in_library)
+        self.assertEqual(rows[0].track_count, 3)
+
     def test_build_library_artist_rows_overlays_pipeline_state_on_beets_row(self) -> None:
         rows = build_library_artist_rows(
             library_albums=[_beets_album()],
@@ -242,6 +263,59 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].mb_albumid, "12856590")
         self.assertEqual(rows[0].pipeline_id, 55)
         self.assertTrue(rows[0].in_library)
+
+    def test_build_library_artist_rows_merges_multiple_beets_and_pipeline_rows(self) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[
+                _beets_album(
+                    id=1,
+                    album="1995 Library Album",
+                    year=1995,
+                    mb_albumid="11111111-1111-1111-1111-111111111111",
+                    release_group_title="1995 Library Album",
+                    added=1773651800.0,
+                ),
+                _beets_album(
+                    id=2,
+                    album="2001 Library Album",
+                    year=2001,
+                    mb_albumid="22222222-2222-2222-2222-222222222222",
+                    release_group_title="2001 Library Album",
+                    added=1773651900.0,
+                ),
+            ],
+            pipeline_rows=[
+                make_request_row(
+                    id=31,
+                    mb_release_id="33333333-3333-3333-3333-333333333333",
+                    artist_name="Test Artist",
+                    album_title="1997 Pipeline Album",
+                    year=1997,
+                    status="wanted",
+                ),
+                make_request_row(
+                    id=32,
+                    mb_release_id="44444444-4444-4444-4444-444444444444",
+                    artist_name="Test Artist",
+                    album_title="2003 Pipeline Album",
+                    year=2003,
+                    status="wanted",
+                ),
+            ],
+            track_counts={31: 9, 32: 11},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual([row.album for row in rows], [
+            "1995 Library Album",
+            "1997 Pipeline Album",
+            "2001 Library Album",
+            "2003 Pipeline Album",
+        ])
+        self.assertEqual(
+            [row.pipeline_id for row in rows],
+            [None, 31, None, 32],
+        )
 
     def test_build_library_artist_rows_ignores_discogs_zero_sentinel(self) -> None:
         rows = build_library_artist_rows(

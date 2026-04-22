@@ -3,6 +3,11 @@
 Issue #155 moves the merge / dedup / sort logic out of
 `web/routes/browse.py` so the route only validates params, calls this
 service, and serializes the typed row contract.
+
+The service intentionally reads pipeline rows before beets rows. That
+preserves the pre-refactor concurrency behavior where an import that
+finishes between the two reads can still collapse onto the later beets
+row instead of momentarily surfacing as pipeline-only.
 """
 
 from __future__ import annotations
@@ -15,7 +20,11 @@ from web.library_album_row import LibraryAlbumRow
 
 
 class SupportsLibraryArtistLookup(Protocol):
-    """Minimal beets-facing surface for artist-scoped library rows."""
+    """Minimal beets-facing surface for artist-scoped library rows.
+
+    The production caller passes the ``web.server`` module, while tests
+    pass stub objects. The Protocol models the shared callable surface.
+    """
 
     def get_library_artist(
         self,
@@ -144,6 +153,8 @@ def list_library_artist_rows(
     pipeline_rows = pipeline_db.list_requests_by_artist(artist_name, mb_artist_id)
     request_ids = [_request_id(row) for row in pipeline_rows]
     track_counts = pipeline_db.get_track_counts(request_ids) if request_ids else {}
+    # Keep the original pipeline-first ordering so a concurrent import
+    # that lands between the two reads still collapses onto the beets row.
     library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
     return build_library_artist_rows(
         library_albums=library_albums,
