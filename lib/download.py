@@ -424,8 +424,8 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 def _path_is_within(path: str, root: str) -> bool:
     """Return True when ``path`` is located under ``root``."""
-    abs_path = os.path.abspath(path)
-    abs_root = os.path.abspath(root)
+    abs_path = os.path.realpath(path)
+    abs_root = os.path.realpath(root)
     try:
         return os.path.commonpath([abs_path, abs_root]) == abs_root
     except ValueError:
@@ -445,9 +445,13 @@ def _materialize_processing_dir(
     if os.path.abspath(staged_album.current_path) != os.path.abspath(canonical_path):
         if _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir):
             logger.error(
-                "Current staged path already lives under beets staging: %s. "
-                "Refusing automatic retry from a post-move path; manual "
-                "recovery is required to avoid duplicate import.",
+                "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
+                "current_path=%s already lives under beets staging. "
+                "Automatic retry is disabled to avoid duplicate import; "
+                "manual recovery is required.",
+                album_data.db_request_id,
+                album_data.artist,
+                album_data.title,
                 staged_album.current_path,
             )
             return None

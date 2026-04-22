@@ -859,6 +859,49 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             self.assertEqual(file.import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
+    @patch("lib.download.music_tag")
+    def test_persists_canonical_current_path_for_fresh_materialization(self, mock_mt):
+        """The first local materialization must persist the canonical path to DB."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={"filetype": "mp3", "files": []},
+            ))
+            source_dir = os.path.join(tmpdir, "downloads", "Music")
+            os.makedirs(source_dir)
+            source_file = os.path.join(source_dir, "01 - Track.mp3")
+            with open(source_file, "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+                db_request_id=42,
+            )
+            cfg = cast(Any, _make_ctx().cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_validation_enabled = False
+            ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertEqual(
+                fake_db.request(42)["active_download_state"]["current_path"],
+                os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
+            )
+
     @patch("lib.download._process_beets_validation")
     def test_returns_none_for_post_move_beets_staging_retry(self, mock_process_validation):
         """Post-move beets staging paths must not auto-revalidate on retry."""
@@ -891,10 +934,12 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             cfg.beets_validation_enabled = True
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx)
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(album, [], ctx)
 
             self.assertIsNone(result)
             mock_process_validation.assert_not_called()
+            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
@@ -1992,10 +2037,12 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
 
-            poll_active_downloads(ctx)
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                poll_active_downloads(ctx)
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")
             self.assertEqual(fake_db.status_history, [])
+            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
     @patch("lib.download.process_completed_album")
     def test_poll_no_redownload_window(self, mock_process):
