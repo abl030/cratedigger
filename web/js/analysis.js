@@ -1,5 +1,5 @@
 // @ts-check
-import { state, API, toast, updatePipelineStatus, pipelineStore } from './state.js';
+import { state, API, toast, updatePipelineStatus } from './state.js';
 import { esc } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderActionToolbar } from './release_actions.js';
@@ -218,49 +218,5 @@ export async function disambRemove(pipelineId, btn) {
   } catch (e) {
     btn.textContent = 'Error';
     toast('Remove failed', true);
-  }
-}
-
-/**
- * Delete an album from the beets library and optionally the pipeline.
- * @param {number} beetsId
- * @param {number|null} pipelineId
- * @param {HTMLButtonElement} btn
- * @param {string} [releaseId]
- */
-export async function disambDeleteFromLibrary(beetsId, pipelineId, btn, releaseId = '') {
-  if (!confirm(`Delete album #${beetsId} from beets library and pipeline? This removes files from disk.`)) return;
-  btn.disabled = true;
-  btn.textContent = '...';
-  try {
-    const r = await fetch(`${API}/api/beets/delete`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        id: beetsId,
-        confirm: 'DELETE',
-        purge_pipeline: true,
-        pipeline_id: pipelineId,
-        release_id: releaseId,
-      }),
-    });
-    const data = await r.json();
-    if (data.status === 'ok') {
-      if (data.pipeline_deleted && releaseId) {
-        updatePipelineStatus(releaseId, null, null);
-      }
-      btn.textContent = 'Deleted';
-      btn.style.background = '#333';
-      btn.style.color = '#666';
-      invalidateBrowseArtist();
-      const pipelineMsg = data.pipeline_deleted ? ', request removed' : '';
-      toast(`Deleted: ${data.artist} - ${data.album} (${data.deleted_files} files${pipelineMsg})`);
-    } else {
-      btn.textContent = 'Error';
-      toast(data.error || 'Delete failed', true);
-    }
-  } catch (e) {
-    btn.textContent = 'Error';
-    toast('Delete failed', true);
   }
 }

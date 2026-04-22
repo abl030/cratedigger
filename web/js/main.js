@@ -12,7 +12,7 @@ import { loadRecents, setRecentsFilter, renderRecentsItems } from './recents.js'
 import { loadPipeline, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
-import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove, disambDeleteFromLibrary } from './analysis.js';
+import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
 import { loadManualImport, runManualImport } from './manual.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup } from './wrong-matches.js';
 import { toast } from './state.js';
@@ -98,7 +98,6 @@ Object.assign(window, {
   renderDisambiguateInto,
   toggleDisambRGTracks,
   disambRemove,
-  disambDeleteFromLibrary,
   loadManualImport,
   runManualImport,
   showManualSub,

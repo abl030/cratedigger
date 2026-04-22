@@ -2,7 +2,7 @@
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
-import { renderActionToolbar } from './release_actions.js';
+import { renderActionToolbar, renderRemoveFromBeetsButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
 
@@ -268,7 +268,19 @@ export async function toggleLibDetail(id) {
         html += `<button class="p-btn upgrade-btn" onclick="event.stopPropagation(); window.upgradeAlbum('${data.mb_albumid}', this)">Upgrade${brLabel}</button>`;
       }
     }
-    html += `<button class="p-btn delete-beets" onclick="event.stopPropagation(); window.confirmDeleteBeets(${id}, ${jsArg(data.artist || '')}, ${jsArg(data.album || '')}, ${data.tracks ? data.tracks.length : 0}, ${data.pipeline_id ?? 'null'}, ${jsArg(data.mb_albumid || '')})">Delete from beets</button>`;
+    html += renderRemoveFromBeetsButton({
+      id: data.mb_albumid || '',
+      in_library: true,
+      beets_album_id: id,
+      pipeline_id: data.pipeline_id || null,
+      artist: data.artist || '',
+      album: data.album || '',
+      track_count: data.tracks ? data.tracks.length : 0,
+    }, {
+      className: 'p-btn delete-beets',
+      label: 'Delete from beets',
+      stopPropagation: true,
+    });
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }

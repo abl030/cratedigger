@@ -53,6 +53,40 @@ import { pipelineStore } from './state.js';
  */
 
 /**
+ * Render the shared delete-from-beets button for browse-tab surfaces.
+ *
+ * @param {ActionItem} item
+ * @param {Object} [opts]
+ * @param {string} [opts.className]
+ * @param {string} [opts.enabledStyle]
+ * @param {string} [opts.disabledStyle]
+ * @param {string} [opts.label]
+ * @param {boolean} [opts.stopPropagation]
+ * @returns {string}
+ */
+export function renderRemoveFromBeetsButton(item, opts = {}) {
+  const stored = pipelineStore.get(item.id);
+  const pId = stored ? stored.id : (item.pipeline_id || null);
+  const inLibrary = !!item.in_library;
+  const beetsId = item.beets_album_id || null;
+  const canRemoveBeets = inLibrary && !!beetsId;
+  const className = opts.className || 'btn';
+  const label = opts.label || 'Remove from beets';
+  const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+
+  const enabledStyle = opts.enabledStyle ? ` style="${opts.enabledStyle}"` : '';
+  const disabledStyle = opts.disabledStyle ? ` style="${opts.disabledStyle}"` : '';
+
+  const artistArg = jsArg(item.artist || '');
+  const albumArg = jsArg(item.album || '');
+  const trackCount = item.track_count || 0;
+
+  return canRemoveBeets
+    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${jsArg(item.id)})">${label}</button>`
+    : `<button class="${className}"${disabledStyle} disabled>${label}</button>`;
+}
+
+/**
  * Render the toolbar HTML for one row.
  *
  * @param {ActionItem} item
@@ -67,8 +101,6 @@ export function renderActionToolbar(item, opts = {}) {
   const pStatus = stored ? stored.status : (item.pipeline_status || null);
   const pId = stored ? stored.id : (item.pipeline_id || null);
   const inLibrary = !!item.in_library;
-  const beetsId = item.beets_album_id || null;
-  const canRemoveBeets = inLibrary && !!beetsId;
 
   const sizeStyle = opts.size === 'small'
     ? 'padding:2px 8px;font-size:0.7em;'
@@ -76,9 +108,6 @@ export function renderActionToolbar(item, opts = {}) {
   const baseStyle = `${sizeStyle}white-space:nowrap;`;
 
   const idArg = jsArg(item.id);
-  const artistArg = jsArg(item.artist || '');
-  const albumArg = jsArg(item.album || '');
-  const trackCount = item.track_count || 0;
 
   // Acquire — single context-aware button. See module header for the
   // full priority order. The key invariant: at most one of Add/Upgrade/
@@ -99,10 +128,12 @@ export function renderActionToolbar(item, opts = {}) {
     acquireBtn = `<button class="btn btn-add" style="${baseStyle}" disabled>Add request</button>`;
   }
 
-  // Remove from beets — greyed out when not in library
-  const removeBeetsBtn = canRemoveBeets
-    ? `<button class="btn" style="${baseStyle}background:#3a2a2a;color:#f88;" onclick="event.stopPropagation(); window.confirmDeleteBeets(${beetsId}, ${artistArg}, ${albumArg}, ${trackCount}, ${pId ?? 'null'}, ${idArg})">Remove from beets</button>`
-    : `<button class="btn" style="${baseStyle}" disabled>Remove from beets</button>`;
+  const removeBeetsBtn = renderRemoveFromBeetsButton(item, {
+    className: 'btn',
+    enabledStyle: `${baseStyle}background:#3a2a2a;color:#f88;`,
+    disabledStyle: baseStyle,
+    stopPropagation: true,
+  });
 
   return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeBeetsBtn}</span>`;
 }
