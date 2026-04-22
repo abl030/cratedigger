@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.import_dispatch import transition_request as _transition_request
+from lib.config import read_runtime_config
 from lib.pipeline_db import PipelineDB
 from lib.quality import find_inconsistencies, find_orphaned_downloads, suggest_repair
 
@@ -49,6 +50,7 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     slskd_key: str | None) -> list:
     """Collect all issues: DB inconsistencies + optional orphaned downloads."""
     rows = _get_all_rows(db)
+    cfg = read_runtime_config()
     issues = find_inconsistencies(rows)
     if slskd_host and slskd_key:
         try:
@@ -65,6 +67,8 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                 rows,
                 active,
                 existing_local_paths=existing_local_paths,
+                staging_dir=cfg.beets_staging_dir,
+                slskd_download_dir=cfg.slskd_download_dir,
             )
             issues.extend(orphans)
             if not orphans:
@@ -127,7 +131,8 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
 def _get_all_rows(db: PipelineDB) -> list:
     """Fetch all album_requests rows for inspection."""
     cur = db._execute(
-        "SELECT id, status, active_download_state, imported_path "
+        "SELECT id, status, artist_name, album_title, year, "
+        "active_download_state, imported_path "
         "FROM album_requests ORDER BY id"
     )
     return [dict(r) for r in cur.fetchall()]
