@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from lib.release_identity import (
     ReleaseIdentity,
-    frontend_release_id,
     normalize_release_id,
 )
 from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
+from web.library_album_row import LibraryAlbumRow
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -35,18 +34,15 @@ def _server():
     return server
 
 
-def _library_album_sort_key(row: dict[str, object]) -> tuple[bool, int, str, str, int, int]:
+def _library_album_sort_key(row: LibraryAlbumRow) -> tuple[bool, int, str, str, int, int]:
     """Deterministic chronological-ish ordering for merged library rows."""
-    year = row.get("year")
-    year_num = year if isinstance(year, int) else 0
-    album = str(row.get("album") or "")
-    country = str(row.get("country") or "")
-    beets_album_id = row.get("beets_album_id")
-    pipeline_id = row.get("pipeline_id")
-    beets_key = beets_album_id if isinstance(beets_album_id, int) else -1
-    pipeline_key = pipeline_id if isinstance(pipeline_id, int) else -1
+    year_num = row.year if isinstance(row.year, int) else 0
+    album = row.album
+    country = row.country or ""
+    beets_key = row.beets_album_id if isinstance(row.beets_album_id, int) else -1
+    pipeline_key = row.pipeline_id if isinstance(row.pipeline_id, int) else -1
     return (
-        year is None,
+        row.year is None,
         year_num,
         album.casefold(),
         country.casefold(),
@@ -93,98 +89,38 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
             continue
         pipeline_by_identity[identity.key] = row
 
-    def _pipeline_album_rows() -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        for row in pipeline_rows:
-            created_at = row.get("created_at")
-            added = created_at.timestamp() if isinstance(created_at, datetime) else 0.0
-            min_br = row.get("min_bitrate")
-            release_id = frontend_release_id(
-                row.get("mb_release_id"),
-                row.get("discogs_release_id"),
+    def _pipeline_album_rows() -> list[LibraryAlbumRow]:
+        return [
+            LibraryAlbumRow.from_pipeline_request(
+                row,
+                track_count=track_counts.get(int(row["id"]), 0),
             )
-            result.append({
-                "id": int(row["id"]),
-                "beets_album_id": None,
-                "in_library": False,
-                "album": row["album_title"],
-                "artist": row["artist_name"],
-                "year": row.get("year"),
-                "mb_albumid": release_id,
-                "track_count": track_counts.get(int(row["id"]), 0),
-                # Pipeline rows do not carry RG titles; mirror the album title
-                # so the library subview can render a stable group heading.
-                "mb_releasegroupid": row.get("mb_release_group_id"),
-                "release_group_title": row["album_title"],
-                "added": added,
-                "formats": row.get("format") or "",
-                "min_bitrate": (int(min_br) * 1000) if isinstance(min_br, int) else None,
-                "type": "album",
-                "label": "",
-                "country": row.get("country"),
-                "source": row.get("source"),
-                # Keep the row shape uniform with beets-backed entries; badges
-                # ignore this when `in_library` is false, but the route contract
-                # expects every album row to carry the same keys.
-                "library_rank": None,
-                "pipeline_status": row["status"],
-                "pipeline_id": int(row["id"]),
-                "upgrade_queued": (
-                    row["status"] == "wanted"
-                    and bool(row.get("search_filetype_override") or row.get("target_format"))
-                ),
-            })
-        return result
+            for row in pipeline_rows
+        ]
 
-    albums = srv.get_library_artist(name, mbid)
-    # Enrich with pipeline_status / pipeline_id / upgrade_queued so the
-    # standardised action toolbar (Acquire / Remove from beets) shows
-    # accurate per-row state. Also compute library_rank so the unified
-    # badge renderer can colour the in-library badge by codec-aware tier.
+    albums: list[LibraryAlbumRow] = []
     seen_release_ids: set[tuple[str, str]] = set()
-    for a in albums:
-        # The frontend keys every row off the single ``mb_albumid`` field.
-        # For Discogs rows that field intentionally carries the numeric
-        # Discogs release id so browse/library/pipeline actions share one key.
-        a["mb_albumid"] = frontend_release_id(
-            a.get("mb_albumid"),
-            a.get("discogs_albumid"),
-        )
-        a["in_library"] = True
-        a["beets_album_id"] = a["id"]
-        a["upgrade_queued"] = False
+    for album in srv.get_library_artist(name, mbid):
         identity = ReleaseIdentity.from_fields(
-            a.get("mb_albumid"),
-            a.get("discogs_albumid"),
+            album.get("mb_albumid"),
+            album.get("discogs_albumid"),
         )
-        pi = pipeline_by_identity.get(identity.key) if identity else None
-        if pi:
-            a["pipeline_status"] = pi["status"]
-            a["pipeline_id"] = pi["id"]
-            if pi.get("status") == "wanted" and (pi.get("search_filetype_override") or pi.get("target_format")):
-                a["upgrade_queued"] = True
-        else:
-            a["pipeline_status"] = None
-            a["pipeline_id"] = None
-        # Codec-aware rank for the in-library badge.
-        fmt_raw = a.get("formats")
-        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
-        br_raw = a.get("min_bitrate")
-        br_bps = br_raw if isinstance(br_raw, int) else 0
-        kbps = br_bps // 1000
-        a["library_rank"] = srv.compute_library_rank(fmt, kbps)
-        if identity:
-            seen_release_ids.add(identity.key)
-        a.pop("discogs_albumid", None)
+        row = LibraryAlbumRow.from_beets_album_with_pipeline(
+            album,
+            pipeline_row=pipeline_by_identity.get(identity.key) if identity else None,
+            rank_fn=srv.compute_library_rank,
+        )
+        albums.append(row)
+        if row.identity:
+            seen_release_ids.add(row.identity.key)
 
     for req in _pipeline_album_rows():
-        identity = ReleaseIdentity.from_fields(req.get("mb_albumid"))
-        if identity and identity.key in seen_release_ids:
+        if req.identity and req.identity.key in seen_release_ids:
             continue
         albums.append(req)
 
     albums.sort(key=_library_album_sort_key)
-    h._json({"albums": albums})  # type: ignore[attr-defined]
+    h._json({"albums": [row.to_dict() for row in albums]})  # type: ignore[attr-defined]
 
 
 def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:

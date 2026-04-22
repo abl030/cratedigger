@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from web.library_album_row import LibraryAlbumRow
 
 _MOCK_PIPELINE_REQUEST = make_request_row(
     id=100, status="imported", min_bitrate=320,
@@ -1774,13 +1775,7 @@ class TestBrowseRouteContracts(_WebServerCase):
         "id", "title", "type", "secondary_types", "first_release_date",
         "artist_credit", "primary_artist_id", "has_official",
     }
-    LIBRARY_ALBUM_REQUIRED_FIELDS = {
-        "id", "album", "artist", "year", "mb_albumid", "track_count",
-        "mb_releasegroupid", "release_group_title", "added", "formats",
-        "min_bitrate", "type", "label", "country", "source",
-        "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
-        "upgrade_queued", "library_rank",
-    }
+    LIBRARY_ALBUM_REQUIRED_FIELDS = set(LibraryAlbumRow.__struct_fields__)
     RELEASE_GROUP_REQUIRED_FIELDS = {
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "pipeline_status", "pipeline_id",
@@ -1913,6 +1908,7 @@ class TestBrowseRouteContracts(_WebServerCase):
         self.assertEqual(data["albums"][0]["pipeline_id"], 42)
         self.assertIsNone(data["albums"][0]["beets_album_id"])
         self.assertIsNone(data["albums"][0]["library_rank"])
+        self.assertEqual(data["albums"][0]["release_group_title"], "Wanted Album")
 
     def test_library_artist_route_dedups_pipeline_row_when_beets_row_has_same_release_id(self):
         import web.server as srv
