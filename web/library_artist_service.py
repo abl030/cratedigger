@@ -132,8 +132,8 @@ def list_library_artist_rows(
     rank_fn: Callable[[str | None, int | None], str],
 ) -> list[LibraryAlbumRow]:
     """Load and shape `/api/library/artist` rows for one artist."""
-    library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
     if pipeline_db is None:
+        library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
         return build_library_artist_rows(
             library_albums=library_albums,
             pipeline_rows=[],
@@ -144,6 +144,7 @@ def list_library_artist_rows(
     pipeline_rows = pipeline_db.list_requests_by_artist(artist_name, mb_artist_id)
     request_ids = [_request_id(row) for row in pipeline_rows]
     track_counts = pipeline_db.get_track_counts(request_ids) if request_ids else {}
+    library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
     return build_library_artist_rows(
         library_albums=library_albums,
         pipeline_rows=pipeline_rows,

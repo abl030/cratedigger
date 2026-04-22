@@ -59,6 +59,47 @@ class _StubLibraryLookup:
         return list(self._albums)
 
 
+class _RaceAwareLibraryLookup:
+    def __init__(self) -> None:
+        self.pipeline_read = False
+        self.calls: list[str] = []
+
+    def get_library_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, object]]:
+        self.calls.append(f"library:{artist_name}:{mb_artist_id}")
+        if not self.pipeline_read:
+            return []
+        return [_beets_album()]
+
+
+class _RaceAwarePipelineDB:
+    def __init__(self, lookup: _RaceAwareLibraryLookup) -> None:
+        self._lookup = lookup
+        self.calls: list[str] = []
+
+    def list_requests_by_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, object]]:
+        self.calls.append(f"pipeline:{artist_name}:{mb_artist_id}")
+        self._lookup.pipeline_read = True
+        return [make_request_row(
+            id=42,
+            mb_release_id=RELEASE_ID,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        )]
+
+    def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
+        self.calls.append(f"track_counts:{request_ids}")
+        return {42: 10}
+
+
 class TestLibraryArtistService(unittest.TestCase):
     def test_list_library_artist_rows_includes_pipeline_only_request(self) -> None:
         fake_db = FakePipelineDB()
@@ -116,6 +157,27 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].id, 7)
         self.assertTrue(rows[0].in_library)
         self.assertIsNone(rows[0].pipeline_id)
+
+    def test_list_library_artist_rows_reads_pipeline_before_beets_lookup(self) -> None:
+        lookup = _RaceAwareLibraryLookup()
+        pipeline_db = _RaceAwarePipelineDB(lookup)
+
+        rows = list_library_artist_rows(
+            library_lookup=lookup,
+            pipeline_db=pipeline_db,
+            artist_name="Test Artist",
+            mb_artist_id=ARTIST_ID,
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(
+            pipeline_db.calls,
+            [f"pipeline:Test Artist:{ARTIST_ID}", "track_counts:[42]"],
+        )
+        self.assertEqual(lookup.calls, [f"library:Test Artist:{ARTIST_ID}"])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].in_library)
+        self.assertEqual(rows[0].pipeline_id, 42)
 
     def test_build_library_artist_rows_rejects_non_int_request_id(self) -> None:
         with self.assertRaisesRegex(TypeError, "int id"):
