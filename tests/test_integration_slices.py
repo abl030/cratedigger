@@ -1643,10 +1643,17 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
         # stage_to_ai and dispatch_import_core MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
-        with patch.object(dl_mod, "stage_to_ai") as mock_stage, \
+        with patch.object(dl_mod.StagedAlbum, "move_to") as mock_move, \
              patch.object(dl_mod, "dispatch_import_core") as mock_dispatch:
             outcome = dl_mod._handle_valid_result(
-                entry, bv_result, import_folder_fullpath, ctx)
+                entry,
+                bv_result,
+                dl_mod.StagedAlbum(
+                    current_path=import_folder_fullpath,
+                    request_id=42,
+                ),
+                ctx,
+            )
 
         assert outcome is not None
         self.assertTrue(outcome.deferred)
@@ -1654,7 +1661,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         # **Critical**: staging never ran — files stay at
         # import_folder_fullpath where process_completed_album's
         # resume guard can pick them up next cycle.
-        mock_stage.assert_not_called()
+        mock_move.assert_not_called()
         mock_dispatch.assert_not_called()
 
     def test_redownload_path_does_not_take_release_lock(self):
@@ -1690,14 +1697,112 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         bv_result = ValidationResult(
             valid=True, distance=0.05, scenario="strong_match")
 
-        with patch.object(dl_mod, "stage_to_ai",
+        with patch.object(dl_mod.StagedAlbum, "move_to",
                           return_value="/tmp/staged"):
             dl_mod._handle_valid_result(
-                entry, bv_result, "/tmp/import", ctx)
+                entry,
+                bv_result,
+                dl_mod.StagedAlbum(current_path="/tmp/import", request_id=42),
+                ctx,
+            )
 
         # No RELEASE-namespace lock call — redownload path skips it.
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
+
+    def test_auto_path_persists_current_path_after_staging(self):
+        from lib import download as dl_mod
+        from lib.import_dispatch import DispatchOutcome
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=self.MBID,
+            status="downloading",
+            active_download_state={
+                "filetype": "mp3",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
+                "files": [],
+                "current_path": None,
+            },
+        ))
+
+        from tests.helpers import make_ctx_with_fake_db
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_distance_threshold=0.15,
+            beets_staging_dir=os.path.join(
+                tempfile.gettempdir(),
+                "unused-beets-staging",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing_dir = os.path.join(tmpdir, "processing")
+            os.makedirs(processing_dir)
+            track_path = os.path.join(processing_dir, "01 - Track.mp3")
+            with open(track_path, "w") as fp:
+                fp.write("fake audio")
+
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_distance_threshold=0.15,
+                beets_staging_dir=os.path.join(tmpdir, "beets-staging"),
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            entry = dl_mod.GrabListEntry(
+                album_id=42,
+                artist="Test Artist",
+                title="Test Album",
+                year="2006",
+                files=[],
+                filetype="mp3",
+                mb_release_id=self.MBID,
+                db_source="request",
+                db_request_id=42,
+                import_folder=processing_dir,
+            )
+            staged_album = dl_mod.StagedAlbum.from_entry(
+                entry,
+                default_path=processing_dir,
+            )
+            bv_result = ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )
+
+            with patch.object(
+                dl_mod,
+                "dispatch_import",
+                return_value=DispatchOutcome(success=True, message="ok"),
+            ) as mock_dispatch:
+                outcome = dl_mod._handle_valid_result(
+                    entry,
+                    bv_result,
+                    staged_album,
+                    ctx,
+                )
+
+            assert outcome is not None
+            self.assertTrue(outcome.success)
+            staged_path = os.path.join(
+                cfg.beets_staging_dir,
+                "Test Artist",
+                "Test Album",
+            )
+            self.assertEqual(staged_album.current_path, staged_path)
+            self.assertTrue(os.path.exists(os.path.join(staged_path, "01 - Track.mp3")))
+            self.assertFalse(os.path.exists(processing_dir))
+            self.assertEqual(
+                db.request(42)["active_download_state"]["current_path"],
+                staged_path,
+            )
+            mock_dispatch.assert_called_once()
+            self.assertEqual(mock_dispatch.call_args.args[2], staged_path)
 
 
 class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
