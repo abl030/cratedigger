@@ -58,7 +58,6 @@ function buttonStyle(opts, key) {
  */
 export function renderAcquireActionButton(state, opts = {}) {
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
-  const releaseArg = jsArg(state.releaseId);
 
   if (state.acquireKind === 'remove_request' && state.pipelineId) {
     const label = opts.removeLabel || 'Remove request';
@@ -68,6 +67,7 @@ export function renderAcquireActionButton(state, opts = {}) {
   }
 
   if (state.acquireKind === 'upgrade' && state.releaseId) {
+    const releaseArg = jsArg(state.releaseId);
     const label = opts.upgradeLabel || 'Upgrade';
     const className = buttonClass(opts, 'upgradeClassName', 'btn btn-add');
     const style = buttonStyle(opts, 'upgradeStyle');
@@ -75,6 +75,7 @@ export function renderAcquireActionButton(state, opts = {}) {
   }
 
   if (state.acquireKind === 'add' && state.releaseId) {
+    const releaseArg = jsArg(state.releaseId);
     const label = opts.addLabel || 'Add request';
     const className = buttonClass(opts, 'addClassName', 'btn btn-add');
     const style = buttonStyle(opts, 'addStyle');
@@ -112,13 +113,13 @@ export function renderRemoveFromBeetsButton(state, opts = {}) {
   const enabledStyle = opts.enabledStyle ? ` style="${opts.enabledStyle}"` : '';
   const disabledStyle = opts.disabledStyle ? ` style="${opts.disabledStyle}"` : '';
 
-  const artistArg = jsArg(state.artist);
-  const albumArg = jsArg(state.album);
-  const releaseArg = jsArg(state.releaseId);
-
   if (!state.canRemoveBeets && opts.hideDisabled) {
     return '';
   }
+
+  const artistArg = jsArg(state.artist);
+  const albumArg = jsArg(state.album);
+  const releaseArg = jsArg(state.releaseId);
 
   return state.canRemoveBeets
     ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${state.beetsAlbumId}, ${artistArg}, ${albumArg}, ${state.trackCount}, ${state.pipelineId ?? 'null'}, ${releaseArg})">${label}</button>`

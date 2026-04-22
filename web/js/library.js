@@ -283,7 +283,6 @@ export async function toggleLibDetail(id) {
       addClassName: 'p-btn upgrade-btn',
       upgradeClassName: 'p-btn upgrade-btn',
       removeClassName: 'p-btn delete-beets',
-      disabledClassName: 'p-btn upgrade-btn',
       upgradeLabel: `Upgrade${brLabel}`,
       stopPropagation: true,
       hideDisabled: true,

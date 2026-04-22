@@ -242,6 +242,29 @@ clearStore();
   assertContains(html, 'window.upgradeAlbum(&quot;rel-13&quot;', 'detail upgrade action uses same state contract');
 }
 
+console.log('Acquire helper — library detail shows Remove request for wanted albums');
+clearStore();
+{
+  const state = buildReleaseActionState({
+    id: 'rel-13b',
+    in_library: true,
+    beets_album_id: 130,
+    pipeline_status: 'wanted',
+    pipeline_id: 913,
+  });
+  const html = renderAcquireActionButton(state, {
+    className: 'p-btn',
+    addClassName: 'p-btn upgrade-btn',
+    upgradeClassName: 'p-btn upgrade-btn',
+    removeClassName: 'p-btn delete-beets',
+    stopPropagation: true,
+    hideDisabled: true,
+  });
+  assertContains(html, 'class="p-btn delete-beets"', 'wanted detail button uses remove styling');
+  assertContains(html, '>Remove request</button>', 'wanted detail button switches away from Upgrade');
+  assertContains(html, 'window.disambRemove(913', 'wanted detail button removes queued request');
+}
+
 console.log('Acquire helper — disabled states can be hidden in detail views');
 clearStore();
 {

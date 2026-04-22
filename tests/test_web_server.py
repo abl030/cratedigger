@@ -1779,10 +1779,11 @@ class TestBrowseRouteContracts(_WebServerCase):
     LIBRARY_ALBUM_REQUIRED_FIELDS = set(LibraryAlbumRow.__struct_fields__)
     RELEASE_GROUP_REQUIRED_FIELDS = {
         "id", "title", "country", "date", "format", "track_count", "status",
-        "in_library", "pipeline_status", "pipeline_id",
+        "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
     RELEASE_DETAIL_REQUIRED_FIELDS = {
-        "id", "title", "tracks", "in_library", "pipeline_status", "pipeline_id",
+        "id", "title", "tracks", "in_library", "beets_album_id",
+        "pipeline_status", "pipeline_id",
     }
     RELEASE_TRACK_REQUIRED_FIELDS = {
         "disc_number", "track_number", "title", "length_seconds",
