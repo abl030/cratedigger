@@ -1844,11 +1844,14 @@ class TestBrowseRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(len(data["albums"]), 1)
+        _assert_required_fields(self, data["albums"][0], self.LIBRARY_ALBUM_REQUIRED_FIELDS,
+                                "pipeline-only library artist album")
         self.assertEqual(data["albums"][0]["album"], "Wanted Album")
         self.assertFalse(data["albums"][0]["in_library"])
         self.assertEqual(data["albums"][0]["pipeline_status"], "wanted")
         self.assertEqual(data["albums"][0]["pipeline_id"], 42)
         self.assertIsNone(data["albums"][0]["beets_album_id"])
+        self.assertIsNone(data["albums"][0]["library_rank"])
 
     def test_library_artist_route_dedups_pipeline_row_when_beets_row_has_same_release_id(self):
         import web.server as srv
@@ -2682,6 +2685,42 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(status, 500)
         self.assertIn("error", data)
         mock_beets_cls.delete_album.assert_not_called()
+
+    @patch("web.routes.library.os.path.isdir", return_value=False)
+    @patch("web.routes.library.os.path.isfile", return_value=False)
+    @patch("web.routes.library.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB")
+    def test_beets_delete_failure_after_pipeline_purge_returns_targeted_error(
+        self,
+        mock_beets_cls,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        import web.server as srv
+
+        self._srv.beets_db_path = "/tmp/beets.db"
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=self.RELEASE_ID,
+        ))
+        self._configure_beets_delete_mock(
+            mock_beets_cls,
+            delete_side_effect=OSError("boom"),
+        )
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post("/api/beets/delete", {
+                "id": 7,
+                "confirm": "DELETE",
+                "purge_pipeline": True,
+                "pipeline_id": 42,
+                "release_id": self.RELEASE_ID,
+            })
+
+        self.assertEqual(status, 500)
+        self.assertIn("Pipeline request was removed", data["error"])
+        self.assertIsNone(fake_db.get_request(42))
 
 
 class TestApplyPipelineBitrateOverride(unittest.TestCase):
