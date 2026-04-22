@@ -1249,6 +1249,12 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(f.username, "alice")
         self.assertEqual(f.filename, "alice\\Music\\track.flac")
         self.assertEqual(f.file_dir, "alice\\Music")
+        self.assertEqual(f.size, 25000000)
+        self.assertIsNone(f.disk_no)
+        self.assertIsNone(f.disk_count)
+        self.assertEqual(f.retry_count, 0)
+        self.assertEqual(f.bytes_transferred, 0)
+        self.assertIsNone(f.last_state)
 
     def test_active_download_state_missing_current_path_defaults_none(self):
         """Pre-refactor rows without current_path still deserialize."""
