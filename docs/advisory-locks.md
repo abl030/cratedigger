@@ -149,6 +149,21 @@ Automatic retry is intentionally disabled there to avoid replaying an
 already-started import. Operator recovery should inspect the staged path
 and either finish the import manually or reset the request explicitly.
 
+To list candidate blocked rows, query for `status='downloading'` entries
+whose persisted `current_path` already points at your staging root:
+
+```bash
+pipeline-cli query "
+SELECT id,
+       artist_name,
+       album_title,
+       active_download_state->>'current_path' AS current_path
+FROM album_requests
+WHERE status = 'downloading'
+  AND active_download_state->>'current_path' LIKE '<beets_staging_dir>%';
+"
+```
+
 ## Contention behaviour
 
 All acquires are non-blocking via `pg_try_advisory_lock`. On

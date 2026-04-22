@@ -424,6 +424,8 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 def _path_is_within(path: str, root: str) -> bool:
     """Return True when ``path`` is located under ``root``."""
+    if not root:
+        return False
     abs_path = os.path.realpath(path)
     abs_root = os.path.realpath(root)
     try:
@@ -442,7 +444,7 @@ def _materialize_processing_dir(
     db = (ctx.pipeline_db_source._get_db()
           if ctx.pipeline_db_source is not None else None)
 
-    if os.path.abspath(staged_album.current_path) != os.path.abspath(canonical_path):
+    if os.path.realpath(staged_album.current_path) != os.path.realpath(canonical_path):
         if _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir):
             logger.error(
                 "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
@@ -472,7 +474,6 @@ def _materialize_processing_dir(
             )
             return False
         album_data.import_folder = staged_album.current_path
-        staged_album.persist_current_path(db)
         return True
 
     rm_dirs: list[str] = []
@@ -1242,9 +1243,6 @@ def _run_completed_processing(
     #   contention and guarded post-move staged paths where auto-retry
     #   would risk duplicate import. Do NOT touch state here.
     if outcome is None:
-        logger.info(
-            "  process_completed_album left state untouched; "
-            "poll_active_downloads will retry or await manual recovery")
         return
 
     refreshed = db.get_request(request_id)

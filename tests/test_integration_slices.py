@@ -9,6 +9,7 @@ and _check_quality_gate_core run for real, not patched.
 """
 
 import os
+from contextlib import contextmanager
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -1714,6 +1715,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     def test_auto_path_persists_current_path_after_staging(self):
         from lib import download as dl_mod
         from lib.import_dispatch import DispatchOutcome
+        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
+                                     release_id_to_lock_key)
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -1766,12 +1769,47 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
+            move_saw_release_lock = False
+
+            original_advisory_lock = db.advisory_lock
+
+            @contextmanager
+            def tracking_advisory_lock(namespace: int, key: int):
+                nonlocal move_saw_release_lock
+                with original_advisory_lock(namespace, key) as acquired:
+                    if (
+                        acquired
+                        and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                        and key == release_id_to_lock_key(self.MBID)
+                    ):
+                        move_saw_release_lock = True
+                        try:
+                            yield acquired
+                        finally:
+                            move_saw_release_lock = False
+                    else:
+                        yield acquired
+
+            original_move_to = dl_mod.StagedAlbum.move_to
+
+            def checked_move_to(album, dest, db=None):
+                self.assertTrue(move_saw_release_lock)
+                return original_move_to(album, dest, db)
 
             with patch.object(
                 dl_mod,
                 "dispatch_import",
                 return_value=DispatchOutcome(success=True, message="ok"),
-            ) as mock_dispatch:
+            ) as mock_dispatch, patch.object(
+                db,
+                "advisory_lock",
+                side_effect=tracking_advisory_lock,
+            ), patch.object(
+                dl_mod.StagedAlbum,
+                "move_to",
+                autospec=True,
+                side_effect=checked_move_to,
+            ):
                 outcome = dl_mod._handle_valid_result(
                     entry,
                     bv_result,
@@ -1789,6 +1827,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             self.assertEqual(staged_album.current_path, staged_path)
             self.assertTrue(os.path.exists(os.path.join(staged_path, "01 - Track.mp3")))
             self.assertFalse(os.path.exists(processing_dir))
+            self.assertFalse(move_saw_release_lock)
             self.assertEqual(
                 db.request(42)["active_download_state"]["current_path"],
                 staged_path,
