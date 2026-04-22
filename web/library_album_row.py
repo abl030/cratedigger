@@ -31,10 +31,10 @@ def _timestamp(value: object | None) -> float:
     )
 
 
-def _bitrate_kbps(min_bitrate_bps: object | None) -> int | None:
+def _bitrate_kbps(min_bitrate_bps: object | None) -> int:
     if isinstance(min_bitrate_bps, int):
         return min_bitrate_bps // 1000
-    return None
+    return 0
 
 
 class LibraryAlbumRow(msgspec.Struct, frozen=True):

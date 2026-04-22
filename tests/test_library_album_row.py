@@ -179,6 +179,37 @@ class TestLibraryAlbumRow(unittest.TestCase):
 
         self.assertEqual(row.source, "unknown")
 
+    def test_from_beets_album_missing_bitrate_passes_zero_to_rank_fn(self) -> None:
+        seen: list[tuple[str | None, int | None]] = []
+
+        def rank_fn(fmt: str | None, kbps: int | None) -> str:
+            seen.append((fmt, kbps))
+            return "poor"
+
+        row = LibraryAlbumRow.from_beets_album(
+            {
+                "id": 7,
+                "album": "Test Album",
+                "artist": "Test Artist",
+                "year": 2024,
+                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_albumid": None,
+                "track_count": 10,
+                "mb_releasegroupid": "11111111-1111-1111-1111-111111111111",
+                "release_group_title": "Test Album",
+                "added": 1773651901.0,
+                "formats": "MP3",
+                "min_bitrate": None,
+                "type": "album",
+                "label": "Test Label",
+                "country": "US",
+            },
+            rank_fn=rank_fn,
+        )
+
+        self.assertEqual(seen, [("MP3", 0)])
+        self.assertEqual(row.library_rank, "poor")
+
     def test_from_pipeline_request_rejects_missing_album_title(self) -> None:
         with self.assertRaises(msgspec.ValidationError):
             LibraryAlbumRow.from_pipeline_request(
