@@ -8,16 +8,13 @@ import os
 import shutil
 from typing import Protocol, TYPE_CHECKING
 
-from lib.util import sanitize_folder_name
+from lib.processing_paths import stage_to_ai_path, stage_to_ai_root
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
 
 
 logger = logging.getLogger("cratedigger")
-
-AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
-POST_VALIDATION_STAGING_SUBDIR = "post-validation"
 
 
 class SupportsCurrentPathUpdate(Protocol):
@@ -37,42 +34,6 @@ def staged_filename(file: "DownloadFile") -> str:
     if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
         return f"Disk {file.disk_no} - {filename}"
     return filename
-
-
-def stage_to_ai_root(
-    *,
-    staging_dir: str,
-    auto_import: bool | None = None,
-) -> str:
-    """Return the root staging directory for a given validation branch."""
-    if auto_import is None:
-        return staging_dir
-    subdir = (
-        AUTO_IMPORT_STAGING_SUBDIR
-        if auto_import
-        else POST_VALIDATION_STAGING_SUBDIR
-    )
-    return os.path.join(staging_dir, subdir)
-
-
-def stage_to_ai_path(
-    *,
-    artist: str,
-    title: str,
-    staging_dir: str,
-    request_id: int | None = None,
-    auto_import: bool | None = None,
-) -> str:
-    """Return the beets staging destination for an album."""
-    artist_dir = sanitize_folder_name(artist)
-    album_dir = sanitize_folder_name(title)
-    if request_id is not None:
-        album_dir = f"{album_dir} [request-{request_id}]"
-    return os.path.join(
-        stage_to_ai_root(staging_dir=staging_dir, auto_import=auto_import),
-        artist_dir,
-        album_dir,
-    )
 
 
 @dataclass

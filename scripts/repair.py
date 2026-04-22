@@ -22,6 +22,7 @@ from lib.import_dispatch import transition_request as _transition_request
 from lib.config import read_runtime_config
 from lib.download_recovery import find_blocked_recovery_issues
 from lib.pipeline_db import PipelineDB
+from lib.processing_paths import directory_has_entries
 from lib.quality import (OrphanInfo, find_inconsistencies,
                          find_orphaned_downloads, suggest_repair)
 from lib.transitions import apply_transition
@@ -84,7 +85,7 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     active,
                     staging_dir=cfg.beets_staging_dir,
                     slskd_download_dir=cfg.slskd_download_dir,
-                    has_entries=_directory_has_entries,
+                    has_entries=directory_has_entries,
                 )
             ]
             issues.extend(orphans)
@@ -154,15 +155,6 @@ def _get_all_rows(db: PipelineDB) -> list:
         "FROM album_requests ORDER BY id"
     )
     return [dict(r) for r in cur.fetchall()]
-
-
-def _directory_has_entries(path: str) -> bool:
-    if not os.path.isdir(path):
-        return False
-    with os.scandir(path) as entries:
-        return any(True for _ in entries)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Pipeline repair tool")
     parser.add_argument("--dsn", default=DEFAULT_DSN)

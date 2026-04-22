@@ -2096,10 +2096,10 @@ class TestPollActiveDownloads(unittest.TestCase):
             entry.import_folder,
             "/tmp/downloads/Test Artist - Test Album (2020)",
         )
-        self.assertEqual(len(_fake_db.update_download_state_calls), 1)
-        self.assertIn(
-            '"current_path": "/tmp/downloads/Test Artist - Test Album (2020)"',
-            _fake_db.update_download_state_calls[0][1],
+        self.assertEqual(len(_fake_db.update_download_state_current_path_calls), 1)
+        self.assertEqual(
+            _fake_db.update_download_state_current_path_calls[0],
+            (1, "/tmp/downloads/Test Artist - Test Album (2020)"),
         )
 
     @patch("lib.download.process_completed_album")

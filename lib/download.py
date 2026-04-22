@@ -17,11 +17,11 @@ from typing import Any, Callable, TYPE_CHECKING
 import music_tag
 
 from lib.download_recovery import (
-    canonical_processing_path,
     classify_processing_path,
     resolve_missing_current_path,
 )
 from lib.grab_list import GrabListEntry, DownloadFile
+from lib.processing_paths import canonical_processing_path, directory_has_entries
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, ValidationResult,
                          decide_download_action,
@@ -266,27 +266,11 @@ def _safe_getsize(path: str) -> int | None:
         return None
 
 
-def _canonical_import_folder_path_from_metadata(
-    *,
-    artist: str,
-    title: str,
-    year: str,
-    slskd_download_dir: str,
-) -> str:
-    """Return the canonical local processing directory for a completed album."""
-    return canonical_processing_path(
-        artist=artist,
-        title=title,
-        year=year,
-        slskd_download_dir=slskd_download_dir,
-    )
-
-
 def _canonical_import_folder_path(
     album_data: GrabListEntry,
     slskd_download_dir: str,
 ) -> str:
-    return _canonical_import_folder_path_from_metadata(
+    return canonical_processing_path(
         artist=album_data.artist,
         title=album_data.title,
         year=album_data.year,
@@ -429,15 +413,6 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 
 
 # === Download completion processing ===
-
-def _directory_has_entries(path: str) -> bool:
-    """Return True when ``path`` exists and contains at least one entry."""
-    if not os.path.isdir(path):
-        return False
-    with os.scandir(path) as entries:
-        return any(True for _ in entries)
-
-
 def _log_post_move_resume_blocked(
     album_data: GrabListEntry,
     *,
@@ -453,6 +428,8 @@ def _log_post_move_resume_blocked(
         current_path,
         detail,
     )
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -1428,7 +1405,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                 request_id=request_id,
                 staging_dir=ctx.cfg.beets_staging_dir,
                 slskd_download_dir=ctx.cfg.slskd_download_dir,
-                has_entries=_directory_has_entries,
+                has_entries=directory_has_entries,
             )
             if recovery_decision.blocked_reason == "multiple_populated_paths":
                 rendered_candidates = ", ".join(
@@ -1467,7 +1444,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             fallback_current_path=fallback_current_path,
         )
         if fallback_current_path is not None:
-            _persist_updated_download_state(db, request_id, entry, state)
+            db.update_download_state_current_path(request_id, fallback_current_path)
 
         if state.processing_started_at is not None:
             _run_completed_processing(entry, request_id, state, db, ctx)
