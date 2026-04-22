@@ -2356,11 +2356,11 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
     }
     DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS = {
         "id", "title", "country", "format",
-        "in_library", "pipeline_status", "pipeline_id",
+        "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
     DISCOGS_RELEASE_REQUIRED_FIELDS = {
         "id", "title", "artist_name", "tracks",
-        "in_library", "pipeline_status", "pipeline_id",
+        "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
     DISCOGS_ARTIST_REQUIRED_FIELDS = {
         "artist_id", "artist_name", "release_groups",
@@ -2421,8 +2421,12 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
                                 "discogs artist response")
 
     def test_discogs_master_contract(self):
+        mock_beets = MagicMock()
+        mock_beets.get_album_ids_by_mbids.return_value = {"83182": 9}
+        mock_beets.check_mbids_detail.return_value = {"83182": {}}
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_beets_library", return_value={"83182"}), \
+                patch("web.server._beets_db", return_value=mock_beets), \
                 patch("web.server.check_pipeline", return_value={}):
             mock_dg.get_master_releases.return_value = {
                 "title": "OK Computer",
@@ -2450,12 +2454,18 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["releases"][0],
                                 self.DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS,
                                 "discogs master release")
+        self.assertEqual(data["releases"][0]["beets_album_id"], 9)
 
     def test_discogs_release_contract(self):
+        mock_beets = MagicMock()
+        mock_beets.get_album_ids_by_mbids.return_value = {"83182": 10}
+        mock_beets.check_mbids_detail.return_value = {"83182": {}}
+        mock_beets.get_tracks_by_mb_release_id.return_value = None
         self.mock_db.get_request_by_mb_release_id.return_value = None
         self.mock_db.get_request_by_discogs_release_id.return_value = None
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()):
+                patch("web.server.check_beets_library", return_value={"83182"}), \
+                patch("web.server._beets_db", return_value=mock_beets):
             mock_dg.get_release.return_value = {
                 "id": "83182",
                 "title": "OK Computer",
@@ -2477,6 +2487,7 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DISCOGS_RELEASE_REQUIRED_FIELDS,
                                 "discogs release detail")
+        self.assertEqual(data["beets_album_id"], 10)
 
 
 class TestBeetsRouteContracts(_WebServerCase):
