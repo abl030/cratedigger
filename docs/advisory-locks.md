@@ -142,6 +142,13 @@ album. On contention, files stay where `process_completed_album`
 expects them and the next cycle simply re-enters with the same
 `current_path`.
 
+If the process dies after moving into `beets_staging_dir` but before the
+import path updates pipeline state, the next poll cycle logs
+`POST-MOVE RESUME BLOCKED` and leaves the row in `downloading`.
+Automatic retry is intentionally disabled there to avoid replaying an
+already-started import. Operator recovery should inspect the staged path
+and either finish the import manually or reset the request explicitly.
+
 ## Contention behaviour
 
 All acquires are non-blocking via `pg_try_advisory_lock`. On

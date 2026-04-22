@@ -109,6 +109,18 @@ class TestStagedAlbum(unittest.TestCase):
             self.assertTrue(os.path.exists(source_file))
             self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
 
+    def test_move_to_cleans_empty_target_on_early_failure(self):
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "missing")
+            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
+
+            with self.assertRaises(FileNotFoundError):
+                StagedAlbum(current_path=source).move_to(dest)
+
+            self.assertFalse(os.path.exists(dest))
+
     def test_persist_current_path_noop_without_request_id(self):
         from lib.staged_album import StagedAlbum
 

@@ -81,6 +81,7 @@ class StagedAlbum:
         """Move album contents into ``dest`` and persist the new location."""
         source = os.path.abspath(self.current_path)
         target = os.path.abspath(dest)
+        target_preexisted = os.path.isdir(target)
 
         if source == target:
             self.current_path = target
@@ -88,8 +89,8 @@ class StagedAlbum:
             return self.current_path
 
         moved_entries: list[tuple[str, str]] = []
-        os.makedirs(target, exist_ok=True)
         try:
+            os.makedirs(target, exist_ok=True)
             for entry in os.listdir(source):
                 source_entry = os.path.join(source, entry)
                 target_entry = os.path.join(target, entry)
@@ -105,5 +106,7 @@ class StagedAlbum:
                 for source_entry, target_entry in reversed(moved_entries):
                     if os.path.exists(target_entry):
                         shutil.move(target_entry, source_entry)
+            elif not target_preexisted and os.path.isdir(target) and not os.listdir(target):
+                shutil.rmtree(target, ignore_errors=True)
             self.current_path = source
             raise
