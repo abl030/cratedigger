@@ -4,10 +4,10 @@ import unittest
 
 from lib.download_recovery import (
     find_blocked_recovery_issues,
-    canonical_processing_path,
     classify_processing_path,
     resolve_missing_current_path,
 )
+from lib.processing_paths import canonical_processing_path
 
 
 class TestClassifyProcessingPath(unittest.TestCase):
