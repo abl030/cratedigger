@@ -17,8 +17,8 @@ from lib import beets_db
 log = logging.getLogger("cratedigger-web")
 
 
-class SupportsDeletePipelineDB(Protocol):
-    """Minimal pipeline DB surface the delete workflow needs."""
+class SupportsLibraryPipelineLookupDB(Protocol):
+    """Minimal pipeline DB surface for library-route request resolution."""
 
     def get_request(self, request_id: int) -> dict[str, Any] | None:
         ...
@@ -29,8 +29,33 @@ class SupportsDeletePipelineDB(Protocol):
     ) -> dict[str, Any] | None:
         ...
 
+
+class SupportsDeletePipelineDB(SupportsLibraryPipelineLookupDB, Protocol):
+    """Delete workflow extends lookup with destructive pipeline purge."""
+
     def delete_request(self, request_id: int) -> None:
         ...
+
+
+def resolve_pipeline_request(
+    pipeline_db: SupportsLibraryPipelineLookupDB | None,
+    *,
+    pipeline_id: int | None,
+    release_id: str,
+) -> dict[str, Any] | None:
+    """Resolve one pipeline row via the shared exact-release lookup seam."""
+    if pipeline_db is None:
+        return None
+
+    if pipeline_id is not None:
+        req = pipeline_db.get_request(int(pipeline_id))
+        if req:
+            return req
+
+    release_id = release_id.strip()
+    if not release_id:
+        return None
+    return pipeline_db.get_request_by_release_id(release_id)
 
 
 @dataclass(frozen=True)
@@ -95,25 +120,6 @@ DeleteResult: TypeAlias = (
 )
 
 
-def _resolve_pipeline_request(
-    pipeline_db: SupportsDeletePipelineDB | None,
-    request: DeleteRequest,
-) -> dict[str, Any] | None:
-    """Resolve the pipeline row to purge using the shared exact-release seam."""
-    if pipeline_db is None:
-        return None
-
-    if request.pipeline_id is not None:
-        req = pipeline_db.get_request(int(request.pipeline_id))
-        if req:
-            return req
-
-    release_id = request.release_id.strip()
-    if not release_id:
-        return None
-    return pipeline_db.get_request_by_release_id(release_id)
-
-
 def _preflight_delete(
     beets_db_path: str | None,
     album_id: int,
@@ -145,16 +151,39 @@ def _delete_album_files(file_paths: list[str]) -> int:
     """Delete album files, then remove the album directory if it is empty."""
     album_dir = os.path.dirname(file_paths[0]) if file_paths else None
     deleted_files = 0
+    # Individual file deletes are safe: shared library directories survive.
     for path in file_paths:
         if os.path.isfile(path):
             os.remove(path)
             deleted_files += 1
+    # Remove the album directory only if it is now empty.
     if album_dir and os.path.isdir(album_dir):
         try:
             os.rmdir(album_dir)
         except OSError:
             pass
     return deleted_files
+
+
+def _delete_failure_result(
+    *,
+    album_id: int,
+    deleted_pipeline_id: int | None,
+) -> DeleteBeetsFailure | DeletePostPurgeBeetsFailure:
+    """Classify a beets-side failure, preserving post-purge partial success."""
+    if deleted_pipeline_id is not None:
+        log.exception(
+            "Beets delete failed after purging pipeline request %s for album %s",
+            deleted_pipeline_id,
+            album_id,
+        )
+        return DeletePostPurgeBeetsFailure(
+            album_id=album_id,
+            deleted_pipeline_id=deleted_pipeline_id,
+        )
+
+    log.exception("Beets delete failed for album %s", album_id)
+    return DeleteBeetsFailure(album_id=album_id)
 
 
 def delete_release_from_library(
@@ -178,7 +207,13 @@ def delete_release_from_library(
 
     deleted_pipeline_id: int | None = None
     if request.purge_pipeline:
-        req = _resolve_pipeline_request(pipeline_db, request)
+        # Purge before the destructive beets delete so a later DB write
+        # cannot resurrect the ghost-imported row this route used to leak.
+        req = resolve_pipeline_request(
+            pipeline_db,
+            pipeline_id=request.pipeline_id,
+            release_id=request.release_id,
+        )
         if req:
             deleted_pipeline_id = int(req["id"])
             try:
@@ -202,23 +237,20 @@ def delete_release_from_library(
         )
         deleted_files = _delete_album_files(file_paths)
     except ValueError:
+        if deleted_pipeline_id is not None:
+            return _delete_failure_result(
+                album_id=request.album_id,
+                deleted_pipeline_id=deleted_pipeline_id,
+            )
         return DeletePreflightFailure(
             album_id=request.album_id,
             reason="album_not_found",
         )
     except Exception:
-        if deleted_pipeline_id is not None:
-            log.exception(
-                "Beets delete failed after purging pipeline request %s for album %s",
-                deleted_pipeline_id,
-                request.album_id,
-            )
-            return DeletePostPurgeBeetsFailure(
-                album_id=request.album_id,
-                deleted_pipeline_id=deleted_pipeline_id,
-            )
-        log.exception("Beets delete failed for album %s", request.album_id)
-        return DeleteBeetsFailure(album_id=request.album_id)
+        return _delete_failure_result(
+            album_id=request.album_id,
+            deleted_pipeline_id=deleted_pipeline_id,
+        )
 
     return DeleteSuccess(
         album_id=request.album_id,

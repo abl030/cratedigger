@@ -209,7 +209,7 @@ class PipelineDB:
         assert row is not None, "INSERT RETURNING should always return a row"
         return row["id"]
 
-    def get_request(self, request_id) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> dict[str, Any] | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE id = %s", (request_id,)
         )
@@ -255,7 +255,7 @@ class PipelineDB:
             return req
         return self.get_request_by_mb_release_id(identity.release_id)
 
-    def delete_request(self, request_id):
+    def delete_request(self, request_id: int) -> None:
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 

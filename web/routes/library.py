@@ -12,26 +12,15 @@ def _find_pipeline_request_for_release(
     pipeline_id: int | None,
     release_id: str,
 ) -> dict | None:
-    """Resolve the pipeline request the UI wants purged, if any.
+    """Resolve one pipeline row through the shared library lookup seam."""
+    from lib.library_delete_service import resolve_pipeline_request
 
-    Prefer the explicit ``pipeline_id`` from the frontend when present;
-    fall back to the release ID so stale/missing row overlays do not turn
-    the delete into a ghost imported row again.
-    """
     srv = _server()
-    if not srv.db:
-        return None
-
-    db = srv._db()
-    if pipeline_id is not None:
-        req = db.get_request(int(pipeline_id))
-        if req:
-            return req
-
-    release_id = release_id.strip()
-    if not release_id:
-        return None
-    return db.get_request_by_release_id(release_id)
+    return resolve_pipeline_request(
+        srv.db,
+        pipeline_id=pipeline_id,
+        release_id=release_id,
+    )
 
 
 def get_beets_search(h, params: dict[str, list[str]]) -> None:

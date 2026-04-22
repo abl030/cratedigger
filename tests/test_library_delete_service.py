@@ -103,6 +103,18 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         self.assertEqual(result.reason, "album_not_found")
         self.assertEqual(result.album_id, 999)
 
+    def test_missing_beets_db_returns_preflight_unavailable(self) -> None:
+        result = delete_release_from_library(
+            beets_db_path=os.path.join(self.tmpdir, "missing.db"),
+            pipeline_db=FakePipelineDB(),
+            request=DeleteRequest(album_id=7),
+        )
+
+        self.assertIsInstance(result, DeletePreflightFailure)
+        assert isinstance(result, DeletePreflightFailure)
+        self.assertEqual(result.reason, "beets_db_unavailable")
+        self.assertEqual(result.album_id, 7)
+
     @patch("lib.beets_db.BeetsDB.delete_album")
     def test_pipeline_purge_failure_aborts_before_beets_delete(
         self,
@@ -147,6 +159,36 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
             mb_release_id=RELEASE_UUID,
         ))
         mock_delete_album.side_effect = OSError("boom")
+
+        result = delete_release_from_library(
+            beets_db_path=self.db_path,
+            pipeline_db=fake_db,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                release_id=RELEASE_UUID,
+            ),
+        )
+
+        self.assertIsInstance(result, DeletePostPurgeBeetsFailure)
+        assert isinstance(result, DeletePostPurgeBeetsFailure)
+        self.assertEqual(result.album_id, 7)
+        self.assertEqual(result.deleted_pipeline_id, 42)
+        self.assertIsNone(fake_db.get_request(42))
+
+    @patch("lib.beets_db.BeetsDB.delete_album")
+    def test_value_error_after_pipeline_purge_returns_partial_success_result(
+        self,
+        mock_delete_album: MagicMock,
+    ) -> None:
+        self._seed_album()
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            mb_release_id=RELEASE_UUID,
+        ))
+        mock_delete_album.side_effect = ValueError("gone")
 
         result = delete_release_from_library(
             beets_db_path=self.db_path,
