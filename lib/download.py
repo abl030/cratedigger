@@ -441,6 +441,24 @@ def _directory_has_entries(path: str) -> bool:
     with os.scandir(path) as entries:
         return any(True for _ in entries)
 
+
+def _log_post_move_resume_blocked(
+    album_data: GrabListEntry,
+    *,
+    current_path: str,
+    detail: str,
+) -> None:
+    logger.error(
+        "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
+        "current_path=%s %s See docs/advisory-locks.md.",
+        album_data.db_request_id,
+        album_data.artist,
+        album_data.title,
+        current_path,
+        detail,
+    )
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -453,7 +471,23 @@ def _materialize_processing_dir(
           if ctx.pipeline_db_source is not None else None)
 
     if os.path.realpath(staged_album.current_path) != os.path.realpath(canonical_path):
+        is_staged_retry = _path_is_within(
+            staged_album.current_path,
+            ctx.cfg.beets_staging_dir,
+        )
         if not os.path.isdir(staged_album.current_path):
+            if is_staged_retry:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=staged_album.current_path,
+                    detail=(
+                        "is already under beets staging but the directory is "
+                        "missing. Automatic retry is disabled because import "
+                        "may already have consumed the files; manual recovery "
+                        "is required."
+                    ),
+                )
+                return None
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
         staged_album.bind_import_paths(album_data.files)
@@ -464,6 +498,19 @@ def _materialize_processing_dir(
             if not os.path.isfile(import_path):
                 missing_paths.append(import_path)
         if missing_paths:
+            if is_staged_retry:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=staged_album.current_path,
+                    detail=(
+                        "is already under beets staging but tracked files are "
+                        f"missing ({', '.join(missing_paths)}). Automatic "
+                        "retry is disabled because import may already have "
+                        "partially consumed the album; manual recovery is "
+                        "required."
+                    ),
+                )
+                return None
             logger.error(
                 "Current staged path is missing tracked files: %s",
                 ", ".join(missing_paths),
@@ -717,16 +764,14 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
         will_auto_import
         and _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir)
     ):
-        logger.error(
-            "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
-            "current_path=%s already lives under beets staging on the "
-            "auto-import path. Automatic retry is disabled to avoid "
-            "duplicate import; manual recovery is required. See "
-            "docs/advisory-locks.md.",
-            request_id,
-            album_data.artist,
-            album_data.title,
-            staged_album.current_path,
+        _log_post_move_resume_blocked(
+            album_data,
+            current_path=staged_album.current_path,
+            detail=(
+                "already lives under beets staging on the auto-import path. "
+                "Automatic retry is disabled to avoid duplicate import; "
+                "manual recovery is required."
+            ),
         )
         return DispatchOutcome(
             success=False,
@@ -1363,9 +1408,19 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             )
             if (not _directory_has_entries(canonical_fallback)
                     and os.path.isdir(staged_fallback)):
-                fallback_current_path = staged_fallback
-            else:
-                fallback_current_path = canonical_fallback
+                logger.error(
+                    "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
+                    "current_path is missing, canonical_path=%s has no files, "
+                    "and staged_path=%s is ambiguous across editions. "
+                    "Manual recovery is required.",
+                    request_id,
+                    row["artist_name"],
+                    row["album_title"],
+                    canonical_fallback,
+                    staged_fallback,
+                )
+                continue
+            fallback_current_path = canonical_fallback
             state.current_path = fallback_current_path
         entry = reconstruct_grab_list_entry(
             row,
