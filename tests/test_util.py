@@ -130,33 +130,6 @@ class TestMoveFailedImport(unittest.TestCase):
         assert result is not None
         self.assertNotIn("bad_files", result)
 
-
-class TestStageToAi(unittest.TestCase):
-
-    def test_moves_files_to_staging(self):
-        from lib.util import stage_to_ai
-        tmpdir = tempfile.mkdtemp()
-        try:
-            source = os.path.join(tmpdir, "source")
-            staging = os.path.join(tmpdir, "staging")
-            os.makedirs(source)
-            os.makedirs(staging)
-            open(os.path.join(source, "track1.mp3"), "w").close()
-            open(os.path.join(source, "track2.mp3"), "w").close()
-
-            album_data = MagicMock()
-            album_data.artist = "Artist"
-            album_data.title = "Album"
-
-            dest = stage_to_ai(album_data, source, staging)
-            self.assertTrue(os.path.isdir(dest))
-            self.assertTrue(os.path.exists(os.path.join(dest, "track1.mp3")))
-            self.assertTrue(os.path.exists(os.path.join(dest, "track2.mp3")))
-            self.assertFalse(os.path.exists(source))
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 class TestRepairMp3Headers(unittest.TestCase):
 
     def test_calls_mp3val_on_mp3_files(self):

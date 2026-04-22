@@ -26,7 +26,7 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core, finalize_request)
-from lib.staged_album import StagedAlbum
+from lib.staged_album import StagedAlbum, stage_to_ai_path
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import,
                       log_validation_result)
@@ -286,13 +286,6 @@ def _canonical_import_folder_path(
     )
 
 
-def _stage_to_ai_path(album_data: GrabListEntry, staging_dir: str) -> str:
-    """Return the beets staging destination for a validated album."""
-    artist_dir = sanitize_folder_name(album_data.artist)
-    album_dir = sanitize_folder_name(album_data.title)
-    return os.path.join(staging_dir, artist_dir, album_dir)
-
-
 # === slskd transfer helpers ===
 
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
@@ -445,6 +438,17 @@ def _materialize_processing_dir(
             logger.error(f"Current staged path missing: {staged_album.current_path}")
             return False
         staged_album.bind_import_paths(album_data.files)
+        missing_paths = [
+            file.import_path
+            for file in album_data.files
+            if file.import_path is not None and not os.path.isfile(file.import_path)
+        ]
+        if missing_paths:
+            logger.error(
+                "Current staged path is missing tracked files: %s",
+                ", ".join(missing_paths),
+            )
+            return False
         album_data.import_folder = staged_album.current_path
         staged_album.persist_current_path(db)
         return True
@@ -716,7 +720,11 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
         db = (ctx.pipeline_db_source._get_db()
               if ctx.pipeline_db_source is not None else None)
         dest = staged_album.move_to(
-            _stage_to_ai_path(album_data, ctx.cfg.beets_staging_dir),
+            stage_to_ai_path(
+                artist=album_data.artist,
+                title=album_data.title,
+                staging_dir=ctx.cfg.beets_staging_dir,
+            ),
             db=db,
         )
         album_data.import_folder = dest
@@ -1127,7 +1135,7 @@ def _persist_updated_download_state(
             enqueued_at=state.enqueued_at,
             last_progress_at=state.last_progress_at,
             processing_started_at=state.processing_started_at,
-            current_path=state.current_path or entry.import_folder,
+            current_path=entry.import_folder,
         ).to_json(),
     )
 
