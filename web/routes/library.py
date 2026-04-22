@@ -90,9 +90,10 @@ def get_beets_recent(h, params: dict[str, list[str]]) -> None:
 def post_beets_delete(h, body: dict) -> None:
     from lib.library_delete_service import (
         DeleteBeetsFailure,
+        DeleteBeetsDbUnavailable,
+        DeleteAlbumNotFound,
         DeletePipelinePurgeFailure,
         DeletePostPurgeBeetsFailure,
-        DeletePreflightFailure,
         DeleteRequest,
         DeleteSuccess,
         delete_release_from_library,
@@ -135,10 +136,11 @@ def post_beets_delete(h, body: dict) -> None:
         })
         return
 
-    if isinstance(result, DeletePreflightFailure):
-        if result.reason == "album_not_found":
-            h._error("Album not found", 404)
-            return
+    if isinstance(result, DeleteAlbumNotFound):
+        h._error("Album not found", 404)
+        return
+
+    if isinstance(result, DeleteBeetsDbUnavailable):
         h._error("Beets DB not available")
         return
 

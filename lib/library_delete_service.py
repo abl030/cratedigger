@@ -10,11 +10,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from lib import beets_db
 
-log = logging.getLogger("cratedigger-web")
+log = logging.getLogger(__name__)
 
 
 class SupportsLibraryPipelineLookupDB(Protocol):
@@ -25,7 +25,7 @@ class SupportsLibraryPipelineLookupDB(Protocol):
 
     def get_request_by_release_id(
         self,
-        release_id: object | None,
+        release_id: str | None,
     ) -> dict[str, Any] | None:
         ...
 
@@ -81,11 +81,17 @@ class DeleteSuccess:
 
 
 @dataclass(frozen=True)
-class DeletePreflightFailure:
-    """Delete aborted before any destructive mutation."""
+class DeleteBeetsDbUnavailable:
+    """Delete failed because the beets DB itself was unavailable."""
 
     album_id: int
-    reason: Literal["beets_db_unavailable", "album_not_found"]
+
+
+@dataclass(frozen=True)
+class DeleteAlbumNotFound:
+    """Delete could not find the target album in beets."""
+
+    album_id: int
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,8 @@ class DeletePostPurgeBeetsFailure:
 
 DeleteResult: TypeAlias = (
     DeleteSuccess
-    | DeletePreflightFailure
+    | DeleteBeetsDbUnavailable
+    | DeleteAlbumNotFound
     | DeletePipelinePurgeFailure
     | DeleteBeetsFailure
     | DeletePostPurgeBeetsFailure
@@ -123,26 +130,17 @@ DeleteResult: TypeAlias = (
 def _preflight_delete(
     beets_db_path: str | None,
     album_id: int,
-) -> DeletePreflightFailure | None:
+) -> DeleteBeetsDbUnavailable | DeleteAlbumNotFound | None:
     """Verify the beets DB is present and the album still exists."""
     if not beets_db_path or not os.path.exists(beets_db_path):
-        return DeletePreflightFailure(
-            album_id=album_id,
-            reason="beets_db_unavailable",
-        )
+        return DeleteBeetsDbUnavailable(album_id=album_id)
 
     try:
         with beets_db.BeetsDB(beets_db_path) as beets:
             if not beets.get_album_detail(album_id):
-                return DeletePreflightFailure(
-                    album_id=album_id,
-                    reason="album_not_found",
-                )
+                return DeleteAlbumNotFound(album_id=album_id)
     except FileNotFoundError:
-        return DeletePreflightFailure(
-            album_id=album_id,
-            reason="beets_db_unavailable",
-        )
+        return DeleteBeetsDbUnavailable(album_id=album_id)
 
     return None
 
@@ -151,7 +149,6 @@ def _delete_album_files(file_paths: list[str]) -> int:
     """Delete album files, then remove the album directory if it is empty."""
     album_dir = os.path.dirname(file_paths[0]) if file_paths else None
     deleted_files = 0
-    # Individual file deletes are safe: shared library directories survive.
     for path in file_paths:
         if os.path.isfile(path):
             os.remove(path)
@@ -242,10 +239,7 @@ def delete_release_from_library(
                 album_id=request.album_id,
                 deleted_pipeline_id=deleted_pipeline_id,
             )
-        return DeletePreflightFailure(
-            album_id=request.album_id,
-            reason="album_not_found",
-        )
+        return DeleteAlbumNotFound(album_id=request.album_id)
     except Exception:
         return _delete_failure_result(
             album_id=request.album_id,

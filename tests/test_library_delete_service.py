@@ -15,10 +15,11 @@ from unittest.mock import MagicMock, patch
 
 from lib.beets_db import BeetsDB
 from lib.library_delete_service import (
+    DeleteAlbumNotFound,
     DeleteBeetsFailure,
+    DeleteBeetsDbUnavailable,
     DeletePipelinePurgeFailure,
     DeletePostPurgeBeetsFailure,
-    DeletePreflightFailure,
     DeleteRequest,
     DeleteSuccess,
     delete_release_from_library,
@@ -98,9 +99,8 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
             request=DeleteRequest(album_id=999),
         )
 
-        self.assertIsInstance(result, DeletePreflightFailure)
-        assert isinstance(result, DeletePreflightFailure)
-        self.assertEqual(result.reason, "album_not_found")
+        self.assertIsInstance(result, DeleteAlbumNotFound)
+        assert isinstance(result, DeleteAlbumNotFound)
         self.assertEqual(result.album_id, 999)
 
     def test_missing_beets_db_returns_preflight_unavailable(self) -> None:
@@ -110,9 +110,8 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
             request=DeleteRequest(album_id=7),
         )
 
-        self.assertIsInstance(result, DeletePreflightFailure)
-        assert isinstance(result, DeletePreflightFailure)
-        self.assertEqual(result.reason, "beets_db_unavailable")
+        self.assertIsInstance(result, DeleteBeetsDbUnavailable)
+        assert isinstance(result, DeleteBeetsDbUnavailable)
         self.assertEqual(result.album_id, 7)
 
     @patch("lib.beets_db.BeetsDB.delete_album")
@@ -222,6 +221,24 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
 
         self.assertIsInstance(result, DeleteBeetsFailure)
         assert isinstance(result, DeleteBeetsFailure)
+        self.assertEqual(result.album_id, 7)
+
+    @patch("lib.beets_db.BeetsDB.delete_album")
+    def test_value_error_without_pipeline_purge_returns_album_not_found(
+        self,
+        mock_delete_album: MagicMock,
+    ) -> None:
+        self._seed_album()
+        mock_delete_album.side_effect = ValueError("gone")
+
+        result = delete_release_from_library(
+            beets_db_path=self.db_path,
+            pipeline_db=FakePipelineDB(),
+            request=DeleteRequest(album_id=7),
+        )
+
+        self.assertIsInstance(result, DeleteAlbumNotFound)
+        assert isinstance(result, DeleteAlbumNotFound)
         self.assertEqual(result.album_id, 7)
 
 
