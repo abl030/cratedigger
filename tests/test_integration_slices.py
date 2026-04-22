@@ -1583,10 +1583,10 @@ class TestReleaseLockContention(unittest.TestCase):
 
 class TestHandleValidResultReleaseLock(unittest.TestCase):
     """Issue #132 P1 + Codex PR #136 R4 P1: release-lock acquisition
-    must happen BEFORE ``stage_to_ai`` so the filesystem stays
+    must happen BEFORE the staged move so the filesystem stays
     resumable on contention.
 
-    Pre-R4: ``_handle_valid_result`` called ``stage_to_ai`` first,
+    Pre-R4: ``_handle_valid_result`` staged into beets first,
     then invoked ``dispatch_import_core`` which checked the lock inside
     ``dispatch_import_core``. On contention, files had already moved
     from ``slskd_download_dir/<import_folder>/`` →
@@ -1597,7 +1597,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     ``status='wanted'`` — breaking the contention-retry contract.
 
     Post-R4: ``_handle_valid_result`` acquires the lock BEFORE
-    ``stage_to_ai``. On contention, return deferred without staging;
+    ``StagedAlbum.move_to``. On contention, return deferred without any
+    path change;
     files stay at ``slskd_download_dir/<import_folder>/`` where
     ``process_completed_album``'s resume guard (``if os.path.exists(
     dst_file) and not os.path.exists(src_file): continue``) picks
@@ -1641,7 +1642,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         bv_result = ValidationResult(
             valid=True, distance=0.05, scenario="strong_match")
 
-        # stage_to_ai and dispatch_import_core MUST NOT run on contention.
+        # The staged move and dispatch MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
         with patch.object(dl_mod.StagedAlbum, "move_to") as mock_move, \
              patch.object(dl_mod, "dispatch_import_core") as mock_dispatch:

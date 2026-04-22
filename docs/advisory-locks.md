@@ -116,7 +116,7 @@ FORCE/MANUAL (dispatch_import_from_db)
 ```
 
 The auto path only holds RELEASE, and acquires it at
-`_handle_valid_result` *before* `stage_to_ai` runs (Codex PR #136 R4
+`_handle_valid_result` *before* `StagedAlbum.move_to(...)` runs (Codex PR #136 R4
 P1 — see below). `_handle_valid_result` now calls
 `dispatch_import_core` directly; its inner acquisition of the same
 RELEASE key is therefore just a no-op reentrant acquire against the
@@ -125,24 +125,22 @@ outer lock already held by the auto path:
 ```
 AUTO (_handle_valid_result in lib/download.py)
   └─ acquire RELEASE(release_id_to_lock_key(mbid))             ← outer
-      └─ stage_to_ai                                           ← moves files
+      └─ staged_album.move_to(...)                             ← moves files + current_path
       └─ dispatch_import_core
           └─ acquire RELEASE(...)                              ← reentrant no-op
               └─ import_one.py subprocess
 ```
 
 **Why RELEASE outer at `_handle_valid_result`, not at
-`dispatch_import_core`?** Codex PR #136 R4 P1: `stage_to_ai` mutates
-filesystem state (`slskd_download_dir/<import_folder>/` →
-`beets_staging_dir/`) that is NOT reflected in the pipeline DB's
-`active_download_state` column. If contention is detected AFTER
-staging, the next cycle's `process_completed_album` reconstructs the
-entry from `active_download_state`, finds the source paths empty, and
-fails with `FileNotFoundError`. Acquiring the RELEASE lock BEFORE
-`stage_to_ai` keeps the original files in place on contention, so the
-resume guard (`if os.path.exists(dst_file) and not
-os.path.exists(src_file): continue`) can idempotently re-enter next
-cycle.
+`dispatch_import_core`?** The staged move now mutates both filesystem
+state (`slskd_download_dir/<import_folder>/` → `beets_staging_dir/`)
+and `active_download_state.current_path`. Resume is safe even after a
+completed move, but acquiring RELEASE first still keeps contention as a
+true no-op: no directory churn, no extra JSONB write, and no
+cross-process ambiguity about which local path currently owns the
+album. On contention, files stay where `process_completed_album`
+expects them and the next cycle simply re-enters with the same
+`current_path`.
 
 ## Contention behaviour
 
