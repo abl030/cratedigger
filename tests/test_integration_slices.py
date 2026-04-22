@@ -1836,6 +1836,80 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             mock_dispatch.assert_called_once()
             self.assertEqual(mock_dispatch.call_args.args[2], staged_path)
 
+    def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
+        """The duplicate-import guard must not quarantine the source processing dir."""
+        from lib import download as dl_mod
+        from lib.import_dispatch import DispatchOutcome
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=self.MBID,
+            status="downloading",
+            active_download_state={
+                "filetype": "mp3",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
+                "files": [],
+                "current_path": None,
+            },
+        ))
+
+        from tests.helpers import make_ctx_with_fake_db
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "beets-staging")
+            processing_dir = os.path.join(staging_root, "downloads", "processing")
+            os.makedirs(processing_dir)
+            with open(os.path.join(processing_dir, "01 - Track.mp3"), "w") as fp:
+                fp.write("fake audio")
+
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_distance_threshold=0.15,
+                beets_staging_dir=staging_root,
+                slskd_download_dir=os.path.join(staging_root, "downloads"),
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            entry = dl_mod.GrabListEntry(
+                album_id=42,
+                artist="Test Artist",
+                title="Test Album",
+                year="2006",
+                files=[],
+                filetype="mp3",
+                mb_release_id=self.MBID,
+                db_source="request",
+                db_request_id=42,
+                import_folder=processing_dir,
+            )
+            staged_album = dl_mod.StagedAlbum.from_entry(
+                entry,
+                default_path=processing_dir,
+            )
+            bv_result = ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )
+
+            with patch.object(
+                dl_mod,
+                "dispatch_import",
+                return_value=DispatchOutcome(success=True, message="ok"),
+            ) as mock_dispatch:
+                outcome = dl_mod._handle_valid_result(
+                    entry,
+                    bv_result,
+                    staged_album,
+                    ctx,
+                )
+
+            assert outcome is not None
+            self.assertTrue(outcome.success)
+            mock_dispatch.assert_called_once()
+
 
 class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
     """The ``process_completed_album`` 3-way return → state-transition seam.

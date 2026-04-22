@@ -467,6 +467,23 @@ def _is_auto_import_staged_path(path: str, staging_dir: str) -> bool:
     )
 
 
+def _is_legacy_shared_staged_path(
+    path: str,
+    *,
+    artist: str,
+    title: str,
+    staging_dir: str,
+) -> bool:
+    return _path_is_within(
+        path,
+        stage_to_ai_path(
+            artist=artist,
+            title=title,
+            staging_dir=staging_dir,
+        ),
+    )
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -780,7 +797,18 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
     if (
         will_auto_import
-        and _path_is_within(staged_album.current_path, ctx.cfg.beets_staging_dir)
+        and (
+            _is_auto_import_staged_path(
+                staged_album.current_path,
+                ctx.cfg.beets_staging_dir,
+            )
+            or _is_legacy_shared_staged_path(
+                staged_album.current_path,
+                artist=album_data.artist,
+                title=album_data.title,
+                staging_dir=ctx.cfg.beets_staging_dir,
+            )
+        )
     ):
         _log_post_move_resume_blocked(
             album_data,
