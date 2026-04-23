@@ -1641,10 +1641,10 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         bv_result = ValidationResult(
             valid=True, distance=0.05, scenario="strong_match")
 
-        # stage_to_ai and dispatch_import MUST NOT run on contention.
+        # stage_to_ai and dispatch_import_core MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
         with patch.object(dl_mod, "stage_to_ai") as mock_stage, \
-             patch.object(dl_mod, "dispatch_import") as mock_dispatch:
+             patch.object(dl_mod, "dispatch_import_core") as mock_dispatch:
             outcome = dl_mod._handle_valid_result(
                 entry, bv_result, import_folder_fullpath, ctx)
 
