@@ -166,10 +166,10 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         db.set_cooldown_result(True)
         ctx = make_ctx_with_fake_db(db)
 
-        with patch("lib.download.cancel_and_delete"), \
-             patch("lib.download.apply_transition"):
+        with patch("lib.download.cancel_and_delete"):
             _timeout_album(entry, 42, "stalled", ctx)
 
+        self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="timeout")
         self.assertIn("deaduser", db.cooldowns_applied)
@@ -196,10 +196,10 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         db.set_cooldown_result(lambda u: u == "disc1user")
         ctx = make_ctx_with_fake_db(db)
 
-        with patch("lib.download.cancel_and_delete"), \
-             patch("lib.download.apply_transition"):
+        with patch("lib.download.cancel_and_delete"):
             _timeout_album(entry, 42, "stalled", ctx)
 
+        self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(set(db.cooldowns_applied), {"disc1user", "disc2user"})
         self.assertEqual(ctx.cooled_down_users, {"disc1user"})
 
@@ -218,10 +218,10 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         ctx = make_ctx_with_fake_db(db)
 
-        with patch("lib.download.cancel_and_delete"), \
-             patch("lib.download.apply_transition"):
+        with patch("lib.download.cancel_and_delete"):
             _timeout_album(entry, 42, "stalled", ctx)
 
+        self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.cooldowns_applied, [])
 
 

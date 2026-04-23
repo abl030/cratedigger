@@ -1,7 +1,7 @@
 """Import service — extraction helpers for ImportResult JSON.
 
 The subprocess execution and dispatch logic lives in lib/import_dispatch.py
-(dispatch_import + dispatch_import_from_db). This module provides helpers for
+(dispatch_import_core + dispatch_import_from_db). This module provides helpers for
 extracting typed fields from ImportResult JSON blobs.
 """
 
@@ -144,5 +144,4 @@ def extract_import_log_fields(import_result_json: str | None) -> dict[str, objec
             fields["existing_spectral_bitrate"] = existing_m.spectral_bitrate_kbps
 
     return fields
-
 

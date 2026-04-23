@@ -647,7 +647,7 @@ if refreshed and refreshed["status"] == "downloading":
 **Files**: `lib/pipeline_db.py`
 
 **Why**: `reset_to_wanted()` and `update_status()` are called from many places (quality gate,
-mark_done, reject_and_requeue, dispatch_import). If any of these runs on an album that still has
+mark_done, reject_and_requeue, dispatch_import_core). If any of these runs on an album that still has
 `active_download_state` set (e.g., due to a bug or race), the stale JSONB persists. Clearing
 it in these methods is defensive — it should already be NULL by the time they run, but this
 prevents stale state from accumulating.

@@ -18,6 +18,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from lib.import_dispatch import transition_request as _transition_request
 from lib.pipeline_db import PipelineDB
 from lib.quality import find_inconsistencies, find_orphaned_downloads, suggest_repair
 
@@ -25,34 +26,6 @@ DEFAULT_DSN = os.environ.get(
     "PIPELINE_DB_DSN",
     "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
 )
-
-
-def _transition_request(
-    db: PipelineDB,
-    request_id: int,
-    to_status: str,
-    *,
-    from_status: str | None = None,
-    attempt_type: str | None = None,
-    message: str = "",
-    **transition_fields: object,
-) -> None:
-    """Route repair status changes through the shared finalization seam."""
-    from lib.import_dispatch import DispatchOutcome, finalize_request
-
-    finalize_request(
-        db,
-        request_id,
-        DispatchOutcome.transition(
-            to_status=to_status,
-            success=to_status == "imported",
-            message=message or f"Repaired request to {to_status}",
-            from_status=from_status,
-            attempt_type=attempt_type,
-            transition_fields=transition_fields or None,
-        ),
-    )
-
 
 def _get_slskd_active_transfers(host: str, api_key: str) -> set[tuple[str, str]]:
     """Fetch active (username, filename) pairs from slskd API."""

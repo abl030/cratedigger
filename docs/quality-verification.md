@@ -194,11 +194,11 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 
 ## Downgrade prevention
 
-- `--override-min-bitrate` arg: `dispatch_import()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
+- `--override-min-bitrate` arg: `dispatch_import_core()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
 - `mark_done()` respects `verified_lossless_override` from import_one.py instead of re-deriving via `is_verified_lossless()`. When verified lossless, `current_spectral_bitrate` is set to the actual V0 min bitrate (not the spectral cliff estimate, which can miscalibrate on genuine files).
 - Spectral state writes always go through `RequestSpectralStateUpdate` — grade and bitrate are always written together (including explicit NULLs for genuine files with no cliff). This prevents stale spectral data from persisting after an upgrade.
-- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), skips V0 conversion and keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. Genuine lossless on disk is marked `verified_lossless`. Passed from `dispatch_import()` when `album_data.db_target_format` is set.
-- `--verified-lossless-target` flag: target format after verified lossless (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
+- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), skips V0 conversion and keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. Genuine lossless on disk is marked `verified_lossless`. Passed from `dispatch_import_core()` when `album_data.db_target_format` is set.
+- `--verified-lossless-target` flag: target format after verified lossless (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade, 6=transcode (may or may not have imported as upgrade).
 
