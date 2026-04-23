@@ -141,6 +141,34 @@ class TestCmdCancel(unittest.TestCase):
         self.assertEqual(req["status"], "manual")
 
 
+class TestCmdSet(unittest.TestCase):
+    @patch("builtins.print")
+    @patch("scripts.pipeline_cli._transition_request")
+    def test_set_routes_dynamic_status_through_shared_finalizer(
+        self,
+        mock_transition,
+        _mock_print,
+    ):
+        db = MagicMock()
+        db.get_request.return_value = make_request_row(
+            id=9,
+            status="manual",
+            artist_name="A",
+            album_title="B",
+        )
+
+        args = MagicMock(id=9, status="imported")
+        pipeline_cli.cmd_set(db, args)
+
+        mock_transition.assert_called_once_with(
+            db,
+            9,
+            "imported",
+            from_status="manual",
+            message="Admin set status to imported",
+        )
+
+
 class TestTracksFromMbRelease(unittest.TestCase):
     def test_extract_tracks(self):
         tracks = pipeline_cli.tracks_from_mb_release(SAMPLE_MB_RELEASE)
@@ -453,7 +481,7 @@ class TestCmdSetIntent(unittest.TestCase):
         db.update_request_fields.assert_called_once_with(1, target_format=None)
 
     @patch("builtins.print")
-    @patch("lib.transitions.apply_transition")
+    @patch("scripts.pipeline_cli._transition_request")
     def test_set_lossless_on_imported_requeues(self, mock_transition, _mock_print):
         db = MagicMock()
         db.get_request.return_value = make_request_row(
@@ -462,9 +490,15 @@ class TestCmdSetIntent(unittest.TestCase):
         )
         args = MagicMock(id=2, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        mock_transition.assert_called_once()
-        call_kwargs = mock_transition.call_args.kwargs or mock_transition.call_args[1]
-        self.assertEqual(call_kwargs.get("search_filetype_override"), "lossless")
+        mock_transition.assert_called_once_with(
+            db,
+            2,
+            "wanted",
+            from_status="imported",
+            message="Re-queued imported request for lossless search",
+            search_filetype_override="lossless",
+            min_bitrate=245,
+        )
         db.update_request_fields.assert_called_once_with(2, target_format="lossless")
 
     @patch("builtins.print")
@@ -529,7 +563,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             clear_cur = MagicMock()
             delete_cur = MagicMock()
             delete_cur.fetchall.return_value = []
-            import_cur = MagicMock()
+            finalize_request = MagicMock()
 
             db = MagicMock()
             db.get_request.return_value = make_request_row(
@@ -548,7 +582,6 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 candidate_cur,
                 clear_cur,
                 delete_cur,
-                import_cur,
             ]
 
             beets_info = AlbumInfo(
@@ -570,16 +603,22 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
+                 patch("scripts.pipeline_cli._transition_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(db, args)
 
             output = stdout.getvalue()
             self.assertIn("quality_gate_decision → accept", output)
             self.assertIn("→ transitioned to imported", output)
-            self.assertEqual(db._execute.call_count, 4)
-            imported_sql, imported_params = db._execute.call_args_list[3][0]
-            self.assertIn("SET status = 'imported'", imported_sql)
-            self.assertEqual(imported_params, (207, 42))
+            self.assertEqual(db._execute.call_count, 3)
+            finalize_request.assert_called_once_with(
+                db,
+                42,
+                "imported",
+                from_status="wanted",
+                message="Repaired stale spectral gate state",
+                min_bitrate=207,
+            )
         finally:
             os.unlink(cfg_path)
 

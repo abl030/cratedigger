@@ -1004,8 +1004,12 @@ def _canonicalize_siblings(
 # ---------------------------------------------------------------------------
 
 def update_pipeline_db(request_id, status, imported_path=None, distance=None, scenario=None):
-    """Update pipeline DB status. Best-effort — failures logged but don't block."""
+    """Update pipeline DB via the shared finalization seam.
+
+    Best-effort — failures are logged but do not block the import harness.
+    """
     try:
+        from lib.import_dispatch import DispatchOutcome, finalize_request
         from lib.pipeline_db import PipelineDB
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
@@ -1016,8 +1020,19 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
             extra["beets_distance"] = distance
         if scenario:
             extra["beets_scenario"] = scenario
-        db.update_status(request_id, status, **extra)
-        db.close()
+        try:
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status=status,
+                    success=status == "imported",
+                    message=f"Harness updated request to {status}",
+                    transition_fields=extra or None,
+                ),
+            )
+        finally:
+            db.close()
     except Exception as e:
         print(f"  [WARN] Pipeline DB update failed: {e}", file=sys.stderr)
 

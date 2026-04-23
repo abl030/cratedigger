@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
@@ -49,6 +50,43 @@ class TestImportBootstrap(unittest.TestCase):
             f"Standalone import_one import failed:\nstdout:{proc.stdout}\nstderr:{proc.stderr}"
         )
         self.assertIn("OK", proc.stdout)
+
+
+class TestPipelineDbUpdate(unittest.TestCase):
+    @patch("lib.import_dispatch.finalize_request")
+    @patch("lib.pipeline_db.PipelineDB")
+    def test_update_pipeline_db_routes_through_shared_finalizer(
+        self,
+        mock_db_cls,
+        mock_finalize,
+    ) -> None:
+        from harness import import_one
+
+        db = MagicMock()
+        mock_db_cls.return_value = db
+
+        import_one.update_pipeline_db(
+            42,
+            "imported",
+            imported_path="/Beets/Artist/Album",
+            distance=0.12,
+            scenario="preflight_existing",
+        )
+
+        mock_finalize.assert_called_once()
+        called_db, called_request_id, outcome = mock_finalize.call_args.args
+        self.assertIs(called_db, db)
+        self.assertEqual(called_request_id, 42)
+        self.assertEqual(outcome.target_status, "imported")
+        self.assertEqual(
+            outcome.transition_fields,
+            {
+                "imported_path": "/Beets/Artist/Album",
+                "beets_distance": 0.12,
+                "beets_scenario": "preflight_existing",
+            },
+        )
+        db.close.assert_called_once()
 
 
 # ============================================================================

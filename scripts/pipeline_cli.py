@@ -263,23 +263,60 @@ def cmd_status(db, args):
             print(f"    {status:15s} {c:4d}")
 
 
+def _transition_request(
+    db,
+    request_id: int,
+    to_status: str,
+    *,
+    from_status: str | None = None,
+    attempt_type: str | None = None,
+    message: str = "",
+    **transition_fields: object,
+) -> None:
+    """Route request-state mutations through the shared finalization seam."""
+    from lib.import_dispatch import DispatchOutcome, finalize_request
+
+    finalize_request(
+        db,
+        request_id,
+        DispatchOutcome.transition(
+            to_status=to_status,
+            success=to_status == "imported",
+            message=message or f"Transitioned request to {to_status}",
+            from_status=from_status,
+            attempt_type=attempt_type,
+            transition_fields=transition_fields or None,
+        ),
+    )
+
+
 def cmd_retry(db, args):
-    from lib.transitions import apply_transition
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    apply_transition(db, args.id, "wanted", from_status=req["status"])
+    _transition_request(
+        db,
+        args.id,
+        "wanted",
+        from_status=req["status"],
+        message="Reset request to wanted",
+    )
     print(f"  Reset to wanted: [{args.id}] {req['artist_name']} - {req['album_title']}")
 
 
 def cmd_cancel(db, args):
-    from lib.transitions import apply_transition
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    apply_transition(db, args.id, "manual", from_status=req["status"])
+    _transition_request(
+        db,
+        args.id,
+        "manual",
+        from_status=req["status"],
+        message="Marked request for manual handling",
+    )
     print(f"  Marked for manual download: [{args.id}] {req['artist_name']} - {req['album_title']}")
 
 
@@ -287,7 +324,6 @@ VALID_STATUSES = ["wanted", "imported", "manual"]
 
 
 def cmd_set(db, args):
-    from lib.transitions import apply_transition
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
@@ -296,7 +332,13 @@ def cmd_set(db, args):
     if old_status == args.status:
         print(f"  [{args.id}] already has status '{args.status}'.")
         return
-    apply_transition(db, args.id, args.status, from_status=old_status)
+    _transition_request(
+        db,
+        args.id,
+        args.status,
+        from_status=old_status,
+        message=f"Admin set status to {args.status}",
+    )
     print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: {old_status} → {args.status}")
 
 
@@ -307,7 +349,6 @@ def cmd_set_intent(db, args):
     'default'  — pipeline decides (uses global verified_lossless_target)
     """
     from lib.quality import QUALITY_LOSSLESS, should_clear_lossless_search_override
-    from lib.transitions import apply_transition
 
     target_format = QUALITY_LOSSLESS if args.intent == "lossless" else None
 
@@ -324,9 +365,15 @@ def cmd_set_intent(db, args):
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        apply_transition(db, args.id, "wanted", from_status="imported",
-                         search_filetype_override=QUALITY_LOSSLESS,
-                         min_bitrate=min_br)
+        _transition_request(
+            db,
+            args.id,
+            "wanted",
+            from_status="imported",
+            message="Re-queued imported request for lossless search",
+            search_filetype_override=QUALITY_LOSSLESS,
+            min_bitrate=min_br,
+        )
         db.update_request_fields(args.id, target_format=target_format)
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
@@ -1096,13 +1143,14 @@ def cmd_repair_spectral(db, args):
 
         # If quality gate would accept, transition to imported
         if decision == "accept" and effective_min_br is not None:
-            db._execute("""
-                UPDATE album_requests
-                SET status = 'imported',
-                    min_bitrate = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (effective_min_br, rid))
+            _transition_request(
+                db,
+                rid,
+                "imported",
+                from_status="wanted",
+                message="Repaired stale spectral gate state",
+                min_bitrate=effective_min_br,
+            )
             print(f"         → transitioned to imported")
         else:
             print(f"         → remains wanted (gate says {decision})")
