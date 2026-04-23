@@ -545,6 +545,19 @@ class TestRetryLogic(unittest.TestCase):
         delta2 = (retry2 - now).total_seconds()
         self.assertGreater(delta2, delta1)
 
+    def test_backoff_caps_at_six_hours(self):
+        for _ in range(6):
+            self.db.record_attempt(self.req_id, "search")
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        retry_at = req["next_retry_after"]
+        assert retry_at is not None
+
+        delta = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        self.assertLessEqual(delta, 6 * 60 * 60 + 5)
+        self.assertGreater(delta, 5 * 60 * 60)
+
 
 @requires_postgres
 class TestSourcePreservation(unittest.TestCase):

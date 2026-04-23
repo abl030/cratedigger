@@ -27,7 +27,7 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
-BACKOFF_MAX_MINUTES = 60 * 24  # 24 hours
+BACKOFF_MAX_MINUTES = 60 * 6  # 6 hours
 
 
 def _escape_like_pattern(value: str) -> str:

@@ -59,6 +59,52 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Discogs as first-class citizen** -- browse, add, and import Discogs releases through the same pipeline as MusicBrainz. Beets auto-routes numeric IDs to the Discogs plugin; local Discogs mirror eliminates external API dependencies.
 - **Comprehensive test suite** -- 1500+ tests (`nix-shell --run "bash scripts/run_tests.sh"`) with a 4-category taxonomy (pure / seam / orchestration / integration slice), shared `FakePipelineDB`/`FakeSlskdAPI` fakes, builders for typed data, and a route contract audit guard that fails at test time if a new web endpoint is added without frontend contract coverage
 
+## Request Retry Backoff
+
+Cratedigger distinguishes between:
+
+- `status = 'wanted'` -- the request is still active in the pipeline
+- `eligible for search now` -- `status = 'wanted'` **and** `next_retry_after <= now()`
+
+`get_wanted()` only returns rows that are both wanted and due. A request can
+therefore sit in the wanted bucket while being intentionally skipped for a few
+hours.
+
+Retry-worthy failures call `record_attempt()` and set a shared per-request
+`next_retry_after` timestamp. There are three counters:
+
+- `search_attempts` -- search miss / enqueue failure
+- `download_attempts` -- download timeout or local move/processing failure
+- `validation_attempts` -- auto-import rejection that requeues the album
+
+The counters are separate, but the retry clock is shared. The most recent
+recorded failure overwrites `next_retry_after` for the request.
+
+Today this backoff is hardcoded in Python (`BACKOFF_BASE_MINUTES = 30`,
+`BACKOFF_MAX_MINUTES = 360`) and is **not yet tunable via the NixOS module**.
+The schedule is exponential and capped at 6 hours:
+
+| Attempt count | Delay before next search |
+|---|---|
+| 1 | 30 minutes |
+| 2 | 60 minutes |
+| 3 | 120 minutes |
+| 4 | 240 minutes |
+| 5 | 360 minutes |
+| 6 | 360 minutes |
+| 7+ | 360 minutes (6 hour cap) |
+
+That means a repeatedly failing request is retried at roughly:
+`t0`, `t0+30m`, `t0+1h30m`, `t0+3h30m`, `t0+7h30m`, then every 6 hours after
+the cap kicks in.
+
+Some transitions go back to `wanted` without backoff. `reset_to_wanted()`
+clears all three counters and nulls `next_retry_after`, so upgrade/requeue
+paths from already-imported albums become eligible again immediately.
+
+This is separate from **user cooldowns**. Backoff is per album request; user
+cooldowns are global per Soulseek user.
+
 ## Install
 
 Cratedigger ships as a Nix flake. The repo provides:
