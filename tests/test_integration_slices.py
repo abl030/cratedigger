@@ -1587,7 +1587,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     resumable on contention.
 
     Pre-R4: ``_handle_valid_result`` called ``stage_to_ai`` first,
-    then invoked ``dispatch_import`` which checked the lock inside
+    then invoked ``dispatch_import_core`` which checked the lock inside
     ``dispatch_import_core``. On contention, files had already moved
     from ``slskd_download_dir/<import_folder>/`` →
     ``beets_staging_dir/``, but ``active_download_state`` still

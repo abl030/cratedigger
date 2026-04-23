@@ -118,15 +118,14 @@ FORCE/MANUAL (dispatch_import_from_db)
 The auto path only holds RELEASE, and acquires it at
 `_handle_valid_result` *before* `stage_to_ai` runs (Codex PR #136 R4
 P1 — see below). `dispatch_import_core`'s inner acquisition of the
-same key — reached via `dispatch_import` (the auto-path orchestration
+same key — reached via `dispatch_import_core` (the auto-path orchestration
 wrapper in `lib/import_dispatch.py`) — is a no-op reentrant acquire:
 
 ```
 AUTO (_handle_valid_result in lib/download.py)
   └─ acquire RELEASE(release_id_to_lock_key(mbid))             ← outer
       └─ stage_to_ai                                           ← moves files
-      └─ dispatch_import
-          └─ dispatch_import_core
+      └─ dispatch_import_core
               └─ acquire RELEASE(...)                          ← reentrant no-op
                   └─ import_one.py subprocess
 ```

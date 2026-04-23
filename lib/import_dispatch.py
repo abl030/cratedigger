@@ -204,6 +204,14 @@ def finalize_request(
     if outcome.deferred or outcome.target_status is None:
         return
 
+    reserved_fields = {"from_status", "attempt_type"} & set(outcome.transition_fields)
+    if reserved_fields:
+        names = ", ".join(sorted(reserved_fields))
+        raise ValueError(
+            "DispatchOutcome.transition_fields must not include reserved keys: "
+            f"{names}. Use the explicit DispatchOutcome fields instead."
+        )
+
     transition_kwargs = dict(outcome.transition_fields)
     if outcome.from_status is not None:
         transition_kwargs["from_status"] = outcome.from_status
@@ -211,6 +219,32 @@ def finalize_request(
         transition_kwargs["attempt_type"] = outcome.attempt_type
 
     apply_transition(db, request_id, outcome.target_status, **transition_kwargs)
+
+
+def transition_request(
+    db: "PipelineDB",
+    request_id: int,
+    to_status: str,
+    *,
+    from_status: str | None = None,
+    attempt_type: str | None = None,
+    message: str = "",
+    **transition_fields: object,
+) -> None:
+    """Finalize one request-state transition through the shared seam."""
+
+    finalize_request(
+        db,
+        request_id,
+        DispatchOutcome.transition(
+            to_status=to_status,
+            success=to_status == "imported",
+            message=message or f"Transitioned request to {to_status}",
+            from_status=from_status,
+            attempt_type=attempt_type,
+            transition_fields=transition_fields or None,
+        ),
+    )
 
 
 def _do_mark_done(

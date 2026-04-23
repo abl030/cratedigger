@@ -33,7 +33,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 
 # Surface INFO-level log lines (e.g. the [import] stderr passthrough from
-# dispatch_import) so force-import / manual-import failures are visible to
+# dispatch_import_core) so force-import / manual-import failures are visible to
 # the user instead of silently swallowed by Python's default WARNING-only
 # logger configuration.
 logging.basicConfig(
@@ -47,6 +47,7 @@ import psycopg2
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+from lib.import_dispatch import transition_request as _transition_request
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
@@ -261,33 +262,6 @@ def cmd_status(db, args):
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")
-
-
-def _transition_request(
-    db,
-    request_id: int,
-    to_status: str,
-    *,
-    from_status: str | None = None,
-    attempt_type: str | None = None,
-    message: str = "",
-    **transition_fields: object,
-) -> None:
-    """Route request-state mutations through the shared finalization seam."""
-    from lib.import_dispatch import DispatchOutcome, finalize_request
-
-    finalize_request(
-        db,
-        request_id,
-        DispatchOutcome.transition(
-            to_status=to_status,
-            success=to_status == "imported",
-            message=message or f"Transitioned request to {to_status}",
-            from_status=from_status,
-            attempt_type=attempt_type,
-            transition_fields=transition_fields or None,
-        ),
-    )
 
 
 def cmd_retry(db, args):

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from lib.import_dispatch import DispatchOutcome, finalize_request
+from lib.import_dispatch import DispatchOutcome, finalize_request, transition_request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
@@ -77,6 +77,52 @@ class TestFinalizeRequest(unittest.TestCase):
             search_filetype_override="flac,mp3 v0",
             min_bitrate=245,
         )
+
+    @patch("lib.import_dispatch.apply_transition")
+    def test_transition_request_routes_explicit_fields_through_finalize_request(
+        self,
+        mock_transition: MagicMock,
+    ) -> None:
+        db = MagicMock()
+
+        transition_request(
+            db,
+            42,
+            "wanted",
+            from_status="downloading",
+            attempt_type="download",
+            search_filetype_override="flac,mp3 v0",
+            min_bitrate=245,
+        )
+
+        mock_transition.assert_called_once_with(
+            db,
+            42,
+            "wanted",
+            from_status="downloading",
+            attempt_type="download",
+            search_filetype_override="flac,mp3 v0",
+            min_bitrate=245,
+        )
+
+    @patch("lib.import_dispatch.apply_transition")
+    def test_rejects_reserved_transition_fields_in_outcome(
+        self,
+        mock_transition: MagicMock,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved keys: from_status"):
+            finalize_request(
+                MagicMock(),
+                42,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    from_status="downloading",
+                    transition_fields={"from_status": "manual"},
+                ),
+            )
+
+        mock_transition.assert_not_called()
 
 
 class _RequestStatusWriteVisitor(ast.NodeVisitor):
