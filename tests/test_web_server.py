@@ -2649,6 +2649,28 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertEqual(data["source"], "discogs")
         self.assertEqual(data["mb_albumid"], "12856590")
 
+    def test_beets_album_detail_allows_nullable_legacy_fields(self):
+        detail = self._album()
+        detail["added"] = None
+        detail["path"] = "/music/Test Artist/Test Album"
+        detail["tracks"] = [
+            {
+                **self._track(),
+                "disc": None,
+                "track": None,
+                "title": None,
+            }
+        ]
+        self.beets.get_album_detail.return_value = detail
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["added"])
+        self.assertIsNone(data["tracks"][0]["disc"])
+        self.assertIsNone(data["tracks"][0]["track"])
+        self.assertIsNone(data["tracks"][0]["title"])
+
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
     @patch("lib.library_delete_service.os.path.exists", return_value=True)
