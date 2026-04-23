@@ -5,8 +5,8 @@ may only skip the beets *distance* check. All other pre-import gates
 (audio integrity, spectral transcode detection) run identically.
 
 These tests FAIL against the current code because dispatch_import_from_db
-calls dispatch_import_core directly, bypassing the audio + spectral gates
-that _process_beets_validation runs in the auto path.
+called dispatch_import_core directly, bypassing the shared pre-import gates
+that the auto path now runs inline before dispatch.
 """
 
 from __future__ import annotations
@@ -312,7 +312,7 @@ class TestForceImportRunsAudioCheck(unittest.TestCase):
     """Force-import must run the audio corruption check.
 
     The auto path rejects corrupt audio via validate_audio in
-    _process_beets_validation. Force-import currently skips this entirely,
+    the shared pre-import gate path. Force-import currently skips this entirely,
     so a corrupt MP3 can be force-imported into beets.
     """
 

@@ -204,7 +204,9 @@ def finalize_request(
     if outcome.deferred or outcome.target_status is None:
         return
 
-    reserved_fields = {"from_status", "attempt_type"} & set(outcome.transition_fields)
+    reserved_fields = {"from_status", "attempt_type", "state_json"} & set(
+        outcome.transition_fields
+    )
     if reserved_fields:
         names = ", ".join(sorted(reserved_fields))
         raise ValueError(
@@ -226,6 +228,7 @@ def transition_request(
     request_id: int,
     to_status: str,
     *,
+    success: bool = False,
     from_status: str | None = None,
     attempt_type: str | None = None,
     message: str = "",
@@ -238,7 +241,7 @@ def transition_request(
         request_id,
         DispatchOutcome.transition(
             to_status=to_status,
-            success=to_status == "imported",
+            success=success,
             message=message or f"Transitioned request to {to_status}",
             from_status=from_status,
             attempt_type=attempt_type,

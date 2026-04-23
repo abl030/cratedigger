@@ -3,6 +3,7 @@
 import json
 import re
 import msgspec
+from typing import TypedDict
 
 from web.classify import classify_log_entry, LogEntry
 from lib.import_dispatch import transition_request as _transition_request
@@ -18,6 +19,11 @@ from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                 CLIFF_THRESHOLD_DB_PER_KHZ)
 from web import mb as mb_api
 from web import discogs as discogs_api
+
+
+class _TransitionFields(TypedDict, total=False):
+    search_filetype_override: str | None
+    min_bitrate: int
 
 
 def _server():
@@ -417,38 +423,18 @@ def post_pipeline_update(h, body: dict) -> None:
                 quality = resolve_user_requeue_override(
                     req.get("search_filetype_override"))
                 min_br = b.get_min_bitrate(mbid)
-        if quality is not None and min_br is not None:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-                search_filetype_override=quality,
-                min_bitrate=min_br,
-            )
-        elif quality is not None:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-                search_filetype_override=quality,
-            )
-        elif min_br is not None:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-                min_bitrate=min_br,
-            )
-        else:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-            )
+        transition_fields: _TransitionFields = {}
+        if quality is not None:
+            transition_fields["search_filetype_override"] = quality
+        if min_br is not None:
+            transition_fields["min_bitrate"] = min_br
+        _transition_request(
+            s._db(),
+            int(req_id),
+            "wanted",
+            from_status=req["status"],
+            **transition_fields,
+        )
     else:
         _transition_request(
             s._db(), int(req_id), new_status, from_status=req["status"])
@@ -574,23 +560,18 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                 b = s._beets_db()
                 if b:
                     min_bitrate = b.get_avg_bitrate_kbps(mbid)
+            transition_fields: _TransitionFields = {
+                "search_filetype_override": None,
+            }
             if min_bitrate is not None:
-                _transition_request(
-                    s._db(),
-                    req_id,
-                    "imported",
-                    from_status=existing["status"],
-                    search_filetype_override=None,
-                    min_bitrate=int(min_bitrate),
-                )
-            else:
-                _transition_request(
-                    s._db(),
-                    req_id,
-                    "imported",
-                    from_status=existing["status"],
-                    search_filetype_override=None,
-                )
+                transition_fields["min_bitrate"] = int(min_bitrate)
+            _transition_request(
+                s._db(),
+                req_id,
+                "imported",
+                from_status=existing["status"],
+                **transition_fields,
+            )
         elif new_status == "wanted" and existing["status"] != "wanted":
             _transition_request(
                 s._db(), req_id, "wanted", from_status=existing["status"])
@@ -728,23 +709,18 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         quality = resolve_user_requeue_override(
             req.get("search_filetype_override"))
         min_br = req.get("min_bitrate")
+        ban_fields: _TransitionFields = {
+            "search_filetype_override": quality,
+        }
         if min_br is not None:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-                search_filetype_override=quality,
-                min_bitrate=min_br,
-            )
-        else:
-            _transition_request(
-                s._db(),
-                int(req_id),
-                "wanted",
-                from_status=req["status"],
-                search_filetype_override=quality,
-            )
+            ban_fields["min_bitrate"] = min_br
+        _transition_request(
+            s._db(),
+            int(req_id),
+            "wanted",
+            from_status=req["status"],
+            **ban_fields,
+        )
 
     h._json({
         "status": "ok",

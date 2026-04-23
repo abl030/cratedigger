@@ -261,6 +261,25 @@ class TestDatabaseSource(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["search_filetype_override"], "flac,mp3 v0")
 
+    def test_reject_and_requeue_uses_db_loaded_from_status(self):
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="fail-manual-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db.update_status(req_id, "manual")
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
+
+        source.reject_and_requeue(record, bv_result)
+
+        req = db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["validation_attempts"], 1)
+
     def test_mark_done_sets_on_disk_spectral(self):
         """Successful import updates current_spectral_grade/bitrate."""
         from lib.quality import DownloadInfo, SpectralMeasurement
