@@ -5,6 +5,7 @@ These test the decision points extracted from main() — each stage function
 takes data inputs and returns a StageResult without I/O.
 """
 
+import io
 import importlib
 import os
 import subprocess
@@ -87,6 +88,25 @@ class TestPipelineDbUpdate(unittest.TestCase):
             },
         )
         db.close.assert_called_once()
+
+    @patch("lib.import_dispatch.finalize_request", side_effect=RuntimeError("boom"))
+    @patch("lib.pipeline_db.PipelineDB")
+    def test_update_pipeline_db_closes_db_when_finalizer_raises(
+        self,
+        mock_db_cls,
+        _mock_finalize,
+    ) -> None:
+        from harness import import_one
+
+        db = MagicMock()
+        mock_db_cls.return_value = db
+        stderr = io.StringIO()
+
+        with patch("sys.stderr", stderr):
+            import_one.update_pipeline_db(42, "imported")
+
+        db.close.assert_called_once()
+        self.assertIn("Pipeline DB update failed", stderr.getvalue())
 
 
 # ============================================================================

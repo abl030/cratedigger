@@ -11,7 +11,7 @@ from lib.import_dispatch import DispatchOutcome, finalize_request, transition_re
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
-PRODUCTION_FILES = ("album_source.py",)
+PRODUCTION_FILES = ("album_source.py", "cratedigger.py")
 RAW_SQL_ALLOWED_PATHS = {"lib/pipeline_db.py"}
 
 
@@ -123,6 +123,19 @@ class TestFinalizeRequest(unittest.TestCase):
             )
 
         mock_transition.assert_not_called()
+
+        with self.assertRaisesRegex(ValueError, "reserved keys: state_json"):
+            finalize_request(
+                MagicMock(),
+                42,
+                DispatchOutcome.transition(
+                    to_status="downloading",
+                    success=False,
+                    transition_fields={"state_json": "{}"},
+                ),
+            )
+
+        self.assertEqual(mock_transition.call_count, 0)
 
 
 class _RequestStatusWriteVisitor(ast.NodeVisitor):

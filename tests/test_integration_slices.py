@@ -447,7 +447,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """Integration slice: shared run_preimport_gates updates spectral state + denylists.
 
     Exercises the pre-import gate pipeline that both the auto-import path
-    (lib.download._process_beets_validation) and the force/manual-import path
+    (lib.download.process_completed_album) and the force/manual-import path
     (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves the
     function does its side effects — spectral state write + denylist —
     consistently regardless of caller.

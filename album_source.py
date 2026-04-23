@@ -191,23 +191,6 @@ class DatabaseSource:
             for t in tracks
         ]
 
-    def update_status(self, album_record, status, **extra):
-        """Update album status in the pipeline DB."""
-        from lib.import_dispatch import DispatchOutcome, finalize_request
-        request_id = getattr(album_record, "db_request_id", None)
-        if not request_id:
-            return
-        db = self._get_db()
-        finalize_request(
-            db,
-            request_id,
-            DispatchOutcome.transition(
-                to_status=status,
-                success=status == "imported",
-                transition_fields=extra,
-            ),
-        )
-
     def mark_done(self, album_record, bv_result, dest_path=None,
                   download_info=None):
         """Mark album as imported."""
@@ -254,11 +237,10 @@ class DatabaseSource:
                 to_status="wanted",
                 success=False,
                 message="Validation rejected",
-                from_status="downloading",
-                attempt_type="validation",
                 transition_fields=transition_kwargs,
             ),
         )
+        db.record_attempt(request_id, "validation")
 
         db.log_download(
             request_id=request_id,
