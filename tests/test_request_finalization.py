@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 from lib.import_dispatch import DispatchOutcome, finalize_request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
+PRODUCTION_FILES = ("album_source.py",)
+RAW_SQL_ALLOWED_PATHS = {"lib/pipeline_db.py"}
 
 
 class TestFinalizeRequest(unittest.TestCase):
@@ -76,12 +79,63 @@ class TestFinalizeRequest(unittest.TestCase):
         )
 
 
-class _TerminalTransitionVisitor(ast.NodeVisitor):
-    """Collect direct terminal status writes in production Python modules."""
+class _RequestStatusWriteVisitor(ast.NodeVisitor):
+    """Collect request-status writes that bypass the shared finalization seam."""
 
     def __init__(self, rel_path: str) -> None:
         self.rel_path = rel_path
-        self.offending: list[tuple[int, str]] = []
+        self.offending: list[tuple[int, str, str]] = []
+
+    def _status_arg(self, func_name: str, node: ast.Call) -> ast.expr | None:
+        arg_index = 2 if func_name == "apply_transition" else 1
+        if len(node.args) > arg_index:
+            return node.args[arg_index]
+        kw_name = "to_status" if func_name == "apply_transition" else "status"
+        for kw in node.keywords:
+            if kw.arg == kw_name:
+                return kw.value
+        return None
+
+    def _allow_direct_transition_call(self, func_name: str, node: ast.Call) -> bool:
+        if self.rel_path in {
+            "lib/import_dispatch.py",
+            "lib/pipeline_db.py",
+            "lib/transitions.py",
+        }:
+            return True
+
+        if self.rel_path != "lib/download.py":
+            return False
+
+        status_expr = self._status_arg(func_name, node)
+        return (
+            isinstance(status_expr, ast.Constant)
+            and status_expr.value == "downloading"
+        )
+
+    def _maybe_record_raw_sql(self, node: ast.Call) -> None:
+        func_name: str | None = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+
+        if func_name not in {"execute", "_execute"}:
+            return
+        if self.rel_path in RAW_SQL_ALLOWED_PATHS or not node.args:
+            return
+
+        sql = node.args[0]
+        if not isinstance(sql, ast.Constant) or not isinstance(sql.value, str):
+            return
+
+        normalized = " ".join(sql.value.lower().split())
+        if "update album_requests" in normalized and "set status" in normalized:
+            self.offending.append((
+                node.lineno,
+                "raw SQL status write",
+                ast.unparse(node),
+            ))
 
     def visit_Call(self, node: ast.Call) -> None:
         func_name: str | None = None
@@ -90,48 +144,49 @@ class _TerminalTransitionVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Attribute):
             func_name = node.func.attr
 
-        if func_name not in {"apply_transition", "update_status"}:
-            self.generic_visit(node)
-            return
-
-        statuses: list[str] = []
-        for arg in node.args:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                statuses.append(arg.value)
-        for kw in node.keywords:
-            if kw.arg == "status" and isinstance(kw.value, ast.Constant):
-                if isinstance(kw.value.value, str):
-                    statuses.append(kw.value.value)
-
-        if any(status in {"wanted", "imported"} for status in statuses):
-            snippet = ast.unparse(node)
-            self.offending.append((node.lineno, snippet))
-
+        if func_name in {"apply_transition", "update_status"}:
+            if not self._allow_direct_transition_call(func_name, node):
+                self.offending.append((
+                    node.lineno,
+                    "direct transition call",
+                    ast.unparse(node),
+                ))
+        self._maybe_record_raw_sql(node)
         self.generic_visit(node)
 
 
 class TestTerminalTransitionContract(unittest.TestCase):
-    """Terminal request-state writes must route through finalize_request()."""
+    """Production request-state writes must route through finalize_request()."""
 
-    def test_no_direct_terminal_status_writes_in_lib_or_web(self) -> None:
-        offending: list[tuple[str, int, str]] = []
+    def test_no_direct_request_status_writes_outside_the_shared_seam(self) -> None:
+        offending: list[tuple[str, int, str, str]] = []
 
-        for root_name in ("lib", "web"):
+        for rel_path in PRODUCTION_FILES:
+            path = REPO_ROOT / rel_path
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel_path)
+            visitor = _RequestStatusWriteVisitor(rel_path)
+            visitor.visit(tree)
+            for lineno, reason, snippet in visitor.offending:
+                offending.append((rel_path, lineno, reason, snippet))
+
+        for root_name in PRODUCTION_ROOTS:
             root = REPO_ROOT / root_name
             for path in sorted(root.rglob("*.py")):
                 rel = path.relative_to(REPO_ROOT).as_posix()
                 tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-                visitor = _TerminalTransitionVisitor(rel)
+                visitor = _RequestStatusWriteVisitor(rel)
                 visitor.visit(tree)
-                for lineno, snippet in visitor.offending:
-                    offending.append((rel, lineno, snippet))
+                for lineno, reason, snippet in visitor.offending:
+                    offending.append((rel, lineno, reason, snippet))
 
         if offending:
-            lines = [f"  {rel}:{lineno}: {snippet}" for rel, lineno, snippet in offending]
+            lines = [
+                f"  {rel}:{lineno}: {reason}: {snippet}"
+                for rel, lineno, reason, snippet in offending
+            ]
             self.fail(
-                "Direct terminal request status writes remain in production code. "
-                "Route wanted/imported transitions through lib.import_dispatch."
-                "finalize_request(...).\n"
+                "Direct request status writes remain outside the shared seam. "
+                "Route them through lib.import_dispatch.finalize_request(...).\n"
                 + "\n".join(lines)
             )
 
