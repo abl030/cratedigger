@@ -6,7 +6,6 @@ instead of reading module-level globals.
 
 from __future__ import annotations
 
-import glob
 import logging
 import os
 import re
@@ -45,23 +44,171 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
 
 # === slskd on-disk path resolution ===
 #
-# slskd's default placement rule: a remote share path like
+# Most installs save a remote path like
 #   @@user\Share\Artist\Album\CD1\17 - Track.mp3
-# gets saved to
+# to
 #   {download_root}/CD1/17 - Track.mp3
-# i.e. the trailing component of the remote folder becomes the on-disk
-# folder name. On filename collision — the same folder name (e.g. "CD1")
-# often appears across unrelated downloads — slskd appends a .NET Ticks
-# suffix before the extension:
-#   17 - Track_639123086573912108.mp3
-# See issue #144 for the regression this locked down.
+# but production has seen two backwards-compat variants:
+# - files still under ``{download_root}/incomplete/...``
+# - on-disk names that differ only by filename casing from the remote path
+# We therefore resolve in layers: fast leaf-folder lookup first, then
+# case-insensitive / collision-suffix matches, then bounded recursive
+# searches rooted in likely ancestor folders.
 
 _TICKS_SUFFIX = re.compile(r"^(?P<base>.+)_(?P<ticks>\d{17,20})$")
+_REMOTE_PATH_SEPARATORS = re.compile(r"[\\/]+")
+
+
+def _remote_path_components(path: str) -> list[str]:
+    """Split a Soulseek remote path into non-empty components."""
+    return [part for part in _REMOTE_PATH_SEPARATORS.split(path) if part]
 
 
 def slskd_local_folder(file_dir: str, slskd_download_dir: str) -> str:
     """Return the on-disk folder slskd places this file_dir's downloads into."""
-    return os.path.join(slskd_download_dir, file_dir.split("\\")[-1])
+    components = _remote_path_components(file_dir)
+    leaf = components[-1] if components else file_dir
+    return os.path.join(slskd_download_dir, leaf)
+
+
+def _matching_slskd_paths(
+    search_root: str,
+    *,
+    expected_name: str,
+    max_depth: int,
+) -> list[str]:
+    """Return files under ``search_root`` matching the expected basename.
+
+    Matches both exact basenames (case-insensitive) and slskd's
+    ``_<ticks>`` collision suffix. ``max_depth`` is relative to
+    ``search_root``: 0 = only the root dir, 1 = one level below, etc.
+    """
+    if not os.path.isdir(search_root):
+        return []
+
+    expected_fold = expected_name.casefold()
+    expected_base, expected_ext = os.path.splitext(expected_name)
+    expected_base_fold = expected_base.casefold()
+    expected_ext_fold = expected_ext.casefold()
+    matches: list[str] = []
+
+    for dirpath, dirnames, filenames in os.walk(search_root):
+        rel = os.path.relpath(dirpath, search_root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth > max_depth:
+            dirnames[:] = []
+            continue
+        if depth == max_depth:
+            dirnames[:] = []
+
+        for filename in filenames:
+            basename_fold = filename.casefold()
+            if basename_fold == expected_fold:
+                matches.append(os.path.join(dirpath, filename))
+                continue
+
+            stem, ext = os.path.splitext(filename)
+            if ext.casefold() != expected_ext_fold:
+                continue
+            suffix = _TICKS_SUFFIX.fullmatch(stem)
+            if suffix is None:
+                continue
+            if suffix.group("base").casefold() == expected_base_fold:
+                matches.append(os.path.join(dirpath, filename))
+
+    return matches
+
+
+def _choose_slskd_match(
+    matches: list[str],
+    *,
+    expected_name: str,
+    expected_folder: str,
+    file_size: int | None,
+    context: str,
+) -> str:
+    """Pick the best on-disk file from a candidate list and log why."""
+    if len(matches) == 1:
+        chosen = matches[0]
+        logger.info(
+            f"slskd file resolved via {context}: {expected_name} → "
+            f"{os.path.relpath(chosen, expected_folder)}")
+        return chosen
+
+    if file_size:
+        size_matches = [c for c in matches if _safe_getsize(c) == file_size]
+        if len(size_matches) == 1:
+            chosen = size_matches[0]
+            logger.info(
+                f"slskd file resolved by size via {context}: {expected_name} → "
+                f"{os.path.relpath(chosen, expected_folder)} "
+                f"(size={file_size}, {len(matches)} candidates)")
+            return chosen
+
+    exact_case_matches = [c for c in matches if os.path.basename(c) == expected_name]
+    if len(exact_case_matches) == 1:
+        chosen = exact_case_matches[0]
+        logger.info(
+            f"slskd file resolved by exact basename via {context}: "
+            f"{expected_name} → {os.path.relpath(chosen, expected_folder)}")
+        return chosen
+
+    casefold_matches = [
+        c for c in matches
+        if os.path.basename(c).casefold() == expected_name.casefold()
+    ]
+    if len(casefold_matches) == 1:
+        chosen = casefold_matches[0]
+        logger.info(
+            f"slskd file resolved by case-insensitive basename via {context}: "
+            f"{expected_name} → {os.path.relpath(chosen, expected_folder)}")
+        return chosen
+
+    chosen = sorted(matches)[0]
+    logger.warning(
+        f"AMBIGUOUS slskd path resolution for {expected_name} via {context}: "
+        f"{len(matches)} candidates, picked "
+        f"{os.path.relpath(chosen, expected_folder)} deterministically. "
+        f"Target size={file_size}, candidates="
+        f"{[(os.path.relpath(c, expected_folder), _safe_getsize(c)) for c in matches]}")
+    return chosen
+
+
+def _slskd_search_roots(
+    file_dir: str,
+    slskd_download_dir: str,
+) -> list[tuple[str, int, str]]:
+    """Ordered search roots for resolving one downloaded file on disk."""
+    components = _remote_path_components(file_dir)
+    incomplete_root = os.path.join(slskd_download_dir, "incomplete")
+    plans: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(root: str, max_depth: int, label: str) -> None:
+        key = (root, max_depth)
+        if key in seen:
+            return
+        seen.add(key)
+        plans.append((root, max_depth, label))
+
+    leaf = components[-1] if components else ""
+    if leaf:
+        add(os.path.join(slskd_download_dir, leaf), 0, "leaf folder")
+        add(os.path.join(incomplete_root, leaf), 0, "incomplete leaf folder")
+
+    for width in range(2, min(len(components), 3) + 1):
+        suffix = components[-width:]
+        joined = os.path.join(*suffix)
+        add(os.path.join(slskd_download_dir, joined), 1, "leaf suffix")
+        add(os.path.join(incomplete_root, joined), 1, "incomplete leaf suffix")
+
+    for component in reversed(components[-3:]):
+        add(os.path.join(slskd_download_dir, component), 2, "ancestor folder")
+        add(os.path.join(incomplete_root, component), 2, "incomplete ancestor folder")
+
+    add(slskd_download_dir, 2, "download root")
+    add(incomplete_root, 2, "incomplete root")
+    return plans
 
 
 def resolve_slskd_local_path(file: "DownloadFile",
@@ -75,42 +222,29 @@ def resolve_slskd_local_path(file: "DownloadFile",
     picks deterministically and logs a warning so ambiguous cases are
     visible in journald.
     """
-    folder = slskd_local_folder(file.file_dir, slskd_download_dir)
-    expected_name = file.filename.split("\\")[-1]
-    expected_path = os.path.join(folder, expected_name)
-    if os.path.isfile(expected_path):
-        return expected_path
+    filename_components = _remote_path_components(file.filename)
+    expected_name = filename_components[-1] if filename_components else file.filename
+    expected_folder = slskd_local_folder(file.file_dir, slskd_download_dir)
 
-    base, ext = os.path.splitext(expected_name)
-    # Collision candidates only — filter by strict `_<17-20 digit ticks><ext>`
-    # shape so we never match a different file that happens to share a prefix.
-    pattern = os.path.join(folder, f"{glob.escape(base)}_*{ext}")
-    matches: list[str] = []
-    for candidate in glob.iglob(pattern):
-        stem = os.path.splitext(os.path.basename(candidate))[0]
-        if _TICKS_SUFFIX.fullmatch(stem):
-            matches.append(candidate)
-    if not matches:
-        return None
-    if len(matches) == 1:
-        logger.info(f"slskd collision-renamed file resolved: {expected_name} → "
-                    f"{os.path.basename(matches[0])}")
-        return matches[0]
-    if file.size:
-        size_matches = [c for c in matches
-                        if _safe_getsize(c) == file.size]
-        if len(size_matches) == 1:
-            logger.info(f"slskd collision-renamed file resolved by size: "
-                        f"{expected_name} → {os.path.basename(size_matches[0])} "
-                        f"(chose 1 of {len(matches)} candidates by size={file.size})")
-            return size_matches[0]
-    chosen = sorted(matches)[0]
-    logger.warning(f"AMBIGUOUS slskd collision resolution for {expected_name} in {folder}: "
-                   f"{len(matches)} candidates, no unique size match, picked "
-                   f"{os.path.basename(chosen)} deterministically. "
-                   f"Target size={file.size}, candidates="
-                   f"{[(os.path.basename(c), _safe_getsize(c)) for c in matches]}")
-    return chosen
+    for root, max_depth, label in _slskd_search_roots(file.file_dir, slskd_download_dir):
+        matches = _matching_slskd_paths(
+            root, expected_name=expected_name, max_depth=max_depth)
+        if not matches:
+            continue
+        return _choose_slskd_match(
+            matches,
+            expected_name=expected_name,
+            expected_folder=slskd_download_dir,
+            file_size=file.size,
+            context=label,
+        )
+
+    # Keep the old fast-path fallback shape in the logs: callers still build
+    # ``src_folder/expected_name`` when this returns None.
+    logger.debug(
+        f"slskd local path not found for {expected_name}; expected under "
+        f"{expected_folder} or compatible legacy layouts")
+    return None
 
 
 def _safe_getsize(path: str) -> int | None:
@@ -282,15 +416,17 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     else:
         os.mkdir(import_folder_fullpath)
     for file in album_data.files:
-        src_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
-        if src_folder not in rm_dirs:
-            rm_dirs.append(src_folder)
         # Destination filename keeps the remote basename (no ticks suffix,
         # even if slskd appended one on the source).
-        filename = file.filename.split("\\")[-1]
+        filename_components = _remote_path_components(file.filename)
+        filename = filename_components[-1] if filename_components else file.filename
+        expected_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
         resolved_src = resolve_slskd_local_path(file, ctx.cfg.slskd_download_dir)
         src_file = resolved_src if resolved_src is not None \
-            else os.path.join(src_folder, filename)
+            else os.path.join(expected_folder, filename)
+        src_folder = os.path.dirname(src_file)
+        if src_folder not in rm_dirs:
+            rm_dirs.append(src_folder)
         if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
             filename = f"Disk {file.disk_no} - {filename}"
         dst_file = os.path.join(import_folder_fullpath, filename)

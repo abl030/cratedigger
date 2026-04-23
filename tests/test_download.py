@@ -809,6 +809,25 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
             )
             self.assertEqual(resolve_slskd_local_path(f, tmpdir), src)
 
+    def test_matches_case_insensitive_filename_in_leaf_folder(self):
+        """Production regression: slskd's on-disk casing can drift from the
+        remote path. Resolve by case-insensitive basename match before giving
+        up on the folder."""
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "Kid A")
+            os.makedirs(folder)
+            src = os.path.join(folder, "04 How to Disappear Completely.mp3")
+            with open(src, "w") as fp:
+                fp.write("x" * 1234)
+            f = make_download_file(
+                filename="@@wcren\\Music\\Radiohead\\Kid A\\04 How To Disappear Completely.mp3",
+                file_dir="@@wcren\\Music\\Radiohead\\Kid A",
+                size=1234,
+            )
+            self.assertEqual(resolve_slskd_local_path(f, tmpdir), src)
+
     def test_finds_collision_renamed_file(self):
         """slskd renames colliding filenames as ``<base>_<ticks><ext>``.
 
@@ -855,6 +874,35 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
                 size=5555,
             )
             self.assertEqual(resolve_slskd_local_path(f, tmpdir), right)
+
+    def test_recursively_finds_incomplete_ancestor_folder(self):
+        """Production regression: some installs keep completed files under
+        ``incomplete/<album>/CD2`` instead of ``<download_root>/CD2``.
+        The resolver must search likely ancestor folders, not just the leaf
+        ``CD2`` directory."""
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(
+                tmpdir, "incomplete", "1991- Back To Mono (1958-1969)", "CD2")
+            os.makedirs(folder)
+            fname = "01.- The Ronettes - Be My Baby.mp3"
+            src = os.path.join(folder, fname)
+            with open(src, "w") as fp:
+                fp.write("x" * 4321)
+            f = make_download_file(
+                filename=(
+                    "@@ctvhz\\Shared Music\\Everything Else Music\\"
+                    "Phil Spector [USA]\\1991- Back To Mono (1958-1969)\\"
+                    f"CD2\\{fname}"
+                ),
+                file_dir=(
+                    "@@ctvhz\\Shared Music\\Everything Else Music\\"
+                    "Phil Spector [USA]\\1991- Back To Mono (1958-1969)\\CD2"
+                ),
+                size=4321,
+            )
+            self.assertEqual(resolve_slskd_local_path(f, tmpdir), src)
 
     def test_returns_none_when_file_missing(self):
         from lib.download import resolve_slskd_local_path
@@ -927,6 +975,92 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             self.assertEqual(len(moved), 1)
             # Destination keeps the clean (non-suffixed) basename.
             self.assertEqual(moved[0], f"{base}.mp3")
+
+    @patch("lib.download.music_tag")
+    def test_moves_file_from_incomplete_ancestor_folder(self, mock_mt):
+        """Regression: full processing must tolerate legacy slskd layouts
+        where the finished files still sit under ``incomplete/<album>/CD2``.
+        """
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(
+                tmpdir, "incomplete", "1991- Back To Mono (1958-1969)", "CD2")
+            os.makedirs(folder)
+            fname = "01.- The Ronettes - Be My Baby.mp3"
+            src = os.path.join(folder, fname)
+            with open(src, "w") as fp:
+                fp.write("fake audio")
+
+            files = [make_download_file(
+                filename=(
+                    "@@ctvhz\\Shared Music\\Everything Else Music\\"
+                    "Phil Spector [USA]\\1991- Back To Mono (1958-1969)\\"
+                    f"CD2\\{fname}"
+                ),
+                file_dir=(
+                    "@@ctvhz\\Shared Music\\Everything Else Music\\"
+                    "Phil Spector [USA]\\1991- Back To Mono (1958-1969)\\CD2"
+                ),
+                size=len("fake audio"),
+            )]
+            files[0].disk_no = 2
+            files[0].disk_count = 3
+            album = make_grab_list_entry(
+                files=files, mb_release_id="", artist="Phil Spector",
+                title="Back to Mono", year="1991")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = False
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertFalse(os.path.exists(src))
+            self.assertFalse(os.path.exists(folder))
+            import_folder = os.path.join(
+                tmpdir, "Phil Spector - Back to Mono (1991)")
+            moved = os.listdir(import_folder)
+            self.assertEqual(moved, ["Disk 2 - 01.- The Ronettes - Be My Baby.mp3"])
+
+    @patch("lib.download.music_tag")
+    def test_moves_file_with_forward_slash_remote_path(self, mock_mt):
+        """Compatibility: some remote path payloads may arrive slash-normalized.
+        Basename extraction and on-disk resolution must accept either separator.
+        """
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = os.path.join(tmpdir, "Kid A")
+            os.makedirs(folder)
+            fname = "04 How To Disappear Completely.mp3"
+            src = os.path.join(folder, fname)
+            with open(src, "w") as fp:
+                fp.write("fake audio")
+
+            files = [make_download_file(
+                filename=f"@@wcren/Music/Radiohead/Kid A/{fname}",
+                file_dir="@@wcren/Music/Radiohead/Kid A",
+                size=len("fake audio"),
+            )]
+            album = make_grab_list_entry(
+                files=files, mb_release_id="", artist="Radiohead",
+                title="Kid A", year="2000")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = False
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertFalse(os.path.exists(src))
+            import_folder = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
+            moved = os.listdir(import_folder)
+            self.assertEqual(moved, [fname])
 
 
 class TestPollActiveDownloads(unittest.TestCase):
