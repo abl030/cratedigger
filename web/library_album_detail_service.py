@@ -38,7 +38,9 @@ class SupportsLibraryAlbumDetailPipelineDB(
         ...
 
 
-def _timestamp(value: object | None) -> float:
+def _timestamp(value: object | None) -> float | None:
+    if value is None:
+        return None
     if isinstance(value, datetime):
         return value.timestamp()
     if isinstance(value, float):
@@ -75,9 +77,9 @@ def _min_track_bitrate(tracks: Sequence["LibraryAlbumTrack"]) -> int | None:
 class LibraryAlbumTrack(msgspec.Struct, frozen=True):
     """Typed frontend contract for one library album track."""
 
-    disc: int
-    track: int
-    title: str
+    disc: int | None
+    track: int | None
+    title: str | None
     length: float | None
     format: str
     bitrate: int | None
@@ -107,7 +109,7 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     track_count: int
     mb_releasegroupid: str | None
     release_group_title: str
-    added: float
+    added: float | None
     formats: str
     min_bitrate: int | None
     type: str
@@ -139,9 +141,9 @@ def build_library_album_detail(
     tracks = [
         msgspec.convert(
             {
-                "disc": track["disc"],
-                "track": track["track"],
-                "title": track["title"],
+                "disc": track.get("disc"),
+                "track": track.get("track"),
+                "title": track.get("title"),
                 "length": track.get("length"),
                 "format": str(track.get("format") or ""),
                 "bitrate": track.get("bitrate"),

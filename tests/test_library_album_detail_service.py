@@ -144,6 +144,28 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.download_history[0].downloaded_label, "MP3 320")
         self.assertTrue(detail.download_history[0].verdict)
 
+    def test_build_library_album_detail_preserves_nullable_legacy_fields(self) -> None:
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(
+                added=None,
+                tracks=[
+                    _track(
+                        disc=None,
+                        track=None,
+                        title=None,
+                    ),
+                ],
+            ),
+            pipeline_request=None,
+            download_history=[],
+        )
+
+        self.assertIsNone(detail.added)
+        self.assertEqual(len(detail.tracks), 1)
+        self.assertIsNone(detail.tracks[0].disc)
+        self.assertIsNone(detail.tracks[0].track)
+        self.assertIsNone(detail.tracks[0].title)
+
     def test_load_library_album_detail_resolves_discogs_request(self) -> None:
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
