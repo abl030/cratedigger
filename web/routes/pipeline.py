@@ -5,13 +5,13 @@ import re
 import msgspec
 
 from web.classify import classify_log_entry, LogEntry
+from lib.import_dispatch import DispatchOutcome, finalize_request
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
                          get_decision_tree, full_pipeline_decision)
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
-from lib.transitions import apply_transition
 from lib.util import resolve_failed_path
 from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                 ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
@@ -24,6 +24,20 @@ def _server():
     """Deferred import to avoid circular deps."""
     from web import server
     return server
+
+
+def _transition_request(db, request_id: int, status: str, **extra: object) -> None:
+    """Route request-status writes through the shared finalization seam."""
+
+    finalize_request(
+        db,
+        request_id,
+        DispatchOutcome.transition(
+            to_status=status,
+            success=status == "imported",
+            transition_fields=extra,
+        ),
+    )
 
 
 # ── GET handlers ─────────────────────────────────────────────────
@@ -423,10 +437,10 @@ def post_pipeline_update(h, body: dict) -> None:
             kwargs["search_filetype_override"] = quality
         if min_br is not None:
             kwargs["min_bitrate"] = min_br
-        apply_transition(s._db(), int(req_id), "wanted", **kwargs)
+        _transition_request(s._db(), int(req_id), "wanted", **kwargs)
     else:
-        apply_transition(s._db(), int(req_id), new_status,
-                         from_status=req["status"])
+        _transition_request(
+            s._db(), int(req_id), new_status, from_status=req["status"])
 
     h._json({"status": "ok", "id": req_id, "new_status": new_status})
 
@@ -455,10 +469,14 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         quality = resolve_user_requeue_override(
             existing.get("search_filetype_override"))
         req_id = existing["id"]
-        apply_transition(s._db(), req_id, "wanted",
-                         from_status=existing["status"],
-                         search_filetype_override=quality,
-                         min_bitrate=min_bitrate)
+        _transition_request(
+            s._db(),
+            req_id,
+            "wanted",
+            from_status=existing["status"],
+            search_filetype_override=quality,
+            min_bitrate=min_bitrate,
+        )
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -498,10 +516,14 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
         # Newly added request — status is already 'wanted', set quality override
-        apply_transition(s._db(), req_id, "wanted",
-                         from_status="wanted",
-                         search_filetype_override=quality,
-                         min_bitrate=min_bitrate)
+        _transition_request(
+            s._db(),
+            req_id,
+            "wanted",
+            from_status="wanted",
+            search_filetype_override=quality,
+            min_bitrate=min_bitrate,
+        )
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -544,14 +566,19 @@ def post_pipeline_set_quality(h, body: dict) -> None:
             extra: dict[str, object] = {"search_filetype_override": None}
             if min_bitrate is not None:
                 extra["min_bitrate"] = int(min_bitrate)
-            apply_transition(s._db(), req_id, "imported",
-                             from_status=existing["status"], **extra)
+            _transition_request(
+                s._db(),
+                req_id,
+                "imported",
+                from_status=existing["status"],
+                **extra,
+            )
         elif new_status == "wanted" and existing["status"] != "wanted":
-            apply_transition(s._db(), req_id, "wanted",
-                             from_status=existing["status"])
+            _transition_request(
+                s._db(), req_id, "wanted", from_status=existing["status"])
         else:
-            apply_transition(s._db(), req_id, new_status,
-                             from_status=existing["status"])
+            _transition_request(
+                s._db(), req_id, new_status, from_status=existing["status"])
 
     h._json({
         "status": "ok",
@@ -597,10 +624,14 @@ def post_pipeline_set_intent(h, body: dict) -> None:
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        apply_transition(s._db(), int(req_id), "wanted",
-                         from_status="imported",
-                         search_filetype_override=QUALITY_LOSSLESS,
-                         min_bitrate=min_br)
+        _transition_request(
+            s._db(),
+            int(req_id),
+            "wanted",
+            from_status="imported",
+            search_filetype_override=QUALITY_LOSSLESS,
+            min_bitrate=min_br,
+        )
         s._db().update_request_fields(int(req_id), target_format=target_format)
         h._json({
             "status": "ok",
@@ -685,7 +716,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         }
         if min_br is not None:
             ban_kwargs["min_bitrate"] = min_br
-        apply_transition(s._db(), int(req_id), "wanted", **ban_kwargs)
+        _transition_request(s._db(), int(req_id), "wanted", **ban_kwargs)
 
     h._json({
         "status": "ok",

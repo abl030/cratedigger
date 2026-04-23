@@ -19,10 +19,11 @@ import music_tag
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, decide_download_action,
+                         compute_effective_override_bitrate,
                          extract_usernames,
                          rejection_backfill_override)
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
-                                 dispatch_import)
+                                 dispatch_import_core, finalize_request)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
                       log_validation_result)
@@ -471,73 +472,56 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
             except Exception:
                 logger.exception(f"Error writing tags for: {file.import_path}")
         if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
-            outcome = _process_beets_validation(
-                album_data, import_folder_fullpath, ctx)
-            if outcome is not None and outcome.deferred:
-                # Release-lock contention. Propagate ``None`` so
-                # ``_run_completed_processing`` leaves the request's
-                # status, active_download_state, and staged files
-                # untouched for the next cycle to retry.
-                return None
+            from lib.beets import beets_validate as _bv
+            from lib.preimport import run_preimport_gates
+
+            bv_result = _bv(ctx.cfg.beets_harness_path, import_folder_fullpath,
+                            album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
+            usernames_pre = set(f.username for f in album_data.files if f.username)
+            bv_result.soulseek_username = (
+                ", ".join(sorted(usernames_pre)) if usernames_pre else None
+            )
+            bv_result.download_folder = import_folder_fullpath
+
+            if bv_result.valid:
+                dl_pre = _build_download_info(album_data)
+                db = (ctx.pipeline_db_source._get_db()
+                      if ctx.pipeline_db_source is not None else None)
+                preimport = run_preimport_gates(
+                    path=import_folder_fullpath,
+                    mb_release_id=album_data.mb_release_id or "",
+                    label=f"{album_data.artist} - {album_data.title}",
+                    download_filetype=dl_pre.filetype or "",
+                    download_min_bitrate_bps=dl_pre.bitrate,
+                    download_is_vbr=dl_pre.is_vbr,
+                    cfg=ctx.cfg,
+                    db=db,
+                    request_id=album_data.db_request_id,
+                    usernames=usernames_pre,
+                )
+                album_data.download_spectral = preimport.download_spectral
+                album_data.current_spectral = preimport.existing_spectral
+                album_data.current_min_bitrate = preimport.existing_min_bitrate
+                if not preimport.valid:
+                    bv_result.valid = False
+                    bv_result.scenario = preimport.scenario
+                    bv_result.detail = preimport.detail
+                    if preimport.corrupt_files:
+                        bv_result.corrupt_files = preimport.corrupt_files
+
+            if bv_result.valid:
+                outcome = _handle_valid_result(
+                    album_data, bv_result, import_folder_fullpath, ctx)
+                if outcome is not None and outcome.deferred:
+                    # Release-lock contention. Propagate ``None`` so
+                    # ``_run_completed_processing`` leaves the request's
+                    # status, active_download_state, and staged files
+                    # untouched for the next cycle to retry.
+                    return None
+            else:
+                _handle_rejected_result(
+                    album_data, bv_result, import_folder_fullpath, ctx)
         return True
-
-
-def _process_beets_validation(album_data: GrabListEntry, import_folder_fullpath: str,
-                              ctx: CratediggerContext) -> "DispatchOutcome | None":
-    """Beets validation sub-path of process_completed_album.
-
-    After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
-    for the shared audio + spectral gates. The force/manual-import path
-    (``dispatch_import_from_db``) calls the same function — only the beets
-    distance check is path-specific.
-
-    Returns the dispatch outcome when the auto-import path fires,
-    ``None`` when beets validation rejects (``_handle_rejected_result``
-    already handles the state transition) or when the non-auto
-    redownload path takes over in ``_handle_valid_result``. Caller
-    uses the ``deferred`` flag to decide whether to flip status.
-    """
-    from lib.beets import beets_validate as _bv
-    from lib.preimport import run_preimport_gates
-    bv_result = _bv(ctx.cfg.beets_harness_path, import_folder_fullpath,
-                    album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
-    # Populate source info
-    usernames_pre = set(f.username for f in album_data.files if f.username)
-    bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
-    bv_result.download_folder = import_folder_fullpath
-
-    if bv_result.valid:
-        dl_pre = _build_download_info(album_data)
-        db = (ctx.pipeline_db_source._get_db()
-              if ctx.pipeline_db_source is not None else None)
-        preimport = run_preimport_gates(
-            path=import_folder_fullpath,
-            mb_release_id=album_data.mb_release_id or "",
-            label=f"{album_data.artist} - {album_data.title}",
-            download_filetype=dl_pre.filetype or "",
-            download_min_bitrate_bps=dl_pre.bitrate,
-            download_is_vbr=dl_pre.is_vbr,
-            cfg=ctx.cfg,
-            db=db,
-            request_id=album_data.db_request_id,
-            usernames=usernames_pre,
-        )
-        album_data.download_spectral = preimport.download_spectral
-        album_data.current_spectral = preimport.existing_spectral
-        album_data.current_min_bitrate = preimport.existing_min_bitrate
-        if not preimport.valid:
-            bv_result.valid = False
-            bv_result.scenario = preimport.scenario
-            bv_result.detail = preimport.detail
-            if preimport.corrupt_files:
-                bv_result.corrupt_files = preimport.corrupt_files
-
-    if bv_result.valid:
-        return _handle_valid_result(
-            album_data, bv_result, import_folder_fullpath, ctx)
-    _handle_rejected_result(
-        album_data, bv_result, import_folder_fullpath, ctx)
-    return None
 
 
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
@@ -545,10 +529,10 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          ctx: CratediggerContext) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
-    Returns the ``DispatchOutcome`` from ``dispatch_import`` when the
+    Returns the ``DispatchOutcome`` from ``dispatch_import_core`` when the
     auto-import path fires (source='request', distance within
     threshold), or ``None`` for the redownload path that just stages
-    and marks done. ``_process_beets_validation`` propagates the
+    and marks done. ``process_completed_album()`` propagates the
     outcome upward so ``_run_completed_processing`` can distinguish
     ``deferred`` from ``success`` / ``failure`` on the release-lock
     contention path.
@@ -567,7 +551,6 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     ``dispatch_import_core``).
     """
     from contextlib import nullcontext
-    from lib.import_dispatch import DispatchOutcome
     from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                  release_id_to_lock_key)
 
@@ -577,9 +560,9 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     will_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
+    pdb = ctx.pipeline_db_source._get_db()
 
     if will_auto_import and album_data.mb_release_id:
-        pdb = ctx.pipeline_db_source._get_db()
         lock_ctx = pdb.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_RELEASE,
             release_id_to_lock_key(album_data.mb_release_id))
@@ -619,8 +602,36 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
             dl_info.actual_filetype = dl_info.filetype
         if will_auto_import:
             assert request_id is not None, "pipeline request must have db_request_id"
-            return dispatch_import(
-                album_data, bv_result, dest, dl_info, request_id, ctx)
+            override_min_bitrate: int | None = None
+            try:
+                req = pdb.get_request(request_id)
+                if req:
+                    override_min_bitrate = compute_effective_override_bitrate(
+                        req.get("min_bitrate"),
+                        req.get("current_spectral_bitrate"),
+                        req.get("current_spectral_grade"),
+                    )
+            except Exception:
+                logger.debug("DB lookup failed for override-min-bitrate")
+
+            return dispatch_import_core(
+                path=dest,
+                mb_release_id=album_data.mb_release_id or "",
+                request_id=request_id,
+                label=f"{album_data.artist} - {album_data.title}",
+                override_min_bitrate=override_min_bitrate,
+                target_format=album_data.db_target_format,
+                verified_lossless_target=ctx.cfg.verified_lossless_target,
+                beets_harness_path=ctx.cfg.beets_harness_path,
+                db=pdb,
+                dl_info=dl_info,
+                distance=bv_result.distance if bv_result.distance is not None else 0.0,
+                scenario=bv_result.scenario or "auto_import",
+                files=album_data.files,
+                cfg=ctx.cfg,
+                requeue_on_failure=True,
+                cooled_down_users=ctx.cooled_down_users,
+            )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
         return None
@@ -950,9 +961,17 @@ def _timeout_album(
     for username in extract_usernames(entry.files):
         if db.check_and_apply_cooldown(username):
             ctx.cooled_down_users.add(username)
-    apply_transition(db, request_id, "wanted",
-                     from_status="downloading",
-                     attempt_type="download")
+    finalize_request(
+        db,
+        request_id,
+        DispatchOutcome.transition(
+            to_status="wanted",
+            success=False,
+            message="Download timed out",
+            from_status="downloading",
+            attempt_type="download",
+        ),
+    )
 
 
 def _persist_updated_download_state(
@@ -1058,14 +1077,30 @@ def _run_completed_processing(
         if outcome:
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
-            apply_transition(db, request_id, "imported",
-                             from_status="downloading")
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status="imported",
+                    success=True,
+                    message="Completed local processing",
+                    from_status="downloading",
+                ),
+            )
         else:
             logger.warning(f"  process_completed_album failed without "
                            f"setting status — resetting to wanted")
-            apply_transition(db, request_id, "wanted",
-                             from_status="downloading",
-                             attempt_type="download")
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    message="Completed processing failed",
+                    from_status="downloading",
+                    attempt_type="download",
+                ),
+            )
 
 
 def poll_active_downloads(ctx: CratediggerContext) -> None:
@@ -1103,8 +1138,16 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             # crashed on a previous run. Reset to wanted so it gets re-searched.
             logger.error(f"Downloading album {request_id} has no active_download_state — "
                          f"resetting to wanted")
-            apply_transition(db, request_id, "wanted",
-                             from_status="downloading")
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    message="Missing active download state",
+                    from_status="downloading",
+                ),
+            )
             continue
 
         # psycopg2 returns JSONB as dict, not string — use from_dict directly

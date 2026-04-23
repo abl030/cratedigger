@@ -193,12 +193,20 @@ class DatabaseSource:
 
     def update_status(self, album_record, status, **extra):
         """Update album status in the pipeline DB."""
-        from lib.transitions import apply_transition
+        from lib.import_dispatch import DispatchOutcome, finalize_request
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
         db = self._get_db()
-        apply_transition(db, request_id, status, **extra)
+        finalize_request(
+            db,
+            request_id,
+            DispatchOutcome.transition(
+                to_status=status,
+                success=status == "imported",
+                transition_fields=extra,
+            ),
+        )
 
     def mark_done(self, album_record, bv_result, dest_path=None,
                   download_info=None):
@@ -232,15 +240,25 @@ class DatabaseSource:
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-        from lib.transitions import apply_transition
+        from lib.import_dispatch import DispatchOutcome, finalize_request
         transition_kwargs: dict[str, object] = dict(
             beets_distance=bv_result.distance,
             beets_scenario=bv_result.scenario,
         )
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        apply_transition(db, request_id, "wanted", **transition_kwargs)
-        db.record_attempt(request_id, "validation")
+        finalize_request(
+            db,
+            request_id,
+            DispatchOutcome.transition(
+                to_status="wanted",
+                success=False,
+                message="Validation rejected",
+                from_status="downloading",
+                attempt_type="validation",
+                transition_fields=transition_kwargs,
+            ),
+        )
 
         db.log_download(
             request_id=request_id,

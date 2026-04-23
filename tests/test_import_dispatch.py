@@ -2,7 +2,8 @@
 
 Orchestration tests (TestDispatchImport, TestQualityGate*) use FakePipelineDB
 and assert domain state. Seam tests (TestOverrideMinBitrate, TestOpus*,
-TestTargetFormat*) test subprocess argv and adapter wiring via MagicMock.
+TestTargetFormat*) exercise the surviving auto-import seam in
+``lib.download._handle_valid_result`` and the core subprocess wiring.
 Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 
@@ -21,7 +22,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 
 
-# --- Local helpers for seam tests that call dispatch_import() (adapter) ---
+# --- Local helpers for auto-import seam tests ---
 
 def _make_album_data(artist="Test Artist", title="Test Album",
                      mb_release_id="test-mbid", db_request_id=42,
@@ -33,7 +34,15 @@ def _make_album_data(artist="Test Artist", title="Test Album",
     mock.mb_release_id = mb_release_id
     mock.db_request_id = db_request_id
     mock.db_source = db_source
-    mock.files = [MagicMock(username="user1", filename="01 - Track.mp3")]
+    mock.db_target_format = None
+    mock.files = [MagicMock(
+        username="user1",
+        filename="01 - Track.mp3",
+        bitRate=None,
+        sampleRate=None,
+        bitDepth=None,
+        isVariableBitRate=None,
+    )]
     return mock
 
 
@@ -42,10 +51,15 @@ def _make_ctx():
     ctx = MagicMock()
     ctx.cfg.beets_harness_path = "/nix/store/fake/harness/run_beets_harness.sh"
     ctx.cfg.beets_distance_threshold = 0.15
+    ctx.cfg.beets_staging_dir = "/tmp/staging"
+    ctx.cfg.verified_lossless_target = ""
+    ctx.cfg.quality_ranks.to_json.return_value = "{}"
     ctx.cooled_down_users = set()
     ctx.pipeline_db_source = MagicMock()
     db_mock = MagicMock()
     db_mock.get_request.return_value = make_request_row(status="downloading")
+    db_mock.advisory_lock.return_value.__enter__.return_value = True
+    db_mock.advisory_lock.return_value.__exit__.return_value = False
     ctx.pipeline_db_source._get_db.return_value = db_mock
     return ctx
 
@@ -62,6 +76,33 @@ def _make_bv_result(distance=0.05):
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _dispatch_valid_result_cmd(
+    *,
+    album_data=None,
+    ctx=None,
+    db_fields=None,
+    ir=None,
+):
+    """Run the surviving auto-import seam and return the harness argv."""
+    from lib.download import _handle_valid_result
+
+    album_data = album_data or _make_album_data()
+    ctx = ctx or _make_ctx()
+    db_mock = ctx.pipeline_db_source._get_db.return_value
+    if db_fields is not None:
+        db_mock.get_request.return_value = db_fields
+    bv_result = _make_bv_result()
+    ir = ir or make_import_result(decision="import")
+
+    with patch("lib.download.stage_to_ai", return_value="/tmp/dest"), \
+         patch("lib.download.log_validation_result"), \
+         patch_dispatch_externals() as ext, \
+         patch("lib.import_dispatch._check_quality_gate_core"), \
+         patch("lib.import_dispatch.parse_import_result", return_value=ir):
+        _handle_valid_result(album_data, bv_result, "/tmp/import", ctx)
+        return ext.run.call_args[0][0]
 
 
 class TestPopulateDlInfoFromImportResult(unittest.TestCase):
@@ -332,8 +373,7 @@ class TestDispatchImport(unittest.TestCase):
 class TestOverrideMinBitrate(unittest.TestCase):
     """Seam tests — subprocess arg wiring for --override-min-bitrate.
 
-    Tests the dispatch_import() adapter's override computation. Will break
-    if import_one becomes a library call (#48).
+    Tests the surviving auto-import seam's override computation.
 
     The override must be grade-aware: spectral bitrate only participates when
     current_spectral_grade is in {suspect, likely_transcode}. Genuine/marginal/
@@ -341,21 +381,7 @@ class TestOverrideMinBitrate(unittest.TestCase):
     """
 
     def _get_override_value(self, db_fields):
-        from lib.import_dispatch import dispatch_import
-        album_data = _make_album_data()
-        ctx = _make_ctx()
-        db_mock = ctx.pipeline_db_source._get_db.return_value
-        db_mock.get_request.return_value = db_fields
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="mp3")
-        ir = make_import_result(decision="import")
-
-        with patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
-            cmd = ext.run.call_args[0][0]
+        cmd = _dispatch_valid_result_cmd(db_fields=db_fields)
 
         for i, arg in enumerate(cmd):
             if arg == "--override-min-bitrate" and i + 1 < len(cmd):
@@ -890,25 +916,16 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
 class TestOpusConversionDispatch(unittest.TestCase):
     """Seam tests — --verified-lossless-target flag wiring.
 
-    Will break if import_one becomes a library call (#48).
+    Exercised through the surviving auto-import seam in lib.download.
     """
 
     def _get_cmd(self, verified_lossless_target=""):
-        from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         ctx = _make_ctx()
         ctx.cfg.verified_lossless_target = verified_lossless_target
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="flac")
         ir = make_import_result(decision="import", was_converted=True,
                                 original_filetype="flac", target_filetype="mp3")
-
-        with patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
-            return ext.run.call_args[0][0]
+        return _dispatch_valid_result_cmd(album_data=album_data, ctx=ctx, ir=ir)
 
     def test_target_flag_passed_when_set(self):
         cmd = self._get_cmd(verified_lossless_target="opus 128")
@@ -945,25 +962,16 @@ class TestOpusConversionDispatch(unittest.TestCase):
 class TestTargetFormatDispatch(unittest.TestCase):
     """Seam tests — --target-format flag wiring.
 
-    Will break if import_one becomes a library call (#48).
+    Exercised through the surviving auto-import seam in lib.download.
     """
 
     def _get_cmd(self, target_format=None):
-        from lib.import_dispatch import dispatch_import
         album_data = _make_album_data()
         album_data.db_target_format = target_format
         ctx = _make_ctx()
         ctx.cfg.verified_lossless_target = ""
-        bv_result = _make_bv_result()
-        dl_info = DownloadInfo(filetype="flac")
         ir = make_import_result(decision="import")
-
-        with patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
-            dispatch_import(album_data, bv_result, "/tmp/dest", dl_info,
-                            42, ctx)
-            return ext.run.call_args[0][0]
+        return _dispatch_valid_result_cmd(album_data=album_data, ctx=ctx, ir=ir)
 
     def test_target_format_passed_when_set(self):
         cmd = self._get_cmd(target_format="flac")

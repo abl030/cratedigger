@@ -11,8 +11,8 @@ import os
 import shutil
 import subprocess as sp
 import sys
-from dataclasses import dataclass
-from typing import Sequence, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Mapping, Sequence, TYPE_CHECKING
 
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, SpectralMeasurement, ValidationResult,
@@ -27,7 +27,6 @@ from lib.preimport import inspect_local_files, run_preimport_gates
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.context import CratediggerContext
     from lib.grab_list import GrabListEntry
     from lib.pipeline_db import PipelineDB
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
@@ -147,6 +146,73 @@ def load_quality_gate_state(
     )
 
 
+@dataclass(frozen=True)
+class DispatchOutcome:
+    """Summary of an import / request-status outcome.
+
+    ``target_status`` + ``transition_fields`` describe the request mutation
+    that ``finalize_request()`` should apply. Callers that only need a result
+    summary can leave them unset.
+    """
+
+    success: bool
+    message: str
+    deferred: bool = False
+    target_status: str | None = None
+    from_status: str | None = None
+    attempt_type: str | None = None
+    transition_fields: dict[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def transition(
+        cls,
+        *,
+        to_status: str,
+        success: bool,
+        message: str = "",
+        from_status: str | None = None,
+        attempt_type: str | None = None,
+        transition_fields: Mapping[str, object] | None = None,
+    ) -> "DispatchOutcome":
+        """Build an outcome that owns one request-status transition."""
+
+        return cls(
+            success=success,
+            message=message,
+            target_status=to_status,
+            from_status=from_status,
+            attempt_type=attempt_type,
+            transition_fields=(
+                dict(transition_fields)
+                if transition_fields is not None
+                else {}
+            ),
+        )
+
+
+def finalize_request(
+    db: "PipelineDB",
+    request_id: int,
+    outcome: "DispatchOutcome",
+) -> None:
+    """Apply the request-status transition described by ``outcome``.
+
+    This is the only production seam that should turn import / requeue
+    decisions into ``album_requests.status`` writes.
+    """
+
+    if outcome.deferred or outcome.target_status is None:
+        return
+
+    transition_kwargs = dict(outcome.transition_fields)
+    if outcome.from_status is not None:
+        transition_kwargs["from_status"] = outcome.from_status
+    if outcome.attempt_type is not None:
+        transition_kwargs["attempt_type"] = outcome.attempt_type
+
+    apply_transition(db, request_id, outcome.target_status, **transition_kwargs)
+
+
 def _do_mark_done(
     db: "PipelineDB",
     request_id: int,
@@ -206,7 +272,16 @@ def _do_mark_done(
                 ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
-    apply_transition(db, request_id, "imported", **update_fields)
+    finalize_request(
+        db,
+        request_id,
+        DispatchOutcome.transition(
+            to_status="imported",
+            success=True,
+            message="Import successful",
+            transition_fields=update_fields,
+        ),
+    )
 
     db.log_download(
         request_id=request_id,
@@ -271,8 +346,18 @@ def _record_rejection_and_maybe_requeue(
         )
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        apply_transition(db, request_id, "wanted", **transition_kwargs)
-        db.record_attempt(request_id, "validation")
+        finalize_request(
+            db,
+            request_id,
+            DispatchOutcome.transition(
+                to_status="wanted",
+                success=False,
+                message=f"Rejected: {scenario}",
+                from_status="downloading",
+                attempt_type="validation",
+                transition_fields=transition_kwargs,
+            ),
+        )
 
     db.log_download(
         request_id=request_id,
@@ -523,10 +608,20 @@ def _check_quality_gate_core(
 
         if decision == "requeue_upgrade":
             upgrade_override = QUALITY_UPGRADE_TIERS
-            apply_transition(db, request_id, "wanted",
-                             from_status="imported",
-                             search_filetype_override=upgrade_override,
-                             min_bitrate=min_br_kbps)
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    message="Queued for upgrade",
+                    from_status="imported",
+                    transition_fields={
+                        "search_filetype_override": upgrade_override,
+                        "min_bitrate": min_br_kbps,
+                    },
+                ),
+            )
             usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(
                 min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
@@ -547,22 +642,38 @@ def _check_quality_gate_core(
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            apply_transition(db, request_id, "wanted",
-                             from_status="imported",
-                             search_filetype_override=lossless_override,
-                             min_bitrate=min_br_kbps)
+            finalize_request(
+                db,
+                request_id,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    message="Queued for lossless verification",
+                    from_status="imported",
+                    transition_fields={
+                        "search_filetype_override": lossless_override,
+                        "min_bitrate": min_br_kbps,
+                    },
+                ),
+            )
             logger.info(
                 f"QUALITY GATE: {label} "
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            apply_transition(
+            finalize_request(
                 db,
                 request_id,
-                "imported",
-                from_status="imported",
-                min_bitrate=min_br_kbps,
-                search_filetype_override=None,  # done searching
+                DispatchOutcome.transition(
+                    to_status="imported",
+                    success=True,
+                    message="Quality gate accepted",
+                    from_status="imported",
+                    transition_fields={
+                        "min_bitrate": min_br_kbps,
+                        "search_filetype_override": None,  # done searching
+                    },
+                ),
             )
             if current.verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
@@ -599,8 +710,8 @@ def dispatch_import_core(
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
-    Used by dispatch_import() (auto-import adapter) and dispatch_import_from_db()
-    (force/manual import) — eliminates the need for heavyweight wrapper objects.
+    Used by the auto-import flow in ``lib.download`` and by
+    ``dispatch_import_from_db()`` (force/manual import).
     """
     from lib.util import trigger_meelo_scan as _trigger_meelo
     from lib.util import trigger_plex_scan as _trigger_plex
@@ -640,7 +751,7 @@ def dispatch_import_core(
         release_lock_key = release_id_to_lock_key(mb_release_id)
     else:
         # Defensive: ``dispatch_import_from_db`` already rejects empty
-        # mbids before reaching here; ``dispatch_import`` uses
+        # mbids before reaching here; the auto-import flow passes
         # ``album_data.mb_release_id or ""``. An empty mbid means
         # there's nothing to serialise across, so skip the lock.
         release_lock_key = None
@@ -785,10 +896,20 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                apply_transition(db, request_id, "imported",
-                                                 from_status="imported",
-                                                 prev_min_bitrate=prev_br,
-                                                 min_bitrate=new_br)
+                                finalize_request(
+                                    db,
+                                    request_id,
+                                    DispatchOutcome.transition(
+                                        to_status="imported",
+                                        success=True,
+                                        message="Updated upgrade delta",
+                                        from_status="imported",
+                                        transition_fields={
+                                            "prev_min_bitrate": prev_br,
+                                            "min_bitrate": new_br,
+                                        },
+                                    ),
+                                )
                             except Exception:
                                 logger.exception("Failed to update upgrade delta")
                     outcome_success = True
@@ -891,7 +1012,17 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    apply_transition(db, request_id, "wanted", **requeue_fields)
+                    finalize_request(
+                        db,
+                        request_id,
+                        DispatchOutcome.transition(
+                            to_status="wanted",
+                            success=False,
+                            message="Queued for another upgrade pass",
+                            from_status="imported",
+                            transition_fields=requeue_fields,
+                        ),
+                    )
 
                 if action.run_quality_gate:
                     _check_quality_gate_core(
@@ -956,89 +1087,6 @@ def dispatch_import_core(
             outcome_message = "Unhandled exception"
 
     return DispatchOutcome(success=outcome_success, message=outcome_message)
-
-
-def dispatch_import(album_data: "GrabListEntry", bv_result: ValidationResult, dest: str,
-                    dl_info: DownloadInfo, request_id: int,
-                    ctx: "CratediggerContext", *, force: bool = False
-                    ) -> "DispatchOutcome":
-    """Import decision tree — thin adapter extracting plain params for the core.
-
-    Called from ``process_completed_album()`` for auto-import.
-
-    Returns ``DispatchOutcome`` so the auto-path caller
-    (``_run_completed_processing``) can distinguish three terminal
-    states: ``success=True`` (import landed; flip to ``imported``),
-    ``deferred=True`` (release lock held; leave row alone for the
-    next cycle), or ``success=False`` with ``deferred=False`` (actual
-    failure; caller's existing fallback reset handles it).
-
-    Pre-#133 this returned ``None`` and callers inferred success from
-    ``process_completed_album``'s boolean. That branch mis-flipped
-    contention to ``imported`` (the C1 bug fixed in commit 43e83e8).
-    The Codex R3 follow-up widened the fix: threading ``deferred``
-    explicitly lets the caller preserve all resumable state
-    (staging, spectral, status) on contention, not just skip the
-    flip.
-    """
-    db = ctx.pipeline_db_source._get_db()
-
-    # Compute override_min_bitrate from DB — grade-aware: current_spectral_bitrate
-    # only lowers the override when current_spectral_grade is suspect/likely_transcode.
-    override_min_bitrate: int | None = None
-    try:
-        req = db.get_request(request_id)
-        if req:
-            override_min_bitrate = compute_effective_override_bitrate(
-                req.get("min_bitrate"),
-                req.get("current_spectral_bitrate"),
-                req.get("current_spectral_grade"))
-    except Exception:
-        logger.debug("DB lookup failed for override-min-bitrate")
-
-    return dispatch_import_core(
-        path=dest,
-        mb_release_id=album_data.mb_release_id or "",
-        request_id=request_id,
-        label=f"{album_data.artist} - {album_data.title}",
-        force=force,
-        override_min_bitrate=override_min_bitrate,
-        target_format=album_data.db_target_format,
-        verified_lossless_target=ctx.cfg.verified_lossless_target,
-        beets_harness_path=ctx.cfg.beets_harness_path,
-        db=db,
-        dl_info=dl_info,
-        distance=bv_result.distance if bv_result.distance is not None else 0.0,
-        scenario=bv_result.scenario or "auto_import",
-        files=album_data.files,
-        cfg=ctx.cfg,
-        requeue_on_failure=True,
-        cooled_down_users=ctx.cooled_down_users,
-    )
-
-
-@dataclass(frozen=True)
-class DispatchOutcome:
-    """Result of ``dispatch_import_*`` — typed return for every caller
-    (auto-path, web/CLI force/manual, tests).
-
-    - ``success``: the import landed in beets and the request is now
-      ``imported``. Callers that further transition the request (the
-      auto-path's ``_run_completed_processing``) branch on this.
-    - ``message``: human-readable summary for UI / logs; never parsed.
-    - ``deferred``: the import did NOT run because a competing process
-      holds the release advisory lock (issue #132 P1 / #133). The
-      request's state is UNTOUCHED — no status transition, no staged
-      cleanup, no spectral clear — so the next cycle can resume
-      exactly where this one left off. Callers MUST check
-      ``deferred`` before applying any "on failure" fallback state
-      transition (Codex PR #136 R2 P1 + R3 P2/P3: every round of
-      review surfaced a different piece of state the old eager
-      reset-to-wanted was clobbering).
-    """
-    success: bool
-    message: str
-    deferred: bool = False
 
 def dispatch_import_from_db(
     db: "PipelineDB",

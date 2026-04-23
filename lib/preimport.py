@@ -8,10 +8,11 @@ check — that is what --force on import_one.py overrides. Every other gate is
 shared, so it lives here in a single function.
 
 Rationale: force-import previously called dispatch_import_core() directly,
-skipping the audio + spectral gates that _process_beets_validation ran in the
-auto path. A transcode rejected by auto-import's spectral gate could be
-force-imported into beets, replacing an existing copy of the same quality with
-no real upgrade. See the "No Parallel Code Paths" rule in
+skipping the audio + spectral gates that ``process_completed_album()`` now
+runs before handing off to the shared auto-import seam. A transcode rejected
+by auto-import's spectral gate could be force-imported into beets, replacing
+an existing copy of the same quality with no real upgrade. See the
+"No Parallel Code Paths" rule in
 .claude/rules/code-quality.md.
 """
 

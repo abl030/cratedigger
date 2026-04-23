@@ -1950,7 +1950,7 @@ class DispatchAction:
 def dispatch_action(decision: str) -> DispatchAction:
     """Map an ImportResult.decision string to the set of actions to take (pure).
 
-    Encodes the if/elif dispatch chain from dispatch_import().
+    Encodes the if/elif dispatch chain from the import dispatch flow.
     """
     if decision in ("import", "preflight_existing"):
         return DispatchAction(mark_done=True, trigger_notifiers=True,
@@ -1993,9 +1993,9 @@ def compute_effective_override_bitrate(
     returned untouched.
 
     When spectral is authorized, the function returns the lower of the two
-    available values (conservative). Used by ``dispatch_import()`` to derive
-    ``--override-min-bitrate`` for ``import_one.py`` and by the quality gate
-    to determine whether to apply a spectral override to the gate bitrate.
+    available values (conservative). Used by the auto / force import seams to
+    derive ``--override-min-bitrate`` for ``import_one.py`` and by the quality
+    gate to determine whether to apply a spectral override to the gate bitrate.
     """
     if spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
         return container_bitrate
