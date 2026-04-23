@@ -153,12 +153,16 @@ For Codex, use:
 
 ```bash
 rm -f /tmp/codex-self-review.txt
-codex exec review --base main -o /tmp/codex-self-review.txt
+nix-shell --run "codex exec review --base main -o /tmp/codex-self-review.txt"
 cat /tmp/codex-self-review.txt
 ```
 
 Notes:
 
+- In this repo, launch Codex review from `nix-shell --run` so any Python or
+  test commands the reviewer executes inherit the dev-shell dependencies
+  (`msgspec`, `psycopg2`, `music-tag`, etc.) instead of failing in plain shell
+  with environment noise.
 - Do not pass a positional prompt with `--base`.
 - If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
 - Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.
@@ -235,12 +239,15 @@ The partner engine should review the branch only after the same-engine pre-revie
 
 ```bash
 rm -f /tmp/codex-review.txt
-codex exec review --base main -o /tmp/codex-review.txt
+nix-shell --run "codex exec review --base main -o /tmp/codex-review.txt"
 cat /tmp/codex-review.txt
 ```
 
 Notes:
 
+- In this repo, launch Codex review from `nix-shell --run` so the reviewer can
+  execute Python or tests with the same dependency set the branch verification
+  uses, instead of plain-shell import failures.
 - Do not pass a positional prompt with `--base`.
 - If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
 - Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.

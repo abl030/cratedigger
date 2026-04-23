@@ -95,10 +95,24 @@ If the current engine is Codex, use the native review command first:
 
 ```bash
 rm -f /tmp/codex-self-review.txt
-codex exec review --base main -o /tmp/codex-self-review.txt
-while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+nix-shell --run "codex exec review --base main -o /tmp/codex-self-review.txt"
 cat /tmp/codex-self-review.txt
 ```
+
+Notes:
+
+- In this repo, launch Codex review from `nix-shell --run` so any Python or
+  test commands the reviewer executes inherit the dev-shell dependencies
+  (`msgspec`, `psycopg2`, `music-tag`, etc.) instead of failing in plain shell.
+- Do not pass a positional prompt with `--base`.
+- If you are launching this from an outer tool wrapper, run it in its own
+  long-lived session and then leave it alone.
+- Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter
+  while the review is running.
+- Do **not** interrupt a quiet review just because the output file is still
+  empty. Codex often writes only at the end.
+- When the session exits, read `/tmp/codex-self-review.txt` and continue from
+  the completed review.
 
 Run the partner review on the branch only after that pre-review and grep gate are clean.
 
@@ -106,12 +120,24 @@ Run the partner review on the branch only after that pre-review and grep gate ar
 
 ```bash
 rm -f /tmp/codex-review.txt
-codex exec review --base main -o /tmp/codex-review.txt
-while pgrep -f "codex-raw exec review" > /dev/null; do sleep 30; done
+nix-shell --run "codex exec review --base main -o /tmp/codex-review.txt"
 cat /tmp/codex-review.txt
 ```
 
-Do not pass a positional prompt with `--base`.
+Notes:
+
+- In this repo, launch Codex review from `nix-shell --run` so the reviewer can
+  execute Python or tests with the same dependency set the branch verification
+  uses, instead of plain-shell import failures.
+- Do not pass a positional prompt with `--base`.
+- If you are launching this from an outer tool wrapper, run it in its own
+  long-lived session and then leave it alone.
+- Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter
+  while the review is running.
+- Do **not** interrupt a quiet review just because the output file is still
+  empty. Codex often writes only at the end.
+- When the session exits, read `/tmp/codex-review.txt` and continue from the
+  completed review.
 
 #### If Codex is the primary driver, use Claude as partner reviewer
 
@@ -119,7 +145,7 @@ Do not pass a positional prompt with `--base`.
 rm -f /tmp/claude-review.txt
 cat <<'EOF' | claude -p --model opus \
   --permission-mode dontAsk \
-  --allowedTools "Bash(git status --short --branch),Bash(git diff main...HEAD),Bash(git show --stat --summary HEAD),Bash(rg *),Bash(sed *)" \
+  --allowedTools "Bash(git status --short --branch),Bash(git diff main...HEAD),Bash(git show --stat --summary HEAD),Bash(rg *),Bash(sed *),Bash(cat /tmp/*),Bash(nix-shell --run *)" \
   > /tmp/claude-review.txt
 You are an adversarial code reviewer.
 
@@ -140,13 +166,19 @@ EOF
 cat /tmp/claude-review.txt
 ```
 
-Use stdin for the prompt. In this environment that is the reliable `claude -p` path when the allowlist is present.
+Use stdin for the prompt. In this environment, the reliable headless shape is
+the normal `claude -p` auth path with a narrow allowlist that still includes
+`nix-shell --run ...` and `/tmp` reads, so the reviewer can inspect real
+verification output without falling out of the repo environment.
 
 Notes:
 
-- keep normal `claude -p` auth resolution; do **not** add `--bare` unless auth comes from `ANTHROPIC_API_KEY` or explicit `--settings`
-- do **not** use `bypassPermissions` / `--dangerously-skip-permissions` for review, because that defeats the constrained allowlist
-- if `/tmp/claude-review.txt` stays empty while the process is still running, Claude may still be working; it often writes once at completion
+- keep normal `claude -p` auth resolution; do **not** add `--bare` unless auth
+  comes from `ANTHROPIC_API_KEY` or explicit `--settings`
+- do **not** use `bypassPermissions` / `--dangerously-skip-permissions` for
+  review, because that defeats the constrained allowlist
+- if `/tmp/claude-review.txt` stays empty while the process is still running,
+  Claude may still be working; it often writes once at completion
 
 Fix every real finding, add the missing regression coverage, and rerun review if the branch changed materially.
 
