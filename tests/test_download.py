@@ -904,6 +904,23 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
             )
             self.assertEqual(resolve_slskd_local_path(f, tmpdir), src)
 
+    def test_does_not_cross_album_match_from_download_root(self):
+        """Never fall back to a basename-only hit from an unrelated album."""
+        from lib.download import resolve_slskd_local_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wrong_folder = os.path.join(tmpdir, "Other Album", "CD1")
+            os.makedirs(wrong_folder)
+            wrong = os.path.join(wrong_folder, "04.mp3")
+            with open(wrong, "w") as fp:
+                fp.write("x" * 4096)
+            f = make_download_file(
+                filename="@@user\\Wanted Album\\CD1\\04.mp3",
+                file_dir="@@user\\Wanted Album\\CD1",
+                size=4096,
+            )
+            self.assertIsNone(resolve_slskd_local_path(f, tmpdir))
+
     def test_returns_none_when_file_missing(self):
         from lib.download import resolve_slskd_local_path
         import tempfile

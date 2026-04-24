@@ -198,6 +198,37 @@ class TestCleanupStagedDir(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
+    """Seam tests for the shared rejection finalizer."""
+
+    @patch("lib.import_dispatch.finalize_request")
+    def test_requeue_defers_from_status_lookup_to_finalize_request(
+        self,
+        mock_finalize,
+    ) -> None:
+        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
+
+        _record_rejection_and_maybe_requeue(
+            db,  # type: ignore[arg-type]
+            42,
+            DownloadInfo(username="user1"),
+            distance=0.5,
+            scenario="quality_downgrade",
+            detail="too low",
+            error=None,
+            requeue=True,
+        )
+
+        mock_finalize.assert_called_once()
+        _db_arg, request_id, outcome = mock_finalize.call_args.args
+        self.assertEqual(request_id, 42)
+        self.assertIsNone(outcome.from_status)
+        self.assertEqual(outcome.attempt_type, "validation")
+
+
 class TestDispatchImport(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
