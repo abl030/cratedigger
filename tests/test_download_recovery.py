@@ -272,16 +272,16 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 },
             }],
             set(),
-            existing_local_paths={"/tmp/staging/Test Artist/Test Album"},
             staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: path == "/tmp/staging/Test Artist/Test Album",
         )
 
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].request_id, 1)
         self.assertIn("legacy shared staged path", issues[0].detail)
 
-    def test_skips_request_scoped_auto_import_path(self):
+    def test_reports_request_scoped_auto_import_path_as_blocked(self):
         issues = find_blocked_processing_path_issues(
             [{
                 "id": 1,
@@ -303,11 +303,43 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 },
             }],
             set(),
-            existing_local_paths={
-                "/tmp/staging/auto-import/Test Artist/Test Album [request-1]",
-            },
             staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("request-scoped auto-import staged path", issues[0].detail)
+
+    def test_skips_stale_canonical_current_path_with_request_scoped_recovery(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "current_path": "/tmp/downloads/Test Artist - Test Album (2020)",
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
         )
 
         self.assertEqual(issues, [])

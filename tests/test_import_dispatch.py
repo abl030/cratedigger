@@ -87,6 +87,7 @@ def _dispatch_valid_result_cmd(
 ):
     """Run the surviving auto-import seam and return the harness argv."""
     from lib.download import _handle_valid_result
+    from lib.staged_album import StagedAlbum
 
     album_data = album_data or _make_album_data()
     ctx = ctx or _make_ctx()
@@ -96,13 +97,28 @@ def _dispatch_valid_result_cmd(
     bv_result = _make_bv_result()
     ir = ir or make_import_result(decision="import")
 
-    with patch("lib.download.stage_to_ai", return_value="/tmp/dest"), \
-         patch("lib.download.log_validation_result"), \
-         patch_dispatch_externals() as ext, \
-         patch("lib.import_dispatch._check_quality_gate_core"), \
-         patch("lib.import_dispatch.parse_import_result", return_value=ir):
-        _handle_valid_result(album_data, bv_result, "/tmp/import", ctx)
-        return ext.run.call_args[0][0]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_dir = os.path.join(tmpdir, "import")
+        dest_dir = os.path.join(tmpdir, "dest")
+        os.makedirs(source_dir)
+        with open(os.path.join(source_dir, "01 - Track.mp3"), "w", encoding="utf-8") as fp:
+            fp.write("fake audio")
+
+        with patch("lib.download.stage_to_ai_path", return_value=dest_dir), \
+             patch("lib.download.log_validation_result"), \
+             patch_dispatch_externals() as ext, \
+             patch("lib.import_dispatch._check_quality_gate_core"), \
+             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+            _handle_valid_result(
+                album_data,
+                bv_result,
+                StagedAlbum(
+                    current_path=source_dir,
+                    request_id=album_data.db_request_id,
+                ),
+                ctx,
+            )
+            return ext.run.call_args[0][0]
 
 
 class TestPopulateDlInfoFromImportResult(unittest.TestCase):

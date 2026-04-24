@@ -18,15 +18,14 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.import_dispatch import transition_request as _transition_request
 from lib.config import read_runtime_config
 from lib.download_recovery import (find_blocked_processing_path_issues,
                                    find_blocked_recovery_issues)
+from lib.import_dispatch import transition_request
 from lib.pipeline_db import PipelineDB
 from lib.processing_paths import directory_has_entries
 from lib.quality import (OrphanInfo, find_inconsistencies,
                          find_orphaned_downloads, suggest_repair)
-from lib.transitions import apply_transition
 
 DEFAULT_DSN = os.environ.get(
     "PIPELINE_DB_DSN",
@@ -60,18 +59,10 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
         try:
             cfg = read_runtime_config()
             active = _get_slskd_active_transfers(slskd_host, slskd_key)
-            existing_local_paths = {
-                current_path
-                for row in rows
-                for state in [row.get("active_download_state")]
-                if isinstance(state, dict)
-                for current_path in [state.get("current_path")]
-                if isinstance(current_path, str) and os.path.exists(current_path)
-            }
             orphans = find_orphaned_downloads(
                 rows,
                 active,
-                existing_local_paths=existing_local_paths,
+                existing_local_paths=None,
             )
             blocked_processing_path_issues = [
                 OrphanInfo(
@@ -82,9 +73,9 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                 for issue in find_blocked_processing_path_issues(
                     rows,
                     active,
-                    existing_local_paths=existing_local_paths,
                     staging_dir=cfg.beets_staging_dir,
                     slskd_download_dir=cfg.slskd_download_dir,
+                    has_entries=directory_has_entries,
                 )
             ]
             blocked_recovery_issues = [
@@ -149,7 +140,7 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
     for issue in issues:
         repair = suggest_repair(issue)
         if repair.action == "reset_to_wanted":
-            _transition_request(
+            transition_request(
                 db,
                 issue.request_id,
                 "wanted",
@@ -169,6 +160,8 @@ def _get_all_rows(db: PipelineDB) -> list:
         "FROM album_requests ORDER BY id"
     )
     return [dict(r) for r in cur.fetchall()]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline repair tool")
     parser.add_argument("--dsn", default=DEFAULT_DSN)
