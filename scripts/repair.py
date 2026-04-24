@@ -81,6 +81,7 @@ def _auto_import_in_progress(
                 WHERE locktype = 'advisory'
                   AND classid = %s
                   AND objid = %s
+                  AND objsubid = 2
                   AND mode = 'ExclusiveLock'
                   AND granted
                   AND database = (
