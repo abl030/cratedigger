@@ -568,28 +568,39 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
     if wants_auto_import and not album_data.mb_release_id:
         detail = "Request auto-import requires a MusicBrainz release ID"
+        failed_result = ValidationResult(
+            distance=bv_result.distance if bv_result.distance is not None else 0.0,
+            scenario="request_missing_mbid",
+            detail=detail,
+            error="missing_mbid",
+        )
+        failed_result.failed_path = move_failed_import(
+            import_folder_fullpath,
+            scenario=failed_result.scenario,
+        )
         logger.error(
             f"AUTO-IMPORT REJECTED: {album_data.artist} - {album_data.title} — "
             f"{detail}"
         )
+        log_validation_result(album_data, failed_result, ctx.cfg)
         if request_id is not None:
             db = ctx.pipeline_db_source._get_db()
             dl_info = _build_download_info(album_data)
-            validation_json = ValidationResult(
-                distance=bv_result.distance if bv_result.distance is not None else 0.0,
-                scenario="request_missing_mbid",
-                detail=detail,
-                error="missing_mbid",
-            ).to_json()
-            dl_info.validation_result = validation_json
+            if album_data.download_spectral is not None:
+                dl_info.download_spectral = album_data.download_spectral
+                dl_info.current_spectral = album_data.current_spectral
+                dl_info.existing_min_bitrate = album_data.current_min_bitrate
+                dl_info.slskd_filetype = dl_info.filetype
+                dl_info.actual_filetype = dl_info.filetype
+            validation_json = failed_result.to_json()
             _record_rejection_and_maybe_requeue(
                 db,
                 request_id,
                 dl_info,
-                distance=bv_result.distance if bv_result.distance is not None else 0.0,
-                scenario="request_missing_mbid",
+                distance=failed_result.distance if failed_result.distance is not None else 0.0,
+                scenario=failed_result.scenario or "request_missing_mbid",
                 detail=detail,
-                error="missing_mbid",
+                error=failed_result.error,
                 requeue=True,
                 validation_result=validation_json,
             )

@@ -1031,6 +1031,8 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
                     transition_fields=extra or None,
                 ),
             )
+        except ValueError as e:
+            print(f"  [WARN] Pipeline DB transition rejected: {e}", file=sys.stderr)
         finally:
             db.close()
     except Exception as e:

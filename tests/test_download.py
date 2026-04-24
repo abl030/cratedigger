@@ -924,6 +924,7 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
     def test_request_source_without_mbid_requeues_instead_of_marking_done(self):
         """Request rows without an MBID must requeue, not mark imported."""
         from lib.download import _handle_valid_result
+        import tempfile
 
         album = make_grab_list_entry(
             files=[make_download_file()],
@@ -941,12 +942,23 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
         ctx = make_ctx_with_fake_db(db)
         ctx.cfg.beets_distance_threshold = 0.15
 
-        with patch("lib.download.stage_to_ai", return_value="/tmp/staged"), \
+        with tempfile.TemporaryDirectory() as tmpdir, \
              patch("lib.download.log_validation_result"):
-            outcome = _handle_valid_result(album, bv_result, "/tmp/import", ctx)
+            import_dir = os.path.join(tmpdir, "Test Artist - Test Album")
+            os.makedirs(import_dir)
+            with open(os.path.join(import_dir, "01 - Track.mp3"), "w",
+                      encoding="utf-8") as fp:
+                fp.write("x")
 
-        assert outcome is not None
-        self.assertFalse(outcome.success)
+            outcome = _handle_valid_result(album, bv_result, import_dir, ctx)
+
+            assert outcome is not None
+            self.assertFalse(outcome.success)
+            self.assertFalse(os.path.exists(import_dir))
+            failed_dir = os.path.join(tmpdir, "failed_imports")
+            self.assertTrue(os.path.isdir(failed_dir))
+            self.assertEqual(len(os.listdir(failed_dir)), 1)
+
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.request(42)["validation_attempts"], 1)
         self.assertEqual(len(db.download_logs), 1)
