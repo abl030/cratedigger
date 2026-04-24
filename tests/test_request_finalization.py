@@ -172,9 +172,11 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         self,
         rel_path: str,
         module_string_constants: dict[str, str] | None = None,
+        transition_aliases: dict[str, str] | None = None,
     ) -> None:
         self.rel_path = rel_path
         self.module_string_constants = module_string_constants or {}
+        self.transition_aliases = transition_aliases or {}
         self.offending: list[tuple[int, str, str]] = []
 
     def _status_arg(self, func_name: str, node: ast.Call) -> ast.expr | None:
@@ -234,7 +236,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         func_name: str | None = None
         if isinstance(node.func, ast.Name):
-            func_name = node.func.id
+            func_name = self.transition_aliases.get(node.func.id, node.func.id)
         elif isinstance(node.func, ast.Attribute):
             func_name = node.func.attr
 
@@ -261,6 +263,7 @@ class TestTerminalTransitionContract(unittest.TestCase):
             visitor = _RequestStatusWriteVisitor(
                 rel_path,
                 _module_string_constants(tree),
+                _transition_aliases(tree),
             )
             visitor.visit(tree)
             for lineno, reason, snippet in visitor.offending:
@@ -274,6 +277,7 @@ class TestTerminalTransitionContract(unittest.TestCase):
                 visitor = _RequestStatusWriteVisitor(
                     rel,
                     _module_string_constants(tree),
+                    _transition_aliases(tree),
                 )
                 visitor.visit(tree)
                 for lineno, reason, snippet in visitor.offending:
@@ -311,6 +315,24 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
     return constants
 
 
+def _transition_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    if not isinstance(tree, ast.Module):
+        return aliases
+
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "lib.transitions":
+            continue
+        for imported in node.names:
+            if imported.name != "apply_transition":
+                continue
+            aliases[imported.asname or imported.name] = imported.name
+
+    return aliases
+
+
 class TestRequestStatusWriteVisitor(unittest.TestCase):
     def test_allows_module_constant_for_downloading_in_download_module(self) -> None:
         tree = ast.parse(
@@ -320,6 +342,7 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
         visitor = _RequestStatusWriteVisitor(
             "lib/download.py",
             _module_string_constants(tree),
+            _transition_aliases(tree),
         )
 
         visitor.visit(tree)
@@ -334,11 +357,43 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
         visitor = _RequestStatusWriteVisitor(
             "lib/download.py",
             _module_string_constants(tree),
+            _transition_aliases(tree),
         )
 
         visitor.visit(tree)
 
         self.assertEqual(len(visitor.offending), 1)
+
+    def test_rejects_aliased_apply_transition_import(self) -> None:
+        tree = ast.parse(
+            "from lib.transitions import apply_transition as _do_transition\n"
+            "_do_transition(db, 42, 'wanted')\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "web/routes/pipeline.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+
+    def test_allows_aliased_apply_transition_for_downloading_in_download_module(self) -> None:
+        tree = ast.parse(
+            "from lib.transitions import apply_transition as _do_transition\n"
+            "STATUS_DOWNLOADING = 'downloading'\n"
+            "_do_transition(db, 42, STATUS_DOWNLOADING)\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(visitor.offending, [])
 
 
 if __name__ == "__main__":

@@ -108,6 +108,31 @@ class TestPipelineDbUpdate(unittest.TestCase):
         db.close.assert_called_once()
         self.assertIn("Pipeline DB update failed", stderr.getvalue())
 
+    @patch("lib.import_dispatch.apply_transition")
+    @patch("lib.pipeline_db.PipelineDB")
+    def test_update_pipeline_db_distinguishes_transition_whitelist_errors(
+        self,
+        mock_db_cls,
+        mock_transition,
+    ) -> None:
+        from harness import import_one
+
+        db = MagicMock()
+        mock_db_cls.return_value = db
+        stderr = io.StringIO()
+
+        with patch("sys.stderr", stderr):
+            import_one.update_pipeline_db(
+                42,
+                "wanted",
+                imported_path="/Beets/Artist/Album",
+            )
+
+        mock_transition.assert_not_called()
+        db.close.assert_called_once()
+        self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
+        self.assertIn("unknown keys: imported_path", stderr.getvalue())
+
 
 # ============================================================================
 # StageResult
