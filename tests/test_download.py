@@ -921,8 +921,8 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
             )
             self.assertIsNone(resolve_slskd_local_path(f, tmpdir))
 
-    def test_request_source_without_mbid_stages_without_auto_import(self):
-        """Auto-import requires an MBID; blank IDs should not assert."""
+    def test_request_source_without_mbid_requeues_instead_of_marking_done(self):
+        """Request rows without an MBID must requeue, not mark imported."""
         from lib.download import _handle_valid_result
 
         album = make_grab_list_entry(
@@ -936,16 +936,20 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
         bv_result.scenario = "strong_match"
         bv_result.to_json.return_value = '{"valid": true}'
 
-        source = MagicMock()
-        ctx = _make_ctx(pipeline_db_source=source)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ctx = make_ctx_with_fake_db(db)
+        ctx.cfg.beets_distance_threshold = 0.15
 
         with patch("lib.download.stage_to_ai", return_value="/tmp/staged"), \
              patch("lib.download.log_validation_result"):
             outcome = _handle_valid_result(album, bv_result, "/tmp/import", ctx)
 
-        self.assertIsNone(outcome)
-        source._get_db.assert_not_called()
-        source.mark_done.assert_called_once()
+        assert outcome is not None
+        self.assertFalse(outcome.success)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.request(42)["validation_attempts"], 1)
+        self.assertEqual(len(db.download_logs), 1)
 
     def test_returns_none_when_file_missing(self):
         from lib.download import resolve_slskd_local_path

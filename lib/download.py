@@ -18,11 +18,13 @@ import music_tag
 
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         DownloadDecision, decide_download_action,
+                         DownloadDecision, ValidationResult,
+                         decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
                          rejection_backfill_override)
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
+                                 _record_rejection_and_maybe_requeue,
                                  dispatch_import_core, finalize_request)
 from lib.transitions import apply_transition
 from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
@@ -30,7 +32,6 @@ from lib.util import (sanitize_folder_name, move_failed_import, stage_to_ai,
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
-    from lib.quality import ValidationResult
 
 logger = logging.getLogger("cratedigger")
 MAX_FILE_RETRIES = 5
@@ -561,14 +562,43 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     source_type = album_data.db_source or "redownload"
     request_id = album_data.db_request_id
     dist = bv_result.distance if bv_result.distance is not None else 1.0
-    will_auto_import = (
+    wants_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
-    if will_auto_import and not album_data.mb_release_id:
-        will_auto_import = False
+
+    if wants_auto_import and not album_data.mb_release_id:
+        detail = "Request auto-import requires a MusicBrainz release ID"
+        logger.error(
+            f"AUTO-IMPORT REJECTED: {album_data.artist} - {album_data.title} — "
+            f"{detail}"
+        )
+        if request_id is not None:
+            db = ctx.pipeline_db_source._get_db()
+            dl_info = _build_download_info(album_data)
+            validation_json = ValidationResult(
+                distance=bv_result.distance if bv_result.distance is not None else 0.0,
+                scenario="request_missing_mbid",
+                detail=detail,
+                error="missing_mbid",
+            ).to_json()
+            dl_info.validation_result = validation_json
+            _record_rejection_and_maybe_requeue(
+                db,
+                request_id,
+                dl_info,
+                distance=bv_result.distance if bv_result.distance is not None else 0.0,
+                scenario="request_missing_mbid",
+                detail=detail,
+                error="missing_mbid",
+                requeue=True,
+                validation_result=validation_json,
+            )
+        return DispatchOutcome(success=False, message=detail)
+
+    will_auto_import = wants_auto_import
     pdb = None
 
-    if will_auto_import and album_data.mb_release_id:
+    if will_auto_import:
         pdb = ctx.pipeline_db_source._get_db()
         lock_ctx = pdb.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_RELEASE,
