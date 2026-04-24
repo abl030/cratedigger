@@ -17,15 +17,34 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     request_id: int
     outcome: str
     created_at: str | None
-    soulseek_username: str | None
-    downloaded_label: str
-    verdict: str
     beets_scenario: str | None
     beets_distance: float | None
+    beets_detail: str | None
+    soulseek_username: str | None
+    error_message: str | None
+    import_result: str | dict[str, object] | None
+    validation_result: str | dict[str, object] | None
+    filetype: str | None
+    bitrate: int | None
+    was_converted: bool | None
+    original_filetype: str | None
+    actual_filetype: str | None
+    actual_min_bitrate: int | None
+    slskd_filetype: str | None
+    slskd_bitrate: int | None
+    downloaded_label: str
+    verdict: str
     spectral_grade: str | None
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
     existing_spectral_bitrate: int | None
+    album_title: str
+    artist_name: str
+    mb_release_id: str | None
+    request_status: str | None
+    request_min_bitrate: int | None
+    search_filetype_override: str | None
+    source: str | None
 
     def to_dict(self) -> dict[str, object]:
         return cast(dict[str, object], msgspec.to_builtins(self))
@@ -41,19 +60,9 @@ def build_download_history_rows(
         classified = classify_log_entry(entry)
         items.append(msgspec.convert(
             {
-                "id": entry.id,
-                "request_id": entry.request_id,
-                "outcome": entry.outcome,
-                "created_at": entry.created_at,
-                "soulseek_username": entry.soulseek_username,
+                **entry.to_json_dict(),
                 "downloaded_label": classified.downloaded_label,
                 "verdict": classified.verdict,
-                "beets_scenario": entry.beets_scenario,
-                "beets_distance": entry.beets_distance,
-                "spectral_grade": entry.spectral_grade,
-                "spectral_bitrate": entry.spectral_bitrate,
-                "existing_min_bitrate": entry.existing_min_bitrate,
-                "existing_spectral_bitrate": entry.existing_spectral_bitrate,
             },
             type=DownloadHistoryViewRow,
         ))
