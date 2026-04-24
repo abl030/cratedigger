@@ -133,6 +133,27 @@ class TestPipelineDbUpdate(unittest.TestCase):
         self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
         self.assertIn("imported_path", stderr.getvalue())
 
+    @patch("lib.transitions.finalize_request")
+    @patch("lib.pipeline_db.PipelineDB")
+    def test_update_pipeline_db_rejects_unknown_status_and_closes_db(
+        self,
+        mock_db_cls,
+        mock_finalize,
+    ) -> None:
+        from harness import import_one
+
+        db = MagicMock()
+        mock_db_cls.return_value = db
+        stderr = io.StringIO()
+
+        with patch("sys.stderr", stderr):
+            import_one.update_pipeline_db(42, "queued")
+
+        mock_finalize.assert_not_called()
+        db.close.assert_called_once()
+        self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
+        self.assertIn("queued", stderr.getvalue())
+
 
 # ============================================================================
 # StageResult

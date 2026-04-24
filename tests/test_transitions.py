@@ -273,6 +273,15 @@ class TestRequestTransition(unittest.TestCase):
         with self.assertRaises(TypeError):
             RequestTransition.to_wanted(imported_path="/Beets/Artist/Album")  # type: ignore[call-arg]
 
+    def test_wanted_fields_reject_imported_only_fields(self):
+        with self.assertRaisesRegex(ValueError, "imported_path"):
+            RequestTransition.to_wanted_fields(
+                fields={"imported_path": "/Beets/Artist/Album"})
+
+    def test_imported_fields_reject_downloading_only_fields(self):
+        with self.assertRaisesRegex(ValueError, "state_json"):
+            RequestTransition.to_imported_fields(fields={"state_json": "{}"})
+
     def test_transition_fields_are_immutable(self):
         transition = RequestTransition.to_manual(from_status="wanted")
 
