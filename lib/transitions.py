@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal, Mapping, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -58,6 +59,10 @@ _IMPORTED_FIELDS = frozenset({
     "verified_lossless",
 })
 
+_DOWNLOADING_FIELDS = frozenset({"state_json"})
+_MANUAL_FIELDS = frozenset()
+_RESERVED_FIELDS = frozenset({"from_status", "attempt_type"})
+
 
 def _field_or_omitted(fields: Mapping[str, object], key: str) -> object:
     if key in fields:
@@ -77,6 +82,35 @@ def _reject_unknown_fields(
             f"{target_status} transitions do not accept fields: {names}")
 
 
+def _validate_transition_fields(
+    target_status: str,
+    fields: Mapping[str, object],
+) -> None:
+    reserved = set(fields) & _RESERVED_FIELDS
+    if reserved:
+        names = ", ".join(sorted(reserved))
+        raise ValueError(
+            "RequestTransition.fields must not include reserved keys: "
+            f"{names}. Use the explicit RequestTransition fields instead."
+        )
+
+    if target_status == "wanted":
+        _reject_unknown_fields(target_status, fields, _WANTED_FIELDS)
+        return
+    if target_status == "imported":
+        _reject_unknown_fields(target_status, fields, _IMPORTED_FIELDS)
+        return
+    if target_status == "manual":
+        _reject_unknown_fields(target_status, fields, _MANUAL_FIELDS)
+        return
+    if target_status == "downloading":
+        _reject_unknown_fields(target_status, fields, _DOWNLOADING_FIELDS)
+        if "state_json" not in fields:
+            raise ValueError("state_json is required for downloading transitions")
+        return
+    raise ValueError(f"Unknown request status: {target_status!r}")
+
+
 @dataclass(frozen=True)
 class RequestTransition:
     """A typed command for one album_requests state transition."""
@@ -84,7 +118,10 @@ class RequestTransition:
     target_status: RequestStatus
     from_status: str | None = None
     attempt_type: str | None = None
-    fields: dict[str, object] = field(default_factory=dict)
+    fields: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
 
     @classmethod
     def to_wanted(
@@ -236,6 +273,8 @@ def finalize_request(
     transition: RequestTransition,
 ) -> None:
     """Apply one validated request-state transition command."""
+
+    _validate_transition_fields(transition.target_status, transition.fields)
 
     transition_kwargs = dict(transition.fields)
     if transition.from_status is not None:

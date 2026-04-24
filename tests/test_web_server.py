@@ -1472,6 +1472,24 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(self._override_passed(mock_transition),
                          QUALITY_UPGRADE_TIERS)
 
+    @patch("lib.transitions.finalize_request")
+    def test_upgrade_omits_min_bitrate_when_beets_lookup_misses(
+            self, mock_transition):
+        """Missing Beets quality data must not clear the existing DB baseline."""
+        self._beets.get_min_bitrate.return_value = None
+        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+            id=1704, status="imported", min_bitrate=320,
+            search_filetype_override="lossless",
+        )
+
+        status, _data = self._post("/api/pipeline/upgrade",
+                                    {"mb_release_id": self.RELEASE_ID})
+
+        self.assertEqual(status, 200)
+        transition = mock_transition.call_args.args[2]
+        self.assertNotIn("min_bitrate", transition.fields)
+        self.assertEqual(transition.fields["search_filetype_override"], "lossless")
+
     # -- Update (status → wanted) ---------------------------------------
 
     @patch("lib.transitions.finalize_request")

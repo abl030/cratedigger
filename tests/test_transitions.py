@@ -1,6 +1,7 @@
 """Tests for lib/transitions.py — state transition validation and side effects."""
 
 import unittest
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from lib.transitions import (
@@ -263,6 +264,12 @@ class TestRequestTransition(unittest.TestCase):
         with self.assertRaises(TypeError):
             RequestTransition.to_wanted(imported_path="/Beets/Artist/Album")  # type: ignore[call-arg]
 
+    def test_transition_fields_are_immutable(self):
+        transition = RequestTransition.to_manual(from_status="wanted")
+
+        with self.assertRaises(TypeError):
+            cast(Any, transition.fields)["imported_path"] = "/Beets/Artist/Album"
+
     def test_status_only_rejects_downloading_without_state(self):
         with self.assertRaisesRegex(ValueError, "state_json"):
             RequestTransition.status_only("downloading", from_status="wanted")
@@ -294,6 +301,30 @@ class TestFinalizeRequest(unittest.TestCase):
             min_bitrate=245,
             prev_min_bitrate=320,
         )
+
+    def test_rejects_direct_constructor_wrong_fields_at_finalization(self):
+        db = MagicMock()
+        transition = RequestTransition(
+            "manual",
+            from_status="wanted",
+            fields={"imported_path": "/Beets/Artist/Album"},
+        )
+
+        with patch("lib.transitions.apply_transition") as mock_apply:
+            with self.assertRaisesRegex(ValueError, "manual transitions"):
+                finalize_request(db, 42, transition)
+
+        mock_apply.assert_not_called()
+
+    def test_rejects_downloading_without_state_at_finalization(self):
+        db = MagicMock()
+        transition = RequestTransition("downloading", from_status="wanted")
+
+        with patch("lib.transitions.apply_transition") as mock_apply:
+            with self.assertRaisesRegex(ValueError, "state_json"):
+                finalize_request(db, 42, transition)
+
+        mock_apply.assert_not_called()
 
 
 if __name__ == "__main__":

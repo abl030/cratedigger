@@ -463,13 +463,17 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         quality = resolve_user_requeue_override(
             existing.get("search_filetype_override"))
         req_id = existing["id"]
+        transition_fields: dict[str, object] = {
+            "search_filetype_override": quality,
+        }
+        if min_bitrate is not None:
+            transition_fields["min_bitrate"] = min_bitrate
         transitions.finalize_request(
             s._db(),
             req_id,
-            transitions.RequestTransition.to_wanted(
+            transitions.RequestTransition.to_wanted_fields(
                 from_status=existing["status"],
-                search_filetype_override=quality,
-                min_bitrate=min_bitrate,
+                fields=transition_fields,
             ),
         )
         h._json({
