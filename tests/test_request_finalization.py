@@ -141,7 +141,12 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Attribute):
             func_name = node.func.attr
 
-        if func_name in {"apply_transition", "update_status"}:
+        if func_name in {
+            "apply_transition",
+            "reset_to_wanted",
+            "set_downloading",
+            "update_status",
+        }:
             if not self._allow_direct_transition_call(func_name, node):
                 self.offending.append((
                     node.lineno,
@@ -286,6 +291,30 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
             "STATUS_DOWNLOADING = 'downloading'\n"
             "_do_transition(db, 42, STATUS_DOWNLOADING)\n"
         )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+
+    def test_rejects_direct_reset_to_wanted_call(self) -> None:
+        tree = ast.parse("db.reset_to_wanted(42)\n")
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+
+    def test_rejects_direct_set_downloading_call(self) -> None:
+        tree = ast.parse('db.set_downloading(42, "{}")\n')
         visitor = _RequestStatusWriteVisitor(
             "lib/download.py",
             _module_string_constants(tree),

@@ -845,6 +845,42 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             result = process_completed_album(album, [], ctx)
             self.assertTrue(result)
 
+    @patch("lib.download._process_beets_validation")
+    @patch("lib.download.music_tag")
+    def test_dispatch_outcome_summary_does_not_drive_outer_status(
+        self,
+        mock_mt,
+        mock_validation,
+    ):
+        """Auto-import summaries must not become fallback status transitions."""
+        from lib.download import process_completed_album
+        from lib.import_dispatch import DispatchOutcome
+        import tempfile, os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_dir = os.path.join(tmpdir, "source_dir")
+            os.makedirs(src_dir)
+            with open(os.path.join(src_dir, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            files = [make_download_file(filename="source_dir\\01 - Track.mp3",
+                                        file_dir="source_dir")]
+            album = make_grab_list_entry(files=files, mb_release_id="test-mbid")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = True
+            mock_mt.load_file.return_value = MagicMock()
+            mock_validation.return_value = DispatchOutcome(
+                success=True,
+                message="Import successful",
+            )
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertIsNone(result)
+            mock_validation.assert_called_once()
+
     def test_returns_false_on_file_move_failure(self):
         """File move failure returns False."""
         from lib.download import process_completed_album
@@ -1411,7 +1447,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx)
 
-            self.assertFalse(result)
+            self.assertIsNone(result)
             self.assertEqual(db.request(1)["status"], "wanted")
             self.assertEqual(len(db.download_logs), 1)
             self.assertEqual(

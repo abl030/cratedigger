@@ -611,15 +611,13 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
     Returns three-valued ``bool | None``:
-    - ``True`` — files moved and tagged successfully, and any auto-import
-      dispatch succeeded.
-    - ``False`` — a non-deferred failure happened. Outer caller resets to
-      ``wanted`` only if the request row is still ``downloading``.
-    - ``None`` — processing left the row untouched. This covers release-lock
-      contention, post-move staged paths that must not be auto-retried
-      because they already live under ``beets_staging_dir``, and guarded
-      request rejects where ownership cannot be proven. Outer caller must
-      NOT touch status.
+    - ``True`` — local non-dispatch processing succeeded. Outer caller may
+      finalize only if the request row is still ``downloading``.
+    - ``False`` — local non-dispatch processing failed. Outer caller resets
+      to ``wanted`` only if the request row is still ``downloading``.
+    - ``None`` — the validation / dispatch path either already owned the
+      request transition or intentionally left state untouched for retry /
+      manual recovery. Outer caller must NOT touch status.
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
@@ -653,7 +651,11 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
                 # status, active_download_state, and staged files
                 # untouched for the next cycle to retry.
                 return None
-            return outcome.success
+            # DispatchOutcome is an import summary only. The dispatch path
+            # must perform any request transition itself through
+            # lib.transitions; do not let a summary bool mask a missing
+            # typed transition in the outer poller.
+            return None
     return True
 
 
@@ -672,8 +674,7 @@ def _process_beets_validation(album_data: GrabListEntry,
     already handles the state transition) or when the non-auto
     redownload path takes over in ``_handle_valid_result``. Guarded
     ownership-less rejects also return a deferred outcome so callers
-    keep the row untouched for manual recovery. Caller uses the
-    ``deferred`` flag to decide whether to flip status.
+    keep the row untouched for manual recovery.
     """
     from lib.beets import beets_validate as _bv
     from lib.preimport import run_preimport_gates
@@ -835,13 +836,12 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          ctx: CratediggerContext) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
-    Returns the ``DispatchOutcome`` from ``dispatch_import_core`` when the
-    auto-import path fires (source='request', distance within
+    Returns the ``DispatchOutcome`` summary from ``dispatch_import_core``
+    when the auto-import path fires (source='request', distance within
     threshold), or ``None`` for the redownload path that just stages
-    and marks done. ``process_completed_album()`` propagates the
-    outcome upward so ``_run_completed_processing`` can distinguish
-    ``deferred`` from ``success`` / ``failure`` on the release-lock
-    contention path.
+    and marks done. ``process_completed_album()`` only uses the summary
+    to detect deferred no-op cases; request-state changes remain owned
+    by the dispatch/finalization seam itself.
 
     This function acquires the RELEASE advisory lock outer for the
     auto-import path *before* ``StagedAlbum.move_to`` runs, so

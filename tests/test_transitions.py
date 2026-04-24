@@ -209,6 +209,15 @@ class TestApplyTransition(unittest.TestCase):
                              state_json='{"filetype":"flac"}')
         self.assertTrue(any("status guard" in msg for msg in cm.output))
 
+    def test_downloading_requires_state_json(self):
+        db = self._make_db("wanted")
+
+        with self.assertRaisesRegex(ValueError, "state_json"):
+            apply_transition(db, 1, "downloading", from_status="wanted")
+
+        db.set_downloading.assert_not_called()
+        db.update_status.assert_not_called()
+
     def test_request_not_found(self):
         db = MagicMock()
         db.get_request.return_value = None
@@ -319,6 +328,20 @@ class TestFinalizeRequest(unittest.TestCase):
     def test_rejects_downloading_without_state_at_finalization(self):
         db = MagicMock()
         transition = RequestTransition("downloading", from_status="wanted")
+
+        with patch("lib.transitions.apply_transition") as mock_apply:
+            with self.assertRaisesRegex(ValueError, "state_json"):
+                finalize_request(db, 42, transition)
+
+        mock_apply.assert_not_called()
+
+    def test_rejects_downloading_with_explicit_none_state_at_finalization(self):
+        db = MagicMock()
+        transition = RequestTransition(
+            "downloading",
+            from_status="wanted",
+            fields={"state_json": None},
+        )
 
         with patch("lib.transitions.apply_transition") as mock_apply:
             with self.assertRaisesRegex(ValueError, "state_json"):

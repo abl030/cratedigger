@@ -105,8 +105,10 @@ def _validate_transition_fields(
         return
     if target_status == "downloading":
         _reject_unknown_fields(target_status, fields, _DOWNLOADING_FIELDS)
-        if "state_json" not in fields:
+        if "state_json" not in fields or fields["state_json"] is None:
             raise ValueError("state_json is required for downloading transitions")
+        if not isinstance(fields["state_json"], str):
+            raise ValueError("state_json must be a string")
         return
     raise ValueError(f"Unknown request status: {target_status!r}")
 
@@ -396,7 +398,11 @@ def apply_transition(
     fx = VALID_TRANSITIONS.get((from_status, to_status), TransitionSideEffects())
 
     # wanted → downloading: use set_downloading with JSONB state
-    if to_status == "downloading" and state_json is not None:
+    if to_status == "downloading":
+        if state_json is None:
+            raise ValueError("state_json is required for downloading transitions")
+        if not isinstance(state_json, str):
+            raise ValueError("state_json must be a string")
         if not db.set_downloading(request_id, state_json):
             logger.warning(
                 f"apply_transition: status guard prevented {from_status!r} -> "
