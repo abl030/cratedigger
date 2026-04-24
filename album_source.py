@@ -224,10 +224,7 @@ class DatabaseSource:
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
         from lib.import_dispatch import DispatchOutcome, finalize_request
-        transition_kwargs: dict[str, object] = dict(
-            beets_distance=bv_result.distance,
-            beets_scenario=bv_result.scenario,
-        )
+        transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
         finalize_request(

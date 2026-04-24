@@ -33,20 +33,7 @@ class TestFinalizeRequest(unittest.TestCase):
         mock_transition.assert_not_called()
 
     @patch("lib.import_dispatch.apply_transition")
-    def test_unsuccessful_outcome_without_target_status_skips_transition(
-        self,
-        mock_transition: MagicMock,
-    ) -> None:
-        finalize_request(
-            MagicMock(),
-            42,
-            DispatchOutcome(success=False, message="failed summary"),
-        )
-
-        mock_transition.assert_not_called()
-
-    @patch("lib.import_dispatch.apply_transition")
-    def test_successful_outcome_without_target_status_is_rejected(
+    def test_outcome_without_target_status_is_rejected(
         self,
         mock_transition: MagicMock,
     ) -> None:
@@ -54,7 +41,7 @@ class TestFinalizeRequest(unittest.TestCase):
             finalize_request(
                 MagicMock(),
                 42,
-                DispatchOutcome(success=True, message="ok"),
+                DispatchOutcome(success=False, message="failed summary"),
             )
 
         mock_transition.assert_not_called()
@@ -161,6 +148,17 @@ class TestFinalizeRequest(unittest.TestCase):
                     to_status="wanted",
                     success=False,
                     transition_fields={"min_birate": 245},
+                ),
+            )
+
+        with self.assertRaisesRegex(ValueError, "unknown keys: beets_distance"):
+            finalize_request(
+                MagicMock(),
+                42,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    transition_fields={"beets_distance": 0.12},
                 ),
             )
 

@@ -564,6 +564,8 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     will_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
+    if will_auto_import and not album_data.mb_release_id:
+        will_auto_import = False
     pdb = None
 
     if will_auto_import and album_data.mb_release_id:

@@ -39,7 +39,13 @@ _SPECIAL_TRANSITION_FIELDS = frozenset({
     "state_json",
 })
 
-_ALLOWED_TRANSITION_FIELDS = frozenset({
+_COMMON_TRANSITION_FIELDS = frozenset({
+    "min_bitrate",
+    "prev_min_bitrate",
+    "search_filetype_override",
+})
+
+_IMPORTED_TRANSITION_FIELDS = frozenset({
     "beets_distance",
     "beets_scenario",
     "current_spectral_bitrate",
@@ -48,11 +54,15 @@ _ALLOWED_TRANSITION_FIELDS = frozenset({
     "imported_path",
     "last_download_spectral_bitrate",
     "last_download_spectral_grade",
-    "min_bitrate",
-    "prev_min_bitrate",
-    "search_filetype_override",
     "verified_lossless",
 })
+
+_ALLOWED_TRANSITION_FIELDS_BY_TARGET: dict[str, frozenset[str]] = {
+    "downloading": frozenset(),
+    "imported": _COMMON_TRANSITION_FIELDS | _IMPORTED_TRANSITION_FIELDS,
+    "manual": frozenset(),
+    "wanted": _COMMON_TRANSITION_FIELDS,
+}
 
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
@@ -226,18 +236,20 @@ def finalize_request(
         return
 
     if outcome.target_status is None:
-        if outcome.success:
-            raise ValueError(
-                "Successful DispatchOutcome passed to finalize_request() "
-                "must declare target_status."
-            )
-        return
+        raise ValueError(
+            "DispatchOutcome passed to finalize_request() "
+            "must declare target_status."
+        )
 
     transition_field_names = set(outcome.transition_fields)
     reserved_fields = _SPECIAL_TRANSITION_FIELDS & transition_field_names
+    allowed_fields = _ALLOWED_TRANSITION_FIELDS_BY_TARGET.get(
+        outcome.target_status,
+        frozenset(),
+    )
     unknown_fields = (
         transition_field_names
-        - _ALLOWED_TRANSITION_FIELDS
+        - allowed_fields
         - _SPECIAL_TRANSITION_FIELDS
     )
     if reserved_fields:
@@ -416,10 +428,7 @@ def _record_rejection_and_maybe_requeue(
     via action.denylist, not here.
     """
     if requeue:
-        transition_kwargs: dict[str, object] = dict(
-            beets_distance=distance,
-            beets_scenario=scenario,
-        )
+        transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
         finalize_request(

@@ -229,6 +229,30 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         self.assertIsNone(outcome.attempt_type)
         self.assertEqual(db.request(42)["validation_attempts"], 1)
 
+    def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:
+        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        _record_rejection_and_maybe_requeue(
+            db,  # type: ignore[arg-type]
+            42,
+            DownloadInfo(username="user1"),
+            distance=0.5,
+            scenario="quality_downgrade",
+            detail="too low",
+            error=None,
+            requeue=True,
+            search_filetype_override="flac,mp3 v0",
+        )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "flac,mp3 v0")
+        self.assertIsNone(row["beets_distance"])
+        self.assertIsNone(row["beets_scenario"])
+
 
 class TestDispatchImport(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
