@@ -135,7 +135,34 @@ hedge that weakens the invariant.
 Keep agent-specific attribution trailers in the engine-local rules rather than
 hardcoding them into this shared workflow.
 
-### 6. Run a same-engine pre-review before partner review
+### 6. Review exactly one snapshot
+
+Before any same-engine or partner review, freeze the review target to one exact
+snapshot.
+
+Allowed shapes:
+
+- a clean worktree at the committed branch tip you want reviewed
+- a detached scratch worktree or temporary review branch containing the exact
+  local fixes you want reviewed
+
+Hard rules:
+
+- never ask a reviewer to reason about both committed `HEAD` and extra dirty
+  working-tree changes in the same round
+- do not launch Claude or Codex review from a dirty tree if the reviewer has
+  file-read access to paths that include uncommitted fixes
+- staging alone is not enough when the reviewer can still inspect the dirty
+  filesystem state with `sed`, `cat`, or `rg`
+- if the fixes are not committed yet, materialize them into a clean scratch
+  worktree before review
+- after each review-fix batch, refresh the snapshot before rerunning review
+
+Mixed-state review is expensive nonsense: it spends tokens rediscovering stale
+`HEAD` findings that are already fixed locally and can easily burn another
+~100k tokens for no new information.
+
+### 7. Run a same-engine pre-review before partner review
 
 Before the partner engine reviews the branch, force one disjoint pass from the current engine. Use the strongest option the current platform supports:
 
@@ -163,10 +190,19 @@ Notes:
   test commands the reviewer executes inherit the dev-shell dependencies
   (`msgspec`, `psycopg2`, `music-tag`, etc.) instead of failing in plain shell
   with environment noise.
+- Run this only from a clean review snapshot per section 6. If the current
+  worktree is dirty and those local edits matter, copy them into a scratch
+  worktree first.
 - Do not pass a positional prompt with `--base`.
 - If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
 - Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.
 - Do **not** interrupt a quiet review just because the output file is still empty. Codex often writes only at the end.
+- Treat a quiet review as an expensive remote job, not an interactive shell. A
+  run can stay silent for minutes and still be healthy.
+- Interrupting it mid-run can waste roughly a six-figure token bill of already
+  consumed context and then make you pay again for the replacement round.
+- Unless the user explicitly says to abandon the run, leave it alone until the
+  session exits.
 - When the session exits, read `/tmp/codex-self-review.txt` and continue from the completed review.
 - Treat every real finding as pre-review work. Do **not** count this as satisfying the partner review.
 
@@ -231,7 +267,7 @@ Every remaining match must be:
 - deleted
 - or explicitly justified in code or the follow-up note
 
-### 7. Run the mandatory partner-engine review
+### 8. Run the mandatory partner-engine review
 
 The partner engine should review the branch only after the same-engine pre-review and grep gate are clean for the current batch. Review after each meaningful commit or review-fix batch, and again once at the end.
 
@@ -248,10 +284,19 @@ Notes:
 - In this repo, launch Codex review from `nix-shell --run` so the reviewer can
   execute Python or tests with the same dependency set the branch verification
   uses, instead of plain-shell import failures.
+- Run this only from a clean review snapshot per section 6. Do not let Codex
+  inspect a dirty worktree that mixes old `HEAD` state with newer uncommitted
+  fixes.
 - Do not pass a positional prompt with `--base`.
 - If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
 - Do **not** poll with `pgrep`, `tail`, repeated `cat`, or status chatter while the review is running.
 - Do **not** interrupt a quiet review just because the output file is still empty. Codex often writes only at the end.
+- Treat a quiet review as an expensive remote job, not an interactive shell. A
+  run can stay silent for minutes and still be healthy.
+- Interrupting it mid-run can waste roughly a six-figure token bill of already
+  consumed context and then make you pay again for the replacement round.
+- Unless the user explicitly says to abandon the run, leave it alone until the
+  session exits.
 - When the session exits, read `/tmp/codex-review.txt` and continue from the completed review.
 - Treat every real finding as a fixable issue, not as commentary.
 - If Codex is also available as the current engine's native pre-review, run that first and only then ask Claude or Codex to do the partner pass.
@@ -294,15 +339,24 @@ Notes:
 - `--bare` is great for scripted runs, but it skips stored login/keychain state; in this repo's current setup that can fail with `Not logged in`.
 - Do **not** swap in `bypassPermissions` / `--dangerously-skip-permissions` here. Per Claude's docs, bypass mode ignores the allowlist and approves every tool, which defeats the constrained-review setup.
 - Do **not** give the reviewer edit authority in this pass. If you want the partner engine to patch findings itself, do that as a separate worker step after the review, not inside the review command.
+- Run this only from a clean review snapshot per section 6. If the working tree
+  has extra local fixes beyond committed `HEAD`, review those fixes from a
+  scratch worktree instead of letting Claude see both states at once.
 - If you are launching this from an outer tool wrapper, run it in its own long-lived session and then leave it alone.
 - Do **not** poll `/tmp/claude-review.txt`, tail logs, or narrate the empty file while the review is running.
 - Do **not** interrupt a quiet review just because the output file is still empty. Claude often writes only once the full review completes.
+- Treat a quiet Claude run as an expensive remote job, not an interactive
+  shell. It can sit silent for a long time and still be doing useful work.
+- Interrupting it mid-run can waste roughly a six-figure token bill of already
+  consumed context and then make you pay again for the replacement round.
+- Unless the user explicitly says to abandon the run, leave it alone until the
+  session exits.
 - When the session exits, read `/tmp/claude-review.txt` and continue from the completed review.
 - If Codex is the current engine, the normal sequence is Codex self-review first, then Claude partner review. Do not make Claude spend a round finding grep-level stragglers.
 
 For commit-scoped review, tighten the allowed diff command and prompt to `HEAD~1..HEAD`. For final branch review, keep `main...HEAD`.
 
-### 8. Stop and refactor when reviews keep circling the same seam
+### 9. Stop and refactor when reviews keep circling the same seam
 
 If two review rounds on the branch keep finding real issues around the same invariant, do not keep patching leaves.
 
@@ -317,7 +371,7 @@ Do this before the next round:
 
 If you reach six real review rounds on the same branch, stop. Document the remaining issues as follow-up work instead of pretending the scope is still stable.
 
-### 9. Run one final branch-wide pass
+### 10. Run one final branch-wide pass
 
 After every feature commit and review-fix commit has landed:
 
@@ -333,7 +387,7 @@ After every feature commit and review-fix commit has landed:
 If a final branch-wide review round is still finding real bugs at round 6, stop
 and document follow-up work instead of pretending the branch is converged.
 
-### 10. Open the PR, merge, deploy, verify
+### 11. Open the PR, merge, deploy, verify
 
 1. Open a PR with the acceptance checklist.
 2. Post a PR comment listing every review round, what each review-fix commit
@@ -344,7 +398,7 @@ and document follow-up work instead of pretending the branch is converged.
 
 Use the repo's deploy workflow rather than improvising one.
 
-### 11. Reflect
+### 12. Reflect
 
 Once the change is live, write a short note for the next refactor:
 
