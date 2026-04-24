@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-
 from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import DownloadInfo, ValidationResult
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -88,6 +90,37 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
         """DB records use negative IDs."""
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
         self.assertLess(record.id, 0)
+
+
+class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
+    """Pin the non-DB seam around reject-and-requeue finalization."""
+
+    @patch("lib.import_dispatch.finalize_request")
+    def test_reject_and_requeue_defers_from_status_to_shared_seam(
+        self,
+        mock_finalize: MagicMock,
+    ) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="manual"))
+
+        source = DatabaseSource.__new__(DatabaseSource)
+        source._db = fake_db  # type: ignore[assignment]
+
+        album_record = MagicMock()
+        album_record.db_request_id = 42
+        bv_result = ValidationResult(
+            valid=False,
+            distance=0.35,
+            scenario="high_distance",
+        )
+
+        source.reject_and_requeue(album_record, bv_result)
+
+        db_arg, request_id, outcome = mock_finalize.call_args.args
+        self.assertIs(db_arg, fake_db)
+        self.assertEqual(request_id, 42)
+        self.assertEqual(outcome.target_status, "wanted")
+        self.assertIsNone(outcome.from_status)
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set — skipping PostgreSQL tests")

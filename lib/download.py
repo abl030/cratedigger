@@ -560,9 +560,10 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     will_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
-    pdb = ctx.pipeline_db_source._get_db()
+    pdb = None
 
     if will_auto_import and album_data.mb_release_id:
+        pdb = ctx.pipeline_db_source._get_db()
         lock_ctx = pdb.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_RELEASE,
             release_id_to_lock_key(album_data.mb_release_id))
@@ -602,6 +603,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
             dl_info.actual_filetype = dl_info.filetype
         if will_auto_import:
             assert request_id is not None, "pipeline request must have db_request_id"
+            assert pdb is not None, "auto-import path must hold a pipeline DB handle"
             override_min_bitrate: int | None = None
             try:
                 req = pdb.get_request(request_id)

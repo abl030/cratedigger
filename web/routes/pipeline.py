@@ -23,7 +23,8 @@ from web import discogs as discogs_api
 
 class _TransitionFields(TypedDict, total=False):
     search_filetype_override: str | None
-    min_bitrate: int
+    min_bitrate: int | None
+    prev_min_bitrate: int | None
 
 
 def _server():

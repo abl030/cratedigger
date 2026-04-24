@@ -64,6 +64,7 @@ class TestFinalizeRequest(unittest.TestCase):
                 transition_fields={
                     "search_filetype_override": "flac,mp3 v0",
                     "min_bitrate": 245,
+                    "prev_min_bitrate": 320,
                 },
             ),
         )
@@ -76,6 +77,7 @@ class TestFinalizeRequest(unittest.TestCase):
             attempt_type="download",
             search_filetype_override="flac,mp3 v0",
             min_bitrate=245,
+            prev_min_bitrate=320,
         )
 
     @patch("lib.import_dispatch.apply_transition")
@@ -93,6 +95,7 @@ class TestFinalizeRequest(unittest.TestCase):
             attempt_type="download",
             search_filetype_override="flac,mp3 v0",
             min_bitrate=245,
+            prev_min_bitrate=320,
         )
 
         mock_transition.assert_called_once_with(
@@ -103,6 +106,7 @@ class TestFinalizeRequest(unittest.TestCase):
             attempt_type="download",
             search_filetype_override="flac,mp3 v0",
             min_bitrate=245,
+            prev_min_bitrate=320,
         )
 
     @patch("lib.import_dispatch.apply_transition")
