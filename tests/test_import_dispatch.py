@@ -226,7 +226,8 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         _db_arg, request_id, outcome = mock_finalize.call_args.args
         self.assertEqual(request_id, 42)
         self.assertIsNone(outcome.from_status)
-        self.assertEqual(outcome.attempt_type, "validation")
+        self.assertIsNone(outcome.attempt_type)
+        self.assertEqual(db.request(42)["validation_attempts"], 1)
 
 
 class TestDispatchImport(unittest.TestCase):
