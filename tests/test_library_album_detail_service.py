@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 import unittest
 
@@ -19,6 +20,8 @@ RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 def _track(**overrides: object) -> dict[str, object]:
     track: dict[str, object] = {
+        "id": 11,
+        "artist": "Test Artist",
         "disc": 1,
         "track": 1,
         "title": "Track 1",
@@ -27,6 +30,7 @@ def _track(**overrides: object) -> dict[str, object]:
         "bitrate": 320000,
         "samplerate": 44100,
         "bitdepth": 16,
+        "path": "/music/Test Artist/Test Album/01 Track 1.mp3",
     }
     track.update(overrides)
     return track
@@ -43,6 +47,7 @@ def _beets_detail(**overrides: object) -> dict[str, object]:
         "label": "Test Label",
         "country": "US",
         "added": 1773651901.0,
+        "artpath": "/music/Test Artist/Test Album/cover.jpg",
         "tracks": [_track(), _track(track=2, title="Track 2")],
         "path": "/music/Test Artist/Test Album",
         "source": "musicbrainz",
@@ -71,6 +76,7 @@ def _history_row(**overrides: object) -> dict[str, object]:
         "existing_spectral_bitrate": None,
         "import_result": None,
         "validation_result": None,
+        "source": "request",
     }
     row.update(overrides)
     return row
@@ -128,7 +134,9 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
                 search_filetype_override="flac",
                 target_format="lossless",
             ),
-            download_history=[_history_row()],
+            download_history=[_history_row(
+                validation_result={"detail": "distance too high"},
+            )],
         )
 
         self.assertEqual(detail.pipeline_id, 42)
@@ -143,6 +151,13 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.download_history[0].beets_scenario, "strong_match")
         self.assertEqual(detail.download_history[0].downloaded_label, "MP3 320")
         self.assertTrue(detail.download_history[0].verdict)
+        self.assertEqual(detail.download_history[0].actual_min_bitrate, 320)
+        self.assertEqual(detail.download_history[0].slskd_bitrate, 320000)
+        self.assertEqual(
+            detail.download_history[0].validation_result,
+            {"detail": "distance too high"},
+        )
+        self.assertEqual(detail.download_history[0].source, "request")
 
     def test_build_library_album_detail_preserves_nullable_legacy_fields(self) -> None:
         detail = build_library_album_detail(
@@ -162,9 +177,16 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
 
         self.assertIsNone(detail.added)
         self.assertEqual(len(detail.tracks), 1)
+        self.assertEqual(detail.artpath, "/music/Test Artist/Test Album/cover.jpg")
+        self.assertEqual(detail.tracks[0].id, 11)
+        self.assertEqual(detail.tracks[0].artist, "Test Artist")
         self.assertIsNone(detail.tracks[0].disc)
         self.assertIsNone(detail.tracks[0].track)
         self.assertIsNone(detail.tracks[0].title)
+        self.assertEqual(
+            detail.tracks[0].path,
+            "/music/Test Artist/Test Album/01 Track 1.mp3",
+        )
 
     def test_load_library_album_detail_resolves_discogs_request(self) -> None:
         fake_db = FakePipelineDB()
@@ -207,6 +229,82 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.source, "discogs")
         self.assertEqual(detail.pipeline_id, 55)
         self.assertEqual(detail.download_history[0].soulseek_username, "discogs-user")
+
+    def test_load_library_album_detail_preserves_unknown_release_ids(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=77,
+            mb_release_id="fixture-release-1",
+            artist_name="Fixture Artist",
+            album_title="Fixture Album",
+            source="request",
+            status="wanted",
+        ))
+        lookup = _StubLibraryLookup(_beets_detail(
+            album="Fixture Album",
+            artist="Fixture Artist",
+            mb_albumid="fixture-release-1",
+            source="unknown",
+        ))
+
+        detail = load_library_album_detail(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            album_id=7,
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.mb_albumid, "fixture-release-1")
+        self.assertEqual(detail.source, "unknown")
+        self.assertEqual(detail.pipeline_id, 77)
+
+    def test_load_library_album_detail_preserves_string_history_json_blobs(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=88,
+            mb_release_id=RELEASE_ID,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            source="request",
+            status="wanted",
+        ))
+        fake_db.log_download(
+            88,
+            outcome="success",
+            import_result=json.dumps({
+                "version": 2,
+                "exit_code": 0,
+                "decision": "import",
+            }),
+            validation_result=json.dumps({
+                "failed_path": "/mnt/virtio/music/slskd/failed_imports/Test",
+            }),
+        )
+        lookup = _StubLibraryLookup(_beets_detail())
+
+        detail = load_library_album_detail(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            album_id=7,
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(
+            detail.download_history[0].import_result,
+            json.dumps({
+                "version": 2,
+                "exit_code": 0,
+                "decision": "import",
+            }),
+        )
+        self.assertEqual(
+            detail.download_history[0].validation_result,
+            json.dumps({
+                "failed_path": "/mnt/virtio/music/slskd/failed_imports/Test",
+            }),
+        )
 
     def test_load_library_album_detail_returns_none_when_album_missing(self) -> None:
         lookup = _StubLibraryLookup(None)

@@ -24,8 +24,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-from web.download_history_view import DownloadHistoryViewRow
-from web.library_album_detail_service import LibraryAlbumDetail, LibraryAlbumTrack
 from web.library_album_row import LibraryAlbumRow
 
 _MOCK_PIPELINE_REQUEST = make_request_row(
@@ -2502,9 +2500,33 @@ class TestBeetsRouteContracts(_WebServerCase):
         "mb_releasegroupid", "release_group_title", "added", "formats",
         "min_bitrate", "type", "label", "country", "source",
     }
-    DETAIL_REQUIRED_FIELDS = set(LibraryAlbumDetail.__struct_fields__)
-    TRACK_REQUIRED_FIELDS = set(LibraryAlbumTrack.__struct_fields__)
-    HISTORY_REQUIRED_FIELDS = set(DownloadHistoryViewRow.__struct_fields__)
+    DETAIL_REQUIRED_FIELDS = (
+        ALBUM_REQUIRED_FIELDS | {
+            "artpath", "path", "tracks", "pipeline_id", "pipeline_status",
+            "pipeline_source", "pipeline_min_bitrate",
+            "search_filetype_override", "target_format", "upgrade_queued",
+            "download_history",
+        }
+    )
+    TRACK_REQUIRED_FIELDS = {
+        "id", "artist", "disc", "track", "title", "length", "format",
+        "bitrate", "samplerate", "bitdepth", "path",
+    }
+    # `/api/beets/album/<id>` historically forwarded the full LogEntry JSON
+    # plus derived verdict/downloaded_label. Keep the explicit list here so
+    # route contract coverage catches accidental payload narrowing.
+    HISTORY_REQUIRED_FIELDS = {
+        "id", "request_id", "outcome", "created_at", "beets_scenario",
+        "beets_distance", "beets_detail", "soulseek_username",
+        "error_message", "import_result", "validation_result", "filetype",
+        "bitrate", "was_converted", "original_filetype", "actual_filetype",
+        "actual_min_bitrate", "slskd_filetype", "slskd_bitrate",
+        "downloaded_label", "verdict", "spectral_grade",
+        "spectral_bitrate", "existing_min_bitrate",
+        "existing_spectral_bitrate", "album_title", "artist_name",
+        "mb_release_id", "request_status", "request_min_bitrate",
+        "search_filetype_override", "source",
+    }
     DELETE_REQUIRED_FIELDS = {
         "status", "id", "album", "artist", "deleted_files",
         "pipeline_deleted", "pipeline_id",
@@ -2554,6 +2576,8 @@ class TestBeetsRouteContracts(_WebServerCase):
 
     def _track(self) -> dict:
         return {
+            "id": 11,
+            "artist": "Test Artist",
             "disc": 1,
             "track": 1,
             "title": "Track",
@@ -2562,6 +2586,7 @@ class TestBeetsRouteContracts(_WebServerCase):
             "bitrate": 320000,
             "samplerate": 44100,
             "bitdepth": 16,
+            "path": "/music/Test Artist/Test Album/01 Track.mp3",
         }
 
     def _configure_beets_delete_mock(
@@ -2603,6 +2628,7 @@ class TestBeetsRouteContracts(_WebServerCase):
 
     def test_beets_album_detail_contract(self):
         detail = self._album()
+        detail["artpath"] = "/music/Test Artist/Test Album/cover.jpg"
         detail["path"] = "/music/Test Artist/Test Album"
         detail["tracks"] = [self._track()]
         self.beets.get_album_detail.return_value = detail
@@ -2620,11 +2646,16 @@ class TestBeetsRouteContracts(_WebServerCase):
             self.HISTORY_REQUIRED_FIELDS,
             "beets album detail history",
         )
+        self.assertEqual(data["artpath"], "/music/Test Artist/Test Album/cover.jpg")
+        self.assertEqual(data["tracks"][0]["id"], 11)
+        self.assertEqual(data["tracks"][0]["path"], "/music/Test Artist/Test Album/01 Track.mp3")
+        self.assertEqual(data["download_history"][0]["actual_min_bitrate"], 320)
 
     def test_beets_album_detail_discogs_contract(self):
         detail = self._album()
         detail["mb_albumid"] = "12856590"
         detail["source"] = "discogs"
+        detail["artpath"] = "/music/Test Artist/Test Album/cover.jpg"
         detail["path"] = "/music/Test Artist/Test Album"
         detail["tracks"] = [self._track()]
         self.beets.get_album_detail.return_value = detail
@@ -2652,6 +2683,7 @@ class TestBeetsRouteContracts(_WebServerCase):
     def test_beets_album_detail_allows_nullable_legacy_fields(self):
         detail = self._album()
         detail["added"] = None
+        detail["artpath"] = "/music/Test Artist/Test Album/cover.jpg"
         detail["path"] = "/music/Test Artist/Test Album"
         detail["tracks"] = [
             {

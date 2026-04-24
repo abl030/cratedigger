@@ -17,7 +17,11 @@ from lib.library_delete_service import (
     SupportsLibraryPipelineLookupDB,
     resolve_pipeline_request,
 )
-from lib.release_identity import detect_release_source, frontend_release_id
+from lib.release_identity import (
+    detect_release_source,
+    frontend_release_id,
+    normalize_release_id,
+)
 from web.download_history_view import DownloadHistoryViewRow, build_download_history_rows
 
 
@@ -74,9 +78,28 @@ def _min_track_bitrate(tracks: Sequence["LibraryAlbumTrack"]) -> int | None:
     return min(bitrates) if bitrates else None
 
 
+def _detail_release_id(detail_row: Mapping[str, object]) -> str | None:
+    """Preserve exact-release IDs across canonical and unknown legacy shapes."""
+    frontend_id = frontend_release_id(
+        detail_row.get("mb_albumid"),
+        detail_row.get("discogs_albumid"),
+    )
+    if frontend_id:
+        return frontend_id
+
+    legacy_id = normalize_release_id(detail_row.get("mb_albumid"))
+    if legacy_id:
+        return legacy_id
+
+    discogs_id = normalize_release_id(detail_row.get("discogs_albumid"))
+    return discogs_id or None
+
+
 class LibraryAlbumTrack(msgspec.Struct, frozen=True):
     """Typed frontend contract for one library album track."""
 
+    id: int | None
+    artist: str | None
     disc: int | None
     track: int | None
     title: str | None
@@ -85,6 +108,7 @@ class LibraryAlbumTrack(msgspec.Struct, frozen=True):
     bitrate: int | None
     samplerate: int | None
     bitdepth: int | None
+    path: str | None
 
 
 class LibraryAlbumDetail(msgspec.Struct, frozen=True):
@@ -116,6 +140,7 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     label: str
     country: str | None
     source: str
+    artpath: str | None
     path: str | None
     tracks: list[LibraryAlbumTrack]
     pipeline_id: int | None
@@ -141,6 +166,8 @@ def build_library_album_detail(
     tracks = [
         msgspec.convert(
             {
+                "id": track.get("id"),
+                "artist": track.get("artist"),
                 "disc": track.get("disc"),
                 "track": track.get("track"),
                 "title": track.get("title"),
@@ -149,15 +176,13 @@ def build_library_album_detail(
                 "bitrate": track.get("bitrate"),
                 "samplerate": track.get("samplerate"),
                 "bitdepth": track.get("bitdepth"),
+                "path": track.get("path"),
             },
             type=LibraryAlbumTrack,
         )
         for track in cast(Sequence[Mapping[str, object]], detail_row.get("tracks") or [])
     ]
-    frontend_id = frontend_release_id(
-        detail_row.get("mb_albumid"),
-        detail_row.get("discogs_albumid"),
-    )
+    frontend_id = _detail_release_id(detail_row)
     raw_formats = str(detail_row.get("formats") or "")
     source = str(detail_row.get("source") or detect_release_source(frontend_id))
     history_items = build_download_history_rows(download_history)
@@ -180,6 +205,7 @@ def build_library_album_detail(
             "label": str(detail_row.get("label") or ""),
             "country": detail_row.get("country"),
             "source": source or "unknown",
+            "artpath": detail_row.get("artpath"),
             "path": detail_row.get("path"),
             "tracks": tracks,
             "pipeline_id": pipeline_request.get("id") if pipeline_request else None,
@@ -225,10 +251,7 @@ def load_library_album_detail(
     if detail is None:
         return None
 
-    release_id = frontend_release_id(
-        detail.get("mb_albumid"),
-        detail.get("discogs_albumid"),
-    )
+    release_id = _detail_release_id(detail)
     pipeline_request = (
         resolve_pipeline_request(
             pipeline_db,
