@@ -921,6 +921,32 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
             )
             self.assertIsNone(resolve_slskd_local_path(f, tmpdir))
 
+    def test_request_source_without_mbid_stages_without_auto_import(self):
+        """Auto-import requires an MBID; blank IDs should not assert."""
+        from lib.download import _handle_valid_result
+
+        album = make_grab_list_entry(
+            files=[make_download_file()],
+            mb_release_id="",
+            db_source="request",
+            db_request_id=42,
+        )
+        bv_result = MagicMock()
+        bv_result.distance = 0.05
+        bv_result.scenario = "strong_match"
+        bv_result.to_json.return_value = '{"valid": true}'
+
+        source = MagicMock()
+        ctx = _make_ctx(pipeline_db_source=source)
+
+        with patch("lib.download.stage_to_ai", return_value="/tmp/staged"), \
+             patch("lib.download.log_validation_result"):
+            outcome = _handle_valid_result(album, bv_result, "/tmp/import", ctx)
+
+        self.assertIsNone(outcome)
+        source._get_db.assert_not_called()
+        source.mark_done.assert_called_once()
+
     def test_returns_none_when_file_missing(self):
         from lib.download import resolve_slskd_local_path
         import tempfile
