@@ -429,10 +429,10 @@ def _record_rejection_and_maybe_requeue(
                 to_status="wanted",
                 success=False,
                 message=f"Rejected: {scenario}",
-                attempt_type="validation",
                 transition_fields=transition_kwargs,
             ),
         )
+        db.record_attempt(request_id, "validation")
 
     db.log_download(
         request_id=request_id,
