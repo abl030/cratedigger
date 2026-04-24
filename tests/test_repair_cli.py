@@ -17,12 +17,12 @@ from scripts import repair
 
 
 class TestCmdFix(unittest.TestCase):
-    @patch("scripts.repair.transition_request")
+    @patch("lib.transitions.finalize_request")
     @patch("scripts.repair._collect_issues")
     def test_reset_to_wanted_routes_through_shared_finalizer(
         self,
         mock_collect_issues,
-        mock_transition,
+        mock_finalize,
     ) -> None:
         db = MagicMock()
         mock_collect_issues.return_value = [
@@ -37,13 +37,11 @@ class TestCmdFix(unittest.TestCase):
         with redirect_stdout(stdout):
             repair.cmd_fix(db)
 
-        mock_transition.assert_called_once_with(
-            db,
-            17,
-            "wanted",
-            from_status="downloading",
-            message="Repair reset orphaned download to wanted",
-        )
+        called_db, request_id, transition = mock_finalize.call_args.args
+        self.assertIs(called_db, db)
+        self.assertEqual(request_id, 17)
+        self.assertEqual(transition.target_status, "wanted")
+        self.assertEqual(transition.from_status, "downloading")
         self.assertIn("Reset to wanted", stdout.getvalue())
 
 

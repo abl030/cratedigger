@@ -217,7 +217,7 @@ class TestCleanupStagedDir(unittest.TestCase):
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
     """Seam tests for the shared rejection finalizer."""
 
-    @patch("lib.import_dispatch.finalize_request")
+    @patch("lib.transitions.finalize_request")
     def test_requeue_defers_from_status_lookup_to_finalize_request(
         self,
         mock_finalize,

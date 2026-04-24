@@ -1009,7 +1009,7 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
     Best-effort — failures are logged but do not block the import harness.
     """
     try:
-        from lib.import_dispatch import DispatchOutcome, finalize_request
+        from lib import transitions
         from lib.pipeline_db import PipelineDB
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
@@ -1021,17 +1021,26 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
         if scenario:
             extra["beets_scenario"] = scenario
         try:
-            finalize_request(
+            if status == "imported":
+                transition = transitions.RequestTransition.to_imported_fields(
+                    fields=extra)
+            elif status == "wanted":
+                transition = transitions.RequestTransition.to_wanted_fields(
+                    fields=extra)
+            elif status == "manual":
+                if extra:
+                    names = ", ".join(sorted(extra))
+                    raise ValueError(
+                        f"manual transitions do not accept fields: {names}")
+                transition = transitions.RequestTransition.to_manual()
+            else:
+                transition = transitions.RequestTransition.status_only(status)
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status=status,
-                    success=status == "imported",
-                    message=f"Harness updated request to {status}",
-                    transition_fields=extra or None,
-                ),
+                transition,
             )
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             print(f"  [WARN] Pipeline DB transition rejected: {e}", file=sys.stderr)
         finally:
             db.close()

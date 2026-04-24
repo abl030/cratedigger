@@ -19,9 +19,9 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.config import read_runtime_config
+from lib import transitions
 from lib.download_recovery import (find_blocked_processing_path_issues,
                                    find_blocked_recovery_issues)
-from lib.import_dispatch import transition_request
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
                              release_id_to_lock_key)
 from lib.processing_paths import directory_has_entries
@@ -235,12 +235,11 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
     for issue in issues:
         repair = suggest_repair(issue)
         if repair.action == "reset_to_wanted":
-            transition_request(
+            transitions.finalize_request(
                 db,
                 issue.request_id,
-                "wanted",
-                from_status="downloading",
-                message="Repair reset orphaned download to wanted",
+                transitions.RequestTransition.to_wanted(
+                    from_status="downloading"),
             )
             print(f"  [{issue.request_id}] Reset to wanted ({issue.issue_type})")
         else:

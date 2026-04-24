@@ -223,19 +223,15 @@ class DatabaseSource:
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-        from lib.import_dispatch import DispatchOutcome, finalize_request
+        from lib import transitions
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        finalize_request(
+        transitions.finalize_request(
             db,
             request_id,
-            DispatchOutcome.transition(
-                to_status="wanted",
-                success=False,
-                message="Validation rejected",
-                transition_fields=transition_kwargs,
-            ),
+            transitions.RequestTransition.to_wanted_fields(
+                fields=transition_kwargs),
         )
         db.record_attempt(request_id, "validation")
 

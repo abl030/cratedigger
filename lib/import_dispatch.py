@@ -11,16 +11,16 @@ import os
 import shutil
 import subprocess as sp
 import sys
-from dataclasses import dataclass, field
-from typing import Mapping, Sequence, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Sequence, TYPE_CHECKING
 
+from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, SpectralMeasurement, ValidationResult,
                          QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, narrow_override_on_downgrade,
                          rejection_backfill_override)
-from lib.transitions import apply_transition
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
                       repair_mp3_headers, trigger_meelo_clean)
 from lib.preimport import inspect_local_files, run_preimport_gates
@@ -32,38 +32,6 @@ if TYPE_CHECKING:
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
-
-_SPECIAL_TRANSITION_FIELDS = frozenset({
-    "from_status",
-    "attempt_type",
-    "state_json",
-})
-
-_COMMON_TRANSITION_FIELDS = frozenset({
-    "min_bitrate",
-    "prev_min_bitrate",
-    "search_filetype_override",
-})
-
-_IMPORTED_TRANSITION_FIELDS = frozenset({
-    "beets_distance",
-    "beets_scenario",
-    "current_spectral_bitrate",
-    "current_spectral_grade",
-    "final_format",
-    "imported_path",
-    "last_download_spectral_bitrate",
-    "last_download_spectral_grade",
-    "verified_lossless",
-})
-
-_ALLOWED_TRANSITION_FIELDS_BY_TARGET: dict[str, frozenset[str]] = {
-    "downloading": frozenset(),
-    "imported": _COMMON_TRANSITION_FIELDS | _IMPORTED_TRANSITION_FIELDS,
-    "manual": frozenset(),
-    "wanted": _COMMON_TRANSITION_FIELDS,
-}
-
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -179,126 +147,11 @@ def load_quality_gate_state(
 
 @dataclass(frozen=True)
 class DispatchOutcome:
-    """Summary of an import / request-status outcome.
-
-    ``target_status`` + ``transition_fields`` describe the request mutation
-    that ``finalize_request()`` should apply. Callers that only need a result
-    summary can leave them unset.
-    """
+    """Summary of an import outcome."""
 
     success: bool
     message: str
     deferred: bool = False
-    target_status: str | None = None
-    from_status: str | None = None
-    attempt_type: str | None = None
-    transition_fields: dict[str, object] = field(default_factory=dict)
-
-    @classmethod
-    def transition(
-        cls,
-        *,
-        to_status: str,
-        success: bool,
-        message: str = "",
-        from_status: str | None = None,
-        attempt_type: str | None = None,
-        transition_fields: Mapping[str, object] | None = None,
-    ) -> "DispatchOutcome":
-        """Build an outcome that owns one request-status transition."""
-
-        return cls(
-            success=success,
-            message=message,
-            target_status=to_status,
-            from_status=from_status,
-            attempt_type=attempt_type,
-            transition_fields=(
-                dict(transition_fields)
-                if transition_fields is not None
-                else {}
-            ),
-        )
-
-
-def finalize_request(
-    db: "PipelineDB",
-    request_id: int,
-    outcome: "DispatchOutcome",
-) -> None:
-    """Apply the request-status transition described by ``outcome``.
-
-    This is the only production seam that should turn import / requeue
-    decisions into ``album_requests.status`` writes.
-    """
-
-    if outcome.deferred:
-        return
-
-    if outcome.target_status is None:
-        raise ValueError(
-            "DispatchOutcome passed to finalize_request() "
-            "must declare target_status."
-        )
-
-    transition_field_names = set(outcome.transition_fields)
-    reserved_fields = _SPECIAL_TRANSITION_FIELDS & transition_field_names
-    allowed_fields = _ALLOWED_TRANSITION_FIELDS_BY_TARGET.get(
-        outcome.target_status,
-        frozenset(),
-    )
-    unknown_fields = (
-        transition_field_names
-        - allowed_fields
-        - _SPECIAL_TRANSITION_FIELDS
-    )
-    if reserved_fields:
-        names = ", ".join(sorted(reserved_fields))
-        raise ValueError(
-            "DispatchOutcome.transition_fields must not include reserved keys: "
-            f"{names}. Use the explicit DispatchOutcome fields instead."
-        )
-    if unknown_fields:
-        names = ", ".join(sorted(unknown_fields))
-        raise ValueError(
-            "DispatchOutcome.transition_fields includes unknown keys: "
-            f"{names}."
-        )
-
-    transition_kwargs = dict(outcome.transition_fields)
-    if outcome.from_status is not None:
-        transition_kwargs["from_status"] = outcome.from_status
-    if outcome.attempt_type is not None:
-        transition_kwargs["attempt_type"] = outcome.attempt_type
-
-    apply_transition(db, request_id, outcome.target_status, **transition_kwargs)
-
-
-def transition_request(
-    db: "PipelineDB",
-    request_id: int,
-    to_status: str,
-    *,
-    success: bool = False,
-    from_status: str | None = None,
-    attempt_type: str | None = None,
-    message: str = "",
-    **transition_fields: object,
-) -> None:
-    """Finalize one request-state transition through the shared seam."""
-
-    finalize_request(
-        db,
-        request_id,
-        DispatchOutcome.transition(
-            to_status=to_status,
-            success=success,
-            message=message or f"Transitioned request to {to_status}",
-            from_status=from_status,
-            attempt_type=attempt_type,
-            transition_fields=transition_fields or None,
-        ),
-    )
 
 
 def _do_mark_done(
@@ -360,15 +213,10 @@ def _do_mark_done(
                 ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
-    finalize_request(
+    transitions.finalize_request(
         db,
         request_id,
-        DispatchOutcome.transition(
-            to_status="imported",
-            success=True,
-            message="Import successful",
-            transition_fields=update_fields,
-        ),
+        transitions.RequestTransition.to_imported_fields(fields=update_fields),
     )
 
     db.log_download(
@@ -431,15 +279,11 @@ def _record_rejection_and_maybe_requeue(
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        finalize_request(
+        transitions.finalize_request(
             db,
             request_id,
-            DispatchOutcome.transition(
-                to_status="wanted",
-                success=False,
-                message=f"Rejected: {scenario}",
-                transition_fields=transition_kwargs,
-            ),
+            transitions.RequestTransition.to_wanted_fields(
+                fields=transition_kwargs),
         )
         db.record_attempt(request_id, "validation")
 
@@ -692,18 +536,13 @@ def _check_quality_gate_core(
 
         if decision == "requeue_upgrade":
             upgrade_override = QUALITY_UPGRADE_TIERS
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    message="Queued for upgrade",
+                transitions.RequestTransition.to_wanted(
                     from_status="imported",
-                    transition_fields={
-                        "search_filetype_override": upgrade_override,
-                        "min_bitrate": min_br_kbps,
-                    },
+                    search_filetype_override=upgrade_override,
+                    min_bitrate=min_br_kbps,
                 ),
             )
             usernames = extract_usernames(files)
@@ -726,18 +565,13 @@ def _check_quality_gate_core(
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    message="Queued for lossless verification",
+                transitions.RequestTransition.to_wanted(
                     from_status="imported",
-                    transition_fields={
-                        "search_filetype_override": lossless_override,
-                        "min_bitrate": min_br_kbps,
-                    },
+                    search_filetype_override=lossless_override,
+                    min_bitrate=min_br_kbps,
                 ),
             )
             logger.info(
@@ -745,18 +579,13 @@ def _check_quality_gate_core(
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="imported",
-                    success=True,
-                    message="Quality gate accepted",
+                transitions.RequestTransition.to_imported(
                     from_status="imported",
-                    transition_fields={
-                        "min_bitrate": min_br_kbps,
-                        "search_filetype_override": None,  # done searching
-                    },
+                    min_bitrate=min_br_kbps,
+                    search_filetype_override=None,  # done searching
                 ),
             )
             if current.verified_lossless:
@@ -980,18 +809,13 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                finalize_request(
+                                transitions.finalize_request(
                                     db,
                                     request_id,
-                                    DispatchOutcome.transition(
-                                        to_status="imported",
-                                        success=True,
-                                        message="Updated upgrade delta",
+                                    transitions.RequestTransition.to_imported(
                                         from_status="imported",
-                                        transition_fields={
-                                            "prev_min_bitrate": prev_br,
-                                            "min_bitrate": new_br,
-                                        },
+                                        prev_min_bitrate=prev_br,
+                                        min_bitrate=new_br,
                                     ),
                                 )
                             except Exception:
@@ -1096,15 +920,12 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    finalize_request(
+                    transitions.finalize_request(
                         db,
                         request_id,
-                        DispatchOutcome.transition(
-                            to_status="wanted",
-                            success=False,
-                            message="Queued for another upgrade pass",
+                        transitions.RequestTransition.to_wanted_fields(
                             from_status="imported",
-                            transition_fields=requeue_fields,
+                            fields=requeue_fields,
                         ),
                     )
 

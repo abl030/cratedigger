@@ -95,7 +95,7 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
 class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
     """Pin the non-DB seam around reject-and-requeue finalization."""
 
-    @patch("lib.import_dispatch.finalize_request")
+    @patch("lib.transitions.finalize_request")
     def test_reject_and_requeue_defers_from_status_to_shared_seam(
         self,
         mock_finalize: MagicMock,

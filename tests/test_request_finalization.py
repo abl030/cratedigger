@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from lib.import_dispatch import DispatchOutcome, finalize_request, transition_request
+from lib.import_dispatch import DispatchOutcome
+from lib.transitions import RequestTransition, finalize_request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
@@ -15,38 +16,23 @@ PRODUCTION_FILES = ("album_source.py", "cratedigger.py")
 RAW_SQL_ALLOWED_PATHS = {"lib/pipeline_db.py"}
 
 
+class TestDispatchOutcomeSummary(unittest.TestCase):
+    """Import summaries must not carry request-transition commands."""
+
+    def test_dispatch_outcome_has_no_transition_command_fields(self) -> None:
+        outcome = DispatchOutcome(success=True, message="ok")
+
+        self.assertFalse(hasattr(outcome, "target_status"))
+        self.assertFalse(hasattr(outcome, "from_status"))
+        self.assertFalse(hasattr(outcome, "attempt_type"))
+        self.assertFalse(hasattr(outcome, "transition_fields"))
+        self.assertFalse(hasattr(DispatchOutcome, "transition"))
+
+
 class TestFinalizeRequest(unittest.TestCase):
     """Unit tests for the shared request-finalization seam."""
 
-    @patch("lib.import_dispatch.apply_transition")
-    def test_deferred_outcome_skips_transition(self, mock_transition: MagicMock) -> None:
-        finalize_request(
-            MagicMock(),
-            42,
-            DispatchOutcome(
-                success=False,
-                message="busy",
-                deferred=True,
-            ),
-        )
-
-        mock_transition.assert_not_called()
-
-    @patch("lib.import_dispatch.apply_transition")
-    def test_outcome_without_target_status_is_rejected(
-        self,
-        mock_transition: MagicMock,
-    ) -> None:
-        with self.assertRaisesRegex(ValueError, "must declare target_status"):
-            finalize_request(
-                MagicMock(),
-                42,
-                DispatchOutcome(success=False, message="failed summary"),
-            )
-
-        mock_transition.assert_not_called()
-
-    @patch("lib.import_dispatch.apply_transition")
+    @patch("lib.transitions.apply_transition")
     def test_forwards_transition_fields_and_attempt_type(
         self,
         mock_transition: MagicMock,
@@ -56,17 +42,12 @@ class TestFinalizeRequest(unittest.TestCase):
         finalize_request(
             db,
             42,
-            DispatchOutcome.transition(
-                to_status="wanted",
-                success=False,
-                message="retry",
+            RequestTransition.to_wanted(
                 from_status="downloading",
                 attempt_type="download",
-                transition_fields={
-                    "search_filetype_override": "flac,mp3 v0",
-                    "min_bitrate": 245,
-                    "prev_min_bitrate": 320,
-                },
+                search_filetype_override="flac,mp3 v0",
+                min_bitrate=245,
+                prev_min_bitrate=320,
             ),
         )
 
@@ -81,88 +62,15 @@ class TestFinalizeRequest(unittest.TestCase):
             prev_min_bitrate=320,
         )
 
-    @patch("lib.import_dispatch.apply_transition")
-    def test_transition_request_routes_explicit_fields_through_finalize_request(
+    @patch("lib.transitions.apply_transition")
+    def test_rejects_target_specific_wrong_fields_at_construction(
         self,
         mock_transition: MagicMock,
     ) -> None:
-        db = MagicMock()
-
-        transition_request(
-            db,
-            42,
-            "wanted",
-            from_status="downloading",
-            attempt_type="download",
-            search_filetype_override="flac,mp3 v0",
-            min_bitrate=245,
-            prev_min_bitrate=320,
-        )
-
-        mock_transition.assert_called_once_with(
-            db,
-            42,
-            "wanted",
-            from_status="downloading",
-            attempt_type="download",
-            search_filetype_override="flac,mp3 v0",
-            min_bitrate=245,
-            prev_min_bitrate=320,
-        )
-
-    @patch("lib.import_dispatch.apply_transition")
-    def test_rejects_reserved_transition_fields_in_outcome(
-        self,
-        mock_transition: MagicMock,
-    ) -> None:
-        with self.assertRaisesRegex(ValueError, "reserved keys: from_status"):
-            finalize_request(
-                MagicMock(),
-                42,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    from_status="downloading",
-                    transition_fields={"from_status": "manual"},
-                ),
-            )
+        with self.assertRaises(TypeError):
+            RequestTransition.to_wanted(beets_distance=0.12)  # type: ignore[call-arg]
 
         mock_transition.assert_not_called()
-
-        with self.assertRaisesRegex(ValueError, "reserved keys: state_json"):
-            finalize_request(
-                MagicMock(),
-                42,
-                DispatchOutcome.transition(
-                    to_status="downloading",
-                    success=False,
-                    transition_fields={"state_json": "{}"},
-                ),
-            )
-
-        with self.assertRaisesRegex(ValueError, "unknown keys: min_birate"):
-            finalize_request(
-                MagicMock(),
-                42,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    transition_fields={"min_birate": 245},
-                ),
-            )
-
-        with self.assertRaisesRegex(ValueError, "unknown keys: beets_distance"):
-            finalize_request(
-                MagicMock(),
-                42,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    transition_fields={"beets_distance": 0.12},
-                ),
-            )
-
-        self.assertEqual(mock_transition.call_count, 0)
 
 
 class _RequestStatusWriteVisitor(ast.NodeVisitor):
@@ -197,17 +105,10 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         return None
 
     def _allow_direct_transition_call(self, func_name: str, node: ast.Call) -> bool:
-        if self.rel_path in {
-            "lib/import_dispatch.py",
-            "lib/pipeline_db.py",
-            "lib/transitions.py",
-        }:
+        if self.rel_path in {"lib/pipeline_db.py", "lib/transitions.py"}:
             return True
 
-        if self.rel_path != "lib/download.py":
-            return False
-
-        return self._resolve_status_value(self._status_arg(func_name, node)) == "downloading"
+        return False
 
     def _maybe_record_raw_sql(self, node: ast.Call) -> None:
         func_name: str | None = None
@@ -252,7 +153,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
 
 
 class TestTerminalTransitionContract(unittest.TestCase):
-    """Production request-state writes must route through finalize_request()."""
+    """Production request-state writes must route through lib.transitions."""
 
     def test_no_direct_request_status_writes_outside_the_shared_seam(self) -> None:
         offending: list[tuple[str, int, str, str]] = []
@@ -290,7 +191,7 @@ class TestTerminalTransitionContract(unittest.TestCase):
             ]
             self.fail(
                 "Direct request status writes remain outside the shared seam. "
-                "Route them through lib.import_dispatch.finalize_request(...).\n"
+                "Route them through lib.transitions.finalize_request(...).\n"
                 + "\n".join(lines)
             )
 
@@ -334,7 +235,7 @@ def _transition_aliases(tree: ast.AST) -> dict[str, str]:
 
 
 class TestRequestStatusWriteVisitor(unittest.TestCase):
-    def test_allows_module_constant_for_downloading_in_download_module(self) -> None:
+    def test_rejects_module_constant_for_downloading_in_download_module(self) -> None:
         tree = ast.parse(
             "STATUS_DOWNLOADING = 'downloading'\n"
             "apply_transition(db, 42, STATUS_DOWNLOADING)\n"
@@ -347,7 +248,7 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
 
         visitor.visit(tree)
 
-        self.assertEqual(visitor.offending, [])
+        self.assertEqual(len(visitor.offending), 1)
 
     def test_rejects_non_downloading_module_constant_in_download_module(self) -> None:
         tree = ast.parse(
@@ -379,7 +280,7 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
 
         self.assertEqual(len(visitor.offending), 1)
 
-    def test_allows_aliased_apply_transition_for_downloading_in_download_module(self) -> None:
+    def test_rejects_aliased_apply_transition_for_downloading_in_download_module(self) -> None:
         tree = ast.parse(
             "from lib.transitions import apply_transition as _do_transition\n"
             "STATUS_DOWNLOADING = 'downloading'\n"
@@ -393,7 +294,7 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
 
         visitor.visit(tree)
 
-        self.assertEqual(visitor.offending, [])
+        self.assertEqual(len(visitor.offending), 1)
 
 
 if __name__ == "__main__":

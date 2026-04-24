@@ -10,13 +10,245 @@ state mutations.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Any, Literal, Mapping, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
+
+
+class _OmittedField:
+    """Sentinel for distinguishing omitted fields from explicit NULL writes."""
+
+
+_OMITTED = _OmittedField()
+
+
+RequestStatus = Literal["wanted", "downloading", "imported", "manual"]
+
+
+def _explicit_fields(**values: object) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not _OMITTED
+    }
+
+
+_WANTED_FIELDS = frozenset({
+    "min_bitrate",
+    "prev_min_bitrate",
+    "search_filetype_override",
+})
+
+_IMPORTED_FIELDS = frozenset({
+    "beets_distance",
+    "beets_scenario",
+    "current_spectral_bitrate",
+    "current_spectral_grade",
+    "final_format",
+    "imported_path",
+    "last_download_spectral_bitrate",
+    "last_download_spectral_grade",
+    "min_bitrate",
+    "prev_min_bitrate",
+    "search_filetype_override",
+    "verified_lossless",
+})
+
+
+def _field_or_omitted(fields: Mapping[str, object], key: str) -> object:
+    if key in fields:
+        return fields[key]
+    return _OMITTED
+
+
+def _reject_unknown_fields(
+    target_status: str,
+    fields: Mapping[str, object],
+    allowed: frozenset[str],
+) -> None:
+    unknown = set(fields) - allowed
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(
+            f"{target_status} transitions do not accept fields: {names}")
+
+
+@dataclass(frozen=True)
+class RequestTransition:
+    """A typed command for one album_requests state transition."""
+
+    target_status: RequestStatus
+    from_status: str | None = None
+    attempt_type: str | None = None
+    fields: dict[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def to_wanted(
+        cls,
+        *,
+        from_status: str | None = None,
+        attempt_type: str | None = None,
+        search_filetype_override: object = _OMITTED,
+        min_bitrate: object = _OMITTED,
+        prev_min_bitrate: object = _OMITTED,
+    ) -> "RequestTransition":
+        return cls(
+            target_status="wanted",
+            from_status=from_status,
+            attempt_type=attempt_type,
+            fields=_explicit_fields(
+                search_filetype_override=search_filetype_override,
+                min_bitrate=min_bitrate,
+                prev_min_bitrate=prev_min_bitrate,
+            ),
+        )
+
+    @classmethod
+    def to_wanted_fields(
+        cls,
+        *,
+        from_status: str | None = None,
+        attempt_type: str | None = None,
+        fields: Mapping[str, object],
+    ) -> "RequestTransition":
+        _reject_unknown_fields("wanted", fields, _WANTED_FIELDS)
+        return cls.to_wanted(
+            from_status=from_status,
+            attempt_type=attempt_type,
+            search_filetype_override=_field_or_omitted(
+                fields, "search_filetype_override"),
+            min_bitrate=_field_or_omitted(fields, "min_bitrate"),
+            prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
+        )
+
+    @classmethod
+    def to_downloading(
+        cls,
+        *,
+        state_json: str,
+        from_status: str | None = None,
+    ) -> "RequestTransition":
+        return cls(
+            target_status="downloading",
+            from_status=from_status,
+            fields={"state_json": state_json},
+        )
+
+    @classmethod
+    def to_imported(
+        cls,
+        *,
+        from_status: str | None = None,
+        beets_distance: object = _OMITTED,
+        beets_scenario: object = _OMITTED,
+        current_spectral_bitrate: object = _OMITTED,
+        current_spectral_grade: object = _OMITTED,
+        final_format: object = _OMITTED,
+        imported_path: object = _OMITTED,
+        last_download_spectral_bitrate: object = _OMITTED,
+        last_download_spectral_grade: object = _OMITTED,
+        min_bitrate: object = _OMITTED,
+        prev_min_bitrate: object = _OMITTED,
+        search_filetype_override: object = _OMITTED,
+        verified_lossless: object = _OMITTED,
+    ) -> "RequestTransition":
+        return cls(
+            target_status="imported",
+            from_status=from_status,
+            fields=_explicit_fields(
+                beets_distance=beets_distance,
+                beets_scenario=beets_scenario,
+                current_spectral_bitrate=current_spectral_bitrate,
+                current_spectral_grade=current_spectral_grade,
+                final_format=final_format,
+                imported_path=imported_path,
+                last_download_spectral_bitrate=last_download_spectral_bitrate,
+                last_download_spectral_grade=last_download_spectral_grade,
+                min_bitrate=min_bitrate,
+                prev_min_bitrate=prev_min_bitrate,
+                search_filetype_override=search_filetype_override,
+                verified_lossless=verified_lossless,
+            ),
+        )
+
+    @classmethod
+    def to_imported_fields(
+        cls,
+        *,
+        from_status: str | None = None,
+        fields: Mapping[str, object],
+    ) -> "RequestTransition":
+        _reject_unknown_fields("imported", fields, _IMPORTED_FIELDS)
+        return cls.to_imported(
+            from_status=from_status,
+            beets_distance=_field_or_omitted(fields, "beets_distance"),
+            beets_scenario=_field_or_omitted(fields, "beets_scenario"),
+            current_spectral_bitrate=_field_or_omitted(
+                fields, "current_spectral_bitrate"),
+            current_spectral_grade=_field_or_omitted(
+                fields, "current_spectral_grade"),
+            final_format=_field_or_omitted(fields, "final_format"),
+            imported_path=_field_or_omitted(fields, "imported_path"),
+            last_download_spectral_bitrate=_field_or_omitted(
+                fields, "last_download_spectral_bitrate"),
+            last_download_spectral_grade=_field_or_omitted(
+                fields, "last_download_spectral_grade"),
+            min_bitrate=_field_or_omitted(fields, "min_bitrate"),
+            prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
+            search_filetype_override=_field_or_omitted(
+                fields, "search_filetype_override"),
+            verified_lossless=_field_or_omitted(fields, "verified_lossless"),
+        )
+
+    @classmethod
+    def to_manual(
+        cls,
+        *,
+        from_status: str | None = None,
+    ) -> "RequestTransition":
+        return cls(target_status="manual", from_status=from_status)
+
+    @classmethod
+    def status_only(
+        cls,
+        target_status: str,
+        *,
+        from_status: str | None = None,
+    ) -> "RequestTransition":
+        if target_status == "wanted":
+            return cls.to_wanted(from_status=from_status)
+        if target_status == "imported":
+            return cls.to_imported(from_status=from_status)
+        if target_status == "manual":
+            return cls.to_manual(from_status=from_status)
+        if target_status == "downloading":
+            raise ValueError("state_json is required for downloading transitions")
+        raise ValueError(f"Unknown request status: {target_status!r}")
+
+
+def finalize_request(
+    db: "PipelineDB",
+    request_id: int,
+    transition: RequestTransition,
+) -> None:
+    """Apply one validated request-state transition command."""
+
+    transition_kwargs = dict(transition.fields)
+    if transition.from_status is not None:
+        transition_kwargs["from_status"] = transition.from_status
+    if transition.attempt_type is not None:
+        transition_kwargs["attempt_type"] = transition.attempt_type
+
+    apply_transition(
+        db,
+        request_id,
+        transition.target_status,
+        **transition_kwargs,
+    )
 
 
 @dataclass(frozen=True)

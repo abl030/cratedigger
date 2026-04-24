@@ -35,11 +35,11 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          compute_effective_override_bitrate,
                          extract_usernames,
                          rejection_backfill_override)
+from lib import transitions
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
-                                 dispatch_import_core, finalize_request)
+                                 dispatch_import_core)
 from lib.staged_album import StagedAlbum
-from lib.transitions import apply_transition
 from lib.util import move_failed_import, log_validation_result
 
 if TYPE_CHECKING:
@@ -1350,13 +1350,10 @@ def _timeout_album(
     for username in extract_usernames(entry.files):
         if db.check_and_apply_cooldown(username):
             ctx.cooled_down_users.add(username)
-    finalize_request(
+    transitions.finalize_request(
         db,
         request_id,
-        DispatchOutcome.transition(
-            to_status="wanted",
-            success=False,
-            message="Download timed out",
+        transitions.RequestTransition.to_wanted(
             from_status="downloading",
             attempt_type="download",
         ),
@@ -1467,26 +1464,20 @@ def _run_completed_processing(
         if outcome:
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="imported",
-                    success=True,
-                    message="Completed local processing",
+                transitions.RequestTransition.to_imported(
                     from_status="downloading",
                 ),
             )
         else:
             logger.warning(f"  process_completed_album failed without "
                            f"setting status — resetting to wanted")
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    message="Completed processing failed",
+                transitions.RequestTransition.to_wanted(
                     from_status="downloading",
                     attempt_type="download",
                 ),
@@ -1528,13 +1519,10 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             # crashed on a previous run. Reset to wanted so it gets re-searched.
             logger.error(f"Downloading album {request_id} has no active_download_state — "
                          f"resetting to wanted")
-            finalize_request(
+            transitions.finalize_request(
                 db,
                 request_id,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    message="Missing active download state",
+                transitions.RequestTransition.to_wanted(
                     from_status="downloading",
                 ),
             )
@@ -1743,9 +1731,14 @@ def grab_most_wanted(albums: list[Any],
         if request_id:
             state = build_active_download_state(entry)
             db = ctx.pipeline_db_source._get_db()
-            apply_transition(db, request_id, "downloading",
-                             from_status="wanted",
-                             state_json=state.to_json())
+            transitions.finalize_request(
+                db,
+                request_id,
+                transitions.RequestTransition.to_downloading(
+                    from_status="wanted",
+                    state_json=state.to_json(),
+                ),
+            )
             logger.info(f"  Set status=downloading, {len(entry.files)} files tracked")
 
     logger.info(f"Failed to grab: {len(failed_grab)}")

@@ -1,14 +1,16 @@
 """Tests for lib/transitions.py — state transition validation and side effects."""
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from lib.transitions import (
     VALID_TRANSITIONS,
+    RequestTransition,
     TransitionSideEffects,
-    validate_transition,
-    transition_side_effects,
     apply_transition,
+    finalize_request,
+    transition_side_effects,
+    validate_transition,
 )
 
 
@@ -216,6 +218,82 @@ class TestApplyTransition(unittest.TestCase):
         db = self._make_db("wanted")
         apply_transition(db, 1, "manual", from_status="wanted")
         db.update_status.assert_called_once_with(1, "manual")
+
+
+class TestRequestTransition(unittest.TestCase):
+    """Target-specific request-transition commands."""
+
+    def test_wanted_transition_forwards_common_fields_and_attempt_type(self):
+        transition = RequestTransition.to_wanted(
+            from_status="downloading",
+            attempt_type="download",
+            search_filetype_override="flac,mp3 v0",
+            min_bitrate=245,
+            prev_min_bitrate=320,
+        )
+
+        self.assertEqual(transition.target_status, "wanted")
+        self.assertEqual(transition.from_status, "downloading")
+        self.assertEqual(transition.attempt_type, "download")
+        self.assertEqual(
+            transition.fields,
+            {
+                "search_filetype_override": "flac,mp3 v0",
+                "min_bitrate": 245,
+                "prev_min_bitrate": 320,
+            },
+        )
+
+    def test_imported_transition_preserves_explicit_none_for_clears(self):
+        transition = RequestTransition.to_imported(
+            from_status="imported",
+            search_filetype_override=None,
+            min_bitrate=245,
+        )
+
+        self.assertEqual(
+            transition.fields,
+            {
+                "search_filetype_override": None,
+                "min_bitrate": 245,
+            },
+        )
+
+    def test_wanted_transition_rejects_imported_only_fields(self):
+        with self.assertRaises(TypeError):
+            RequestTransition.to_wanted(imported_path="/Beets/Artist/Album")  # type: ignore[call-arg]
+
+    def test_status_only_rejects_downloading_without_state(self):
+        with self.assertRaisesRegex(ValueError, "state_json"):
+            RequestTransition.status_only("downloading", from_status="wanted")
+
+
+class TestFinalizeRequest(unittest.TestCase):
+    """Final request-state command execution lives in lib.transitions."""
+
+    def test_forwards_transition_fields_and_attempt_type(self):
+        db = MagicMock()
+        transition = RequestTransition.to_wanted(
+            from_status="downloading",
+            attempt_type="download",
+            search_filetype_override="flac,mp3 v0",
+            min_bitrate=245,
+            prev_min_bitrate=320,
+        )
+
+        with patch("lib.transitions.apply_transition") as mock_apply:
+            finalize_request(db, 42, transition)
+
+        mock_apply.assert_called_once_with(
+            db,
+            42,
+            "wanted",
+            from_status="downloading",
+            attempt_type="download",
+            search_filetype_override="flac,mp3 v0",
+            min_bitrate=245,
+            prev_min_bitrate=320,
+        )
 
 
 if __name__ == "__main__":

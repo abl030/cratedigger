@@ -54,7 +54,7 @@ class TestImportBootstrap(unittest.TestCase):
 
 
 class TestPipelineDbUpdate(unittest.TestCase):
-    @patch("lib.import_dispatch.finalize_request")
+    @patch("lib.transitions.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_routes_through_shared_finalizer(
         self,
@@ -80,7 +80,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
         self.assertEqual(called_request_id, 42)
         self.assertEqual(outcome.target_status, "imported")
         self.assertEqual(
-            outcome.transition_fields,
+            outcome.fields,
             {
                 "imported_path": "/Beets/Artist/Album",
                 "beets_distance": 0.12,
@@ -89,7 +89,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
         )
         db.close.assert_called_once()
 
-    @patch("lib.import_dispatch.finalize_request", side_effect=RuntimeError("boom"))
+    @patch("lib.transitions.finalize_request", side_effect=RuntimeError("boom"))
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_closes_db_when_finalizer_raises(
         self,
@@ -108,12 +108,12 @@ class TestPipelineDbUpdate(unittest.TestCase):
         db.close.assert_called_once()
         self.assertIn("Pipeline DB update failed", stderr.getvalue())
 
-    @patch("lib.import_dispatch.apply_transition")
+    @patch("lib.transitions.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_distinguishes_transition_whitelist_errors(
         self,
         mock_db_cls,
-        mock_transition,
+        mock_finalize,
     ) -> None:
         from harness import import_one
 
@@ -128,10 +128,10 @@ class TestPipelineDbUpdate(unittest.TestCase):
                 imported_path="/Beets/Artist/Album",
             )
 
-        mock_transition.assert_not_called()
+        mock_finalize.assert_not_called()
         db.close.assert_called_once()
         self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
-        self.assertIn("unknown keys: imported_path", stderr.getvalue())
+        self.assertIn("imported_path", stderr.getvalue())
 
 
 # ============================================================================

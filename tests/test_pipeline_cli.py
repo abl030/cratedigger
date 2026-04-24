@@ -143,10 +143,10 @@ class TestCmdCancel(unittest.TestCase):
 
 class TestCmdSet(unittest.TestCase):
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._transition_request")
+    @patch("lib.transitions.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
         self,
-        mock_transition,
+        mock_finalize,
         _mock_print,
     ):
         db = MagicMock()
@@ -160,13 +160,11 @@ class TestCmdSet(unittest.TestCase):
         args = MagicMock(id=9, status="imported")
         pipeline_cli.cmd_set(db, args)
 
-        mock_transition.assert_called_once_with(
-            db,
-            9,
-            "imported",
-            from_status="manual",
-            message="Admin set status to imported",
-        )
+        called_db, request_id, transition = mock_finalize.call_args.args
+        self.assertIs(called_db, db)
+        self.assertEqual(request_id, 9)
+        self.assertEqual(transition.target_status, "imported")
+        self.assertEqual(transition.from_status, "manual")
 
 
 class TestTracksFromMbRelease(unittest.TestCase):
@@ -481,8 +479,8 @@ class TestCmdSetIntent(unittest.TestCase):
         db.update_request_fields.assert_called_once_with(1, target_format=None)
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._transition_request")
-    def test_set_lossless_on_imported_requeues(self, mock_transition, _mock_print):
+    @patch("lib.transitions.finalize_request")
+    def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=2, status="imported", artist_name="A", album_title="B",
@@ -490,14 +488,14 @@ class TestCmdSetIntent(unittest.TestCase):
         )
         args = MagicMock(id=2, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
-        mock_transition.assert_called_once_with(
-            db,
-            2,
-            "wanted",
-            from_status="imported",
-            message="Re-queued imported request for lossless search",
-            search_filetype_override="lossless",
-            min_bitrate=245,
+        called_db, request_id, transition = mock_finalize.call_args.args
+        self.assertIs(called_db, db)
+        self.assertEqual(request_id, 2)
+        self.assertEqual(transition.target_status, "wanted")
+        self.assertEqual(transition.from_status, "imported")
+        self.assertEqual(
+            transition.fields,
+            {"search_filetype_override": "lossless", "min_bitrate": 245},
         )
         db.update_request_fields.assert_called_once_with(2, target_format="lossless")
 
@@ -603,7 +601,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
-                 patch("scripts.pipeline_cli._transition_request", finalize_request), \
+                 patch("lib.transitions.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(db, args)
 
@@ -611,14 +609,12 @@ class TestCmdRepairSpectral(unittest.TestCase):
             self.assertIn("quality_gate_decision → accept", output)
             self.assertIn("→ transitioned to imported", output)
             self.assertEqual(db._execute.call_count, 3)
-            finalize_request.assert_called_once_with(
-                db,
-                42,
-                "imported",
-                from_status="wanted",
-                message="Repaired stale spectral gate state",
-                min_bitrate=207,
-            )
+            called_db, request_id, transition = finalize_request.call_args.args
+            self.assertIs(called_db, db)
+            self.assertEqual(request_id, 42)
+            self.assertEqual(transition.target_status, "imported")
+            self.assertEqual(transition.from_status, "wanted")
+            self.assertEqual(transition.fields, {"min_bitrate": 207})
         finally:
             os.unlink(cfg_path)
 

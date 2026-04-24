@@ -1996,19 +1996,16 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         ``False`` branch must not apply a second reset-to-wanted transition.
         """
         from lib import download as dl_mod
-        from lib.import_dispatch import DispatchOutcome, finalize_request
+        from lib import transitions
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
 
         def reject_inside_process(*_args, **_kwargs):
-            finalize_request(
+            transitions.finalize_request(
                 cast(Any, db),
                 42,
-                DispatchOutcome.transition(
-                    to_status="wanted",
-                    success=False,
-                    message="Rejected: request_missing_request_id",
+                transitions.RequestTransition.to_wanted(
                     from_status="downloading",
                 ),
             )

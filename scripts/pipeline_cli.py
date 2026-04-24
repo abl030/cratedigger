@@ -47,7 +47,7 @@ import psycopg2
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
-from lib.import_dispatch import transition_request as _transition_request
+from lib import transitions
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
@@ -269,12 +269,10 @@ def cmd_retry(db, args):
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    _transition_request(
+    transitions.finalize_request(
         db,
         args.id,
-        "wanted",
-        from_status=req["status"],
-        message="Reset request to wanted",
+        transitions.RequestTransition.to_wanted(from_status=req["status"]),
     )
     print(f"  Reset to wanted: [{args.id}] {req['artist_name']} - {req['album_title']}")
 
@@ -284,12 +282,10 @@ def cmd_cancel(db, args):
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    _transition_request(
+    transitions.finalize_request(
         db,
         args.id,
-        "manual",
-        from_status=req["status"],
-        message="Marked request for manual handling",
+        transitions.RequestTransition.to_manual(from_status=req["status"]),
     )
     print(f"  Marked for manual download: [{args.id}] {req['artist_name']} - {req['album_title']}")
 
@@ -306,12 +302,13 @@ def cmd_set(db, args):
     if old_status == args.status:
         print(f"  [{args.id}] already has status '{args.status}'.")
         return
-    _transition_request(
+    transitions.finalize_request(
         db,
         args.id,
-        args.status,
-        from_status=old_status,
-        message=f"Admin set status to {args.status}",
+        transitions.RequestTransition.status_only(
+            args.status,
+            from_status=old_status,
+        ),
     )
     print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: {old_status} → {args.status}")
 
@@ -339,14 +336,14 @@ def cmd_set_intent(db, args):
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        _transition_request(
+        transitions.finalize_request(
             db,
             args.id,
-            "wanted",
-            from_status="imported",
-            message="Re-queued imported request for lossless search",
-            search_filetype_override=QUALITY_LOSSLESS,
-            min_bitrate=min_br,
+            transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override=QUALITY_LOSSLESS,
+                min_bitrate=min_br,
+            ),
         )
         db.update_request_fields(args.id, target_format=target_format)
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
@@ -1117,13 +1114,13 @@ def cmd_repair_spectral(db, args):
 
         # If quality gate would accept, transition to imported
         if decision == "accept" and effective_min_br is not None:
-            _transition_request(
+            transitions.finalize_request(
                 db,
                 rid,
-                "imported",
-                from_status="wanted",
-                message="Repaired stale spectral gate state",
-                min_bitrate=effective_min_br,
+                transitions.RequestTransition.to_imported(
+                    from_status="wanted",
+                    min_bitrate=effective_min_br,
+                ),
             )
             print(f"         → transitioned to imported")
         else:
