@@ -16,7 +16,7 @@ from scripts import repair
 
 
 class TestCmdFix(unittest.TestCase):
-    @patch("scripts.repair._transition_request")
+    @patch("scripts.repair.transition_request")
     @patch("scripts.repair._collect_issues")
     def test_reset_to_wanted_routes_through_shared_finalizer(
         self,

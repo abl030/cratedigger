@@ -28,7 +28,7 @@ class SupportsCurrentPathUpdate(Protocol):
 
 def staged_filename(file: "DownloadFile") -> str:
     """Return the local filename used once a track is under album staging."""
-    filename = file.filename.split("\\")[-1]
+    filename = file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
         return f"Disk {file.disk_no} - {filename}"
     return filename

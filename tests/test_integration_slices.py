@@ -1798,7 +1798,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
             with patch.object(
                 dl_mod,
-                "dispatch_import",
+                "dispatch_import_core",
                 return_value=DispatchOutcome(success=True, message="ok"),
             ) as mock_dispatch, patch.object(
                 db,
@@ -1834,7 +1834,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 staged_path,
             )
             mock_dispatch.assert_called_once()
-            self.assertEqual(mock_dispatch.call_args.args[2], staged_path)
+            self.assertEqual(mock_dispatch.call_args.kwargs["path"], staged_path)
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""
@@ -1896,7 +1896,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
             with patch.object(
                 dl_mod,
-                "dispatch_import",
+                "dispatch_import_core",
                 return_value=DispatchOutcome(success=True, message="ok"),
             ) as mock_dispatch:
                 outcome = dl_mod._handle_valid_result(

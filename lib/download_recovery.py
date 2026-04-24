@@ -398,9 +398,9 @@ def find_blocked_processing_path_issues(
     db_rows: list[dict[str, object]],
     active_transfers: set[tuple[str, str]],
     *,
-    existing_local_paths: set[str],
     staging_dir: str,
     slskd_download_dir: str,
+    has_entries: Callable[[str], bool],
 ) -> list[BlockedRecoveryIssue]:
     """Find persisted processing paths that block automatic resume."""
     issues: list[BlockedRecoveryIssue] = []
@@ -414,8 +414,6 @@ def find_blocked_processing_path_issues(
             continue
         current_path = state.get("current_path")
         if not isinstance(current_path, str) or not current_path:
-            continue
-        if current_path not in existing_local_paths:
             continue
         files = state.get("files")
         if not isinstance(files, list) or not files:
@@ -434,7 +432,7 @@ def find_blocked_processing_path_issues(
         request_id = row.get("id")
         if not isinstance(request_id, int) or isinstance(request_id, bool):
             continue
-        location = classify_processing_path(
+        recovery_decision = reconcile_processing_current_path(
             current_path=current_path,
             artist=str(row.get("artist_name") or ""),
             title=str(row.get("album_title") or ""),
@@ -442,11 +440,45 @@ def find_blocked_processing_path_issues(
             request_id=request_id,
             staging_dir=staging_dir,
             slskd_download_dir=slskd_download_dir,
+            has_entries=has_entries,
         )
-        # Request-scoped auto-import staged paths are expected while the
-        # import subprocess is still running. Only the legacy shared
-        # staged path is unambiguously blocked from automatic resume.
-        if location.kind != "legacy_shared_staged":
+        if recovery_decision.blocked_reason == "multiple_populated_paths":
+            rendered_candidates = ", ".join(
+                f"{location.short_label}={location.path}"
+                for location in recovery_decision.populated_locations
+            )
+            issues.append(BlockedRecoveryIssue(
+                request_id=request_id,
+                detail=(
+                    "multiple populated local recovery paths block automatic "
+                    f"resume: {rendered_candidates}"
+                ),
+            ))
+            continue
+        if recovery_decision.blocked_reason == "legacy_shared_only":
+            issues.append(BlockedRecoveryIssue(
+                request_id=request_id,
+                detail=(
+                    "ambiguous legacy shared staged path blocks automatic "
+                    f"resume: {recovery_decision.legacy_shared_path}"
+                ),
+            ))
+            continue
+
+        assert recovery_decision.selected_location is not None
+        location = recovery_decision.selected_location
+        if location.path != current_path:
+            continue
+        if not has_entries(current_path):
+            issues.append(BlockedRecoveryIssue(
+                request_id=request_id,
+                detail=(
+                    "persisted processing path missing after local "
+                    f"processing: {current_path}"
+                ),
+            ))
+            continue
+        if not location.blocks_auto_import_dispatch:
             continue
         issues.append(BlockedRecoveryIssue(
             request_id=request_id,

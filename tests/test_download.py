@@ -965,7 +965,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
                 existing_min_bitrate=None,
             )
 
-            with patch("lib.download.dispatch_import") as mock_dispatch, \
+            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
                  self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx)
 
@@ -1015,7 +1015,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             mock_mt.load_file.return_value = MagicMock()
             mock_run_preimport_gates.return_value = MagicMock(valid=True)
 
-            with patch("lib.download.dispatch_import") as mock_dispatch, \
+            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
                  self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx)
 
@@ -1087,7 +1087,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
                 existing_min_bitrate=None,
             )
 
-            with patch("lib.download.dispatch_import") as mock_dispatch:
+            with patch("lib.download.dispatch_import_core") as mock_dispatch:
                 result = process_completed_album(album, [], ctx)
 
             self.assertTrue(result)
@@ -1291,6 +1291,7 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
     def test_request_source_without_mbid_requeues_instead_of_marking_done(self):
         """Request rows without an MBID must requeue, not mark imported."""
         from lib.download import _handle_valid_result
+        from lib.staged_album import StagedAlbum
         import tempfile
 
         album = make_grab_list_entry(
@@ -1317,7 +1318,12 @@ class TestResolveSlskdLocalPath(unittest.TestCase):
                       encoding="utf-8") as fp:
                 fp.write("x")
 
-            outcome = _handle_valid_result(album, bv_result, import_dir, ctx)
+            outcome = _handle_valid_result(
+                album,
+                bv_result,
+                StagedAlbum(current_path=import_dir, request_id=42),
+                ctx,
+            )
 
             assert outcome is not None
             self.assertFalse(outcome.success)
