@@ -973,6 +973,216 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
             mock_dispatch.assert_not_called()
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
+    @patch("lib.download.music_tag")
+    def test_request_scoped_staged_path_without_request_id_blocks_manual_recovery(
+        self,
+        mock_mt,
+    ):
+        """Request-scoped auto-import staging without request id must stay blocked."""
+        from lib.download import process_completed_album
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Artist",
+                title="Album",
+                staging_dir=staging_root,
+                request_id=42,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+                db_request_id=None,
+                db_source="request",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+            cfg.beets_validation_enabled = False
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(album, [], ctx)
+
+            self.assertIsNone(result)
+            self.assertIn("missing db_request_id", "\n".join(logs.output))
+
+    @patch("lib.download.music_tag")
+    def test_post_validation_staged_path_without_request_id_still_resumes(
+        self,
+        mock_mt,
+    ):
+        """Post-validation staging remains resumable without the auto-import guard."""
+        from lib.download import process_completed_album
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Artist",
+                title="Album",
+                staging_dir=staging_root,
+                request_id=42,
+                auto_import=False,
+            )
+            os.makedirs(resumed_path)
+            resumed_file = os.path.join(resumed_path, "01 - Track.mp3")
+            with open(resumed_file, "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="",
+                db_request_id=None,
+                db_source="redownload",
+            )
+            album.import_folder = resumed_path
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+            cfg.beets_staging_dir = staging_root
+            cfg.beets_validation_enabled = False
+            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+            mock_mt.load_file.return_value = MagicMock()
+
+            result = process_completed_album(album, [], ctx)
+
+            self.assertTrue(result)
+            self.assertEqual(album.files[0].import_path, resumed_file)
+
+    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.beets.beets_validate")
+    @patch("lib.download.music_tag")
+    def test_request_auto_import_without_request_id_fails_before_staging_move(
+        self,
+        mock_mt,
+        mock_beets_validate,
+        mock_run_preimport_gates,
+    ):
+        """Fresh request auto-imports must fail before moving into staged auto-import."""
+        from lib.download import process_completed_album
+        from lib.processing_paths import stage_to_ai_path
+        from lib.quality import ValidationResult
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads_root = os.path.join(tmpdir, "downloads")
+            source_dir = os.path.join(downloads_root, "Music")
+            os.makedirs(source_dir)
+            source_file = os.path.join(source_dir, "01 - Track.mp3")
+            with open(source_file, "w") as f:
+                f.write("fake audio")
+
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                album_id=1,
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="test-mbid",
+                db_request_id=None,
+                db_source="request",
+            )
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=1,
+                status="downloading",
+                artist_name="Artist",
+                album_title="Album",
+                year=2024,
+                mb_release_id="test-mbid",
+            ))
+            cfg = cast(Any, _make_ctx().cfg)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = downloads_root
+            cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
+            cfg.beets_validation_enabled = True
+            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
+            mock_mt.load_file.return_value = MagicMock()
+            mock_beets_validate.return_value = ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )
+            mock_run_preimport_gates.return_value = MagicMock(
+                valid=True,
+                scenario=None,
+                detail=None,
+                corrupt_files=[],
+                download_spectral=None,
+                existing_spectral=None,
+                existing_min_bitrate=None,
+            )
+
+            expected_canonical = os.path.join(
+                downloads_root,
+                "Artist - Album (2024)",
+            )
+            unexpected_staged = stage_to_ai_path(
+                artist="Artist",
+                title="Album",
+                staging_dir=cfg.beets_staging_dir,
+                request_id=None,
+                auto_import=True,
+            )
+
+            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
+                 self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(album, [], ctx)
+
+            self.assertFalse(result)
+            failed_path = os.path.join(
+                downloads_root,
+                "failed_imports",
+                "Artist - Album (2024)",
+            )
+            self.assertFalse(os.path.exists(expected_canonical))
+            self.assertTrue(os.path.isfile(
+                os.path.join(failed_path, "01 - Track.mp3")))
+            self.assertFalse(os.path.exists(unexpected_staged))
+            mock_dispatch.assert_not_called()
+            self.assertEqual(db.request(1)["status"], "wanted")
+            self.assertEqual(db.recorded_attempts, [(1, "validation")])
+            self.assertEqual(len(db.download_logs), 1)
+            self.assertEqual(
+                db.download_logs[0].beets_scenario,
+                "request_missing_request_id",
+            )
+            self.assertIsNotNone(db.download_logs[0].validation_result)
+            self.assertIn(
+                "missing_request_id",
+                str(db.download_logs[0].validation_result),
+            )
+            self.assertIn(
+                "failed_imports",
+                str(db.download_logs[0].validation_result),
+            )
+            self.assertIn("missing db_request_id", "\n".join(logs.output))
+
     @patch("lib.preimport.run_preimport_gates")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")

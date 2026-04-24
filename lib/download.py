@@ -24,7 +24,10 @@ from lib.grab_list import GrabListEntry, DownloadFile
 from lib.processing_paths import (
     canonical_processing_path,
     directory_has_entries,
+    normalize_processing_path,
+    path_is_within_root,
     stage_to_ai_path,
+    stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          DownloadDecision, ValidationResult,
@@ -68,6 +71,7 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
 
 _TICKS_SUFFIX = re.compile(r"^(?P<base>.+)_(?P<ticks>\d{17,20})$")
 _REMOTE_PATH_SEPARATORS = re.compile(r"[\\/]+")
+_REQUEST_SCOPED_STAGE_SUFFIX = re.compile(r" \[request-\d+\]$")
 
 
 def _remote_path_components(path: str) -> list[str]:
@@ -80,6 +84,21 @@ def slskd_local_folder(file_dir: str, slskd_download_dir: str) -> str:
     components = _remote_path_components(file_dir)
     leaf = components[-1] if components else file_dir
     return os.path.join(slskd_download_dir, leaf)
+
+
+def _is_request_scoped_auto_import_path(
+    *,
+    current_path: str,
+    staging_dir: str,
+) -> bool:
+    """Return True when ``current_path`` is under auto-import request staging."""
+    normalized_path = normalize_processing_path(current_path)
+    if not _REQUEST_SCOPED_STAGE_SUFFIX.search(os.path.basename(normalized_path)):
+        return False
+    return path_is_within_root(
+        normalized_path,
+        stage_to_ai_root(staging_dir=staging_dir, auto_import=True),
+    )
 
 
 def _matching_slskd_paths(
@@ -443,12 +462,28 @@ def _materialize_processing_dir(
         album_data, ctx.cfg.slskd_download_dir)
     db = (ctx.pipeline_db_source._get_db()
           if ctx.pipeline_db_source is not None else None)
+    request_id = album_data.db_request_id
+    if request_id is None and _is_request_scoped_auto_import_path(
+        current_path=staged_album.current_path,
+        staging_dir=ctx.cfg.beets_staging_dir,
+    ):
+        _log_post_move_resume_blocked(
+            album_data,
+            current_path=staged_album.current_path,
+            detail=(
+                "already lives at the request-scoped auto-import staged "
+                "path but is missing db_request_id. Automatic retry is "
+                "disabled because import ownership can no longer be "
+                "verified; manual recovery is required."
+            ),
+        )
+        return None
     current_path_location = classify_processing_path(
         current_path=staged_album.current_path,
         artist=album_data.artist,
         title=album_data.title,
         year=album_data.year,
-        request_id=album_data.db_request_id or 0,
+        request_id=request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
     )
@@ -576,10 +611,10 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
     Returns three-valued ``bool | None``:
-    - ``True`` — files moved and tagged successfully. Auto-import (if
-      fired) either landed or recorded a rejection; outer caller flips
-      status to ``imported``.
-    - ``False`` — file moves failed; outer caller resets to ``wanted``.
+    - ``True`` — files moved and tagged successfully, and any auto-import
+      dispatch succeeded.
+    - ``False`` — a non-deferred failure happened. Outer caller resets to
+      ``wanted`` only if the request row is still ``downloading``.
     - ``None`` — processing left the row untouched. This covers both
       release-lock contention and post-move staged paths that must not
       be auto-retried because they already live under
@@ -610,12 +645,14 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
         outcome = _process_beets_validation(
             album_data, staged_album, ctx)
-        if outcome is not None and outcome.deferred:
-            # Release-lock contention. Propagate ``None`` so
-            # ``_run_completed_processing`` leaves the request's
-            # status, active_download_state, and staged files
-            # untouched for the next cycle to retry.
-            return None
+        if outcome is not None:
+            if outcome.deferred:
+                # Release-lock contention. Propagate ``None`` so
+                # ``_run_completed_processing`` leaves the request's
+                # status, active_download_state, and staged files
+                # untouched for the next cycle to retry.
+                return None
+            return outcome.success
     return True
 
 
@@ -676,6 +713,93 @@ def _process_beets_validation(album_data: GrabListEntry,
     _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
     return None
+
+
+def _resolved_request_rejection_id(
+    album_data: GrabListEntry,
+    ctx: CratediggerContext,
+) -> tuple[Any | None, int | None]:
+    """Resolve the backing request row for defensive auto-import rejects."""
+    if ctx.pipeline_db_source is None:
+        return None, None
+    db = ctx.pipeline_db_source._get_db()
+    if album_data.db_request_id is not None:
+        return db, album_data.db_request_id
+
+    candidate_request_id = album_data.album_id
+    if not isinstance(candidate_request_id, int) or isinstance(candidate_request_id, bool):
+        return db, None
+
+    request_row = db.get_request(candidate_request_id)
+    if not isinstance(request_row, dict):
+        return db, None
+    if str(request_row.get("artist_name") or "") != album_data.artist:
+        return db, None
+    if str(request_row.get("album_title") or "") != album_data.title:
+        return db, None
+    request_year = request_row.get("year")
+    if request_year not in (None, "") and str(request_year) != album_data.year:
+        return db, None
+    request_release_id = str(request_row.get("mb_release_id") or "")
+    if album_data.mb_release_id and request_release_id:
+        if request_release_id != album_data.mb_release_id:
+            return db, None
+    return db, candidate_request_id
+
+
+def _reject_request_auto_import(
+    album_data: GrabListEntry,
+    bv_result: ValidationResult,
+    staged_album: StagedAlbum,
+    ctx: CratediggerContext,
+    *,
+    detail: str,
+    scenario: str,
+    error: str,
+) -> DispatchOutcome:
+    """Move a rejected request auto-import to failed_imports and requeue it."""
+    failed_result = ValidationResult(
+        distance=bv_result.distance if bv_result.distance is not None else 0.0,
+        scenario=scenario,
+        detail=detail,
+        error=error,
+    )
+    failed_result.failed_path = move_failed_import(
+        staged_album.current_path,
+        scenario=failed_result.scenario,
+    )
+    logger.error(
+        "AUTO-IMPORT REJECTED: %s - %s — %s",
+        album_data.artist,
+        album_data.title,
+        detail,
+    )
+    log_validation_result(album_data, failed_result, ctx.cfg)
+
+    db, request_id = _resolved_request_rejection_id(album_data, ctx)
+    if db is not None and request_id is not None:
+        dl_info = _build_download_info(album_data)
+        if album_data.download_spectral is not None:
+            dl_info.download_spectral = album_data.download_spectral
+            dl_info.current_spectral = album_data.current_spectral
+            dl_info.existing_min_bitrate = album_data.current_min_bitrate
+            dl_info.slskd_filetype = dl_info.filetype
+            dl_info.actual_filetype = dl_info.filetype
+        _record_rejection_and_maybe_requeue(
+            db,
+            request_id,
+            dl_info,
+            distance=failed_result.distance if failed_result.distance is not None else 0.0,
+            scenario=failed_result.scenario or scenario,
+            detail=detail,
+            error=failed_result.error,
+            requeue=True,
+            validation_result=failed_result.to_json(),
+        )
+
+    return DispatchOutcome(success=False, message=detail)
+
+
 def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                          staged_album: StagedAlbum,
                          ctx: CratediggerContext) -> "DispatchOutcome | None":
@@ -713,6 +837,21 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     wants_auto_import = (
         source_type == "request"
         and dist <= ctx.cfg.beets_distance_threshold)
+
+    if wants_auto_import and request_id is None:
+        return _reject_request_auto_import(
+            album_data,
+            bv_result,
+            staged_album,
+            ctx,
+            detail=(
+                "Request auto-import is missing db_request_id; automatic "
+                "resume/import is disabled."
+            ),
+            scenario="request_missing_request_id",
+            error="missing_request_id",
+        )
+
     current_path_location = classify_processing_path(
         current_path=staged_album.current_path,
         artist=album_data.artist,
@@ -724,44 +863,15 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     )
 
     if wants_auto_import and not album_data.mb_release_id:
-        detail = "Request auto-import requires a MusicBrainz release ID"
-        failed_result = ValidationResult(
-            distance=bv_result.distance if bv_result.distance is not None else 0.0,
+        return _reject_request_auto_import(
+            album_data,
+            bv_result,
+            staged_album,
+            ctx,
+            detail="Request auto-import requires a MusicBrainz release ID",
             scenario="request_missing_mbid",
-            detail=detail,
             error="missing_mbid",
         )
-        failed_result.failed_path = move_failed_import(
-            staged_album.current_path,
-            scenario=failed_result.scenario,
-        )
-        logger.error(
-            f"AUTO-IMPORT REJECTED: {album_data.artist} - {album_data.title} — "
-            f"{detail}"
-        )
-        log_validation_result(album_data, failed_result, ctx.cfg)
-        if request_id is not None:
-            db = ctx.pipeline_db_source._get_db()
-            dl_info = _build_download_info(album_data)
-            if album_data.download_spectral is not None:
-                dl_info.download_spectral = album_data.download_spectral
-                dl_info.current_spectral = album_data.current_spectral
-                dl_info.existing_min_bitrate = album_data.current_min_bitrate
-                dl_info.slskd_filetype = dl_info.filetype
-                dl_info.actual_filetype = dl_info.filetype
-            validation_json = failed_result.to_json()
-            _record_rejection_and_maybe_requeue(
-                db,
-                request_id,
-                dl_info,
-                distance=failed_result.distance if failed_result.distance is not None else 0.0,
-                scenario=failed_result.scenario or "request_missing_mbid",
-                detail=detail,
-                error=failed_result.error,
-                requeue=True,
-                validation_result=validation_json,
-            )
-        return DispatchOutcome(success=False, message=detail)
 
     will_auto_import = wants_auto_import
     pdb = None
@@ -1311,10 +1421,10 @@ def _run_completed_processing(
         return
 
     # Three-valued return from ``process_completed_album``:
-    # - True  → imported (or auto-import recorded a rejection); flip to
-    #   'imported' if status is still 'downloading'.
-    # - False → file moves failed; reset to 'wanted' (genuine failure
-    #   that DOES deserve a backoff-scored attempt).
+    # - True  → processing succeeded; flip to 'imported' if status is
+    #   still 'downloading'.
+    # - False → a non-deferred failure path returned; reset to
+    #   'wanted' only if the request row is still 'downloading'.
     # - None  → leave the row untouched. This covers both release-lock
     #   contention and guarded post-move staged paths where auto-retry
     #   would risk duplicate import. Do NOT touch state here.

@@ -95,7 +95,8 @@ class StagedAlbum:
             self.persist_current_path(db)
             shutil.rmtree(source, ignore_errors=True)
             return self.current_path
-        except Exception:
+        except Exception as exc:
+            rollback_failures: list[tuple[str, str]] = []
             if moved_entries:
                 os.makedirs(source, exist_ok=True)
                 for source_entry, target_entry in reversed(moved_entries):
@@ -103,6 +104,7 @@ class StagedAlbum:
                         try:
                             shutil.move(target_entry, source_entry)
                         except Exception:
+                            rollback_failures.append((source_entry, target_entry))
                             logger.exception(
                                 "Failed to roll back staged move %s -> %s",
                                 target_entry,
@@ -111,4 +113,10 @@ class StagedAlbum:
             elif not target_preexisted and os.path.isdir(target) and not os.listdir(target):
                 shutil.rmtree(target, ignore_errors=True)
             self.current_path = source
+            if rollback_failures:
+                first_source, first_target = rollback_failures[0]
+                raise RuntimeError(
+                    "Failed to roll back staged move cleanly after a staging "
+                    f"error: {first_target} -> {first_source}"
+                ) from exc
             raise

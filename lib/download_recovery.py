@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from typing import Callable, Literal
 
 from lib.processing_paths import (
     canonical_processing_path,
     normalize_processing_path,
+    path_is_within_root,
     stage_to_ai_path,
 )
 
@@ -210,7 +210,7 @@ def classify_processing_path(
         request_id=request_id,
         auto_import=True,
     )
-    if _path_is_within(current_path, request_scoped_auto_import):
+    if path_is_within_root(current_path, request_scoped_auto_import):
         return ProcessingPathLocation(
             path=current_path,
             kind="request_scoped_auto_import_staged",
@@ -223,7 +223,7 @@ def classify_processing_path(
         request_id=request_id,
         auto_import=False,
     )
-    if _path_is_within(current_path, request_scoped_post_validation):
+    if path_is_within_root(current_path, request_scoped_post_validation):
         return ProcessingPathLocation(
             path=current_path,
             kind="request_scoped_post_validation_staged",
@@ -234,7 +234,7 @@ def classify_processing_path(
         title=title,
         staging_dir=staging_dir,
     )
-    if _path_is_within(current_path, legacy_shared_path):
+    if path_is_within_root(current_path, legacy_shared_path):
         return ProcessingPathLocation(
             path=current_path,
             kind="legacy_shared_staged",
@@ -401,6 +401,7 @@ def find_blocked_processing_path_issues(
     staging_dir: str,
     slskd_download_dir: str,
     has_entries: Callable[[str], bool],
+    auto_import_in_progress: Callable[[int, str | None], bool | None] | None = None,
 ) -> list[BlockedRecoveryIssue]:
     """Find persisted processing paths that block automatic resume."""
     issues: list[BlockedRecoveryIssue] = []
@@ -478,6 +479,53 @@ def find_blocked_processing_path_issues(
                 ),
             ))
             continue
+        if location.kind == "request_scoped_auto_import_staged":
+            mb_release_id = row.get("mb_release_id")
+            normalized_mbid = (
+                str(mb_release_id)
+                if isinstance(mb_release_id, str) and mb_release_id
+                else None
+            )
+            if normalized_mbid is None:
+                issues.append(BlockedRecoveryIssue(
+                    request_id=request_id,
+                    detail=(
+                        "persisted request-scoped auto-import staged path is "
+                        "still populated, but this request has no "
+                        f"mb_release_id so auto-import cannot resume: {location.path}"
+                    ),
+                ))
+                continue
+            if auto_import_in_progress is not None:
+                # ``album_requests.mb_release_id`` is UNIQUE and
+                # ``request_scoped_auto_import_staged`` only matches when
+                # the request suffix in ``current_path`` belongs to this row,
+                # so a held RELEASE lock for ``normalized_mbid`` is the best
+                # read-only liveness hint that this staged path still belongs
+                # to an in-flight auto-import for this exact row.
+                in_progress = auto_import_in_progress(request_id, normalized_mbid)
+                if in_progress is True:
+                    continue
+                if in_progress is None:
+                    issues.append(BlockedRecoveryIssue(
+                        request_id=request_id,
+                        detail=(
+                            "persisted request-scoped auto-import staged "
+                            "path is still populated, but the repair scan "
+                            "could not determine whether auto-import is "
+                            f"still running: {location.path}"
+                        ),
+                    ))
+                    continue
+            issues.append(BlockedRecoveryIssue(
+                request_id=request_id,
+                detail=(
+                    "persisted request-scoped auto-import staged path is "
+                    "still populated, but no auto-import is currently "
+                    f"running: {location.path}"
+                ),
+            ))
+            continue
         if not location.blocks_auto_import_dispatch:
             continue
         issues.append(BlockedRecoveryIssue(
@@ -488,15 +536,3 @@ def find_blocked_processing_path_issues(
             ),
         ))
     return issues
-
-
-def _path_is_within(path: str, root: str) -> bool:
-    """Return True when ``path`` is located under ``root``."""
-    if not root:
-        return False
-    abs_path = normalize_processing_path(path)
-    abs_root = normalize_processing_path(root)
-    try:
-        return os.path.commonpath([abs_path, abs_root]) == abs_root
-    except ValueError:
-        return False

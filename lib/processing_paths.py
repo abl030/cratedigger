@@ -19,6 +19,18 @@ def normalize_processing_path(path: str) -> str:
     return os.path.abspath(os.path.normpath(path))
 
 
+def path_is_within_root(path: str, root: str) -> bool:
+    """Return True when ``path`` is located under ``root``."""
+    if not root:
+        return False
+    abs_path = normalize_processing_path(path)
+    abs_root = normalize_processing_path(root)
+    try:
+        return os.path.commonpath([abs_path, abs_root]) == abs_root
+    except ValueError:
+        return False
+
+
 def canonical_processing_path(
     *,
     artist: str,
