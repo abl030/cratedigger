@@ -33,6 +33,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
+_SPECIAL_TRANSITION_FIELDS = frozenset({
+    "from_status",
+    "attempt_type",
+    "state_json",
+})
+
+_ALLOWED_TRANSITION_FIELDS = frozenset({
+    "beets_distance",
+    "beets_scenario",
+    "current_spectral_bitrate",
+    "current_spectral_grade",
+    "final_format",
+    "imported_path",
+    "last_download_spectral_bitrate",
+    "last_download_spectral_grade",
+    "min_bitrate",
+    "prev_min_bitrate",
+    "search_filetype_override",
+    "verified_lossless",
+})
+
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -201,17 +222,35 @@ def finalize_request(
     decisions into ``album_requests.status`` writes.
     """
 
-    if outcome.deferred or outcome.target_status is None:
+    if outcome.deferred:
         return
 
-    reserved_fields = {"from_status", "attempt_type", "state_json"} & set(
-        outcome.transition_fields
+    if outcome.target_status is None:
+        if outcome.success:
+            raise ValueError(
+                "Successful DispatchOutcome passed to finalize_request() "
+                "must declare target_status."
+            )
+        return
+
+    transition_field_names = set(outcome.transition_fields)
+    reserved_fields = _SPECIAL_TRANSITION_FIELDS & transition_field_names
+    unknown_fields = (
+        transition_field_names
+        - _ALLOWED_TRANSITION_FIELDS
+        - _SPECIAL_TRANSITION_FIELDS
     )
     if reserved_fields:
         names = ", ".join(sorted(reserved_fields))
         raise ValueError(
             "DispatchOutcome.transition_fields must not include reserved keys: "
             f"{names}. Use the explicit DispatchOutcome fields instead."
+        )
+    if unknown_fields:
+        names = ", ".join(sorted(unknown_fields))
+        raise ValueError(
+            "DispatchOutcome.transition_fields includes unknown keys: "
+            f"{names}."
         )
 
     transition_kwargs = dict(outcome.transition_fields)
@@ -390,7 +429,6 @@ def _record_rejection_and_maybe_requeue(
                 to_status="wanted",
                 success=False,
                 message=f"Rejected: {scenario}",
-                from_status="downloading",
                 attempt_type="validation",
                 transition_fields=transition_kwargs,
             ),

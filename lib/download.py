@@ -179,7 +179,12 @@ def _slskd_search_roots(
     file_dir: str,
     slskd_download_dir: str,
 ) -> list[tuple[str, int, str]]:
-    """Ordered search roots for resolving one downloaded file on disk."""
+    """Ordered search roots for resolving one downloaded file on disk.
+
+    Intentionally stops at the album/ancestor folders derived from the
+    Soulseek remote path. A whole-download-root scan can silently pick an
+    unrelated sibling album that happens to contain the same basename.
+    """
     components = _remote_path_components(file_dir)
     incomplete_root = os.path.join(slskd_download_dir, "incomplete")
     plans: list[tuple[str, int, str]] = []
@@ -206,9 +211,6 @@ def _slskd_search_roots(
     for component in reversed(components[-3:]):
         add(os.path.join(slskd_download_dir, component), 2, "ancestor folder")
         add(os.path.join(incomplete_root, component), 2, "incomplete ancestor folder")
-
-    add(slskd_download_dir, 2, "download root")
-    add(incomplete_root, 2, "incomplete root")
     return plans
 
 
@@ -221,7 +223,9 @@ def resolve_slskd_local_path(file: "DownloadFile",
     ``_<ticks>`` collision-rename variants. When multiple collision variants
     exist, prefers the one whose byte size matches ``file.size``, else
     picks deterministically and logs a warning so ambiguous cases are
-    visible in journald.
+    visible in journald. The fallback search is restricted to path-derived
+    album folders; it never walks the whole slskd root because basename-only
+    matches there can cross album boundaries.
     """
     filename_components = _remote_path_components(file.filename)
     expected_name = filename_components[-1] if filename_components else file.filename

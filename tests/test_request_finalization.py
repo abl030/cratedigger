@@ -33,15 +33,29 @@ class TestFinalizeRequest(unittest.TestCase):
         mock_transition.assert_not_called()
 
     @patch("lib.import_dispatch.apply_transition")
-    def test_outcome_without_target_status_skips_transition(
+    def test_unsuccessful_outcome_without_target_status_skips_transition(
         self,
         mock_transition: MagicMock,
     ) -> None:
         finalize_request(
             MagicMock(),
             42,
-            DispatchOutcome(success=True, message="ok"),
+            DispatchOutcome(success=False, message="failed summary"),
         )
+
+        mock_transition.assert_not_called()
+
+    @patch("lib.import_dispatch.apply_transition")
+    def test_successful_outcome_without_target_status_is_rejected(
+        self,
+        mock_transition: MagicMock,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "must declare target_status"):
+            finalize_request(
+                MagicMock(),
+                42,
+                DispatchOutcome(success=True, message="ok"),
+            )
 
         mock_transition.assert_not_called()
 
@@ -139,14 +153,30 @@ class TestFinalizeRequest(unittest.TestCase):
                 ),
             )
 
+        with self.assertRaisesRegex(ValueError, "unknown keys: min_birate"):
+            finalize_request(
+                MagicMock(),
+                42,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    transition_fields={"min_birate": 245},
+                ),
+            )
+
         self.assertEqual(mock_transition.call_count, 0)
 
 
 class _RequestStatusWriteVisitor(ast.NodeVisitor):
     """Collect request-status writes that bypass the shared finalization seam."""
 
-    def __init__(self, rel_path: str) -> None:
+    def __init__(
+        self,
+        rel_path: str,
+        module_string_constants: dict[str, str] | None = None,
+    ) -> None:
         self.rel_path = rel_path
+        self.module_string_constants = module_string_constants or {}
         self.offending: list[tuple[int, str, str]] = []
 
     def _status_arg(self, func_name: str, node: ast.Call) -> ast.expr | None:
@@ -157,6 +187,13 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         for kw in node.keywords:
             if kw.arg == kw_name:
                 return kw.value
+        return None
+
+    def _resolve_status_value(self, expr: ast.expr | None) -> str | None:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return expr.value
+        if isinstance(expr, ast.Name):
+            return self.module_string_constants.get(expr.id)
         return None
 
     def _allow_direct_transition_call(self, func_name: str, node: ast.Call) -> bool:
@@ -170,11 +207,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         if self.rel_path != "lib/download.py":
             return False
 
-        status_expr = self._status_arg(func_name, node)
-        return (
-            isinstance(status_expr, ast.Constant)
-            and status_expr.value == "downloading"
-        )
+        return self._resolve_status_value(self._status_arg(func_name, node)) == "downloading"
 
     def _maybe_record_raw_sql(self, node: ast.Call) -> None:
         func_name: str | None = None
@@ -227,7 +260,10 @@ class TestTerminalTransitionContract(unittest.TestCase):
         for rel_path in PRODUCTION_FILES:
             path = REPO_ROOT / rel_path
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel_path)
-            visitor = _RequestStatusWriteVisitor(rel_path)
+            visitor = _RequestStatusWriteVisitor(
+                rel_path,
+                _module_string_constants(tree),
+            )
             visitor.visit(tree)
             for lineno, reason, snippet in visitor.offending:
                 offending.append((rel_path, lineno, reason, snippet))
@@ -237,7 +273,10 @@ class TestTerminalTransitionContract(unittest.TestCase):
             for path in sorted(root.rglob("*.py")):
                 rel = path.relative_to(REPO_ROOT).as_posix()
                 tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-                visitor = _RequestStatusWriteVisitor(rel)
+                visitor = _RequestStatusWriteVisitor(
+                    rel,
+                    _module_string_constants(tree),
+                )
                 visitor.visit(tree)
                 for lineno, reason, snippet in visitor.offending:
                     offending.append((rel, lineno, reason, snippet))
@@ -252,6 +291,56 @@ class TestTerminalTransitionContract(unittest.TestCase):
                 "Route them through lib.import_dispatch.finalize_request(...).\n"
                 + "\n".join(lines)
             )
+
+
+def _module_string_constants(tree: ast.AST) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    if not isinstance(tree, ast.Module):
+        return constants
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                constants[node.targets[0].id] = node.value.value
+        elif isinstance(node, ast.AnnAssign):
+            if not isinstance(node.target, ast.Name):
+                continue
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                constants[node.target.id] = node.value.value
+
+    return constants
+
+
+class TestRequestStatusWriteVisitor(unittest.TestCase):
+    def test_allows_module_constant_for_downloading_in_download_module(self) -> None:
+        tree = ast.parse(
+            "STATUS_DOWNLOADING = 'downloading'\n"
+            "apply_transition(db, 42, STATUS_DOWNLOADING)\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(visitor.offending, [])
+
+    def test_rejects_non_downloading_module_constant_in_download_module(self) -> None:
+        tree = ast.parse(
+            "STATUS_MANUAL = 'manual'\n"
+            "apply_transition(db, 42, STATUS_MANUAL)\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
 
 
 if __name__ == "__main__":
