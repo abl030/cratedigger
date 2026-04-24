@@ -42,7 +42,8 @@ class SupportsLibraryAlbumDetailPipelineDB(
         ...
 
 
-def _timestamp(value: object | None) -> float | None:
+def _timestamp(value: object | None) -> float | str | None:
+    """Preserve legacy beets ``added`` shapes while normalizing datetimes."""
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -51,8 +52,10 @@ def _timestamp(value: object | None) -> float | None:
         return value
     if isinstance(value, int):
         return float(value)
+    if isinstance(value, str):
+        return value
     raise TypeError(
-        "LibraryAlbumDetail added must be datetime|float|int, "
+        "LibraryAlbumDetail added must be datetime|float|int|str, "
         f"got {type(value).__name__}"
     )
 
@@ -79,7 +82,11 @@ def _min_track_bitrate(tracks: Sequence["LibraryAlbumTrack"]) -> int | None:
 
 
 def _detail_release_id(detail_row: Mapping[str, object]) -> str | None:
-    """Preserve exact-release IDs across canonical and unknown legacy shapes."""
+    """Preserve exact-release IDs across canonical and unknown legacy shapes.
+
+    When both legacy columns carry non-canonical non-empty strings, prefer the
+    ``mb_albumid`` value so pipeline lookup matches the pre-service route.
+    """
     frontend_id = frontend_release_id(
         detail_row.get("mb_albumid"),
         detail_row.get("discogs_albumid"),
@@ -104,7 +111,7 @@ class LibraryAlbumTrack(msgspec.Struct, frozen=True):
     track: int | None
     title: str | None
     length: float | None
-    format: str
+    format: str | None
     bitrate: int | None
     samplerate: int | None
     bitdepth: int | None
@@ -133,7 +140,7 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     track_count: int
     mb_releasegroupid: str | None
     release_group_title: str
-    added: float | None
+    added: float | str | None
     formats: str
     min_bitrate: int | None
     type: str
@@ -172,7 +179,11 @@ def build_library_album_detail(
                 "track": track.get("track"),
                 "title": track.get("title"),
                 "length": track.get("length"),
-                "format": str(track.get("format") or ""),
+                "format": (
+                    None
+                    if track.get("format") is None
+                    else str(track.get("format"))
+                ),
                 "bitrate": track.get("bitrate"),
                 "samplerate": track.get("samplerate"),
                 "bitdepth": track.get("bitdepth"),

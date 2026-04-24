@@ -1,13 +1,22 @@
-"""Typed download-history rows for detail views."""
+"""Typed download-log presentation helpers shared by detail and pipeline views."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import cast
 
 import msgspec
 
-from web.classify import LogEntry, classify_log_entry
+from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+
+
+@dataclass(frozen=True)
+class ClassifiedDownloadLogRow:
+    """One raw download_log row plus its shared UI classification."""
+
+    entry: LogEntry
+    classified: ClassifiedEntry
 
 
 class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
@@ -34,6 +43,8 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     slskd_bitrate: int | None
     downloaded_label: str
     verdict: str
+    disambiguation_failure: str | None
+    disambiguation_detail: str | None
     spectral_grade: str | None
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
@@ -54,16 +65,34 @@ def build_download_history_rows(
     rows: Sequence[Mapping[str, object]],
 ) -> list[DownloadHistoryViewRow]:
     """Classify raw download_log rows into the shared detail-view contract."""
-    items: list[DownloadHistoryViewRow] = []
-    for row in rows:
-        entry = LogEntry.from_row(dict(row))
-        classified = classify_log_entry(entry)
-        items.append(msgspec.convert(
-            {
-                **entry.to_json_dict(),
-                "downloaded_label": classified.downloaded_label,
-                "verdict": classified.verdict,
-            },
-            type=DownloadHistoryViewRow,
-        ))
-    return items
+    return [build_download_history_row(row) for row in rows]
+
+
+def classify_download_log_row(
+    row: Mapping[str, object],
+) -> ClassifiedDownloadLogRow:
+    """Build the shared typed classification for one raw download_log row."""
+    entry = LogEntry.from_row(dict(row))
+    return ClassifiedDownloadLogRow(
+        entry=entry,
+        classified=classify_log_entry(entry),
+    )
+
+
+def build_download_history_row(
+    row: Mapping[str, object],
+) -> DownloadHistoryViewRow:
+    """Build one detail-view history row from a raw download_log row."""
+    classified_row = classify_download_log_row(row)
+    entry = classified_row.entry
+    classified = classified_row.classified
+    return msgspec.convert(
+        {
+            **entry.to_json_dict(),
+            "downloaded_label": classified.downloaded_label,
+            "verdict": classified.verdict,
+            "disambiguation_failure": classified.disambiguation_failure,
+            "disambiguation_detail": classified.disambiguation_detail,
+        },
+        type=DownloadHistoryViewRow,
+    )

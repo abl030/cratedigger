@@ -135,6 +135,16 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
                 target_format="lossless",
             ),
             download_history=[_history_row(
+                import_result={
+                    "version": 2,
+                    "decision": "import",
+                    "postflight": {
+                        "disambiguation_failure": {
+                            "reason": "timeout",
+                            "detail": "timeout after 120s",
+                        },
+                    },
+                },
                 validation_result={"detail": "distance too high"},
             )],
         )
@@ -153,6 +163,11 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertTrue(detail.download_history[0].verdict)
         self.assertEqual(detail.download_history[0].actual_min_bitrate, 320)
         self.assertEqual(detail.download_history[0].slskd_bitrate, 320000)
+        self.assertEqual(detail.download_history[0].disambiguation_failure, "timeout")
+        self.assertEqual(
+            detail.download_history[0].disambiguation_detail,
+            "timeout after 120s",
+        )
         self.assertEqual(
             detail.download_history[0].validation_result,
             {"detail": "distance too high"},
@@ -187,6 +202,33 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
             detail.tracks[0].path,
             "/music/Test Artist/Test Album/01 Track 1.mp3",
         )
+        self.assertEqual(detail.download_history, [])
+
+    def test_build_library_album_detail_preserves_string_added_shape(self) -> None:
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(added="2026-03-30T12:00:00+00:00"),
+            pipeline_request=None,
+            download_history=[],
+        )
+
+        self.assertEqual(detail.added, "2026-03-30T12:00:00+00:00")
+
+    def test_build_library_album_detail_handles_missing_beets_format_keys(self) -> None:
+        track_without_format = _track(track=2, title="Track 2")
+        del track_without_format["format"]
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(
+                tracks=[_track(), track_without_format],
+                source="",
+                min_bitrate=None,
+            ),
+            pipeline_request=None,
+            download_history=[],
+        )
+
+        self.assertEqual(detail.formats, "MP3")
+        self.assertEqual(detail.min_bitrate, 320000)
+        self.assertIsNone(detail.tracks[1].format)
 
     def test_load_library_album_detail_resolves_discogs_request(self) -> None:
         fake_db = FakePipelineDB()
@@ -258,6 +300,43 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.mb_albumid, "fixture-release-1")
         self.assertEqual(detail.source, "unknown")
         self.assertEqual(detail.pipeline_id, 77)
+
+    def test_load_library_album_detail_prefers_mb_albumid_for_unknown_legacy_ids(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=90,
+            mb_release_id="fixture-mb-id",
+            artist_name="Fixture Artist",
+            album_title="Fixture Album",
+            source="request",
+            status="wanted",
+        ))
+        fake_db.seed_request(make_request_row(
+            id=91,
+            mb_release_id="fixture-discogs-id",
+            artist_name="Fixture Artist",
+            album_title="Fixture Album",
+            source="request",
+            status="wanted",
+        ))
+        lookup = _StubLibraryLookup(_beets_detail(
+            album="Fixture Album",
+            artist="Fixture Artist",
+            mb_albumid="fixture-mb-id",
+            discogs_albumid="fixture-discogs-id",
+            source="unknown",
+        ))
+
+        detail = load_library_album_detail(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            album_id=7,
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.mb_albumid, "fixture-mb-id")
+        self.assertEqual(detail.pipeline_id, 90)
 
     def test_load_library_album_detail_preserves_string_history_json_blobs(self) -> None:
         fake_db = FakePipelineDB()
