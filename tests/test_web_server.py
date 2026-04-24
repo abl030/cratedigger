@@ -643,8 +643,8 @@ class TestPipelineRouteContracts(_WebServerCase):
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
-        "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
-        "existing_spectral_bitrate",
+        "disambiguation_failure", "disambiguation_detail", "spectral_grade",
+        "spectral_bitrate", "existing_min_bitrate", "existing_spectral_bitrate",
     }
     STATUS_WANTED_REQUIRED_FIELDS = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
@@ -2521,11 +2521,11 @@ class TestBeetsRouteContracts(_WebServerCase):
         "error_message", "import_result", "validation_result", "filetype",
         "bitrate", "was_converted", "original_filetype", "actual_filetype",
         "actual_min_bitrate", "slskd_filetype", "slskd_bitrate",
-        "downloaded_label", "verdict", "spectral_grade",
-        "spectral_bitrate", "existing_min_bitrate",
-        "existing_spectral_bitrate", "album_title", "artist_name",
-        "mb_release_id", "request_status", "request_min_bitrate",
-        "search_filetype_override", "source",
+        "downloaded_label", "verdict", "disambiguation_failure",
+        "disambiguation_detail", "spectral_grade", "spectral_bitrate",
+        "existing_min_bitrate", "existing_spectral_bitrate", "album_title",
+        "artist_name", "mb_release_id", "request_status",
+        "request_min_bitrate", "search_filetype_override", "source",
     }
     DELETE_REQUIRED_FIELDS = {
         "status", "id", "album", "artist", "deleted_files",
@@ -2702,6 +2702,24 @@ class TestBeetsRouteContracts(_WebServerCase):
         self.assertIsNone(data["tracks"][0]["disc"])
         self.assertIsNone(data["tracks"][0]["track"])
         self.assertIsNone(data["tracks"][0]["title"])
+
+    def test_beets_album_detail_preserves_string_added_and_missing_format(self):
+        detail = self._album()
+        detail["added"] = "2026-03-30T12:00:00+00:00"
+        detail["artpath"] = "/music/Test Artist/Test Album/cover.jpg"
+        detail["path"] = "/music/Test Artist/Test Album"
+        detail.pop("formats")
+        track = self._track()
+        del track["format"]
+        detail["tracks"] = [track]
+        self.beets.get_album_detail.return_value = detail
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["added"], "2026-03-30T12:00:00+00:00")
+        self.assertEqual(data["formats"], "")
+        self.assertIsNone(data["tracks"][0]["format"])
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)

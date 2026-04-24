@@ -5,8 +5,12 @@ import re
 import msgspec
 from typing import TypedDict
 
-from web.classify import classify_log_entry, LogEntry
 from lib.import_dispatch import transition_request as _transition_request
+from web.download_history_view import (
+    build_download_history_row,
+    build_download_history_rows,
+    classify_download_log_row,
+)
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
@@ -44,8 +48,9 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
     result = []
     for e in entries:
-        entry = LogEntry.from_row(e)
-        classified = classify_log_entry(entry)
+        classified_row = classify_download_log_row(e)
+        entry = classified_row.entry
+        classified = classified_row.classified
         item = entry.to_json_dict()
         mbid = entry.mb_release_id
         bi = beets_info.get(mbid) if mbid else None
@@ -163,12 +168,10 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
         for item in status_items[status]:
             history = history_batch.get(item["id"], [])
             if history:
-                last = history[0]
-                entry = LogEntry.from_row(last)
-                classified = classify_log_entry(entry)
-                item["last_verdict"] = classified.verdict
-                item["last_outcome"] = last.get("outcome")
-                item["last_username"] = last.get("soulseek_username")
+                last = build_download_history_row(history[0])
+                item["last_verdict"] = last.verdict
+                item["last_outcome"] = last.outcome
+                item["last_username"] = last.soulseek_username
                 item["download_count"] = len(history)
             items.append(item)
         all_data[status] = items
@@ -281,14 +284,7 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
         return
     tracks = s._db().get_tracks(req_id)
     history = s._db().get_download_history(req_id)
-    history_items = []
-    for dl in history:
-        he = LogEntry.from_row(dl)
-        hi = he.to_json_dict()
-        classified = classify_log_entry(he)
-        hi["verdict"] = classified.verdict
-        hi["downloaded_label"] = classified.downloaded_label
-        history_items.append(hi)
+    history_items = [item.to_dict() for item in build_download_history_rows(history)]
     result: dict[str, object] = {
         "request": s._serialize_row(req),
         "tracks": tracks,
