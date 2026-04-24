@@ -281,11 +281,12 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
         self.assertEqual(issues[0].request_id, 1)
         self.assertIn("legacy shared staged path", issues[0].detail)
 
-    def test_reports_request_scoped_auto_import_path_as_blocked(self):
+    def test_skips_request_scoped_auto_import_path_while_import_is_still_running(self):
         issues = find_blocked_processing_path_issues(
             [{
                 "id": 1,
                 "status": "downloading",
+                "mb_release_id": "test-mbid",
                 "artist_name": "Test Artist",
                 "album_title": "Test Album",
                 "year": 2020,
@@ -309,11 +310,120 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
             ),
+            auto_import_in_progress=lambda request_id, mb_release_id: (
+                request_id == 1 and mb_release_id == "test-mbid"
+            ),
+        )
+
+        self.assertEqual(issues, [])
+
+    def test_reports_request_scoped_auto_import_path_when_import_is_not_running(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "mb_release_id": "test-mbid",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "current_path": (
+                        "/tmp/staging/auto-import/"
+                        "Test Artist/Test Album [request-1]"
+                    ),
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
+            auto_import_in_progress=lambda _request_id, _mb_release_id: False,
         )
 
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].request_id, 1)
-        self.assertIn("request-scoped auto-import staged path", issues[0].detail)
+        self.assertIn("no auto-import is currently running", issues[0].detail)
+
+    def test_reports_request_scoped_auto_import_path_when_liveness_probe_is_unknown(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "mb_release_id": "test-mbid",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "current_path": (
+                        "/tmp/staging/auto-import/"
+                        "Test Artist/Test Album [request-1]"
+                    ),
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
+            auto_import_in_progress=lambda _request_id, _mb_release_id: None,
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("could not determine whether auto-import is still running", issues[0].detail)
+
+    def test_reports_request_scoped_auto_import_path_without_mbid_as_non_resumable(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "mb_release_id": None,
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "current_path": (
+                        "/tmp/staging/auto-import/"
+                        "Test Artist/Test Album [request-1]"
+                    ),
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda path: (
+                path
+                == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
+            ),
+            auto_import_in_progress=lambda _request_id, _mb_release_id: False,
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("has no mb_release_id so auto-import cannot resume", issues[0].detail)
 
     def test_skips_stale_canonical_current_path_with_request_scoped_recovery(self):
         issues = find_blocked_processing_path_issues(

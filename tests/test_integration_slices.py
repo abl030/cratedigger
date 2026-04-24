@@ -11,6 +11,7 @@ and _check_quality_gate_core run for real, not patched.
 import os
 from contextlib import contextmanager
 import tempfile
+from typing import Any, cast
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1989,6 +1990,45 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             dl_mod._run_completed_processing(
                 self._entry(), 42, self._state(), db, self._ctx(db))
         self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_false_outcome_after_inner_rejection_does_not_double_transition(self):
+        """If ``process_completed_album`` already requeued the row, the outer
+        ``False`` branch must not apply a second reset-to-wanted transition.
+        """
+        from lib import download as dl_mod
+        from lib.import_dispatch import DispatchOutcome, finalize_request
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        def reject_inside_process(*_args, **_kwargs):
+            finalize_request(
+                cast(Any, db),
+                42,
+                DispatchOutcome.transition(
+                    to_status="wanted",
+                    success=False,
+                    message="Rejected: request_missing_request_id",
+                    from_status="downloading",
+                ),
+            )
+            return False
+
+        with patch.object(
+            dl_mod,
+            "process_completed_album",
+            side_effect=reject_inside_process,
+        ):
+            dl_mod._run_completed_processing(
+                self._entry(),
+                42,
+                self._state(),
+                db,
+                self._ctx(db),
+            )
+
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.status_history, [(42, "wanted")])
 
 
 class TestSiblingImportedPathPropagation(unittest.TestCase):

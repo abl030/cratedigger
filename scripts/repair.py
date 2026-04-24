@@ -22,7 +22,8 @@ from lib.config import read_runtime_config
 from lib.download_recovery import (find_blocked_processing_path_issues,
                                    find_blocked_recovery_issues)
 from lib.import_dispatch import transition_request
-from lib.pipeline_db import PipelineDB
+from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
+                             release_id_to_lock_key)
 from lib.processing_paths import directory_has_entries
 from lib.quality import (OrphanInfo, find_inconsistencies,
                          find_orphaned_downloads, suggest_repair)
@@ -50,6 +51,64 @@ def _get_slskd_active_transfers(host: str, api_key: str) -> set[tuple[str, str]]
     return pairs
 
 
+def _dedupe_issues(issues: list[OrphanInfo]) -> list[OrphanInfo]:
+    """Return issues with duplicate (request_id, type, detail) rows removed."""
+    seen: set[tuple[int, str, str]] = set()
+    deduped: list[OrphanInfo] = []
+    for issue in issues:
+        key = (issue.request_id, issue.issue_type, issue.detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+    return deduped
+
+
+def _auto_import_in_progress(
+    db: PipelineDB,
+    request_id: int,
+    mb_release_id: str | None,
+) -> bool | None:
+    """Return True when another session currently holds the release lock."""
+    if not mb_release_id:
+        return False
+    try:
+        cur = db._execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND classid = %s
+                  AND objid = %s
+                  AND mode = 'ExclusiveLock'
+                  AND granted
+                  AND database = (
+                      SELECT oid
+                      FROM pg_database
+                      WHERE datname = current_database()
+                  )
+            ) AS held
+            """,
+            (
+                ADVISORY_LOCK_NAMESPACE_RELEASE,
+                release_id_to_lock_key(mb_release_id),
+            ),
+        )
+        row = cur.fetchone()
+        if isinstance(row, dict):
+            return bool(row.get("held"))
+        if row:
+            return bool(row[0])
+        return False
+    except Exception as e:
+        print(
+            "  slskd: could not probe auto-import lock for "
+            f"request {request_id}: {e}",
+        )
+        return None
+
+
 def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     slskd_key: str | None) -> list:
     """Collect all issues: DB inconsistencies + optional orphaned downloads."""
@@ -57,13 +116,28 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
     issues = find_inconsistencies(rows)
     if slskd_host and slskd_key:
         try:
-            cfg = read_runtime_config()
             active = _get_slskd_active_transfers(slskd_host, slskd_key)
-            orphans = find_orphaned_downloads(
-                rows,
-                active,
-                existing_local_paths=None,
-            )
+        except Exception as e:
+            print(f"  slskd: could not check orphans: {e}")
+            return _dedupe_issues(issues)
+
+        orphans = find_orphaned_downloads(
+            rows,
+            active,
+            existing_local_paths=None,
+        )
+        issues.extend(orphans)
+
+        try:
+            cfg = read_runtime_config()
+        except Exception as e:
+            print(f"  slskd: could not load runtime config for local-path checks: {e}")
+            return _dedupe_issues(issues)
+
+        blocked_processing_path_issues: list[OrphanInfo] = []
+        blocked_recovery_issues: list[OrphanInfo] = []
+        local_path_scan_failed = False
+        try:
             blocked_processing_path_issues = [
                 OrphanInfo(
                     request_id=issue.request_id,
@@ -76,8 +150,20 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     staging_dir=cfg.beets_staging_dir,
                     slskd_download_dir=cfg.slskd_download_dir,
                     has_entries=directory_has_entries,
+                    auto_import_in_progress=(
+                        lambda request_id, mb_release_id: _auto_import_in_progress(
+                            db,
+                            request_id,
+                            mb_release_id,
+                        )
+                    ),
                 )
             ]
+        except Exception as e:
+            print(f"  slskd: could not inspect local recovery paths: {e}")
+            local_path_scan_failed = True
+
+        try:
             blocked_recovery_issues = [
                 OrphanInfo(
                     request_id=issue.request_id,
@@ -92,20 +178,28 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     has_entries=directory_has_entries,
                 )
             ]
-            issues.extend(orphans)
-            issues.extend(blocked_processing_path_issues)
-            issues.extend(blocked_recovery_issues)
-            if not orphans and not blocked_processing_path_issues and not blocked_recovery_issues:
-                print(f"  slskd: checked {len(active)} active transfers, no orphans.")
         except Exception as e:
-            print(f"  slskd: could not check orphans: {e}")
-    else:
-        downloading = [r for r in rows if r["status"] == "downloading"
-                       and r.get("active_download_state")]
-        if downloading:
-            print(f"  Note: {len(downloading)} downloading row(s) — pass "
-                  "--slskd-host/--slskd-key to check for orphans.")
-    return issues
+            print(f"  slskd: could not inspect local recovery paths: {e}")
+            local_path_scan_failed = True
+
+        issues.extend(blocked_processing_path_issues)
+        issues.extend(blocked_recovery_issues)
+        issues = _dedupe_issues(issues)
+        if (
+            not local_path_scan_failed
+            and not orphans
+            and not blocked_processing_path_issues
+            and not blocked_recovery_issues
+        ):
+            print(f"  slskd: checked {len(active)} active transfers, no orphans.")
+        return issues
+
+    downloading = [r for r in rows if r["status"] == "downloading"
+                   and r.get("active_download_state")]
+    if downloading:
+        print(f"  Note: {len(downloading)} downloading row(s) — pass "
+              "--slskd-host/--slskd-key to check for orphans.")
+    return _dedupe_issues(issues)
 
 
 def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
@@ -155,7 +249,7 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
 def _get_all_rows(db: PipelineDB) -> list:
     """Fetch all album_requests rows for inspection."""
     cur = db._execute(
-        "SELECT id, status, artist_name, album_title, year, "
+        "SELECT id, status, artist_name, album_title, year, mb_release_id, "
         "active_download_state, imported_path "
         "FROM album_requests ORDER BY id"
     )

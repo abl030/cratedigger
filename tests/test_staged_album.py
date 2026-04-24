@@ -1,8 +1,10 @@
 """Tests for ``lib/staged_album.py``."""
 
 import os
+import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_download_file, make_request_row
@@ -36,6 +38,23 @@ class TestStageToAiPath(unittest.TestCase):
             dest,
             "/tmp/staging/auto-import/Test Artist/Album [request-42]",
         )
+
+
+class TestStagedFilename(unittest.TestCase):
+
+    CASES = [
+        ("backslashes only", "user1\\Album\\01 - Track.flac", "01 - Track.flac"),
+        ("forward slashes only", "user1/Album/01 - Track.flac", "01 - Track.flac"),
+        ("mixed separators", "user1\\Album/Disc 1\\01 - Track.flac", "01 - Track.flac"),
+    ]
+
+    def test_extracts_leaf_filename_across_separator_variants(self):
+        from lib.staged_album import staged_filename
+
+        for desc, remote_path, expected in self.CASES:
+            with self.subTest(desc=desc):
+                file = make_download_file(filename=remote_path)
+                self.assertEqual(staged_filename(file), expected)
 
 
 class TestStagedAlbum(unittest.TestCase):
@@ -124,6 +143,48 @@ class TestStagedAlbum(unittest.TestCase):
             self.assertEqual(staged_album.current_path, source)
             self.assertTrue(os.path.exists(source_file))
             self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
+
+    def test_move_to_raises_explicit_error_when_rollback_move_fails(self):
+        from lib.staged_album import StagedAlbum
+
+        class ExplodingDB:
+            def update_download_state_current_path(
+                self,
+                request_id: int,
+                current_path: str | None,
+            ) -> None:
+                raise RuntimeError("db boom")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
+            os.makedirs(source)
+            source_file = os.path.join(source, "track.mp3")
+            with open(source_file, "w") as fp:
+                fp.write("audio")
+
+            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
+            dest_file = os.path.join(dest, "track.mp3")
+            real_move = shutil.move
+
+            def move_with_rollback_failure(src: str, dst: str) -> str:
+                if src == dest_file and dst == source_file:
+                    raise OSError("rollback boom")
+                return real_move(src, dst)
+
+            staged_album = StagedAlbum(current_path=source, request_id=42)
+
+            with patch(
+                "lib.staged_album.shutil.move",
+                side_effect=move_with_rollback_failure,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Failed to roll back staged move cleanly",
+                ):
+                    staged_album.move_to(dest, ExplodingDB())
+
+            self.assertTrue(os.path.exists(dest_file))
+            self.assertFalse(os.path.exists(source_file))
 
     def test_move_to_persists_before_removing_source(self):
         from lib.staged_album import StagedAlbum
