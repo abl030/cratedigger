@@ -470,23 +470,25 @@ def find_blocked_processing_path_issues(
         location = recovery_decision.selected_location
         if location.path != current_path:
             continue
-        if not has_entries(current_path):
-            issues.append(BlockedRecoveryIssue(
-                request_id=request_id,
-                detail=(
-                    "persisted processing path missing after local "
-                    f"processing: {current_path}"
-                ),
-            ))
-            continue
         if location.kind == "request_scoped_auto_import_staged":
+            has_path_entries = has_entries(current_path)
             mb_release_id = row.get("mb_release_id")
             normalized_mbid = (
                 str(mb_release_id)
                 if isinstance(mb_release_id, str) and mb_release_id
                 else None
             )
+            in_progress: bool | None = False
             if normalized_mbid is None:
+                if not has_path_entries:
+                    issues.append(BlockedRecoveryIssue(
+                        request_id=request_id,
+                        detail=(
+                            "persisted processing path missing after local "
+                            f"processing: {current_path}"
+                        ),
+                    ))
+                    continue
                 issues.append(BlockedRecoveryIssue(
                     request_id=request_id,
                     detail=(
@@ -506,6 +508,27 @@ def find_blocked_processing_path_issues(
                 in_progress = auto_import_in_progress(request_id, normalized_mbid)
                 if in_progress is True:
                     continue
+            if not has_path_entries:
+                if in_progress is None:
+                    issues.append(BlockedRecoveryIssue(
+                        request_id=request_id,
+                        detail=(
+                            "persisted request-scoped auto-import staged "
+                            "path is missing, but the repair scan could "
+                            "not determine whether auto-import is still "
+                            f"running: {location.path}"
+                        ),
+                    ))
+                    continue
+                issues.append(BlockedRecoveryIssue(
+                    request_id=request_id,
+                    detail=(
+                        "persisted processing path missing after local "
+                        f"processing: {current_path}"
+                    ),
+                ))
+                continue
+            if auto_import_in_progress is not None:
                 if in_progress is None:
                     issues.append(BlockedRecoveryIssue(
                         request_id=request_id,
@@ -523,6 +546,15 @@ def find_blocked_processing_path_issues(
                     "persisted request-scoped auto-import staged path is "
                     "still populated, but no auto-import is currently "
                     f"running: {location.path}"
+                ),
+            ))
+            continue
+        if not has_entries(current_path):
+            issues.append(BlockedRecoveryIssue(
+                request_id=request_id,
+                detail=(
+                    "persisted processing path missing after local "
+                    f"processing: {current_path}"
                 ),
             ))
             continue

@@ -84,6 +84,7 @@ class TestCollectIssues(unittest.TestCase):
         db._execute.assert_called_once()
         sql, params = db._execute.call_args[0]
         self.assertIn("FROM pg_locks", sql)
+        self.assertIn("objsubid = 2", sql)
         self.assertEqual(params[0], repair.ADVISORY_LOCK_NAMESPACE_RELEASE)
 
     def test_auto_import_in_progress_returns_false_when_no_lock_is_held(self) -> None:

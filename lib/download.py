@@ -615,10 +615,11 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
       dispatch succeeded.
     - ``False`` — a non-deferred failure happened. Outer caller resets to
       ``wanted`` only if the request row is still ``downloading``.
-    - ``None`` — processing left the row untouched. This covers both
-      release-lock contention and post-move staged paths that must not
-      be auto-retried because they already live under
-      ``beets_staging_dir``. Outer caller must NOT touch status.
+    - ``None`` — processing left the row untouched. This covers release-lock
+      contention, post-move staged paths that must not be auto-retried
+      because they already live under ``beets_staging_dir``, and guarded
+      request rejects where ownership cannot be proven. Outer caller must
+      NOT touch status.
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
@@ -669,8 +670,10 @@ def _process_beets_validation(album_data: GrabListEntry,
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
     already handles the state transition) or when the non-auto
-    redownload path takes over in ``_handle_valid_result``. Caller
-    uses the ``deferred`` flag to decide whether to flip status.
+    redownload path takes over in ``_handle_valid_result``. Guarded
+    ownership-less rejects also return a deferred outcome so callers
+    keep the row untouched for manual recovery. Caller uses the
+    ``deferred`` flag to decide whether to flip status.
     """
     from lib.beets import beets_validate as _bv
     from lib.preimport import run_preimport_gates
@@ -729,6 +732,10 @@ def _resolved_request_rejection_id(
     candidate_request_id = album_data.album_id
     if not isinstance(candidate_request_id, int) or isinstance(candidate_request_id, bool):
         return db, None
+    # ``AlbumRecord.id`` is negative on the search path, so only positive
+    # ids can safely be treated as ``album_requests.id`` candidates here.
+    if candidate_request_id <= 0:
+        return db, None
 
     request_row = db.get_request(candidate_request_id)
     if not isinstance(request_row, dict):
@@ -738,12 +745,18 @@ def _resolved_request_rejection_id(
     if str(request_row.get("album_title") or "") != album_data.title:
         return db, None
     request_year = request_row.get("year")
-    if request_year not in (None, "") and str(request_year) != album_data.year:
+    if (
+        album_data.year
+        and request_year not in (None, "")
+        and str(request_year) != album_data.year
+    ):
         return db, None
+    album_release_id = str(album_data.mb_release_id or "")
     request_release_id = str(request_row.get("mb_release_id") or "")
-    if album_data.mb_release_id and request_release_id:
-        if request_release_id != album_data.mb_release_id:
-            return db, None
+    if bool(album_release_id) != bool(request_release_id):
+        return db, None
+    if album_release_id and request_release_id != album_release_id:
+        return db, None
     return db, candidate_request_id
 
 
@@ -757,7 +770,26 @@ def _reject_request_auto_import(
     scenario: str,
     error: str,
 ) -> DispatchOutcome:
-    """Move a rejected request auto-import to failed_imports and requeue it."""
+    """Reject a request auto-import when ownership can be proven safely."""
+    db, request_id = _resolved_request_rejection_id(album_data, ctx)
+    if db is None or request_id is None:
+        logger.error(
+            "AUTO-IMPORT REJECT BLOCKED WITHOUT REQUEST AUDIT: album_id=%s %s - %s "
+            "(scenario=%s) could not resolve a safe pipeline request row; "
+            "files remain at %s and automatic retry/import is disabled until "
+            "manual recovery.",
+            album_data.album_id,
+            album_data.artist,
+            album_data.title,
+            scenario,
+            staged_album.current_path,
+        )
+        return DispatchOutcome(
+            success=False,
+            message=detail,
+            deferred=True,
+        )
+
     failed_result = ValidationResult(
         distance=bv_result.distance if bv_result.distance is not None else 0.0,
         scenario=scenario,
@@ -776,26 +808,24 @@ def _reject_request_auto_import(
     )
     log_validation_result(album_data, failed_result, ctx.cfg)
 
-    db, request_id = _resolved_request_rejection_id(album_data, ctx)
-    if db is not None and request_id is not None:
-        dl_info = _build_download_info(album_data)
-        if album_data.download_spectral is not None:
-            dl_info.download_spectral = album_data.download_spectral
-            dl_info.current_spectral = album_data.current_spectral
-            dl_info.existing_min_bitrate = album_data.current_min_bitrate
-            dl_info.slskd_filetype = dl_info.filetype
-            dl_info.actual_filetype = dl_info.filetype
-        _record_rejection_and_maybe_requeue(
-            db,
-            request_id,
-            dl_info,
-            distance=failed_result.distance if failed_result.distance is not None else 0.0,
-            scenario=failed_result.scenario or scenario,
-            detail=detail,
-            error=failed_result.error,
-            requeue=True,
-            validation_result=failed_result.to_json(),
-        )
+    dl_info = _build_download_info(album_data)
+    if album_data.download_spectral is not None:
+        dl_info.download_spectral = album_data.download_spectral
+        dl_info.current_spectral = album_data.current_spectral
+        dl_info.existing_min_bitrate = album_data.current_min_bitrate
+        dl_info.slskd_filetype = dl_info.filetype
+        dl_info.actual_filetype = dl_info.filetype
+    _record_rejection_and_maybe_requeue(
+        db,
+        request_id,
+        dl_info,
+        distance=failed_result.distance if failed_result.distance is not None else 0.0,
+        scenario=failed_result.scenario or scenario,
+        detail=detail,
+        error=failed_result.error,
+        requeue=True,
+        validation_result=failed_result.to_json(),
+    )
 
     return DispatchOutcome(success=False, message=detail)
 
@@ -1425,9 +1455,10 @@ def _run_completed_processing(
     #   still 'downloading'.
     # - False → a non-deferred failure path returned; reset to
     #   'wanted' only if the request row is still 'downloading'.
-    # - None  → leave the row untouched. This covers both release-lock
-    #   contention and guarded post-move staged paths where auto-retry
-    #   would risk duplicate import. Do NOT touch state here.
+    # - None  → leave the row untouched. This covers release-lock
+    #   contention, guarded post-move staged paths, and ownership-less
+    #   request rejects that require manual recovery. Do NOT touch state
+    #   here.
     if outcome is None:
         return
 
