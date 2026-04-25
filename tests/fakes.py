@@ -16,6 +16,10 @@ from typing import Any, Callable, Iterator
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+    IMPORT_JOB_PREVIEW_WAITING,
+    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
+    import_preview_enabled_from_env,
     validate_job_type,
     validate_preview_failure_status,
     validate_payload,
@@ -387,9 +391,15 @@ class FakePipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
+        preview_enabled: bool | None = None,
     ) -> ImportJob:
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
+        preview_enabled = (
+            import_preview_enabled_from_env()
+            if preview_enabled is None
+            else preview_enabled
+        )
         if dedupe_key is not None:
             existing = self.get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
@@ -397,6 +407,7 @@ class FakePipelineDB:
 
         self._next_import_job_id += 1
         now = _utcnow()
+        preview_completed_at = None if preview_enabled else now
         row: dict[str, Any] = {
             "id": self._next_import_job_id,
             "job_type": job_type,
@@ -414,16 +425,22 @@ class FakePipelineDB:
             "started_at": None,
             "heartbeat_at": None,
             "completed_at": None,
-            "preview_status": "waiting",
+            "preview_status": (
+                IMPORT_JOB_PREVIEW_WAITING
+                if preview_enabled
+                else IMPORT_JOB_PREVIEW_WOULD_IMPORT
+            ),
             "preview_result": None,
-            "preview_message": None,
+            "preview_message": (
+                None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
+            ),
             "preview_error": None,
             "preview_attempts": 0,
             "preview_worker_id": None,
             "preview_started_at": None,
             "preview_heartbeat_at": None,
-            "preview_completed_at": None,
-            "importable_at": None,
+            "preview_completed_at": preview_completed_at,
+            "importable_at": None if preview_enabled else now,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))

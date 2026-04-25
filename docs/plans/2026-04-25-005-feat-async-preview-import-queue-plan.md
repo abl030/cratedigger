@@ -171,8 +171,10 @@ Tracking issue: <https://github.com/abl030/cratedigger/issues/169>.
   job lifecycle (`queued`, `running`, `completed`, `failed`), while preview
   fields explain whether a queued job is waiting, previewing, importable, or
   rejected before beets mutation.
-- Make new jobs default to `preview_status='waiting'`. The serial importer
-  should claim only `status='queued'` and `preview_status='would_import'`.
+- Make new jobs enter `preview_status='waiting'` when the async preview gate is
+  enabled. Keep preview disabled by default for deployment compatibility: in
+  that mode, new jobs are `preview_status='would_import'` immediately and the
+  serial importer can drain without preview workers.
 - Persist the full preview result as JSONB and also store summary fields for
   filtering and UI sorting. The JSONB audit should include enough measurement
   and stage-chain detail to explain the decision.
@@ -303,6 +305,7 @@ AE6, AE7
 
 **Files:**
 - Create: `migrations/004_import_job_previews.sql`
+- Create: `migrations/005_import_preview_opt_in_default.sql`
 - Modify: `lib/import_queue.py`
 - Modify: `lib/pipeline_db.py`
 - Modify: `tests/fakes.py`
@@ -342,7 +345,9 @@ are the contract for every later unit.
 - Happy path: migrations create preview columns, constraints, and claim/list
   indexes, and reapplying migrations is idempotent.
 - Happy path: a newly enqueued import job has `preview_status='waiting'` and is
-  returned by the preview claim API.
+  returned by the preview claim API when preview is enabled.
+- Happy path: a newly enqueued import job is immediately `would_import` when
+  preview is disabled or the preview columns are omitted by a raw/default insert.
 - Happy path: marking preview `would_import` persists preview JSONB,
   `preview_completed_at`, and `importable_at`.
 - Edge case: active dedupe still returns an existing queued job when it is
@@ -661,6 +666,9 @@ F7; AE4, AE8
 **Approach:**
 - Add deployment wiring for the preview worker service using the same Python
   environment and state directory patterns as `cratedigger-importer`.
+- Add an explicit `importer.preview.enable` option so the preview worker starts
+  only for deployments that opt into the gate. Export the same gate into Python
+  wrappers so enqueue semantics match the systemd service graph.
 - Expose preview worker concurrency through Nix/module configuration and script
   flags. The doc2 default should be two workers, with docs explaining that CPU,
   swap pressure, and queue throughput should drive changes.
@@ -668,6 +676,9 @@ F7; AE4, AE8
   config.ini field unless implementation finds a real non-Nix runtime need.
 - Ensure preview workers start after DB migrations and do not require the
   importer advisory lock.
+- Render the shared `config.ini` atomically in prestart because importer,
+  preview, web, and timer-driven services can start concurrently after
+  migrations.
 - Update schema docs with preview fields, lifecycle, and importable claim
   semantics.
 - Update web docs to describe the Recents queue subview.
@@ -688,6 +699,9 @@ service details stay consistent with existing deployment guarantees.
 **Test scenarios:**
 - Happy path: Nix module defines a preview worker wrapper and systemd service
   that starts after `cratedigger-db-migrate.service`.
+- Happy path: preview worker service is gated behind
+  `services.cratedigger.importer.preview.enable`, and disabled deployments mark
+  new jobs importable immediately.
 - Happy path: preview worker service receives the configured worker count or
   process count and defaults to two in the module.
 - Error path: invalid worker count is rejected by module or CLI parser tests.

@@ -47,14 +47,18 @@ Key fields:
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
 - `preview_status TEXT` — async readiness stage: `waiting`, `running`,
-  `would_import`, `confident_reject`, `uncertain`, or `error`.
+  `would_import`, `confident_reject`, `uncertain`, or `error`. New jobs use
+  `waiting` only when the async preview gate is enabled; preview-disabled or
+  raw/default inserts are `would_import` immediately with
+  `preview_message='Preview gate disabled'`.
 - `preview_result JSONB`, `preview_message`, `preview_error` — durable
   no-mutation preview audit visible in Recents and CLI output.
 - `preview_attempts`, `preview_worker_id`, `preview_started_at`,
   `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
   recovery metadata.
-- `importable_at TIMESTAMPTZ` — set when preview returns `would_import`; the
-  serial importer claims only queued jobs with this importable preview state.
+- `importable_at TIMESTAMPTZ` — set when preview returns `would_import`, or at
+  enqueue time when the preview gate is disabled; the serial importer claims
+  only queued jobs with this importable preview state.
 
 On importer startup, any pre-existing `running` job is treated as abandoned
 state from a previous worker process, reset to `queued`, and retried
@@ -67,6 +71,10 @@ jobs with `preview_status='waiting'`, call the no-mutation import preview path,
 then either set `preview_status='would_import'` and `importable_at` or fail the
 job with preview audit details. This lets spectral/measurement work run with
 tunable parallelism while beets writes stay serial.
+
+The preview gate is opt-in at deployment time. When disabled, no preview worker
+is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema
+defaults both make jobs importable immediately.
 
 ## `download_log.import_result` JSONB
 
