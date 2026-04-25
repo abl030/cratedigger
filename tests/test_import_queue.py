@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import Any, cast
 from unittest.mock import patch
 
 from lib.import_dispatch import DispatchOutcome
@@ -31,6 +32,10 @@ class TestImporterWorker(unittest.TestCase):
         )
         assert updated is not None
         return updated
+
+    def _result(self, job: Any) -> dict[str, Any]:
+        assert job.result is not None
+        return job.result
 
     def _log_wrong_match(
         self,
@@ -74,7 +79,7 @@ class TestImporterWorker(unittest.TestCase):
             "lib.import_dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported"),
         ) as dispatch:
-            updated = importer.process_claimed_job(db, claimed)
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
 
         dispatch.assert_called_once_with(
             db,
@@ -86,7 +91,7 @@ class TestImporterWorker(unittest.TestCase):
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
-        self.assertEqual(updated.result["success"], True)
+        self.assertEqual(self._result(updated)["success"], True)
         self.assertEqual(job.id, updated.id)
 
     def test_manual_import_failure_marks_job_failed(self):
@@ -108,12 +113,12 @@ class TestImporterWorker(unittest.TestCase):
             "lib.import_dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(False, "quality gate rejected"),
         ):
-            updated = importer.process_claimed_job(db, claimed)
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.error, "quality gate rejected")
-        self.assertEqual(updated.result["success"], False)
+        self.assertEqual(self._result(updated)["success"], False)
 
     def test_failed_force_import_job_cleans_wrong_match_source(self):
         from scripts import importer
@@ -143,14 +148,15 @@ class TestImporterWorker(unittest.TestCase):
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "Pre-import gate rejected"),
             ):
-                updated = importer.process_claimed_job(db, claimed)
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertFalse(os.path.exists(source))
             self.assertEqual(db.get_wrong_matches(), [])
-            self.assertEqual(updated.result["cleanup"]["success"], True)
-            self.assertEqual(updated.result["cleanup"]["cleared_rows"], 1)
+            result = self._result(updated)
+            self.assertEqual(result["cleanup"]["success"], True)
+            self.assertEqual(result["cleanup"]["cleared_rows"], 1)
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
@@ -192,11 +198,11 @@ class TestImporterWorker(unittest.TestCase):
                 "lib.import_dispatch.dispatch_import_from_db",
                 side_effect=reject_again,
             ):
-                updated = importer.process_claimed_job(db, claimed)
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            self.assertEqual(updated.result["cleanup"]["cleared_rows"], 2)
+            self.assertEqual(self._result(updated)["cleanup"]["cleared_rows"], 2)
             self.assertEqual(db.get_wrong_matches(), [])
         finally:
             shutil.rmtree(source, ignore_errors=True)
@@ -223,13 +229,13 @@ class TestImporterWorker(unittest.TestCase):
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "manual import failed"),
             ):
-                updated = importer.process_claimed_job(db, claimed)
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertTrue(os.path.isdir(source))
             self.assertEqual(len(db.get_wrong_matches()), 1)
-            self.assertNotIn("cleanup", updated.result)
+            self.assertNotIn("cleanup", self._result(updated))
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
@@ -262,13 +268,13 @@ class TestImporterWorker(unittest.TestCase):
                     deferred=True,
                 ),
             ):
-                updated = importer.process_claimed_job(db, claimed)
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertTrue(os.path.isdir(source))
             self.assertEqual(len(db.get_wrong_matches()), 1)
-            self.assertNotIn("cleanup", updated.result)
+            self.assertNotIn("cleanup", self._result(updated))
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
@@ -287,7 +293,7 @@ class TestImporterWorker(unittest.TestCase):
         claimed = db.claim_next_import_job(worker_id="old-worker")
         assert claimed is not None
 
-        recovered = importer.recover_abandoned_running_jobs(db)
+        recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
 
         self.assertEqual([job.id for job in recovered], [claimed.id])
         self.assertEqual(recovered[0].status, "queued")
@@ -298,7 +304,7 @@ class TestImporterWorker(unittest.TestCase):
             "lib.import_dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported on retry"),
         ):
-            updated = importer.run_once(db, worker_id="new-worker")
+            updated = importer.run_once(cast(Any, db), worker_id="new-worker")
 
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -335,7 +341,7 @@ class TestImporterWorker(unittest.TestCase):
             preview_enabled=True,
         )
 
-        self.assertIsNone(importer.run_once(db, worker_id="worker"))
+        self.assertIsNone(importer.run_once(cast(Any, db), worker_id="worker"))
 
     def test_automation_job_reconstructs_active_state_and_uses_processing_path(self):
         from scripts import importer
@@ -371,7 +377,7 @@ class TestImporterWorker(unittest.TestCase):
             return_value=True,
         ) as processing:
             updated = importer.process_claimed_job(
-                db,
+                cast(Any, db),
                 claimed,
                 ctx=object(),
             )
@@ -380,6 +386,93 @@ class TestImporterWorker(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Automation import processing completed")
+
+    def test_automation_job_completes_from_dispatch_outcome(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+            preview_enabled=False,
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.download._run_completed_processing",
+            return_value=DispatchOutcome(True, "Imported by dispatch"),
+        ):
+            updated = importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                ctx=object(),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.message, "Imported by dispatch")
+        self.assertEqual(self._result(updated)["success"], True)
+
+    def test_automation_job_fails_from_dispatch_outcome(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+            preview_enabled=False,
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.download._run_completed_processing",
+            return_value=DispatchOutcome(False, "Pre-import gate rejected"),
+        ):
+            updated = importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                ctx=object(),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.message, "Pre-import gate rejected")
+        self.assertEqual(updated.error, "Pre-import gate rejected")
+        self.assertEqual(self._result(updated)["success"], False)
 
 
 class TestImportPreviewWorker(unittest.TestCase):
@@ -435,6 +528,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "would_import")
+        assert updated.preview_result is not None
         self.assertEqual(updated.preview_result["verdict"], "would_import")
         self.assertIsNotNone(updated.importable_at)
 

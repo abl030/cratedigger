@@ -1913,7 +1913,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
 
 class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
-    """The ``process_completed_album`` 3-way return → state-transition seam.
+    """The ``process_completed_album`` return ownership seam.
 
     Pre-#133 this was a 2-way ``bool``: True → flip to ``imported``,
     False → reset to ``wanted``. That binary misclassified release-
@@ -1923,10 +1923,11 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
     Codex R3 P2/P3 then flagged that the reset clobbered spectral
     state and staged files.
 
-    The proper seam is a 3-way return: ``None`` == deferred (leave
-    everything alone). These tests pin the branching at
+    The proper seam separates local bool fallback, ``None`` deferred
+    retry, and ``DispatchOutcome`` queue summaries. These tests pin the
+    branching at
     ``_run_completed_processing`` so a future refactor can't silently
-    collapse the three states back to two.
+    collapse dispatch ownership into bool fallback transitions.
     """
 
     def _ctx(self, db: FakePipelineDB):
@@ -2026,6 +2027,35 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.status_history, [(42, "wanted")])
+
+    def test_dispatch_outcome_does_not_drive_fallback_transition(self):
+        """Dispatch summaries are queue results, not fallback bool outcomes."""
+        from lib import download as dl_mod
+        from lib.import_dispatch import DispatchOutcome
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        dispatch_outcome = DispatchOutcome(
+            success=False,
+            message="Pre-import gate rejected",
+        )
+
+        with patch.object(
+            dl_mod,
+            "process_completed_album",
+            return_value=dispatch_outcome,
+        ):
+            outcome = dl_mod._run_completed_processing(
+                self._entry(),
+                42,
+                self._state(),
+                db,
+                self._ctx(db),
+            )
+
+        self.assertIs(outcome, dispatch_outcome)
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.status_history, [])
 
     def test_real_missing_request_id_rejection_transitions_once(self):
         """The real missing-request-id reject path must transition exactly once."""

@@ -907,8 +907,8 @@ class TestRederiveTransferIds(unittest.TestCase):
         self.assertEqual(status["state"], "Completed, Succeeded")
 
 
-class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
-    """Test process_completed_album returns True/False."""
+class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
+    """Test process_completed_album return ownership."""
 
     @patch("lib.download.music_tag")
     def test_returns_true_on_success(self, mock_mt):
@@ -936,12 +936,12 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
 
     @patch("lib.download._process_beets_validation")
     @patch("lib.download.music_tag")
-    def test_dispatch_outcome_summary_does_not_drive_outer_status(
+    def test_dispatch_outcome_summary_is_returned_to_queue_owner(
         self,
         mock_mt,
         mock_validation,
     ):
-        """Auto-import summaries must not become fallback status transitions."""
+        """Auto-import summaries must survive for the importer queue result."""
         from lib.download import process_completed_album
         from lib.import_dispatch import DispatchOutcome
         import tempfile, os
@@ -967,7 +967,7 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx)
 
-            self.assertIsNone(result)
+            self.assertIs(result, mock_validation.return_value)
             mock_validation.assert_called_once()
 
     def test_returns_false_on_file_move_failure(self):
@@ -1359,7 +1359,11 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
                  self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx)
 
-            self.assertFalse(result)
+            from lib.import_dispatch import DispatchOutcome
+            assert isinstance(result, DispatchOutcome)
+            self.assertFalse(result.success)
+            self.assertFalse(result.deferred)
+            self.assertIn("missing db_request_id", result.message)
             failed_path = os.path.join(
                 downloads_root,
                 "failed_imports",
@@ -1536,7 +1540,11 @@ class TestProcessCompletedAlbumReturnsBool(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx)
 
-            self.assertIsNone(result)
+            from lib.import_dispatch import DispatchOutcome
+            assert isinstance(result, DispatchOutcome)
+            self.assertFalse(result.success)
+            self.assertFalse(result.deferred)
+            self.assertIn("missing db_request_id", result.message)
             self.assertEqual(db.request(1)["status"], "wanted")
             self.assertEqual(len(db.download_logs), 1)
             self.assertEqual(

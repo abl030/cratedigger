@@ -177,6 +177,8 @@ def execute_automation_import_job(
             ),
             deferred=True,
         )
+    if isinstance(result, DispatchOutcome):
+        return result
     if result:
         return DispatchOutcome(
             success=True,

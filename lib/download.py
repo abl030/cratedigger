@@ -657,17 +657,18 @@ def _materialize_processing_dir(
 
 
 def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: CratediggerContext) -> "bool | None":
+                            ctx: CratediggerContext) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
-    Returns three-valued ``bool | None``:
+    Returns the local processing result:
     - ``True`` — local non-dispatch processing succeeded. Outer caller may
       finalize only if the request row is still ``downloading``.
     - ``False`` — local non-dispatch processing failed. Outer caller resets
       to ``wanted`` only if the request row is still ``downloading``.
-    - ``None`` — the validation / dispatch path either already owned the
-      request transition or intentionally left state untouched for retry /
-      manual recovery. Outer caller must NOT touch status.
+    - ``DispatchOutcome`` — the validation / dispatch path already owned the
+      request transition and produced an import summary for the queue owner.
+    - ``None`` — the validation / dispatch path intentionally left state
+      untouched for retry / manual recovery. Outer caller must NOT touch status.
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
@@ -701,11 +702,10 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
                 # status, active_download_state, and staged files
                 # untouched for the next cycle to retry.
                 return None
-            # DispatchOutcome is an import summary only. The dispatch path
-            # must perform any request transition itself through
-            # lib.transitions; do not let a summary bool mask a missing
-            # typed transition in the outer poller.
-            return None
+            # DispatchOutcome is an import summary only. Return it so the
+            # importer queue can record the real terminal job outcome, but do
+            # not let it drive fallback request-status transitions below.
+            return outcome
     return True
 
 
@@ -894,8 +894,8 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     Returns the ``DispatchOutcome`` summary from ``dispatch_import_core``
     when the auto-import path fires (source='request', distance within
     threshold), or ``None`` for the redownload path that just stages
-    and marks done. ``process_completed_album()`` only uses the summary
-    to detect deferred no-op cases; request-state changes remain owned
+    and marks done. ``process_completed_album()`` propagates the summary
+    upward for the importer queue, but request-state changes remain owned
     by the dispatch/finalization seam itself.
 
     This function acquires the RELEASE advisory lock outer for the
@@ -1489,7 +1489,7 @@ def _run_completed_processing(
     state: ActiveDownloadState,
     db: Any,
     ctx: CratediggerContext,
-) -> bool | None:
+) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
         if entry.import_folder is None:
@@ -1507,11 +1507,13 @@ def _run_completed_processing(
                          f"— will retry local processing next cycle")
         return None
 
-    # Three-valued return from ``process_completed_album``:
+    # Ownership return from ``process_completed_album``:
     # - True  → processing succeeded; flip to 'imported' if status is
     #   still 'downloading'.
     # - False → a non-deferred failure path returned; reset to
     #   'wanted' only if the request row is still 'downloading'.
+    # - DispatchOutcome → dispatch/finalization already owned request
+    #   transitions; return the summary to the queue owner only.
     # - None  → leave the row untouched. This covers release-lock
     #   contention, guarded post-move staged paths, and ownership-less
     #   request rejects that require manual recovery. Do NOT touch state
@@ -1519,9 +1521,18 @@ def _run_completed_processing(
     if outcome is None:
         return None
 
+    if isinstance(outcome, DispatchOutcome):
+        return outcome
+
+    if outcome is not True and outcome is not False:
+        raise TypeError(
+            "process_completed_album returned unsupported outcome "
+            f"{type(outcome).__name__}"
+        )
+
     refreshed = db.get_request(request_id)
     if refreshed and refreshed["status"] == "downloading":
-        if outcome:
+        if outcome is True:
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
             transitions.finalize_request(
@@ -1531,7 +1542,7 @@ def _run_completed_processing(
                     from_status="downloading",
                 ),
             )
-        else:
+        elif outcome is False:
             logger.warning(f"  process_completed_album failed without "
                            f"setting status — resetting to wanted")
             transitions.finalize_request(
