@@ -302,9 +302,10 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_assert_log_passes(self):
         db = FakePipelineDB()
-        db.log_download(42, outcome="success", soulseek_username="user1")
+        log_id = db.log_download(42, outcome="success", soulseek_username="user1")
 
         # Should not raise
+        self.assertEqual(log_id, db.download_logs[0].id)
         db.assert_log(self, 0, outcome="success", request_id=42)
 
     def test_assert_log_checks_extra_fields(self):

@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import msgspec
 
 from lib.manual_import import (
     scan_complete_folder,
@@ -18,6 +19,13 @@ from lib.import_queue import (
 )
 from lib.util import resolve_failed_path
 from lib.wrong_matches import dismiss_wrong_match_source
+from lib.wrong_match_triage import triage_wrong_match
+from lib.import_preview import (
+    ImportPreviewValues,
+    preview_import_from_download_log,
+    preview_import_from_path,
+    preview_import_from_values,
+)
 from web.routes.pipeline import _serialize_import_job
 
 
@@ -79,7 +87,7 @@ def _target_candidate(vr: dict[str, object]) -> dict[str, object] | None:
 
 def _threshold_milli(value: object) -> int:
     try:
-        parsed = int(value) if value is not None else 180
+        parsed = int(value) if isinstance(value, (str, int, float)) else 180
     except (TypeError, ValueError):
         parsed = 180
     return max(0, min(parsed, 999))
@@ -485,8 +493,14 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
         target = _target_candidate(vr)
         entries_list = group["entries"]
         assert isinstance(entries_list, list)
+        log_id = row.get("download_log_id")
+        import_job = (
+            _serialize_import_job(active_jobs_by_log_id[log_id])
+            if isinstance(log_id, int) and log_id in active_jobs_by_log_id
+            else None
+        )
         entries_list.append({
-            "download_log_id": row["download_log_id"],
+            "download_log_id": log_id,
             "failed_path": resolved_path or failed_path,
             "files_exist": files_exist,
             "distance": vr.get("distance"),
@@ -496,11 +510,7 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 or vr.get("soulseek_username"),
             "candidate": target,
             "local_items": vr.get("items", []),
-            "import_job": (
-                _serialize_import_job(active_jobs_by_log_id[row["download_log_id"]])
-                if row["download_log_id"] in active_jobs_by_log_id
-                else None
-            ),
+            "import_job": import_job,
         })
         group["pending_count"] = len(entries_list)
 
@@ -685,6 +695,14 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 })
                 remaining += 1
                 continue
+            source_username_raw = (
+                row.get("soulseek_username")
+                or vr.get("soulseek_username")
+            )
+            source_username = (
+                str(source_username_raw)
+                if source_username_raw is not None else None
+            )
             job = pdb.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=rid,
@@ -692,10 +710,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 payload=force_import_payload(
                     download_log_id=lid,
                     failed_path=resolved_path,
-                    source_username=(
-                        row.get("soulseek_username")
-                        or vr.get("soulseek_username")
-                    ),
+                    source_username=source_username,
                 ),
                 message=(
                     f"Force import queued for "
@@ -760,13 +775,78 @@ def post_wrong_match_converge(h, body: dict) -> None:
     }, status=202)
 
 
+def _preview_values_from_body(body: dict) -> ImportPreviewValues:
+    raw_values = body.get("values")
+    if raw_values is None and body.get("values_json"):
+        raw_values = json.loads(str(body["values_json"]))
+    if raw_values is None:
+        raw_values = body
+    if not isinstance(raw_values, dict):
+        raise ValueError("values must be an object")
+    return msgspec.convert(raw_values, type=ImportPreviewValues)
+
+
+def post_import_preview(h, body: dict) -> None:
+    """Preview either typed values, a request/path, or a download-log row."""
+    has_values = any(k in body for k in ("values", "values_json", "is_flac", "min_bitrate"))
+    has_download_log = body.get("download_log_id") is not None
+    has_path = body.get("request_id") is not None and body.get("path")
+    mode_count = sum(1 for value in (has_values, has_download_log, has_path) if value)
+    if mode_count != 1:
+        h._error("Provide exactly one preview mode: values, download_log_id, or request_id+path")
+        return
+
+    try:
+        if has_values:
+            from web.routes.pipeline import _runtime_rank_config
+            preview = preview_import_from_values(
+                _preview_values_from_body(body),
+                cfg=_runtime_rank_config(),
+            )
+        elif has_download_log:
+            preview = preview_import_from_download_log(
+                _server()._db(),
+                int(body["download_log_id"]),
+            )
+        else:
+            preview = preview_import_from_path(
+                _server()._db(),
+                request_id=int(body["request_id"]),
+                path=str(body["path"]),
+                force=bool(body.get("force", True)),
+                source_username=(
+                    str(body["source_username"])
+                    if body.get("source_username") is not None else None
+                ),
+            )
+    except (ValueError, TypeError, msgspec.ValidationError) as exc:
+        h._error(f"Invalid preview input: {exc}")
+        return
+    h._json(preview.to_dict())
+
+
+def post_wrong_match_triage(h, body: dict) -> None:
+    raw_id = body.get("download_log_id")
+    if raw_id is None:
+        h._error("Missing download_log_id")
+        return
+    try:
+        result = triage_wrong_match(_server()._db(), int(raw_id))
+    except (ValueError, TypeError) as exc:
+        h._error(f"Invalid triage input: {exc}")
+        return
+    h._json(result.to_dict())
+
+
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
 }
 POST_ROUTES: dict[str, object] = {
     "/api/manual-import/import": post_manual_import,
+    "/api/import-preview": post_import_preview,
     "/api/wrong-matches/converge": post_wrong_match_converge,
+    "/api/wrong-matches/triage": post_wrong_match_triage,
     "/api/wrong-matches/delete": post_wrong_match_delete,
     "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
     "/api/wrong-matches/delete-transparent-non-flac": post_wrong_match_delete_transparent_non_flac,

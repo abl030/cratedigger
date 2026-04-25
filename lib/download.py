@@ -52,6 +52,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 MAX_FILE_RETRIES = 5
+AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
+    "audio_corrupt",
+    "spectral_reject",
+})
 
 
 # Lazy import for spectral analysis — avoids hard dep on sox at import time
@@ -59,6 +63,47 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """Proxy to spectral_check.analyze_album (lazy import)."""
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
+
+
+def _run_post_rejection_wrong_match_triage(
+    ctx: "CratediggerContext",
+    download_log_id: object,
+    *,
+    scenario: str | None,
+) -> Any:
+    """Immediately triage newly-created Wrong Matches rows.
+
+    This runs after the rejected download_log row exists and only for the
+    review-queue scenarios that Wrong Matches exposes. Bad-file scenarios have
+    their own buckets and should not be deleted through wrong-match policy.
+    """
+    if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
+        return None
+    if scenario in AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS:
+        return None
+    if ctx.pipeline_db_source is None:
+        return None
+    get_db = getattr(ctx.pipeline_db_source, "_get_db", None)
+    if get_db is None:
+        return None
+    try:
+        from lib.wrong_match_triage import triage_wrong_match
+
+        result = triage_wrong_match(get_db(), download_log_id)
+        logger.info(
+            "WRONG-MATCH TRIAGE: download_log_id=%s action=%s verdict=%s reason=%s",
+            download_log_id,
+            getattr(result, "action", None),
+            getattr(getattr(result, "preview", None), "verdict", None),
+            getattr(result, "reason", None),
+        )
+        return result
+    except Exception:
+        logger.exception(
+            "WRONG-MATCH TRIAGE FAILED: download_log_id=%s",
+            download_log_id,
+        )
+        return None
 
 
 # === slskd on-disk path resolution ===
@@ -821,7 +866,7 @@ def _reject_request_auto_import(
         dl_info.existing_min_bitrate = album_data.current_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
-    _record_rejection_and_maybe_requeue(
+    download_log_id = _record_rejection_and_maybe_requeue(
         db,
         request_id,
         dl_info,
@@ -831,6 +876,11 @@ def _reject_request_auto_import(
         error=failed_result.error,
         requeue=True,
         validation_result=failed_result.to_json(),
+    )
+    _run_post_rejection_wrong_match_triage(
+        ctx,
+        download_log_id,
+        scenario=failed_result.scenario,
     )
 
     return DispatchOutcome(success=False, message=detail)
@@ -1045,13 +1095,18 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
     # Backfill search_filetype_override for pre-quality-gate albums stuck in loops
     backfill_override = _compute_rejection_backfill(album_data, ctx)
 
-    ctx.pipeline_db_source.reject_and_requeue(
+    download_log_id = ctx.pipeline_db_source.reject_and_requeue(
         album_data,
         bv_result,
         usernames=usernames,
         download_info=dl_info,
         search_filetype_override=backfill_override,
         cooled_down_users=ctx.cooled_down_users,
+    )
+    _run_post_rejection_wrong_match_triage(
+        ctx,
+        download_log_id,
+        scenario=bv_result.scenario,
     )
     logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
                    f"(scenario={bv_result.scenario}, "

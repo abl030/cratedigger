@@ -233,6 +233,21 @@ class TestDispatchCoreSeams(unittest.TestCase):
         idx = cmd.index("--target-format")
         self.assertEqual(cmd[idx + 1], "flac")
 
+    def test_shared_import_one_command_supports_preview_without_request_id(self):
+        from lib.import_dispatch import build_import_one_command
+
+        cmd = build_import_one_command(
+            path="/tmp/album",
+            mb_release_id="mbid-123",
+            beets_harness_path=_HARNESS,
+            dry_run=True,
+            preserve_source=True,
+        )
+
+        self.assertIn("--dry-run", cmd)
+        self.assertIn("--preserve-source", cmd)
+        self.assertNotIn("--request-id", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

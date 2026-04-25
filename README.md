@@ -54,6 +54,7 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Quality upgrade system** -- automatically re-queues albums when better sources become available. CBR -> lossless -> verified V0.
 - **User cooldowns** -- global, temporary cooldowns for Soulseek users who consistently timeout or fail (5 consecutive failures = 3-day cooldown)
 - **Force-import** -- manually import rejected downloads via CLI or web API
+- **Wrong Matches auto-triage** -- rejected wrong-match folders are previewed immediately; clear rejects are deleted and audited, importable/uncertain candidates stay visible
 - **Full audit trail** -- every decision stored as queryable JSONB in PostgreSQL
 - **Typed decision pipeline** -- pure functions in `quality.py`, typed dataclasses throughout, pyright enforced
 - **Discogs as first-class citizen** -- browse, add, and import Discogs releases through the same pipeline as MusicBrainz. Beets auto-routes numeric IDs to the Discogs plugin; local Discogs mirror eliminates external API dependencies.

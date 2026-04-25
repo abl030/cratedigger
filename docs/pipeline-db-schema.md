@@ -86,9 +86,24 @@ Every search attempt is logged to `search_log` with: `request_id`, `query` (norm
 
 Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable download), `no_results` (0 results from slskd), `timeout`, `error`, `empty_query` (can't build query).
 
-## Force-Import (rejected downloads)
+## Wrong Matches and Force-Import
 
-Albums rejected by beets validation (high distance, wrong pressing) are moved to `failed_imports/` under the slskd download dir, with their `failed_path` stored in `download_log.validation_result` JSONB. After manual review, force-import bypasses the distance check. The request handler or CLI command validates the row/path synchronously, then enqueues a `force_import` job. `cratedigger-importer` runs the actual beets mutation.
+Albums rejected by beets validation (high distance, wrong pressing) are moved
+to `failed_imports/` under the slskd download dir, with their `failed_path`
+stored in `download_log.validation_result` JSONB. New Wrong Matches rows are
+immediately previewed through the no-mutation import preview path. Confident
+cleanup-eligible rejects are deleted and cleared; would-import and uncertain
+rows stay actionable for manual review or converge.
+
+The triage result is persisted under
+`download_log.validation_result.wrong_match_triage`, so a row that leaves the
+actionable Wrong Matches list still keeps the action, success flag, reason,
+preview verdict/decision, stage chain, and cleanup result for audit. Denylist
+rows written by the rejection path are not removed by triage.
+
+After manual review, force-import bypasses the distance check. The request
+handler or CLI command validates the row/path synchronously, then enqueues a
+`force_import` job. `cratedigger-importer` runs the actual beets mutation.
 
 **Path resolution**: old entries stored relative paths (`failed_imports/Foo - Bar`), new entries store absolute paths. Force-import resolves relative paths against `/mnt/virtio/music/slskd/` automatically.
 

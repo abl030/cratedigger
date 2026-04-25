@@ -115,6 +115,95 @@ class TestBuildDownloadInfo(unittest.TestCase):
         self.assertEqual(dl.username, "alpha_user, beta_user")
 
 
+class TestPostRejectionWrongMatchTriage(unittest.TestCase):
+    def test_runs_triage_for_new_wrong_match_log_row(self):
+        from lib.download import _run_post_rejection_wrong_match_triage
+
+        db = FakePipelineDB()
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
+            result = _run_post_rejection_wrong_match_triage(
+                ctx,
+                123,
+                scenario="high_distance",
+            )
+
+        triage.assert_called_once_with(db, 123)
+        self.assertIs(result, triage.return_value)
+
+    def test_skips_bad_file_rejections(self):
+        from lib.download import _run_post_rejection_wrong_match_triage
+
+        db = FakePipelineDB()
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
+            result = _run_post_rejection_wrong_match_triage(
+                ctx,
+                123,
+                scenario="spectral_reject",
+            )
+
+        triage.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_rejected_download_handler_triggers_triage_after_logging(self):
+        from lib.download import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+        import tempfile
+
+        class Source:
+            def __init__(self, db):
+                self.db = db
+                self.rejected = False
+
+            def _get_db(self):
+                return self.db
+
+            def reject_and_requeue(self, *args, **kwargs):
+                self.rejected = True
+                return 77
+
+        db = FakePipelineDB()
+        source = Source(db)
+        ctx = _make_ctx(pipeline_db_source=source)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            current_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01 - Track.mp3"), "w",
+                      encoding="utf-8") as fp:
+                fp.write("audio")
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_tracking_file = os.path.join(tmpdir, "tracking.jsonl")
+            album = make_grab_list_entry(
+                files=[make_download_file(username="user1")],
+                artist="Artist",
+                title="Album",
+                mb_release_id="test-mbid",
+                db_request_id=42,
+            )
+            result = ValidationResult(
+                valid=False,
+                distance=0.4,
+                scenario="high_distance",
+                detail="too far",
+            )
+
+            with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
+                _handle_rejected_result(
+                    album,
+                    result,
+                    StagedAlbum(current_path=current_path, request_id=42),
+                    ctx,
+                )
+
+        self.assertTrue(source.rejected)
+        triage.assert_called_once_with(db, 77)
+
+
 class TestRequestScopedAutoImportPath(unittest.TestCase):
 
     CASES = [

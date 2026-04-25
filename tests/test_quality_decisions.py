@@ -35,6 +35,9 @@ from lib.quality import (
     measurement_rank,
     gate_rank,
     compare_quality,
+    build_existing_quality_measurement,
+    measured_import_decision,
+    MeasuredImportDecisionInput,
 )
 
 
@@ -269,6 +272,85 @@ class TestImportQualityDecision(unittest.TestCase):
                     expected,
                     f"{desc}: new={new_kwargs} existing={existing_kwargs} "
                     f"is_transcode={is_transcode} expected {expected!r}")
+
+
+class TestMeasuredImportDecision(unittest.TestCase):
+    """Shared reducer used by simulator, preview, and harness."""
+
+    def test_reducer_matches_import_quality_decision(self):
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=245,
+            median_bitrate_kbps=245,
+            format="mp3 v0",
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            avg_bitrate_kbps=192,
+            median_bitrate_kbps=192,
+            format="mp3 192",
+            is_cbr=True,
+        )
+
+        result = measured_import_decision(
+            MeasuredImportDecisionInput(new, existing)
+        )
+
+        self.assertEqual(result.decision, "import")
+        self.assertTrue(result.would_import)
+        self.assertFalse(result.confident_reject)
+        self.assertEqual(result.stage_chain, ["stage2_import:import"])
+
+    def test_reducer_classifies_terminal_rejects_for_preview_cleanup(self):
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            median_bitrate_kbps=128,
+            format="mp3 128",
+            is_cbr=True,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=245,
+            median_bitrate_kbps=245,
+            format="mp3 v0",
+        )
+
+        result = measured_import_decision(
+            MeasuredImportDecisionInput(new, existing)
+        )
+
+        self.assertEqual(result.decision, "downgrade")
+        self.assertEqual(result.exit_code, 5)
+        self.assertTrue(result.confident_reject)
+        self.assertTrue(result.cleanup_eligible)
+
+    def test_existing_measurement_clamps_cbr_but_preserves_vbr_average(self):
+        cbr = build_existing_quality_measurement(
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            override_min_bitrate=96,
+        )
+        vbr = build_existing_quality_measurement(
+            min_bitrate_kbps=152,
+            avg_bitrate_kbps=225,
+            median_bitrate_kbps=230,
+            format="MP3",
+            is_cbr=False,
+            override_min_bitrate=96,
+        )
+
+        self.assertIsNotNone(cbr)
+        self.assertEqual(cbr.min_bitrate_kbps, 96)
+        self.assertEqual(cbr.avg_bitrate_kbps, 96)
+        self.assertEqual(cbr.median_bitrate_kbps, 96)
+        self.assertIsNotNone(vbr)
+        self.assertEqual(vbr.min_bitrate_kbps, 96)
+        self.assertEqual(vbr.avg_bitrate_kbps, 225)
+        self.assertEqual(vbr.median_bitrate_kbps, 230)
 
 
 # ============================================================================

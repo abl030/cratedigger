@@ -627,8 +627,10 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/beets/delete",
         "/api/manual-import/scan",
         "/api/manual-import/import",
+        "/api/import-preview",
         "/api/wrong-matches",
         "/api/wrong-matches/converge",
+        "/api/wrong-matches/triage",
         "/api/wrong-matches/delete",
         "/api/wrong-matches/delete-group",
         "/api/wrong-matches/delete-transparent-non-flac",
@@ -688,6 +690,13 @@ class TestPipelineRouteContracts(_WebServerCase):
         "stage1_spectral", "stage2_import", "stage3_quality_gate",
         "final_status", "imported", "denylisted", "keep_searching",
         "target_final_format",
+    }
+    IMPORT_PREVIEW_REQUIRED_FIELDS = {
+        "mode", "verdict", "would_import", "confident_reject", "uncertain",
+        "cleanup_eligible", "decision", "reason", "stage_chain",
+    }
+    WRONG_MATCH_TRIAGE_REQUIRED_FIELDS = {
+        "download_log_id", "action", "success", "reason", "preview", "cleanup",
     }
     IMPORT_JOB_REQUIRED_FIELDS = {
         "id", "job_type", "status", "request_id", "dedupe_key", "payload",
@@ -827,6 +836,56 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
                                 "pipeline simulate response")
 
+    def test_import_preview_values_contract(self):
+        status, data = self._post("/api/import-preview", {
+            "values": {
+                "is_flac": False,
+                "min_bitrate": 320,
+                "is_cbr": True,
+            },
+        })
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.IMPORT_PREVIEW_REQUIRED_FIELDS,
+                                "import preview response")
+        self.assertEqual(data["mode"], "values")
+
+    def test_import_preview_rejects_ambiguous_modes(self):
+        status, data = self._post("/api/import-preview", {
+            "values": {"min_bitrate": 320},
+            "download_log_id": 1,
+        })
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    @patch("web.routes.imports.triage_wrong_match")
+    def test_wrong_match_triage_contract(self, mock_triage):
+        from lib.import_preview import ImportPreviewResult
+        from lib.wrong_match_triage import WrongMatchTriageResult
+
+        mock_triage.return_value = WrongMatchTriageResult(
+            download_log_id=77,
+            action="kept_would_import",
+            success=True,
+            reason="import",
+            preview=ImportPreviewResult(
+                mode="download_log",
+                verdict="would_import",
+                decision="import",
+                would_import=True,
+            ),
+        )
+
+        status, data = self._post("/api/wrong-matches/triage", {
+            "download_log_id": 77,
+        })
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.WRONG_MATCH_TRIAGE_REQUIRED_FIELDS,
+                                "wrong match triage response")
+        self.assertEqual(data["action"], "kept_would_import")
+
     def test_import_jobs_contract(self):
         status, data = self._get("/api/import-jobs")
 
@@ -852,9 +911,14 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 
-    @patch("web.routes.pipeline.full_pipeline_decision")
-    def test_pipeline_simulate_threads_target_format(self, mock_simulate):
-        mock_simulate.return_value = {
+    @patch("web.routes.pipeline.preview_import_from_values")
+    def test_pipeline_simulate_threads_target_format(self, mock_preview):
+        from lib.import_preview import ImportPreviewResult
+
+        mock_preview.return_value = ImportPreviewResult(
+            mode="values",
+            verdict="would_import",
+            simulation={
             "stage0_spectral_gate": "skipped_flac",
             "stage1_spectral": None,
             "stage2_import": "import",
@@ -864,7 +928,8 @@ class TestPipelineRouteContracts(_WebServerCase):
             "denylisted": False,
             "keep_searching": False,
             "target_final_format": "flac",
-        }
+            },
+        )
 
         status, _data = self._get(
             "/api/pipeline/simulate?is_flac=true&min_bitrate=900&target_format=flac"
@@ -872,7 +937,7 @@ class TestPipelineRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(
-            mock_simulate.call_args.kwargs["target_format"], "flac")
+            mock_preview.call_args.args[0].target_format, "flac")
 
     def test_pipeline_simulate_threads_avg_bitrate_to_stage0(self):
         """Issue #93: the web simulator must accept avg_bitrate and return

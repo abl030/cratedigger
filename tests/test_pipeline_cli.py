@@ -1,6 +1,7 @@
 """Tests for scripts/pipeline_cli.py — Pipeline CLI commands."""
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -298,6 +299,73 @@ class TestCmdManualImport(unittest.TestCase):
         pipeline_cli.cmd_manual_import(db, args)
         db.enqueue_import_job.assert_not_called()
         mock_print.assert_any_call("  Files not found at: nonexistent/path")
+
+
+class TestCmdImportPreview(unittest.TestCase):
+    def test_values_json_outputs_common_preview_json(self):
+        from lib.import_preview import ImportPreviewResult
+
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            path=None,
+            source_username=None,
+            no_force=False,
+            values=True,
+            values_json='{"is_flac": false, "min_bitrate": 320, "is_cbr": true}',
+            json=True,
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.import_preview.preview_import_from_values",
+            return_value=ImportPreviewResult(
+                mode="values",
+                verdict="would_import",
+                decision="import",
+                would_import=True,
+            ),
+        ) as mock_preview, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["verdict"], "would_import")
+        self.assertEqual(
+            mock_preview.call_args.args[0].min_bitrate,
+            320,
+        )
+
+    def test_download_log_mode_delegates_to_preview_service(self):
+        from lib.import_preview import ImportPreviewResult
+
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=99,
+            request_id=None,
+            path=None,
+            source_username=None,
+            no_force=False,
+            values=False,
+            values_json=None,
+            json=False,
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.import_preview.preview_import_from_download_log",
+            return_value=ImportPreviewResult(
+                mode="download_log",
+                verdict="confident_reject",
+                decision="downgrade",
+                confident_reject=True,
+                cleanup_eligible=True,
+            ),
+        ) as mock_preview, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        self.assertEqual(rc, 0)
+        mock_preview.assert_called_once_with(db, 99)
+        self.assertIn("cleanup_eligible: yes", stdout.getvalue())
 
 
 class TestCmdQuery(unittest.TestCase):

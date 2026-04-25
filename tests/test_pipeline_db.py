@@ -82,7 +82,9 @@ class TestSchemaCreation(unittest.TestCase):
             )
             RETURNING id
         """, (req_id,))
-        first_id = cur.fetchone()["id"]
+        row = cur.fetchone()
+        assert row is not None
+        first_id = row["id"]
         self.assertIsInstance(first_id, int)
 
         with self.assertRaises(Exception):
@@ -1958,6 +1960,38 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(remaining, {
             (self.req1, "other-path"),
             (self.req2, "other-request"),
+        })
+
+    def test_record_wrong_match_triage_preserves_audit_after_clear(self):
+        log_id = self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/abs/Album",
+            }),
+        )
+
+        recorded = self.db.record_wrong_match_triage(log_id, {
+            "action": "deleted_reject",
+            "success": True,
+            "reason": "downgrade",
+        })
+        cleared = self.db.clear_wrong_match_paths(self.req1, ["/abs/Album"])
+
+        self.assertTrue(recorded)
+        self.assertEqual(cleared, 1)
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        raw_vr = entry["validation_result"]
+        vr = json.loads(raw_vr) if isinstance(raw_vr, str) else raw_vr
+        assert isinstance(vr, dict)
+        self.assertNotIn("failed_path", vr)
+        self.assertEqual(vr["wrong_match_triage"], {
+            "action": "deleted_reject",
+            "success": True,
+            "reason": "downgrade",
         })
 
     def test_excludes_non_rejected_outcomes(self):

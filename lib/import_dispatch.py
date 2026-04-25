@@ -154,6 +154,109 @@ class DispatchOutcome:
     deferred: bool = False
 
 
+@dataclass(frozen=True)
+class ImportOneRun:
+    """Result of one import_one.py subprocess protocol invocation."""
+
+    command: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+    import_result: ImportResult | None
+
+
+def import_one_script_from_harness(beets_harness_path: str) -> str:
+    """Resolve import_one.py beside the configured harness wrapper."""
+    return os.path.join(os.path.dirname(beets_harness_path), "import_one.py")
+
+
+def build_import_one_command(
+    *,
+    path: str,
+    mb_release_id: str,
+    beets_harness_path: str,
+    request_id: int | None = None,
+    force: bool = False,
+    preserve_source: bool = False,
+    dry_run: bool = False,
+    override_min_bitrate: int | None = None,
+    target_format: str | None = None,
+    verified_lossless_target: str = "",
+    quality_rank_config_json: str | None = None,
+) -> list[str]:
+    """Build the single shared import_one.py command line."""
+    cmd = [
+        sys.executable,
+        import_one_script_from_harness(beets_harness_path),
+        path,
+        mb_release_id,
+    ]
+    if request_id is not None:
+        cmd.extend(["--request-id", str(request_id)])
+    if force:
+        cmd.append("--force")
+    if preserve_source:
+        cmd.append("--preserve-source")
+    if dry_run:
+        cmd.append("--dry-run")
+    if verified_lossless_target:
+        cmd.extend(["--verified-lossless-target", verified_lossless_target])
+    if target_format:
+        cmd.extend(["--target-format", target_format])
+    if override_min_bitrate is not None:
+        cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
+    if quality_rank_config_json:
+        cmd.extend(["--quality-rank-config", quality_rank_config_json])
+    return cmd
+
+
+def run_import_one(
+    *,
+    path: str,
+    mb_release_id: str,
+    beets_harness_path: str,
+    request_id: int | None = None,
+    force: bool = False,
+    preserve_source: bool = False,
+    dry_run: bool = False,
+    override_min_bitrate: int | None = None,
+    target_format: str | None = None,
+    verified_lossless_target: str = "",
+    quality_rank_config_json: str | None = None,
+    timeout: int = 1800,
+) -> ImportOneRun:
+    """Run import_one.py and parse its ImportResult sentinel."""
+    cmd = build_import_one_command(
+        path=path,
+        mb_release_id=mb_release_id,
+        beets_harness_path=beets_harness_path,
+        request_id=request_id,
+        force=force,
+        preserve_source=preserve_source,
+        dry_run=dry_run,
+        override_min_bitrate=override_min_bitrate,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+        quality_rank_config_json=quality_rank_config_json,
+    )
+    result = sp.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=beets_subprocess_env(),
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return ImportOneRun(
+        command=tuple(cmd),
+        returncode=int(result.returncode),
+        stdout=stdout,
+        stderr=stderr,
+        import_result=parse_import_result(stdout),
+    )
+
+
 def _do_mark_done(
     db: "PipelineDB",
     request_id: int,
@@ -164,7 +267,7 @@ def _do_mark_done(
     outcome_label: str = "success",
     detail: str | None = None,
     imported_path: str | None = None,
-) -> None:
+) -> int | None:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
     Takes PipelineDB directly instead of going through DatabaseSource.
@@ -219,7 +322,7 @@ def _do_mark_done(
         transitions.RequestTransition.to_imported_fields(fields=update_fields),
     )
 
-    db.log_download(
+    return db.log_download(
         request_id=request_id,
         soulseek_username=dl_info.username,
         filetype=dl_info.filetype,
@@ -630,8 +733,6 @@ def dispatch_import_core(
     from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
-    import_script = os.path.join(
-        os.path.dirname(beets_harness_path), "import_one.py")
     mode = (
         "FORCE-IMPORT" if force
         else "MANUAL-IMPORT" if scenario == "manual_import"
@@ -724,57 +825,52 @@ def dispatch_import_core(
             )
 
         try:
-            cmd = [sys.executable, import_script, path, mb_release_id,
-                   "--request-id", str(request_id)]
-            if force:
-                cmd.append("--force")
             # Force/manual import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
             # downgrade/transcode_downgrade verdicts we exit before deletion so
             # the user's FLACs survive (#111). Auto-import stages to disposable
             # /Incoming and does not need the flag.
-            if scenario in FORCE_MANUAL_SCENARIOS:
-                cmd.append("--preserve-source")
-            if verified_lossless_target:
-                cmd.extend(["--verified-lossless-target", verified_lossless_target])
-            if target_format:
-                cmd.extend(["--target-format", target_format])
-            if override_min_bitrate is not None:
-                cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
-            # Serialize the runtime QualityRankConfig so the harness classifies
-            # with the same policy as the caller. Missing cfg (e.g. legacy test
-            # path) → harness falls back to QualityRankConfig.defaults().
-            if cfg is not None:
-                cmd.extend(["--quality-rank-config", cfg.quality_ranks.to_json()])
-            result = sp.run(cmd, capture_output=True, text=True,
-                            timeout=1800, env=beets_subprocess_env())
-            for line in (result.stderr or "").strip().split("\n"):
+            run = run_import_one(
+                path=path,
+                mb_release_id=mb_release_id,
+                request_id=request_id,
+                force=force,
+                preserve_source=scenario in FORCE_MANUAL_SCENARIOS,
+                override_min_bitrate=override_min_bitrate,
+                target_format=target_format,
+                verified_lossless_target=verified_lossless_target,
+                beets_harness_path=beets_harness_path,
+                quality_rank_config_json=(
+                    cfg.quality_ranks.to_json() if cfg is not None else None
+                ),
+            )
+            for line in run.stderr.strip().split("\n"):
                 if line.strip():
                     logger.info(f"  [import] {line}")
 
-            ir = parse_import_result(result.stdout or "")
+            ir = run.import_result
             if ir is None:
                 logger.error(
-                    f"{mode} FAILED (no JSON, rc={result.returncode}): {label}")
-                for line in (result.stdout or "").strip().split("\n"):
+                    f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
+                for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
                 _record_rejection_and_maybe_requeue(
                     db, request_id, dl_info,
                     distance=distance,
                     scenario="no_json_result",
-                    detail=f"import_one.py rc={result.returncode}, no JSON",
-                    error=f"rc={result.returncode}",
+                    detail=f"import_one.py rc={run.returncode}, no JSON",
+                    error=f"rc={run.returncode}",
                     requeue=requeue_on_failure,
                     outcome_label="failed",
                     validation_result=ValidationResult(
                         distance=distance,
                         scenario="no_json_result",
-                        detail=f"import_one.py rc={result.returncode}, no JSON",
-                        error=f"rc={result.returncode}",
+                        detail=f"import_one.py rc={run.returncode}, no JSON",
+                        error=f"rc={run.returncode}",
                     ).to_json(),
                     staged_path=path)
-                outcome_message = f"No JSON result (rc={result.returncode})"
+                outcome_message = f"No JSON result (rc={run.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
                 # Propagate sibling path updates BEFORE dispatch

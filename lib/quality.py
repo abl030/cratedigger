@@ -1477,6 +1477,7 @@ class ImportResult(msgspec.Struct):
     # Target-conversion audit trail — V0 bitrate that proved genuineness
     v0_verification_bitrate: Optional[int] = None
     final_format: Optional[str] = None  # configured target, None means keep V0/MP3
+    preview: bool = False              # True for no-mutation import preview
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
@@ -1794,6 +1795,123 @@ def import_quality_decision(
 
     # "worse" or "equivalent" without verified_lossless bypass → reject.
     return "transcode_downgrade" if is_transcode else "downgrade"
+
+
+class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
+    """Pure input for the measured import decision reducer.
+
+    This is the common shape shared by the typed simulator, import preview,
+    and the real import harness once files have been measured. It deliberately
+    contains no filesystem, database, or subprocess concerns.
+    """
+    new_measurement: AudioQualityMeasurement
+    existing_measurement: Optional[AudioQualityMeasurement] = None
+    is_transcode: bool = False
+
+
+class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
+    """Pure measured-decision result with preview-friendly classification."""
+    decision: str
+    exit_code: int = 0
+    would_import: bool = False
+    confident_reject: bool = False
+    uncertain: bool = False
+    cleanup_eligible: bool = False
+    stage_chain: list[str] = []
+    reason: Optional[str] = None
+
+
+def build_existing_quality_measurement(
+    *,
+    min_bitrate_kbps: int | None,
+    avg_bitrate_kbps: int | None = None,
+    median_bitrate_kbps: int | None = None,
+    format: str | None = None,
+    is_cbr: bool = False,
+    override_min_bitrate: int | None = None,
+    spectral_grade: str | None = None,
+    spectral_bitrate_kbps: int | None = None,
+) -> AudioQualityMeasurement | None:
+    """Build an existing-album measurement from primitive quality facts.
+
+    The spectral override clamps avg/median only for CBR albums. VBR existing
+    albums keep their real avg/median so a stale spectral floor cannot erase
+    the genuine rank signal that compare_quality() should use.
+    """
+    if min_bitrate_kbps is None:
+        return None
+
+    effective_min = (
+        override_min_bitrate
+        if override_min_bitrate is not None
+        else min_bitrate_kbps
+    )
+    raw_avg = avg_bitrate_kbps if avg_bitrate_kbps is not None else min_bitrate_kbps
+    raw_median = (
+        median_bitrate_kbps
+        if median_bitrate_kbps is not None
+        else raw_avg
+    )
+    if is_cbr and override_min_bitrate is not None:
+        effective_avg = override_min_bitrate
+        effective_median = override_min_bitrate
+    else:
+        effective_avg = raw_avg
+        effective_median = raw_median
+
+    return AudioQualityMeasurement(
+        min_bitrate_kbps=effective_min,
+        avg_bitrate_kbps=effective_avg,
+        median_bitrate_kbps=effective_median,
+        format=format,
+        is_cbr=is_cbr,
+        spectral_grade=spectral_grade,
+        spectral_bitrate_kbps=spectral_bitrate_kbps,
+    )
+
+
+def measured_import_decision(
+    measured: MeasuredImportDecisionInput,
+    *,
+    cfg: "QualityRankConfig | None" = None,
+) -> MeasuredImportDecisionResult:
+    """Reduce measured import facts to a decision and preview classification."""
+    decision = import_quality_decision(
+        measured.new_measurement,
+        measured.existing_measurement,
+        measured.is_transcode,
+        cfg=cfg,
+    )
+    exit_code = 0
+    if decision == "downgrade":
+        exit_code = 5
+    elif decision == "transcode_downgrade":
+        exit_code = 6
+
+    would_import = decision in {
+        "import",
+        "transcode_upgrade",
+        "transcode_first",
+    }
+    confident_reject = decision in {"downgrade", "transcode_downgrade"}
+    reason = decision
+    if measured.existing_measurement is None:
+        reason = f"{decision}: no existing album"
+    elif confident_reject:
+        reason = (
+            f"{decision}: measured candidate is not an upgrade over existing"
+        )
+
+    return MeasuredImportDecisionResult(
+        decision=decision,
+        exit_code=exit_code,
+        would_import=would_import,
+        confident_reject=confident_reject,
+        uncertain=False,
+        cleanup_eligible=confident_reject,
+        stage_chain=[f"stage2_import:{decision}"],
+        reason=reason,
+    )
 
 
 def transcode_detection(converted_count, post_conversion_min_bitrate,
@@ -2850,36 +2968,15 @@ def full_pipeline_decision(
     # with avg=245 but min=180 gets ranked off min=180 (GOOD instead of
     # TRANSPARENT) and downstream comparisons misrepresent production.
     effective_existing_format = existing_format if existing_format is not None else "MP3"
-    _effective_existing_min = (override_min_bitrate
-                               if override_min_bitrate is not None
-                               else existing_min_bitrate)
-    # Override avg/median only when existing is CBR. Kept in lockstep with
-    # ``harness.import_one.build_existing_measurement`` — see the comment
-    # there for rationale. Simulator needs the same CBR-conditional rule
-    # so ``pipeline-cli quality <id>`` mirrors what the live pipeline does
-    # for VBR existing (issue #: Unter Null - The Failure Epiphany loop,
-    # req 1749, where clobbering avg made every 152 CBR transcode "win"
-    # against a genuinely VBR 225-avg existing at compare_quality).
-    _raw_avg = (existing_avg_bitrate
-                if existing_avg_bitrate is not None
-                else existing_min_bitrate)
-    if existing_is_cbr and override_min_bitrate is not None:
-        _effective_existing_avg = override_min_bitrate
-    else:
-        _effective_existing_avg = _raw_avg
-    # spectral_bitrate_kbps is passed through so compare_quality's
-    # shared-spectral bucket can fire in-sim (Eno case, req 1486). Production
-    # always populates this via build_existing_measurement in the harness —
-    # the simulator had been dropping it, which is exactly why the Eno
-    # shared-floor scenario could not surface the bug originally.
-    existing_m = (AudioQualityMeasurement(
-                      min_bitrate_kbps=_effective_existing_min,
-                      avg_bitrate_kbps=_effective_existing_avg,
-                      median_bitrate_kbps=_effective_existing_avg,
-                      format=effective_existing_format,
-                      is_cbr=existing_is_cbr,
-                      spectral_bitrate_kbps=existing_spectral_bitrate)
-                  if existing_min_bitrate is not None else None)
+    existing_m = build_existing_quality_measurement(
+        min_bitrate_kbps=existing_min_bitrate,
+        avg_bitrate_kbps=existing_avg_bitrate,
+        median_bitrate_kbps=existing_avg_bitrate,
+        format=effective_existing_format,
+        is_cbr=existing_is_cbr,
+        override_min_bitrate=override_min_bitrate,
+        spectral_bitrate_kbps=existing_spectral_bitrate,
+    )
 
     if is_flac and target_format in ("flac", "lossless"):
         # FLAC kept on disk (no conversion).
@@ -2890,8 +2987,9 @@ def full_pipeline_decision(
             median_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
             spectral_bitrate_kbps=spectral_bitrate)
-        result["stage2_import"] = import_quality_decision(
-            new_m, existing_m, cfg=cfg)
+        measured = measured_import_decision(
+            MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
+        result["stage2_import"] = measured.decision
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"
@@ -2929,8 +3027,11 @@ def full_pipeline_decision(
             format=stage2_new_format,
             verified_lossless=will_be_verified,
             spectral_bitrate_kbps=spectral_bitrate)
-        result["stage2_import"] = import_quality_decision(
-            new_m, existing_m, is_transcode, cfg=cfg)
+        measured = measured_import_decision(
+            MeasuredImportDecisionInput(new_m, existing_m, is_transcode),
+            cfg=cfg,
+        )
+        result["stage2_import"] = measured.decision
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
@@ -2991,8 +3092,9 @@ def full_pipeline_decision(
             format=stage2_new_format,
             is_cbr=is_cbr,
             spectral_bitrate_kbps=spectral_bitrate)
-        result["stage2_import"] = import_quality_decision(
-            new_m, existing_m, cfg=cfg)
+        measured = measured_import_decision(
+            MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
+        result["stage2_import"] = measured.decision
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing

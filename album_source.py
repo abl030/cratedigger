@@ -219,7 +219,7 @@ class DatabaseSource:
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
-            return
+            return None
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
@@ -235,7 +235,7 @@ class DatabaseSource:
         )
         db.record_attempt(request_id, "validation")
 
-        db.log_download(
+        download_log_id = db.log_download(
             request_id=request_id,
             soulseek_username=dl.username,
             filetype=dl.filetype,
@@ -272,6 +272,7 @@ class DatabaseSource:
                 db.add_denylist(request_id, username, "beets validation rejected")
                 if db.check_and_apply_cooldown(username) and cooled_down_users is not None:
                     cooled_down_users.add(username)
+        return download_log_id
 
     def get_denylisted_users(self, album_record):
         """Get denylisted usernames for an album."""

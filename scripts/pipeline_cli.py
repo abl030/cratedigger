@@ -42,6 +42,7 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
+import msgspec
 import psycopg2
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -57,6 +58,7 @@ from lib.import_queue import (
     manual_import_payload,
 )
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
+from lib.import_preview import ImportPreviewValues
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
 
@@ -1157,6 +1159,142 @@ def cmd_repair_spectral(db, args):
           else f"\n[DRY RUN] Would repair {len(candidates)} album(s).")
 
 
+def _preview_values_from_args(args) -> ImportPreviewValues:
+    raw: dict[str, object] = {}
+    if args.values_json:
+        parsed = json.loads(args.values_json)
+        if not isinstance(parsed, dict):
+            raise ValueError("--values-json must be a JSON object")
+        raw.update(parsed)
+
+    for attr in (
+        "is_flac",
+        "min_bitrate",
+        "is_cbr",
+        "is_vbr",
+        "avg_bitrate",
+        "spectral_grade",
+        "spectral_bitrate",
+        "existing_min_bitrate",
+        "existing_avg_bitrate",
+        "existing_spectral_bitrate",
+        "override_min_bitrate",
+        "existing_format",
+        "existing_is_cbr",
+        "post_conversion_min_bitrate",
+        "converted_count",
+        "verified_lossless",
+        "verified_lossless_target",
+        "target_format",
+        "new_format",
+        "audio_check_mode",
+        "audio_corrupt",
+        "import_mode",
+        "has_nested_audio",
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            raw[attr] = value
+    return msgspec.convert(raw, type=ImportPreviewValues)
+
+
+def _print_preview_result(result, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return
+    print(f"  verdict: {result.verdict}")
+    if result.decision:
+        print(f"  decision: {result.decision}")
+    if result.reason and result.reason != result.decision:
+        print(f"  reason: {result.reason}")
+    if result.detail:
+        print(f"  detail: {result.detail}")
+    if result.cleanup_eligible:
+        print("  cleanup_eligible: yes")
+    if result.stage_chain:
+        print("  stages:")
+        for stage in result.stage_chain:
+            print(f"    - {stage}")
+
+
+def cmd_import_preview(db, args):
+    """Preview a real folder/download-log row or a typed values scenario."""
+    from lib.import_preview import (
+        preview_import_from_download_log,
+        preview_import_from_path,
+        preview_import_from_values,
+    )
+
+    mode_count = sum(bool(v) for v in (
+        args.download_log_id is not None,
+        args.path is not None,
+        args.values or args.values_json is not None,
+    ))
+    if mode_count != 1:
+        print(
+            "  Provide exactly one mode: --download-log-id, --request-id/--path, or --values.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        if args.download_log_id is not None:
+            result = preview_import_from_download_log(db, args.download_log_id)
+        elif args.path is not None:
+            if args.request_id is None:
+                print("  --request-id is required with --path", file=sys.stderr)
+                return 2
+            result = preview_import_from_path(
+                db,
+                request_id=args.request_id,
+                path=args.path,
+                force=not args.no_force,
+                source_username=args.source_username,
+            )
+        else:
+            result = preview_import_from_values(
+                _preview_values_from_args(args),
+                cfg=_load_runtime_rank_config(),
+            )
+    except (ValueError, TypeError, msgspec.ValidationError) as exc:
+        print(f"  Invalid preview input: {exc}", file=sys.stderr)
+        return 2
+
+    _print_preview_result(result, json_output=args.json)
+    return 0
+
+
+def cmd_wrong_match_triage(db, args):
+    """Run conservative preview-driven cleanup for Wrong Matches rows."""
+    from lib.wrong_match_triage import triage_wrong_match, triage_wrong_matches
+
+    if args.download_log_id is not None:
+        results = [triage_wrong_match(db, args.download_log_id)]
+    else:
+        results = triage_wrong_matches(
+            db,
+            request_id=args.request_id,
+            limit=args.limit,
+        )
+
+    if args.json:
+        print(json.dumps([r.to_dict() for r in results], indent=2, sort_keys=True))
+        return 0
+
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.action] = counts.get(result.action, 0) + 1
+        print(
+            f"  [{result.download_log_id}] {result.action}"
+            f"{': ' + result.reason if result.reason else ''}"
+        )
+    print("")
+    for action, count in sorted(counts.items()):
+        print(f"  {action}: {count}")
+    print(f"  total: {len(results)}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -1225,6 +1363,60 @@ def main():
     p_jobs.add_argument("--status", choices=["queued", "running", "completed", "failed"])
     p_jobs.add_argument("--limit", type=int, default=20)
 
+    # import-preview
+    p_preview = sub.add_parser("import-preview", help="Preview whether an import would pass")
+    p_preview.add_argument("--download-log-id", type=int,
+                           help="Preview the failed_path from a download_log row")
+    p_preview.add_argument("--request-id", type=int,
+                           help="Request ID for --path preview")
+    p_preview.add_argument("--path", help="Preview a real folder for a request")
+    p_preview.add_argument("--source-username",
+                           help="Source username for preview audit context")
+    p_preview.add_argument("--no-force", action="store_true",
+                           help="Do not pass --force to import_one.py preview")
+    p_preview.add_argument("--values", action="store_true",
+                           help="Preview typed override values instead of a real folder")
+    p_preview.add_argument("--values-json",
+                           help="JSON object with ImportPreviewValues fields")
+    p_preview.add_argument("--json", action="store_true",
+                           help="Print the common preview result as JSON")
+    p_preview.add_argument("--is-flac", action="store_true", default=None)
+    p_preview.add_argument("--min-bitrate", type=int)
+    p_preview.add_argument("--is-cbr", action="store_true", default=None)
+    p_preview.add_argument("--is-vbr", action="store_true", default=None)
+    p_preview.add_argument("--avg-bitrate", type=int)
+    p_preview.add_argument("--spectral-grade")
+    p_preview.add_argument("--spectral-bitrate", type=int)
+    p_preview.add_argument("--existing-min-bitrate", type=int)
+    p_preview.add_argument("--existing-avg-bitrate", type=int)
+    p_preview.add_argument("--existing-spectral-bitrate", type=int)
+    p_preview.add_argument("--override-min-bitrate", type=int)
+    p_preview.add_argument("--existing-format")
+    p_preview.add_argument("--existing-is-cbr", action="store_true", default=None)
+    p_preview.add_argument("--post-conversion-min-bitrate", type=int)
+    p_preview.add_argument("--converted-count", type=int)
+    p_preview.add_argument("--verified-lossless", action="store_true", default=None)
+    p_preview.add_argument("--verified-lossless-target")
+    p_preview.add_argument("--target-format")
+    p_preview.add_argument("--new-format")
+    p_preview.add_argument("--audio-check-mode")
+    p_preview.add_argument("--audio-corrupt", action="store_true", default=None)
+    p_preview.add_argument("--import-mode")
+    p_preview.add_argument("--has-nested-audio", action="store_true", default=None)
+
+    # wrong-match-triage
+    p_triage = sub.add_parser(
+        "wrong-match-triage",
+        help="Preview Wrong Matches and delete only cleanup-eligible rejects",
+    )
+    p_triage.add_argument("--download-log-id", type=int,
+                          help="Triage one Wrong Matches candidate")
+    p_triage.add_argument("--request-id", type=int,
+                          help="Limit batch triage to one request")
+    p_triage.add_argument("--limit", type=int,
+                          help="Maximum candidates to triage")
+    p_triage.add_argument("--json", action="store_true")
+
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
                               help="Fix albums stuck by stale current_spectral_bitrate (#18)")
@@ -1252,6 +1444,8 @@ def main():
         "force-import": cmd_force_import,
         "manual-import": cmd_manual_import,
         "import-jobs": cmd_import_jobs,
+        "import-preview": cmd_import_preview,
+        "wrong-match-triage": cmd_wrong_match_triage,
         "repair-spectral": cmd_repair_spectral,
     }
     commands[args.command](db, args)

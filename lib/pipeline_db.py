@@ -11,6 +11,7 @@ Usage:
 """
 
 import os
+import json
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -972,7 +973,7 @@ class PipelineDB:
                      validation_result=None,
                      # Final format on disk
                      final_format=None):
-        self._execute("""
+        cur = self._execute("""
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
                 beets_distance, beets_scenario, beets_detail, valid,
@@ -986,6 +987,7 @@ class PipelineDB:
                 import_result, validation_result, final_format
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (
             request_id, soulseek_username, filetype, download_path,
             beets_distance, beets_scenario, beets_detail, valid,
@@ -998,7 +1000,10 @@ class PipelineDB:
             existing_min_bitrate, existing_spectral_bitrate,
             import_result, validation_result, final_format,
         ))
+        row = cur.fetchone()
         self.conn.commit()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
 
     def get_download_log_entry(self, log_id):
         """Get a single download_log entry by its ID."""
@@ -1114,6 +1119,29 @@ class PipelineDB:
         """, tuple([request_id, *paths]))
         self.conn.commit()
         return cur.rowcount
+
+    def record_wrong_match_triage(
+        self,
+        log_id: int,
+        triage_result: dict[str, object],
+    ) -> bool:
+        """Persist preview-driven triage audit details on a download_log row."""
+        cur = self._execute("""
+            UPDATE download_log
+            SET validation_result = jsonb_set(
+                CASE
+                    WHEN jsonb_typeof(validation_result) = 'object'
+                    THEN validation_result
+                    ELSE '{}'::jsonb
+                END,
+                '{wrong_match_triage}',
+                %s::jsonb,
+                true
+            )
+            WHERE id = %s
+        """, (json.dumps(triage_result), log_id))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # -- Search log -----------------------------------------------------------
 

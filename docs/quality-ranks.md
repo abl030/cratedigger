@@ -292,11 +292,23 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
 - `pipeline-cli quality <request_id>` — shows the current rank, the
   configured policy, and simulates every common download scenario against
   the runtime cfg.
+- `pipeline-cli import-preview` — runs the unified no-mutation preview path.
+  Use `--download-log-id` or `--request-id --path` for real folders, or
+  `--values --values-json '{...}'` for typed simulator inputs. Real-folder
+  preview may run audio validation, spectral analysis, and temp-workspace
+  conversion; it is not a metadata-only check.
+- New Wrong Matches rows created by the download import path run the same
+  preview-backed triage immediately. Confident cleanup-eligible rejects are
+  deleted and cleared; would-import and uncertain candidates remain visible.
+  The triage action and reason are persisted under
+  `download_log.validation_result.wrong_match_triage` for audit.
 - `/api/pipeline/constants` (web) — surfaces `rank_gate_min_rank` and
   `rank_bitrate_metric` alongside other constants for the Decisions tab UI.
 - `/api/pipeline/simulate?...` (web) — accepts the same params as
   `full_pipeline_decision()` plus `existing_format`, `existing_is_cbr`,
   `new_format` so the web simulator classifies the same way production does.
+- `/api/import-preview` (web) — returns the common preview verdict shape for
+  real-folder preview and typed values.
 
 ## Related
 

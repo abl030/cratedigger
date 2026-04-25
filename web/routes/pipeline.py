@@ -18,7 +18,8 @@ from web.download_history_view import (
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
-                         get_decision_tree, full_pipeline_decision)
+                         get_decision_tree)
+from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
 from lib.util import resolve_failed_path
@@ -241,36 +242,38 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
             return None
         return v in ("true", "1", "yes")
 
-    result = full_pipeline_decision(
-        is_flac=_bool("is_flac"),
-        min_bitrate=_int("min_bitrate") or 0,
-        is_cbr=_bool("is_cbr"),
-        is_vbr=_opt_bool("is_vbr"),
-        avg_bitrate=_int("avg_bitrate"),
-        spectral_grade=_str("spectral_grade"),
-        spectral_bitrate=_int("spectral_bitrate"),
-        existing_min_bitrate=_int("existing_min_bitrate"),
-        existing_avg_bitrate=_int("existing_avg_bitrate"),
-        existing_spectral_bitrate=_int("existing_spectral_bitrate"),
-        override_min_bitrate=_int("override_min_bitrate"),
-        existing_format=_str("existing_format"),
-        existing_is_cbr=_bool("existing_is_cbr"),
-        new_format=_str("new_format"),
-        post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
-        converted_count=_int("converted_count") or 0,
-        verified_lossless=_bool("verified_lossless"),
-        target_format=_str("target_format"),
-        verified_lossless_target=_str("verified_lossless_target"),
-        # Preimport gate inputs (issue #91). Defaults preserve legacy simulator
-        # behavior — a caller that omits these runs the pipeline as if audio
-        # validation passed and the auto path flattened the download.
-        audio_check_mode=_str("audio_check_mode") or "normal",
-        audio_corrupt=_bool("audio_corrupt"),
-        import_mode=_str("import_mode") or "auto",
-        has_nested_audio=_bool("has_nested_audio"),
+    preview = preview_import_from_values(
+        ImportPreviewValues(
+            is_flac=_bool("is_flac"),
+            min_bitrate=_int("min_bitrate") or 0,
+            is_cbr=_bool("is_cbr"),
+            is_vbr=_opt_bool("is_vbr"),
+            avg_bitrate=_int("avg_bitrate"),
+            spectral_grade=_str("spectral_grade"),
+            spectral_bitrate=_int("spectral_bitrate"),
+            existing_min_bitrate=_int("existing_min_bitrate"),
+            existing_avg_bitrate=_int("existing_avg_bitrate"),
+            existing_spectral_bitrate=_int("existing_spectral_bitrate"),
+            override_min_bitrate=_int("override_min_bitrate"),
+            existing_format=_str("existing_format"),
+            existing_is_cbr=_bool("existing_is_cbr"),
+            new_format=_str("new_format"),
+            post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
+            converted_count=_int("converted_count") or 0,
+            verified_lossless=_bool("verified_lossless"),
+            target_format=_str("target_format"),
+            verified_lossless_target=_str("verified_lossless_target"),
+            # Preimport gate inputs (issue #91). Defaults preserve legacy simulator
+            # behavior — a caller that omits these runs the pipeline as if audio
+            # validation passed and the auto path flattened the download.
+            audio_check_mode=_str("audio_check_mode") or "normal",
+            audio_corrupt=_bool("audio_corrupt"),
+            import_mode=_str("import_mode") or "auto",
+            has_nested_audio=_bool("has_nested_audio"),
+        ),
         cfg=_runtime_rank_config(),
     )
-    h._json(result)
+    h._json(preview.simulation or {})
 
 
 def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> None:

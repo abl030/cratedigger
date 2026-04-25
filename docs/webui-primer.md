@@ -80,7 +80,14 @@ Browser → https://music.ablz.au
 - **Wrong Matches bulk cleanup** — top-level cleanup deletes pending non-FLAC
   wrong-match folders for releases that already have an exact transparent copy
   in beets, leaving FLAC candidates for manual review.
-- **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
+- **Wrong Matches triage** — new download-path wrong-match rejections are
+  previewed immediately after their `download_log` row is created. The
+  `/api/wrong-matches/triage` endpoint can rerun the same policy for one
+  candidate. Triage deletes only `cleanup_eligible` confident rejects;
+  would-import and uncertain candidates stay visible for operator review. The
+  action and reason are stored in
+  `download_log.validation_result.wrong_match_triage`.
+- **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls the value-preview adapter through `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration
 
