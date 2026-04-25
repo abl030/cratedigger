@@ -43,6 +43,8 @@ Browser → https://music.ablz.au
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/manual-import/import` | POST | Queue manual import for a matched folder |
+| `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
+| `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and optionally delete the rest |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
@@ -69,6 +71,10 @@ Browser → https://music.ablz.au
   `import_jobs`, so long beets imports do not block the web request. Failed
   queued force-imports remove the reviewed wrong-match source from the
   actionable list while preserving the failed job/download audit.
+- **Wrong Matches Converge** — each release starts with a `180` milli-distance
+  loosen threshold. Candidates at or below that threshold turn green; Converge
+  queues those folders as force-import jobs and can optionally delete the
+  non-green folders in one action.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration

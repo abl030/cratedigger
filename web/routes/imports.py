@@ -9,11 +9,15 @@ from lib.manual_import import (
     ImportRequest,
 )
 from lib.import_queue import (
+    IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
+    force_import_dedupe_key,
+    force_import_payload,
     manual_import_dedupe_key,
     manual_import_payload,
 )
 from lib.util import resolve_failed_path
+from lib.wrong_matches import dismiss_wrong_match_source
 from web.routes.pipeline import _serialize_import_job
 
 
@@ -71,6 +75,31 @@ def _target_candidate(vr: dict[str, object]) -> dict[str, object] | None:
     if target is not None:
         return target
     return candidates[0] if candidates else None
+
+
+def _threshold_milli(value: object) -> int:
+    try:
+        parsed = int(value) if value is not None else 180
+    except (TypeError, ValueError):
+        parsed = 180
+    return max(0, min(parsed, 999))
+
+
+def _distance_value(vr: dict[str, object]) -> float | None:
+    raw = vr.get("distance")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    try:
+        return float(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_green_distance(vr: dict[str, object], threshold_milli: int) -> bool:
+    distance = _distance_value(vr)
+    return distance is not None and distance <= threshold_milli / 1000
 
 
 def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
@@ -450,12 +479,139 @@ def post_wrong_match_delete_group(h, body: dict) -> None:
     h._json({"status": "ok", "request_id": rid, "deleted": deleted})
 
 
+def post_wrong_match_converge(h, body: dict) -> None:
+    """Queue acceptable candidates and optionally delete the rest."""
+    request_id = body.get("request_id")
+    if request_id is None:
+        h._error("Missing request_id")
+        return
+    try:
+        rid = int(request_id)
+    except (TypeError, ValueError):
+        h._error("request_id must be an integer")
+        return
+
+    threshold_milli = _threshold_milli(body.get("threshold_milli"))
+    delete_unmatched = bool(body.get("delete_unmatched"))
+
+    srv = _server()
+    pdb = srv._db()
+    req = pdb.get_request(rid)
+    if not req:
+        h._error(f"Request {rid} not found", 404)
+        return
+
+    selected: list[dict[str, object]] = []
+    unmatched: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    jobs: list[dict[str, object]] = []
+    deduped = 0
+    dismissed = 0
+    deleted = 0
+    remaining = 0
+
+    for row in pdb.get_wrong_matches():
+        if row.get("request_id") != rid:
+            continue
+        lid = row.get("download_log_id")
+        if not isinstance(lid, int):
+            skipped.append({"download_log_id": None, "reason": "missing_log_id"})
+            remaining += 1
+            continue
+
+        vr = _parse_validation_result(row.get("validation_result"))
+        failed_path_raw = vr.get("failed_path")
+        failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
+        distance = _distance_value(vr)
+        green = _is_green_distance(vr, threshold_milli)
+
+        if green:
+            resolved_path = resolve_failed_path(failed_path)
+            if resolved_path is None:
+                skipped.append({
+                    "download_log_id": lid,
+                    "reason": "files_missing",
+                })
+                remaining += 1
+                continue
+            job = pdb.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=rid,
+                dedupe_key=force_import_dedupe_key(lid),
+                payload=force_import_payload(
+                    download_log_id=lid,
+                    failed_path=resolved_path,
+                    source_username=(
+                        row.get("soulseek_username")
+                        or vr.get("soulseek_username")
+                    ),
+                ),
+                message=(
+                    f"Force import queued for "
+                    f"{req['artist_name']} - {req['album_title']}"
+                ),
+            )
+            if getattr(job, "deduped", False):
+                deduped += 1
+            jobs.append(_serialize_import_job(job))
+            dismiss_result = dismiss_wrong_match_source(
+                pdb,
+                lid,
+                failed_path_hint=resolved_path,
+            )
+            dismissed += int(dismiss_result.cleared_rows)
+            selected.append({
+                "download_log_id": lid,
+                "distance": distance,
+                "job_id": job.id,
+                "deduped": bool(getattr(job, "deduped", False)),
+            })
+            continue
+
+        unmatched.append({
+            "download_log_id": lid,
+            "distance": distance,
+        })
+        if delete_unmatched:
+            if _delete_wrong_match_row(pdb, lid):
+                deleted += 1
+            else:
+                skipped.append({
+                    "download_log_id": lid,
+                    "reason": "delete_failed",
+                })
+                remaining += 1
+        else:
+            remaining += 1
+
+    h._json({
+        "status": "ok",
+        "request_id": rid,
+        "threshold_milli": threshold_milli,
+        "threshold": threshold_milli / 1000,
+        "delete_unmatched": delete_unmatched,
+        "selected_count": len(selected),
+        "unmatched_count": len(unmatched),
+        "queued": len(jobs),
+        "deduped": deduped,
+        "dismissed": dismissed,
+        "deleted": deleted,
+        "remaining": remaining,
+        "group_empty": remaining == 0,
+        "selected": selected,
+        "unmatched": unmatched,
+        "skipped": skipped,
+        "jobs": jobs,
+    }, status=202)
+
+
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
 }
 POST_ROUTES: dict[str, object] = {
     "/api/manual-import/import": post_manual_import,
+    "/api/wrong-matches/converge": post_wrong_match_converge,
     "/api/wrong-matches/delete": post_wrong_match_delete,
     "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
 }

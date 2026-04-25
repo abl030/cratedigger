@@ -4,6 +4,15 @@ import { esc, externalReleaseUrl, sourceLabel } from './util.js';
 
 /** @type {boolean} */
 let _loaded = false;
+/** @type {Object | null} */
+let _lastData = null;
+/** @type {HTMLElement | null} */
+let _lastEl = null;
+
+const DEFAULT_CONVERGE_THRESHOLD_MILLI = 180;
+const CONVERGE_CLEANUP_KEY = 'wrongMatches.converge.deleteUnmatched';
+const CONVERGE_THRESHOLD_KEY_PREFIX = 'wrongMatches.converge.threshold.';
+const ACTIVE_IMPORT_STATUSES = new Set(['queued', 'running']);
 
 /**
  * Format seconds as m:ss.
@@ -42,6 +51,168 @@ export function invalidateWrongMatches() {
 }
 
 /**
+ * @param {string} key
+ * @returns {string | null}
+ */
+function readStorage(key) {
+  try {
+    const storage = globalThis.localStorage;
+    return storage ? storage.getItem(key) : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * @param {string} key
+ * @param {string} value
+ */
+function writeStorage(key, value) {
+  try {
+    const storage = globalThis.localStorage;
+    if (storage) storage.setItem(key, value);
+  } catch (_e) {
+    // Storage can be blocked in private contexts; the UI still works.
+  }
+}
+
+/**
+ * @param {number|string} requestId
+ * @returns {string}
+ */
+function thresholdStorageKey(requestId) {
+  return `${CONVERGE_THRESHOLD_KEY_PREFIX}${requestId}`;
+}
+
+/**
+ * Normalize a loosen threshold expressed in thousandths.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function normalizeThreshold(value) {
+  const raw = value == null || value === '' ? DEFAULT_CONVERGE_THRESHOLD_MILLI : value;
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_CONVERGE_THRESHOLD_MILLI;
+  return Math.max(0, Math.min(999, parsed));
+}
+
+/**
+ * @param {number|string} requestId
+ * @returns {number}
+ */
+function thresholdForGroup(requestId) {
+  return normalizeThreshold(readStorage(thresholdStorageKey(requestId)));
+}
+
+/**
+ * @returns {boolean}
+ */
+function deleteUnmatchedOnConverge() {
+  return readStorage(CONVERGE_CLEANUP_KEY) === '1';
+}
+
+function rerenderWrongMatches() {
+  if (_lastData && _lastEl) renderWrongMatches(_lastData, _lastEl);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function distanceValue(value) {
+  if (value == null || typeof value === 'boolean') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const parsed = Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * @param {any} entry
+ * @param {number} thresholdMilli
+ * @returns {boolean}
+ */
+function isConvergeGreen(entry, thresholdMilli) {
+  const distance = distanceValue(entry?.distance);
+  return distance != null && distance <= normalizeThreshold(thresholdMilli) / 1000;
+}
+
+/**
+ * @param {any} group
+ * @param {number} thresholdMilli
+ * @returns {any[]}
+ */
+function greenEntries(group, thresholdMilli) {
+  return (group.entries || []).filter((/** @type {any} */ entry) => (
+    isConvergeGreen(entry, thresholdMilli)
+  ));
+}
+
+/**
+ * @param {any} job
+ * @returns {boolean}
+ */
+function isActiveImportJob(job) {
+  return job && ACTIVE_IMPORT_STATUSES.has(String(job.status || ''));
+}
+
+/**
+ * @param {any} group
+ * @returns {boolean}
+ */
+function groupHasActiveJob(group) {
+  const groupJobs = group.import_jobs || [];
+  const entryJobs = (group.entries || [])
+    .map((/** @type {any} */ entry) => entry.import_job)
+    .filter(Boolean);
+  return [...groupJobs, ...entryJobs].some(isActiveImportJob);
+}
+
+/**
+ * @param {number|string} requestId
+ * @param {unknown} thresholdMilli
+ * @param {boolean} deleteUnmatched
+ * @returns {{request_id: number, threshold_milli: number, delete_unmatched: boolean}}
+ */
+function convergeRequestBody(requestId, thresholdMilli, deleteUnmatched) {
+  return {
+    request_id: Number(requestId),
+    threshold_milli: normalizeThreshold(thresholdMilli),
+    delete_unmatched: Boolean(deleteUnmatched),
+  };
+}
+
+/**
+ * @param {any} data
+ * @returns {string}
+ */
+function convergeToast(data) {
+  const queued = data.queued || 0;
+  const deleted = data.deleted || 0;
+  const skipped = (data.skipped || []).length;
+  const parts = [`Queued ${queued} candidate${queued !== 1 ? 's' : ''}`];
+  if (deleted) parts.push(`deleted ${deleted}`);
+  if (skipped) parts.push(`skipped ${skipped}`);
+  return parts.join(', ');
+}
+
+/**
+ * @param {number|string} requestId
+ * @param {unknown} value
+ */
+export function setWrongMatchConvergeThreshold(requestId, value) {
+  writeStorage(thresholdStorageKey(requestId), String(normalizeThreshold(value)));
+  rerenderWrongMatches();
+}
+
+/**
+ * @param {boolean} checked
+ */
+export function setWrongMatchConvergeCleanup(checked) {
+  writeStorage(CONVERGE_CLEANUP_KEY, checked ? '1' : '0');
+  rerenderWrongMatches();
+}
+
+/**
  * Render grouped wrong-match entries (issue #113).
  * Top level = one collapsed card per release; expand reveals every rejected
  * candidate that still has files on disk.
@@ -49,6 +220,8 @@ export function invalidateWrongMatches() {
  * @param {HTMLElement} el
  */
 function renderWrongMatches(data, el) {
+  _lastData = data;
+  _lastEl = el;
   /** @type {any[]} */
   const groups = (data.groups || []).filter((/** @type {any} */ g) => (g.pending_count || 0) > 0);
   if (groups.length === 0) {
@@ -188,6 +361,7 @@ function renderLatestImport(d) {
 function renderGroup(g) {
   const groupId = `wm-group-${g.request_id}`;
   const count = g.pending_count || (g.entries ? g.entries.length : 0);
+  const thresholdMilli = thresholdForGroup(g.request_id);
   const externalUrl = g.mb_release_id ? externalReleaseUrl(g.mb_release_id) : '';
   const releaseLabel = g.mb_release_id ? sourceLabel(g.mb_release_id) : '';
   const libBadge = g.in_library
@@ -214,15 +388,9 @@ function renderGroup(g) {
       </div>
     </div>`;
 
-  const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e)).join('');
+  const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e, thresholdMilli)).join('');
   const latest = renderLatestImport(g.latest_import);
-
-  // Group-level bulk actions: currently just "Delete All" so the user can
-  // clear an entire release's failed_imports without clicking each candidate.
-  const bulkActions = `
-    <div style="display:flex;justify-content:flex-end;margin:4px 0 0 0;">
-      <button class="p-btn delete" data-release-name="${esc(String(g.artist) + ' — ' + String(g.album))}" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
-    </div>`;
+  const bulkActions = renderConvergeControls(g, count, thresholdMilli);
 
   return `${header}
     <div class="p-detail" id="${groupId}">
@@ -233,27 +401,75 @@ function renderGroup(g) {
 }
 
 /**
- * Render one rejected candidate inside a group.
- * @param {any} e - entry payload
+ * Render release-level converge controls.
+ * @param {any} g
+ * @param {number} count
+ * @param {number} thresholdMilli
  * @returns {string}
  */
-function renderEntry(e) {
+function renderConvergeControls(g, count, thresholdMilli) {
+  const greenCount = greenEntries(g, thresholdMilli).length;
+  const cleanup = deleteUnmatchedOnConverge();
+  const hasActiveJob = groupHasActiveJob(g);
+  const disabled = hasActiveJob || greenCount === 0;
+  const label = hasActiveJob ? 'Import Active' : `Converge${greenCount ? ` (${greenCount})` : ''}`;
+  const releaseName = esc(String(g.artist) + ' — ' + String(g.album));
+  const greenBadge = greenCount > 0
+    ? `<span class="badge" style="background:#142814;color:#6d6;border:1px solid #426b42;">${greenCount} green</span>`
+    : '<span class="badge" style="background:#2a1a1a;color:#f88;border:1px solid #5a2a2a;">0 green</span>';
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 0;padding:6px 8px;background:#151515;border:1px solid #242424;border-radius:4px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:6px;color:#aaa;font-size:0.82em;">
+          Loosen
+          <input type="number" min="0" max="999" step="1" value="${thresholdMilli}" style="width:68px;background:#101010;color:#ddd;border:1px solid #333;border-radius:3px;padding:3px 5px;font-size:0.95em;" onclick="event.stopPropagation();" onchange="event.stopPropagation(); window.setWrongMatchConvergeThreshold(${g.request_id}, this.value)">
+        </label>
+        ${greenBadge}
+        <label style="display:flex;align-items:center;gap:6px;color:#aaa;font-size:0.82em;">
+          <input type="checkbox" ${cleanup ? 'checked' : ''} onclick="event.stopPropagation();" onchange="event.stopPropagation(); window.setWrongMatchConvergeCleanup(this.checked)">
+          remove all wrong matches when converging
+        </label>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
+        <button class="p-btn delete" data-release-name="${releaseName}" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * Render one rejected candidate inside a group.
+ * @param {any} e - entry payload
+ * @param {number} thresholdMilli
+ * @returns {string}
+ */
+function renderEntry(e, thresholdMilli) {
   const detailId = `wm-entry-${e.download_log_id}`;
-  const dist = e.distance != null ? e.distance.toFixed(3) : '?';
+  const distValue = distanceValue(e.distance);
+  const dist = distValue != null ? distValue.toFixed(3) : '?';
   const job = e.import_job || null;
   const jobBadge = job ? `<span class="badge" style="background:#222;color:#9bf;margin-left:8px;">${esc(job.status)}</span>` : '';
+  const green = isConvergeGreen(e, thresholdMilli);
+  const greenBadge = green
+    ? '<span class="badge" style="background:#142814;color:#6d6;border:1px solid #426b42;margin-left:8px;">green</span>'
+    : '';
+  const itemStyle = green
+    ? 'background:#142014;margin:4px 0;border-color:#426b42;box-shadow:inset 3px 0 0 #6d6;'
+    : 'background:#1a1a1a;margin:4px 0;';
+  const distColor = green ? '#6d6' : '#aaa';
 
   const header = `
-    <div class="p-item" style="background:#1a1a1a;margin:4px 0;" onclick="window.toggleWrongMatchEntry('${detailId}')">
+    <div class="p-item" style="${itemStyle}" onclick="window.toggleWrongMatchEntry('${detailId}')">
       <div class="p-top">
         <div>
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
           <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
+          ${greenBadge}
           ${jobBadge}
         </div>
       </div>
       <div class="p-meta">
-        <span>dist: ${dist}</span>
+        <span style="color:${distColor};">dist: ${dist}</span>
         <span>${esc(e.scenario || '')}</span>
       </div>
     </div>
@@ -435,7 +651,64 @@ async function _pollImportJob(jobId, btn) {
 
 export const __test__ = {
   pollImportJob: _pollImportJob,
+  convergeRequestBody,
+  convergeWrongMatches,
+  deleteUnmatchedOnConverge,
+  greenEntries,
+  isConvergeGreen,
+  normalizeThreshold,
+  renderWrongMatches,
+  setWrongMatchConvergeCleanup,
+  setWrongMatchConvergeThreshold,
+  thresholdForGroup,
 };
+
+/**
+ * Queue every green candidate for a release, optionally deleting the rest.
+ * @param {number} requestId
+ * @param {HTMLButtonElement} btn
+ */
+export async function convergeWrongMatches(requestId, btn) {
+  const group = ((_lastData && Array.isArray(_lastData.groups)) ? _lastData.groups : [])
+    .find((/** @type {any} */ g) => Number(g.request_id) === Number(requestId));
+  const thresholdMilli = thresholdForGroup(requestId);
+  const greenCount = group ? greenEntries(group, thresholdMilli).length : 0;
+  const total = group ? (group.pending_count || (group.entries || []).length) : 0;
+  const deleteUnmatched = deleteUnmatchedOnConverge();
+  const unmatchedCount = Math.max(0, total - greenCount);
+  if (greenCount === 0) {
+    toast('No candidates match the current loosen threshold', true);
+    return;
+  }
+  if (deleteUnmatched && unmatchedCount > 0) {
+    const ok = confirm(`Delete ${unmatchedCount} non-green candidate${unmatchedCount !== 1 ? 's' : ''} while converging?`);
+    if (!ok) return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Converging...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/converge`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(convergeRequestBody(requestId, thresholdMilli, deleteUnmatched)),
+    });
+    const data = await r.json();
+    if (r.ok && data.status === 'ok') {
+      toast(convergeToast(data));
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Converge';
+      toast(data.message || 'Converge failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Converge';
+    toast('Converge request failed', true);
+  }
+}
 
 /**
  * Force-import a wrong match.

@@ -628,6 +628,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/manual-import/scan",
         "/api/manual-import/import",
         "/api/wrong-matches",
+        "/api/wrong-matches/converge",
         "/api/wrong-matches/delete",
         "/api/wrong-matches/delete-group",
     }
@@ -3152,10 +3153,17 @@ class TestWrongMatchesContract(unittest.TestCase):
             return e.code, json.loads(e.read())
 
     def setUp(self) -> None:
+        self.mock_db.get_request.return_value = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
         self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         self.mock_db.clear_wrong_match_path.reset_mock()
         self.mock_db.clear_wrong_match_path.return_value = True
+        self.mock_db.clear_wrong_match_paths.reset_mock()
+        self.mock_db.clear_wrong_match_paths.return_value = 1
+        self.mock_db.enqueue_import_job.reset_mock()
+        self.mock_db.enqueue_import_job.side_effect = None
+        self.mock_db.enqueue_import_job.return_value = self._job(
+            77, 100, 42, "/mnt/virtio/music/slskd/failed_imports/Test")
         self.mock_db.get_download_history_batch.return_value = {}
         # Default: treat every failed_path as existing so the group survives
         # filtering. Individual tests override this to exercise missing-file
@@ -3164,8 +3172,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         resolve_patch = patch("web.routes.imports.resolve_failed_path",
                               side_effect=lambda p: p if p else None)
         rmtree_patch = patch("web.routes.imports.shutil.rmtree")
-        resolve_patch.start()
-        rmtree_patch.start()
+        self.mock_resolve_failed_path = resolve_patch.start()
+        self.mock_rmtree = rmtree_patch.start()
         self.addCleanup(resolve_patch.stop)
         self.addCleanup(rmtree_patch.stop)
 
@@ -3206,7 +3214,8 @@ class TestWrongMatchesContract(unittest.TestCase):
              failed_path: str, artist: str = "Test Artist",
              album: str = "Test Album",
              mb_release_id: str | None = "abc-123",
-             scenario: str = "high_distance") -> dict:
+             scenario: str = "high_distance",
+             distance: float = 0.25) -> dict:
         row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
         row["download_log_id"] = download_log_id
         row["request_id"] = request_id
@@ -3216,7 +3225,45 @@ class TestWrongMatchesContract(unittest.TestCase):
         row["soulseek_username"] = username
         row["validation_result"]["failed_path"] = failed_path
         row["validation_result"]["scenario"] = scenario
+        row["validation_result"]["distance"] = distance
+        row["validation_result"]["candidates"][0]["distance"] = distance
         return row
+
+    def _entry(self, download_log_id: int, request_id: int,
+               failed_path: str) -> dict:
+        return {
+            "id": download_log_id,
+            "request_id": request_id,
+            "validation_result": {
+                "failed_path": failed_path,
+                "scenario": "high_distance",
+            },
+        }
+
+    def _job(self, job_id: int, request_id: int, download_log_id: int,
+             failed_path: str, *, deduped: bool = False) -> ImportJob:
+        return ImportJob(
+            id=job_id,
+            job_type="force_import",
+            status="queued",
+            request_id=request_id,
+            dedupe_key=f"force_import:download_log:{download_log_id}",
+            payload={
+                "download_log_id": download_log_id,
+                "failed_path": failed_path,
+            },
+            result=None,
+            message="Import queued",
+            error=None,
+            attempts=0,
+            worker_id=None,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            started_at=None,
+            heartbeat_at=None,
+            completed_at=None,
+            deduped=deduped,
+        )
 
     def test_response_has_groups(self):
         """RED for issue #113: payload must be {groups: [...]}, not {entries: [...]}."""
@@ -3625,6 +3672,138 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         self.assertGreater(len(data["groups"]), 0)
+
+    def test_converge_queues_green_candidates_and_leaves_unmatched(self):
+        """Converge queues every row at/below the loosen threshold."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a", distance=0.167),
+            self._row(101, 42, "u2", "/fi/b", distance=0.180),
+            self._row(102, 42, "u3", "/fi/c", distance=0.226),
+            self._row(200, 99, "other", "/fi/other", distance=0.100),
+        ]
+        entries = {
+            100: self._entry(100, 42, "/fi/a"),
+            101: self._entry(101, 42, "/fi/b"),
+            102: self._entry(102, 42, "/fi/c"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+        self.mock_db.enqueue_import_job.side_effect = [
+            self._job(900, 42, 100, "/fi/a"),
+            self._job(901, 42, 101, "/fi/b"),
+        ]
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42,
+            "threshold_milli": 180,
+            "delete_unmatched": False,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["queued"], 2)
+        self.assertEqual(data["selected_count"], 2)
+        self.assertEqual(data["unmatched_count"], 1)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual(data["dismissed"], 2)
+        self.assertEqual(data["remaining"], 1)
+        self.assertFalse(data["group_empty"])
+        self.assertEqual(
+            {item["download_log_id"] for item in data["selected"]},
+            {100, 101},
+        )
+        self.assertEqual(
+            [call.kwargs["dedupe_key"]
+             for call in self.mock_db.enqueue_import_job.call_args_list],
+            [
+                "force_import:download_log:100",
+                "force_import:download_log:101",
+            ],
+        )
+        self.assertEqual(self.mock_db.clear_wrong_match_paths.call_count, 2)
+        self.mock_rmtree.assert_not_called()
+
+    def test_converge_deletes_unmatched_when_requested(self):
+        """When opted in, non-green rows are deleted while selected rows are dismissed."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a", distance=0.167),
+            self._row(101, 42, "u2", "/fi/b", distance=0.180),
+            self._row(102, 42, "u3", "/fi/c", distance=0.226),
+        ]
+        entries = {
+            100: self._entry(100, 42, "/fi/a"),
+            101: self._entry(101, 42, "/fi/b"),
+            102: self._entry(102, 42, "/fi/c"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+        self.mock_db.enqueue_import_job.side_effect = [
+            self._job(900, 42, 100, "/fi/a"),
+            self._job(901, 42, 101, "/fi/b"),
+        ]
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42,
+            "threshold_milli": 180,
+            "delete_unmatched": True,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["queued"], 2)
+        self.assertEqual(data["deleted"], 1)
+        self.assertEqual(data["remaining"], 0)
+        self.assertTrue(data["group_empty"])
+        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
+
+    def test_converge_skips_missing_green_files(self):
+        """A green row with no surviving failed_path is not queued or dismissed."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/gone/a", distance=0.167),
+        ]
+
+        with patch("web.routes.imports.resolve_failed_path", return_value=None):
+            status, data = self._post("/api/wrong-matches/converge", {
+                "request_id": 42,
+                "threshold_milli": 180,
+                "delete_unmatched": False,
+            })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["queued"], 0)
+        self.assertEqual(data["remaining"], 1)
+        self.assertEqual(data["skipped"], [
+            {"download_log_id": 100, "reason": "files_missing"},
+        ])
+        self.mock_db.enqueue_import_job.assert_not_called()
+        self.mock_db.clear_wrong_match_paths.assert_not_called()
+        self.mock_rmtree.assert_not_called()
+
+    def test_converge_reports_deduped_jobs(self):
+        """Existing active force-import jobs still count as selected and dismissed."""
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a", distance=0.167),
+        ]
+        self.mock_db.get_download_log_entry.return_value = self._entry(100, 42, "/fi/a")
+        self.mock_db.enqueue_import_job.return_value = self._job(
+            900, 42, 100, "/fi/a", deduped=True)
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42,
+            "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["queued"], 1)
+        self.assertEqual(data["deduped"], 1)
+        self.assertTrue(data["selected"][0]["deduped"])
+        self.assertEqual(data["dismissed"], 1)
+
+    def test_converge_missing_request_id_returns_error(self):
+        status, _data = self._post("/api/wrong-matches/converge", {})
+        self.assertEqual(status, 400)
 
 
 class TestLibraryArtistContract(unittest.TestCase):
