@@ -102,6 +102,113 @@ def _is_green_distance(vr: dict[str, object], threshold_milli: int) -> bool:
     return distance is not None and distance <= threshold_milli / 1000
 
 
+def _validation_local_items(vr: dict[str, object]) -> list[dict[str, object]]:
+    """Collect local item payloads from every place beets validation stores them."""
+    items: list[dict[str, object]] = []
+
+    def add_dicts(raw: object) -> None:
+        if isinstance(raw, list):
+            items.extend(
+                item for item in raw
+                if isinstance(item, dict)
+            )
+
+    add_dicts(vr.get("items"))
+
+    raw_candidates = vr.get("candidates", [])
+    if isinstance(raw_candidates, list):
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            add_dicts(candidate.get("extra_items"))
+            raw_mapping = candidate.get("mapping", [])
+            if isinstance(raw_mapping, list):
+                for match in raw_mapping:
+                    if not isinstance(match, dict):
+                        continue
+                    item = match.get("item")
+                    if isinstance(item, dict):
+                        items.append(item)
+
+    return items
+
+
+def _item_looks_flac(item: dict[str, object]) -> bool:
+    for key in ("format", "filetype", "actual_filetype", "slskd_filetype",
+                "original_filetype"):
+        value = item.get(key)
+        if isinstance(value, str) and "flac" in value.lower():
+            return True
+
+    for key in ("path", "filename", "name"):
+        value = item.get(key)
+        if not isinstance(value, str):
+            continue
+        normalized = value.lower().split("?", 1)[0].split("#", 1)[0]
+        if normalized.endswith(".flac"):
+            return True
+
+    return False
+
+
+def _validation_download_is_non_flac(vr: dict[str, object]) -> bool:
+    items = _validation_local_items(vr)
+    return bool(items) and not any(_item_looks_flac(item) for item in items)
+
+
+def _transparent_non_flac_wrong_match_targets(pdb, srv) -> list[dict[str, object]]:
+    rows = pdb.get_wrong_matches()
+    mbids = [
+        mbid for row in rows
+        for mbid in [row.get("mb_release_id")]
+        if isinstance(mbid, str) and mbid
+    ]
+    beets_info = srv.check_beets_library_detail(mbids) if mbids else {}
+    groups: dict[int, dict[str, object]] = {}
+
+    for row in rows:
+        request_id = row.get("request_id")
+        log_id = row.get("download_log_id")
+        if not isinstance(request_id, int) or not isinstance(log_id, int):
+            continue
+
+        vr = _parse_validation_result(row.get("validation_result"))
+        failed_path_raw = vr.get("failed_path")
+        failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
+        if resolve_failed_path(failed_path) is None:
+            continue
+
+        group = groups.get(request_id)
+        if group is None:
+            quality = _quality_summary(
+                row,
+                beets_info,
+                _row_presence(row, beets_info),
+            )
+            group = {
+                "request_id": request_id,
+                "artist": row.get("artist_name"),
+                "album": row.get("album_title"),
+                "quality_rank": quality.get("quality_rank"),
+                "download_log_ids": [],
+                "all_non_flac": True,
+            }
+            groups[request_id] = group
+
+        log_ids = group["download_log_ids"]
+        assert isinstance(log_ids, list)
+        log_ids.append(log_id)
+        if not _validation_download_is_non_flac(vr):
+            group["all_non_flac"] = False
+
+    return [
+        group for group in groups.values()
+        if group.get("quality_rank") == "transparent"
+        and group.get("all_non_flac")
+        and group.get("download_log_ids")
+    ]
+
+
 def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
 
     complete_dir = params.get("dir", ["/mnt/data/Media/Temp/Music/Complete"])[0]
@@ -479,6 +586,45 @@ def post_wrong_match_delete_group(h, body: dict) -> None:
     h._json({"status": "ok", "request_id": rid, "deleted": deleted})
 
 
+def post_wrong_match_delete_transparent_non_flac(h, body: dict) -> None:
+    """Bulk-delete non-FLAC wrong matches when the exact library copy is transparent."""
+    srv = _server()
+    pdb = srv._db()
+    targets = _transparent_non_flac_wrong_match_targets(pdb, srv)
+
+    deleted = 0
+    deleted_request_ids: list[int] = []
+    skipped: list[dict[str, object]] = []
+    for target in targets:
+        request_deleted = 0
+        log_ids = target.get("download_log_ids")
+        if not isinstance(log_ids, list):
+            continue
+        for log_id in log_ids:
+            if not isinstance(log_id, int):
+                continue
+            if _delete_wrong_match_row(pdb, log_id):
+                deleted += 1
+                request_deleted += 1
+            else:
+                skipped.append({
+                    "download_log_id": log_id,
+                    "reason": "delete_failed",
+                })
+        request_id = target.get("request_id")
+        if request_deleted and isinstance(request_id, int):
+            deleted_request_ids.append(request_id)
+
+    h._json({
+        "status": "ok",
+        "groups_deleted": len(deleted_request_ids),
+        "deleted": deleted,
+        "deleted_request_ids": deleted_request_ids,
+        "eligible_groups": len(targets),
+        "skipped": skipped,
+    })
+
+
 def post_wrong_match_converge(h, body: dict) -> None:
     """Queue acceptable candidates and delete the rest for the release."""
     request_id = body.get("request_id")
@@ -623,4 +769,5 @@ POST_ROUTES: dict[str, object] = {
     "/api/wrong-matches/converge": post_wrong_match_converge,
     "/api/wrong-matches/delete": post_wrong_match_delete,
     "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
+    "/api/wrong-matches/delete-transparent-non-flac": post_wrong_match_delete_transparent_non_flac,
 }

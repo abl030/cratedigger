@@ -79,11 +79,12 @@ function wrongMatchesData() {
       mb_release_id: '1290612',
       in_library: false,
       pending_count: 3,
+      quality_rank: null,
       status: 'wanted',
       entries: [
-        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance' },
-        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance' },
-        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance' },
+        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance', local_items: [{ path: '01.mp3', format: 'MP3' }] },
+        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance', local_items: [{ path: '02.mp3', format: 'MP3' }] },
+        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance', local_items: [{ path: '03.mp3', format: 'MP3' }] },
       ],
     }],
   };
@@ -188,6 +189,21 @@ console.log('renderWrongMatches() keeps converge usable with active import jobs'
   assert(!/id="wm-converge-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML), 'active jobs do not disable converge');
 }
 
+console.log('transparent non-FLAC bulk cleanup targets only transparent on-disk non-FLAC groups');
+{
+  const data = wrongMatchesData();
+  data.groups[0].quality_rank = 'transparent';
+  const flacGroup = JSON.parse(JSON.stringify(data.groups[0]));
+  flacGroup.request_id = 43;
+  flacGroup.entries[0].local_items = [{ path: '01.flac', format: 'FLAC' }];
+  const poorGroup = JSON.parse(JSON.stringify(data.groups[0]));
+  poorGroup.request_id = 44;
+  poorGroup.quality_rank = 'poor';
+
+  const targets = __test__.transparentNonFlacGroups([data.groups[0], flacGroup, poorGroup]);
+  assertDeepEqual(targets.map(g => g.request_id), [42], 'only transparent groups with non-FLAC downloads are targeted');
+}
+
 console.log('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
@@ -265,6 +281,45 @@ console.log('convergeWrongMatches() posts selected threshold and removes row in 
   assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole wrong-matches pane');
   assert(dom.toast.textContent.includes('Queued 2 candidates'), 'toasts converge result');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
+}
+
+console.log('deleteTransparentNonFlacWrongMatches() posts one bulk delete and removes rows in place');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  data.groups[0].quality_rank = 'transparent';
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete transparent non-FLAC (3)'), 'renders top-level cleanup button');
+  const calls = [];
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-transparent-non-flac') {
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          deleted: 3,
+          groups_deleted: 1,
+          deleted_request_ids: [42],
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete transparent non-FLAC (3)', style: {} };
+  await __test__.deleteTransparentNonFlacWrongMatches(btn);
+  assertEqual(calls[0].url, '/api/wrong-matches/delete-transparent-non-flac', 'posts to transparent cleanup endpoint');
+  assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole pane after bulk cleanup');
+  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts bulk cleanup result');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned groups locally');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

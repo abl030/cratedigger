@@ -45,6 +45,7 @@ Browser → https://music.ablz.au
 | `/api/manual-import/import` | POST | Queue manual import for a matched folder |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
+| `/api/wrong-matches/delete-transparent-non-flac` | POST | Bulk-delete wrong-match folders whose exact library copy is already transparent and whose pending downloads are non-FLAC |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
@@ -76,6 +77,9 @@ Browser → https://music.ablz.au
   queues those folders as force-import jobs and deletes the non-green folders
   in one action, then removes the release row without repainting the whole
   review pane.
+- **Wrong Matches bulk cleanup** — top-level cleanup deletes pending non-FLAC
+  wrong-match folders for releases that already have an exact transparent copy
+  in beets, leaving FLAC candidates for manual review.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration

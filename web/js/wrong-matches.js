@@ -174,6 +174,92 @@ function convergeToast(data) {
 }
 
 /**
+ * @param {any} item
+ * @returns {boolean}
+ */
+function itemLooksFlac(item) {
+  if (!item || typeof item !== 'object') return false;
+  for (const key of ['format', 'filetype', 'actual_filetype', 'slskd_filetype', 'original_filetype']) {
+    const value = item[key];
+    if (typeof value === 'string' && value.toLowerCase().includes('flac')) return true;
+  }
+  for (const key of ['path', 'filename', 'name']) {
+    const value = item[key];
+    if (typeof value !== 'string') continue;
+    const normalized = value.toLowerCase().split('?')[0].split('#')[0];
+    if (normalized.endsWith('.flac')) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {any} entry
+ * @returns {any[]}
+ */
+function localItemsForEntry(entry) {
+  const items = [];
+  if (Array.isArray(entry?.local_items)) items.push(...entry.local_items);
+  const candidate = entry?.candidate || {};
+  if (Array.isArray(candidate.extra_items)) items.push(...candidate.extra_items);
+  if (Array.isArray(candidate.mapping)) {
+    for (const match of candidate.mapping) {
+      if (match?.item) items.push(match.item);
+    }
+  }
+  return items.filter((/** @type {any} */ item) => item && typeof item === 'object');
+}
+
+/**
+ * @param {any} entry
+ * @returns {boolean}
+ */
+function entryDownloadIsNonFlac(entry) {
+  const items = localItemsForEntry(entry);
+  return items.length > 0 && !items.some(itemLooksFlac);
+}
+
+/**
+ * @param {any} group
+ * @returns {boolean}
+ */
+function groupIsTransparentNonFlacCleanupTarget(group) {
+  const entries = Array.isArray(group?.entries) ? group.entries : [];
+  return group?.quality_rank === 'transparent'
+    && entries.length > 0
+    && entries.every(entryDownloadIsNonFlac);
+}
+
+/**
+ * @param {any[]} groups
+ * @returns {any[]}
+ */
+function transparentNonFlacGroups(groups) {
+  return groups.filter(groupIsTransparentNonFlacCleanupTarget);
+}
+
+/**
+ * @param {any[]} groups
+ * @returns {{groups: number, entries: number}}
+ */
+function transparentNonFlacCounts(groups) {
+  const targets = transparentNonFlacGroups(groups);
+  return {
+    groups: targets.length,
+    entries: targets.reduce((/** @type {number} */ n, /** @type {any} */ g) => (
+      n + (g.pending_count || (Array.isArray(g.entries) ? g.entries.length : 0))
+    ), 0),
+  };
+}
+
+/**
+ * @param {{groups: number, entries: number}} counts
+ * @returns {string}
+ */
+function transparentNonFlacButtonLabel(counts) {
+  return `Delete transparent non-FLAC (${counts.entries})`;
+}
+
+/**
  * @param {number} greenCount
  * @returns {string}
  */
@@ -288,6 +374,15 @@ function wrongMatchCounts(groups) {
   };
 }
 
+function updateTransparentNonFlacButton() {
+  if (!_lastData || !Array.isArray(_lastData.groups)) return;
+  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('wm-transparent-nonflac-btn'));
+  if (!btn) return;
+  const counts = transparentNonFlacCounts(_lastData.groups);
+  btn.textContent = transparentNonFlacButtonLabel(counts);
+  btn.disabled = counts.groups === 0;
+}
+
 function updateWrongMatchesSummary() {
   if (!_lastData || !Array.isArray(_lastData.groups) || !_lastEl) return;
   const counts = wrongMatchCounts(_lastData.groups);
@@ -299,6 +394,7 @@ function updateWrongMatchesSummary() {
   if (summary) {
     summary.textContent = `${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review`;
   }
+  updateTransparentNonFlacButton();
 }
 
 /**
@@ -353,7 +449,12 @@ function renderWrongMatches(data, el) {
   }
 
   const counts = wrongMatchCounts(groups);
-  let html = `<div id="wrong-matches-summary" style="margin:8px 0;color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>`;
+  const cleanupCounts = transparentNonFlacCounts(groups);
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
+      <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
+      <button id="wm-transparent-nonflac-btn" class="p-btn delete" ${cleanupCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteTransparentNonFlacWrongMatches(this)">${transparentNonFlacButtonLabel(cleanupCounts)}</button>
+    </div>`;
 
   html += groups.map(renderGroup).join('');
   el.innerHTML = html;
@@ -764,6 +865,7 @@ export const __test__ = {
   pollImportJob: _pollImportJob,
   convergeRequestBody,
   convergeWrongMatches,
+  deleteTransparentNonFlacWrongMatches,
   deleteUnmatchedOnConverge,
   greenEntries,
   isConvergeGreen,
@@ -772,6 +874,7 @@ export const __test__ = {
   setWrongMatchConvergeCleanup,
   setWrongMatchConvergeThreshold,
   thresholdForGroup,
+  transparentNonFlacGroups,
 };
 
 /**
@@ -881,6 +984,56 @@ export async function deleteWrongMatchGroup(requestId, btn) {
   } catch (e) {
     btn.textContent = 'Error';
     toast('Delete-all request failed', true);
+  }
+}
+
+/**
+ * Delete all visible release groups that already have transparent quality on
+ * disk and whose pending wrong-match folders are non-FLAC.
+ * @param {HTMLButtonElement} btn
+ */
+export async function deleteTransparentNonFlacWrongMatches(btn) {
+  const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
+  const counts = transparentNonFlacCounts(groups);
+  if (counts.groups === 0) {
+    toast('No transparent non-FLAC wrong matches to delete', true);
+    return;
+  }
+  const ok = confirm(
+    `Delete ${counts.entries} non-FLAC wrong-match candidate${counts.entries !== 1 ? 's' : ''} `
+    + `across ${counts.groups} transparent release${counts.groups !== 1 ? 's' : ''}?`,
+  );
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete-transparent-non-flac`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await r.json();
+    if (r.ok && data.status === 'ok') {
+      toast(
+        `Deleted ${data.deleted || 0} candidate${data.deleted === 1 ? '' : 's'} `
+        + `from ${data.groups_deleted || 0} release${data.groups_deleted === 1 ? '' : 's'}`,
+      );
+      invalidateWrongMatches();
+      if (Array.isArray(data.deleted_request_ids) && data.deleted_request_ids.length > 0) {
+        for (const requestId of data.deleted_request_ids) removeWrongMatchGroup(requestId);
+      } else {
+        await _refreshWrongMatches();
+      }
+    } else {
+      btn.disabled = false;
+      btn.textContent = transparentNonFlacButtonLabel(counts);
+      toast(data.message || 'Bulk delete failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = transparentNonFlacButtonLabel(counts);
+    toast('Bulk delete request failed', true);
   }
 }
 

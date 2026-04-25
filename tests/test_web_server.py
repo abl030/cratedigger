@@ -631,6 +631,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/wrong-matches/converge",
         "/api/wrong-matches/delete",
         "/api/wrong-matches/delete-group",
+        "/api/wrong-matches/delete-transparent-non-flac",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -3666,6 +3667,52 @@ class TestWrongMatchesContract(unittest.TestCase):
             "/api/wrong-matches/delete-group", {"request_id": 999})
         self.assertEqual(status, 200)
         self.assertEqual(data["deleted"], 0)
+
+    @patch("web.server.compute_library_rank", return_value="transparent")
+    @patch("web.server.check_beets_library_detail")
+    def test_delete_transparent_non_flac_removes_only_non_flac_candidates(
+            self, mock_beets_detail, _mock_rank):
+        """Top-level cleanup deletes MP3 wrong matches only when on-disk rank is transparent."""
+        rows = [
+            self._row(100, 42, "u1", "/fi/a", mb_release_id="mb-mp3"),
+            self._row(101, 42, "u2", "/fi/b", mb_release_id="mb-mp3"),
+            self._row(200, 43, "u3", "/fi/c", mb_release_id="mb-flac"),
+        ]
+        rows[0]["validation_result"]["items"] = [{"path": "01.mp3", "format": "MP3"}]
+        rows[1]["validation_result"]["items"] = [{"path": "02.mp3", "format": "MP3"}]
+        rows[2]["validation_result"]["items"] = [{"path": "01.flac", "format": "FLAC"}]
+        self.mock_db.get_wrong_matches.return_value = rows
+        entries = {
+            100: self._entry(100, 42, "/fi/a"),
+            101: self._entry(101, 42, "/fi/b"),
+            200: self._entry(200, 43, "/fi/c"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+        mock_beets_detail.return_value = {
+            "mb-mp3": {"beets_format": "MP3", "beets_bitrate": 245},
+            "mb-flac": {"beets_format": "MP3", "beets_bitrate": 245},
+        }
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-transparent-non-flac",
+            {},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["groups_deleted"], 1)
+        self.assertEqual(data["deleted"], 2)
+        self.assertEqual(data["deleted_request_ids"], [42])
+        self.assertEqual(
+            [call.args[0] for call in self.mock_rmtree.call_args_list],
+            ["/fi/a", "/fi/b"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.mock_db.clear_wrong_match_path.call_args_list],
+            [100, 101],
+        )
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""
