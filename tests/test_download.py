@@ -2042,9 +2042,35 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
         self.assertEqual(fake_db.clear_download_state_calls, [])
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_all_complete(self, mock_process):
-        """1 downloading album, all files complete → calls process_completed_album."""
+    def test_poll_active_all_complete(self):
+        """1 downloading album, all files complete → enqueues importer job."""
+        from lib.download import poll_active_downloads
+        from lib.import_queue import IMPORT_JOB_AUTOMATION
+        row = self._make_downloading_row()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
+
+        poll_active_downloads(ctx)
+
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        jobs = fake_db.list_import_jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].job_type, IMPORT_JOB_AUTOMATION)
+        self.assertEqual(jobs[0].request_id, 1)
+
+    def test_poll_active_all_complete_no_beets(self):
+        """beets_validation_enabled=False still queues importer ownership."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -2060,41 +2086,12 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        def mark_imported(*args):
-            fake_db.update_status(1, "imported")
-            return True
-
-        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
         self.assertEqual(len(fake_db.update_download_state_calls), 1)
-        self.assertEqual(fake_db.request(1)["status"], "imported")
-        mock_process.assert_called_once()
-
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_all_complete_no_beets(self, mock_process):
-        """beets_validation_enabled=False → process returns True, poll sets imported."""
-        from lib.download import poll_active_downloads
-        row = self._make_downloading_row()
-        ctx, fake_db = self._make_poll_ctx(
-            downloading_rows=[row],
-            slskd_downloads=[{
-                "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [{
-                    "filename": "user1\\Music\\01.flac",
-                    "id": "tid-1",
-                    "state": "Completed, Succeeded",
-                    "bytesTransferred": 30000000,
-                }]}],
-            }],
-        )
-
-        mock_process.return_value = True
-        poll_active_downloads(ctx)
-
-        self.assertEqual(len(fake_db.update_download_state_calls), 1)
-        self.assertEqual(fake_db.request(1)["status"], "imported")
-        self.assertIsNone(fake_db.request(1)["active_download_state"])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertIsNotNone(fake_db.request(1)["active_download_state"])
+        self.assertEqual(len(fake_db.list_import_jobs()), 1)
 
     def test_poll_active_timeout(self):
         """No byte/state progress for stalled_timeout → cancel, log, reset to wanted."""
@@ -2184,9 +2181,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_completed_removed_transfer_uses_snapshot_status(self, mock_process):
-        """Completed transfers from includeRemoved=true should import, not timeout."""
+    def test_poll_active_completed_removed_transfer_uses_snapshot_status(self):
+        """Completed transfers from includeRemoved=true should enqueue, not timeout."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -2205,19 +2201,13 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        def mark_imported(*args):
-            fake_db.update_status(1, "imported")
-            return True
-
-        mock_process.side_effect = mark_imported
-
         with patch("lib.download.slskd_download_status") as mock_status:
             poll_active_downloads(ctx)
 
         mock_status.assert_not_called()
-        mock_process.assert_called_once()
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.request(1)["status"], "imported")
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(len(fake_db.list_import_jobs()), 1)
 
     def test_poll_active_in_progress(self):
         """Files still downloading with fresh state transition → persist progress snapshot."""
@@ -2243,8 +2233,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_multiple_albums(self, mock_process):
+    def test_poll_active_multiple_albums(self):
         """2 albums: 1 completes, 1 in progress → correct handling."""
         from lib.download import poll_active_downloads
         row1 = self._make_downloading_row(request_id=1)
@@ -2287,11 +2276,6 @@ class TestPollActiveDownloads(unittest.TestCase):
         # slskd returns transfers for both users
         self.assertEqual(cast(FakeSlskdAPI, ctx.slskd).transfers.get_all_downloads_calls, [])
 
-        def mark_imported(*args):
-            fake_db.update_status(1, "imported")
-            return True
-
-        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
         # Album 1 persists processing_started_at, album 2 persists progress.
@@ -2300,9 +2284,9 @@ class TestPollActiveDownloads(unittest.TestCase):
             request_id for request_id, _ in fake_db.update_download_state_calls
         ]
         self.assertEqual(update_request_ids, [1, 2])
-        self.assertIsNone(fake_db.request(1)["active_download_state"])
+        self.assertIsNotNone(fake_db.request(1)["active_download_state"])
         self.assertIsNotNone(self._download_state(fake_db, 2)["last_progress_at"])
-        mock_process.assert_called_once()
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_crash_recovery_no_state(self):
         """Downloading album with no active_download_state → reset to wanted."""
@@ -2556,9 +2540,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(fake_db.status_history, [])
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_completion_exception_persists_processing_state(self, mock_process):
-        """Exceptions after completion should leave persisted state for the next cycle to resume."""
+    def test_poll_active_completion_queues_and_persists_processing_state(self):
+        """Completion should leave persisted state for the importer to resume."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -2574,7 +2557,6 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        mock_process.side_effect = RuntimeError("boom")
         poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
@@ -2586,63 +2568,90 @@ class TestPollActiveDownloads(unittest.TestCase):
             persisted["current_path"],
             "/tmp/test_downloads/Test Artist - Test Album (2020)",
         )
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_resume_processing_uses_persisted_current_path(self, mock_process):
-        """Resume path must reconstruct the post-move directory from persisted state."""
+    def test_poll_resume_processing_queues_persisted_current_path(self):
+        """Resume path keeps the post-move directory for the importer."""
         from lib.download import poll_active_downloads
-        current_path = "/tmp/staged/auto-import/Test Artist/Test Album [request-1]"
-        row = self._make_downloading_row(state_dict={
-            "filetype": "flac",
-            "enqueued_at": _utc_now_iso(),
-            "processing_started_at": _utc_now_iso(),
-            "current_path": current_path,
-            "files": [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000},
-            ],
-        })
-        ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            current_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=False,
+            )
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": current_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
 
-        mock_process.return_value = True
-        poll_active_downloads(ctx)
+            poll_active_downloads(ctx)
 
-        entry = mock_process.call_args[0][0]
-        self.assertEqual(entry.import_folder, current_path)
+            self.assertEqual(
+                _fake_db.request(1)["active_download_state"]["current_path"],
+                current_path,
+            )
+            self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_legacy_processing_row_uses_canonical_fallback(self, mock_process):
+    def test_poll_legacy_processing_row_uses_canonical_fallback(self):
         """Legacy mid-processing rows without current_path still resume canonically."""
         from lib.download import poll_active_downloads
-        row = self._make_downloading_row(state_dict={
-            "filetype": "flac",
-            "enqueued_at": _utc_now_iso(),
-            "processing_started_at": _utc_now_iso(),
-            "files": [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000},
-            ],
-        })
-        ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-        cfg = cast(Any, ctx.cfg)
-        cfg.slskd_download_dir = "/tmp/downloads"
+        from lib.processing_paths import canonical_processing_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads_root = os.path.join(tmpdir, "downloads")
+            canonical_path = canonical_processing_path(
+                artist="Test Artist",
+                title="Test Album",
+                year="2020",
+                slskd_download_dir=downloads_root,
+            )
+            os.makedirs(canonical_path)
+            with open(os.path.join(canonical_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = downloads_root
 
-        mock_process.return_value = True
-        poll_active_downloads(ctx)
+            poll_active_downloads(ctx)
 
-        entry = mock_process.call_args[0][0]
-        self.assertEqual(
-            entry.import_folder,
-            "/tmp/downloads/Test Artist - Test Album (2020)",
-        )
-        self.assertEqual(len(_fake_db.update_download_state_current_path_calls), 1)
-        self.assertEqual(
-            _fake_db.update_download_state_current_path_calls[0],
-            (1, "/tmp/downloads/Test Artist - Test Album (2020)"),
-        )
+            self.assertEqual(
+                _fake_db.request(1)["active_download_state"]["current_path"],
+                canonical_path,
+            )
+            self.assertEqual(len(_fake_db.update_download_state_current_path_calls), 1)
+            self.assertEqual(
+                _fake_db.update_download_state_current_path_calls[0],
+                (1, canonical_path),
+            )
+            self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_mid_processing_row_uses_request_scoped_staging_fallback(self, mock_process):
+    def test_poll_mid_processing_row_uses_request_scoped_staging_fallback(self):
         """Move/persist crashes should recover from request-scoped staged dirs."""
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
@@ -2674,21 +2683,17 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_staging_dir = staging_root
 
-            mock_process.return_value = None
             poll_active_downloads(ctx)
 
-            entry = mock_process.call_args[0][0]
-            self.assertEqual(entry.import_folder, staged_path)
             self.assertEqual(
                 fake_db.request(1)["active_download_state"]["current_path"],
                 staged_path,
             )
             self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
-    @patch("lib.download.process_completed_album")
     def test_poll_stale_canonical_current_path_uses_request_scoped_staging_fallback(
         self,
-        mock_process,
     ):
         """A stale canonical current_path must recover to the staged location."""
         from lib.download import poll_active_downloads
@@ -2729,15 +2734,13 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg.slskd_download_dir = downloads_root
             cfg.beets_staging_dir = staging_root
 
-            mock_process.return_value = None
             poll_active_downloads(ctx)
 
-            entry = mock_process.call_args[0][0]
-            self.assertEqual(entry.import_folder, staged_path)
             self.assertEqual(
                 fake_db.request(1)["active_download_state"]["current_path"],
                 staged_path,
             )
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_legacy_processing_row_blocks_on_ambiguous_staged_dir(self):
         """Legacy rows must not guess a shared staged dir as current_path."""
@@ -2836,8 +2839,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             self.assertEqual(fake_db.request(1)["status"], "wanted")
             self.assertIn((1, "wanted"), fake_db.status_history)
 
-    def test_poll_post_move_staged_path_without_validation_completes(self):
-        """Staged retries still finish when the auto-import branch is unavailable."""
+    def test_poll_post_move_staged_path_without_validation_queues(self):
+        """Staged retries are queued for importer ownership."""
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -2870,9 +2873,13 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             poll_active_downloads(ctx)
 
-            self.assertEqual(fake_db.request(1)["status"], "imported")
-            self.assertIn((1, "imported"), fake_db.status_history)
-            self.assertIsNone(fake_db.request(1)["active_download_state"])
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
+            self.assertEqual(
+                fake_db.request(1)["active_download_state"]["current_path"],
+                resumed_path,
+            )
 
     def test_poll_post_move_staged_path_with_missing_file_leaves_row_downloading(self):
         """Missing files under a staged current_path must block, not requeue."""
@@ -2955,9 +2962,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             )
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_no_redownload_window(self, mock_process):
-        """Album stays 'downloading' during process_completed_album — no redownload window."""
+    def test_poll_no_redownload_window(self):
+        """Album stays 'downloading' while queued for importer."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -2973,18 +2979,12 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        def mark_imported(*args):
-            fake_db.update_status(1, "imported")
-            return True
-
-        mock_process.side_effect = mark_imported
         poll_active_downloads(ctx)
 
-        # process_completed_album ran
-        mock_process.assert_called_once()
         self.assertEqual(len(fake_db.update_download_state_calls), 1)
         self.assertNotIn((1, "wanted"), fake_db.status_history)
-        self.assertEqual(fake_db.request(1)["status"], "imported")
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
 
 class TestBuildActiveDownloadState(unittest.TestCase):

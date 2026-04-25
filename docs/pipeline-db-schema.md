@@ -27,6 +27,32 @@ Full schema lives in `migrations/*.sql`. This doc covers the fields that appear 
 - `existing_spectral_bitrate INTEGER` — spectral estimate of existing files before download.
 - `outcome TEXT` — one of 6 values: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`.
 
+## `import_jobs` — shared importer queue
+
+All beets-mutating import work is submitted to `import_jobs` and drained by
+`cratedigger-importer`. Web force-import, web/manual import, automation
+completed-download processing, and CLI force/manual import all share this table.
+
+Key fields:
+
+- `job_type TEXT` — `force_import`, `manual_import`, or `automation_import`.
+- `status TEXT` — `queued`, `running`, `completed`, or `failed`.
+- `request_id INTEGER` — the related `album_requests.id`.
+- `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
+  duplicate queued/running jobs while allowing a later job after completion.
+- `payload JSONB` — typed job input. Force/manual jobs carry `failed_path`;
+  force jobs also carry `download_log_id` and optional `source_username`.
+- `result JSONB`, `message`, `error` — terminal worker result visible to web
+  and CLI callers.
+- `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
+  claim and recovery metadata.
+
+On importer startup, any pre-existing `running` job is treated as abandoned
+state from a previous worker process, reset to `queued`, and retried
+immediately. The importer also holds a DB advisory singleton lock while it
+runs, so an accidentally-started second worker exits instead of requeueing a
+live worker's job.
+
 ## `download_log.import_result` JSONB
 
 `import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, per-track spectral analysis (grade, hf_deficit, cliff detection per track), quality comparison (new vs prev bitrate), postflight verification (beets_id, path). Every import path (success, downgrade, transcode, error, timeout, crash) logs to download_log.
@@ -62,18 +88,19 @@ Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable down
 
 ## Force-Import (rejected downloads)
 
-Albums rejected by beets validation (high distance, wrong pressing) are moved to `failed_imports/` under the slskd download dir, with their `failed_path` stored in `download_log.validation_result` JSONB. After manual review, force-import bypasses the distance check and imports them.
+Albums rejected by beets validation (high distance, wrong pressing) are moved to `failed_imports/` under the slskd download dir, with their `failed_path` stored in `download_log.validation_result` JSONB. After manual review, force-import bypasses the distance check. The request handler or CLI command validates the row/path synchronously, then enqueues a `force_import` job. `cratedigger-importer` runs the actual beets mutation.
 
 **Path resolution**: old entries stored relative paths (`failed_imports/Foo - Bar`), new entries store absolute paths. Force-import resolves relative paths against `/mnt/virtio/music/slskd/` automatically.
 
 1. Look up `download_log` entry by ID via `get_download_log_entry()` → extract `failed_path` from `validation_result` JSONB.
 2. Resolve path (handle both relative and absolute) → verify files still exist.
 3. Look up `mb_release_id` from `album_requests` via `request_id`.
-4. Call `import_one.py --force` (sets `MAX_DISTANCE=999` — everything else runs normally: conversion, spectral, quality comparison).
-5. Log result to new `download_log` row with `outcome='force_import'`.
-6. Update `album_requests` status to `imported` on success.
+4. Enqueue `import_jobs(job_type='force_import')` with a dedupe key for the `download_log` row.
+5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `MAX_DISTANCE=999` — everything else runs normally: conversion, spectral, quality comparison).
+6. The worker marks the job `completed` or `failed`; the import internals still write `download_log` and `album_requests` outcomes.
 
 ```bash
 pipeline_cli.py force-import <download_log_id>
+pipeline_cli.py import-jobs --status failed
 # or: POST /api/pipeline/force-import {"download_log_id": N}
 ```

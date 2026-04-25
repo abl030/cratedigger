@@ -5,6 +5,11 @@ import re
 import msgspec
 
 from lib import transitions
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    force_import_dedupe_key,
+    force_import_payload,
+)
 from web.download_history_view import (
     build_download_history_row,
     build_download_history_rows,
@@ -290,6 +295,43 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
         if tracks is not None:
             result["beets_tracks"] = tracks
     h._json(result)
+
+
+def _serialize_import_job(job) -> dict[str, object]:
+    if hasattr(job, "to_json_dict"):
+        return job.to_json_dict()
+    return dict(job)
+
+
+def get_import_jobs(h, params: dict[str, list[str]]) -> None:
+    status = params.get("status", [None])[0]
+    request_id_raw = params.get("request_id", [None])[0]
+    if status not in (None, "", "queued", "running", "completed", "failed"):
+        h._error("Invalid import job status")
+        return
+    status = status or None
+    try:
+        request_id = int(request_id_raw) if request_id_raw else None
+    except ValueError:
+        h._error("Invalid request_id")
+        return
+    jobs = _server()._db().list_import_jobs(
+        status=status,
+        request_id=request_id,
+        limit=50,
+    )
+    h._json({
+        "jobs": [_serialize_import_job(job) for job in jobs],
+        "counts": _server()._db().count_import_jobs_by_status(),
+    })
+
+
+def get_import_job(h, params: dict[str, list[str]], job_id_str: str) -> None:
+    job = _server()._db().get_import_job(int(job_id_str))
+    if job is None:
+        h._error("Import job not found", 404)
+        return
+    h._json({"job": _serialize_import_job(job)})
 
 
 # ── POST handlers ────────────────────────────────────────────────
@@ -747,8 +789,6 @@ def post_pipeline_ban_source(h, body: dict) -> None:
 
 
 def post_pipeline_force_import(h, body: dict) -> None:
-    from lib.import_dispatch import dispatch_import_from_db
-
     s = _server()
     log_id = body.get("download_log_id")
 
@@ -783,19 +823,28 @@ def post_pipeline_force_import(h, body: dict) -> None:
         h._error(f"Files not found at: {failed_path}")
         return
 
-    outcome = dispatch_import_from_db(
-        s._db(), request_id=request_id, failed_path=resolved_path,
-        force=True, outcome_label="force_import",
-        source_username=entry.get("soulseek_username"),
+    job = s._db().enqueue_import_job(
+        IMPORT_JOB_FORCE,
+        request_id=request_id,
+        dedupe_key=force_import_dedupe_key(int(log_id)),
+        payload=force_import_payload(
+            download_log_id=int(log_id),
+            failed_path=resolved_path,
+            source_username=entry.get("soulseek_username"),
+        ),
+        message=f"Force import queued for {req['artist_name']} - {req['album_title']}",
     )
 
     h._json({
-        "status": "ok" if outcome.success else "error",
+        "status": "queued",
+        "job_id": job.id,
+        "job": _serialize_import_job(job),
+        "deduped": bool(getattr(job, "deduped", False)),
         "request_id": request_id,
         "artist": req["artist_name"],
         "album": req["album_title"],
-        "message": outcome.message,
-    })
+        "message": "Import queued",
+    }, status=202)
 
 
 def post_pipeline_delete(h, body: dict) -> None:
@@ -821,10 +870,12 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/all": get_pipeline_all,
     "/api/pipeline/constants": get_pipeline_constants,
     "/api/pipeline/simulate": get_pipeline_simulate,
+    "/api/import-jobs": get_import_jobs,
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
+    (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
 ]
 
 POST_ROUTES: dict[str, object] = {

@@ -48,6 +48,14 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 from lib import transitions
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    IMPORT_JOB_MANUAL,
+    force_import_dedupe_key,
+    force_import_payload,
+    manual_import_dedupe_key,
+    manual_import_payload,
+)
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
@@ -973,22 +981,23 @@ def cmd_force_import(db, args):
     print(f"  Path: {failed_path}")
     print(f"  MBID: {mbid}")
 
-    from lib.import_dispatch import dispatch_import_from_db
-    outcome = dispatch_import_from_db(
-        db, request_id=request_id, failed_path=failed_path,
-        force=True, outcome_label="force_import",
-        source_username=entry.get("soulseek_username"),
+    job = db.enqueue_import_job(
+        IMPORT_JOB_FORCE,
+        request_id=request_id,
+        dedupe_key=force_import_dedupe_key(log_id),
+        payload=force_import_payload(
+            download_log_id=log_id,
+            failed_path=failed_path,
+            source_username=entry.get("soulseek_username"),
+        ),
+        message=f"Force import queued for {req['artist_name']} - {req['album_title']}",
     )
-    if outcome.success:
-        print(f"  [OK] {outcome.message}")
-    else:
-        print(f"  [WARN] {outcome.message}")
+    deduped = " existing" if job.deduped else ""
+    print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
 
 
 def cmd_manual_import(db, args):
     """Import a local folder as a pipeline request."""
-    from lib.import_dispatch import dispatch_import_from_db
-
     request_id = args.id
     path = args.path
 
@@ -1018,14 +1027,30 @@ def cmd_manual_import(db, args):
     print(f"  Path: {path}")
     print(f"  MBID: {mbid}")
 
-    outcome = dispatch_import_from_db(
-        db, request_id=request_id, failed_path=path,
-        force=False, outcome_label="manual_import",
+    job = db.enqueue_import_job(
+        IMPORT_JOB_MANUAL,
+        request_id=request_id,
+        dedupe_key=manual_import_dedupe_key(request_id, path),
+        payload=manual_import_payload(failed_path=path),
+        message=f"Manual import queued for {req['artist_name']} - {req['album_title']}",
     )
-    if outcome.success:
-        print(f"  [OK] {outcome.message}")
-    else:
-        print(f"  [FAIL] {outcome.message}")
+    deduped = " existing" if job.deduped else ""
+    print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
+
+
+def cmd_import_jobs(db, args):
+    """List recent import queue jobs."""
+    jobs = db.list_import_jobs(status=args.status, limit=args.limit)
+    if not jobs:
+        print("  No import jobs found.")
+        return
+    for job in jobs:
+        request = f"request={job.request_id}" if job.request_id is not None else "request=-"
+        msg = job.message or job.error or ""
+        print(
+            f"  [{job.id:4d}] {job.status:9s} {job.job_type:17s} "
+            f"{request:12s} attempts={job.attempts} {msg}"
+        )
 
 
 def cmd_repair_spectral(db, args):
@@ -1195,6 +1220,11 @@ def main():
     p_manual.add_argument("--verified-lossless-target",
                           help="Override the runtime verified-lossless target for this import")
 
+    # import-jobs
+    p_jobs = sub.add_parser("import-jobs", help="List recent import queue jobs")
+    p_jobs.add_argument("--status", choices=["queued", "running", "completed", "failed"])
+    p_jobs.add_argument("--limit", type=int, default=20)
+
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
                               help="Fix albums stuck by stale current_spectral_bitrate (#18)")
@@ -1221,6 +1251,7 @@ def main():
         "quality": cmd_quality,
         "force-import": cmd_force_import,
         "manual-import": cmd_manual_import,
+        "import-jobs": cmd_import_jobs,
         "repair-spectral": cmd_repair_spectral,
     }
     commands[args.command](db, args)

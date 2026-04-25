@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
+from lib.import_queue import ImportJob, validate_job_type, validate_payload, validate_status
 from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
@@ -299,6 +300,7 @@ class FakePipelineDB:
         self._requests: dict[int, dict[str, Any]] = {}
         self._tracks: dict[int, list[dict[str, Any]]] = {}
         self.download_logs: list[DownloadLogRow] = []
+        self._import_jobs: list[dict[str, Any]] = []
         self.search_logs: list[SearchLogRow] = []
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
@@ -312,6 +314,7 @@ class FakePipelineDB:
         self.closed = False
         self._next_request_id = 0
         self._next_download_log_id = 0
+        self._next_import_job_id = 0
         self._next_search_log_id = 0
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
@@ -367,6 +370,245 @@ class FakePipelineDB:
             if callable(self._advisory_lock_result)
             else self._advisory_lock_result)
         yield acquired
+
+    # --- import_jobs queue ---
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob:
+        validate_job_type(job_type)
+        payload = validate_payload(job_type, payload or {})
+        if dedupe_key is not None:
+            existing = self.get_import_job_by_dedupe_key(dedupe_key)
+            if existing is not None:
+                return ImportJob.from_row(existing.to_dict(), deduped=True)
+
+        self._next_import_job_id += 1
+        now = _utcnow()
+        row: dict[str, Any] = {
+            "id": self._next_import_job_id,
+            "job_type": job_type,
+            "status": "queued",
+            "request_id": request_id,
+            "dedupe_key": dedupe_key,
+            "payload": copy.deepcopy(payload),
+            "result": None,
+            "message": message,
+            "error": None,
+            "attempts": 0,
+            "worker_id": None,
+            "created_at": now,
+            "updated_at": now,
+            "started_at": None,
+            "heartbeat_at": None,
+            "completed_at": None,
+        }
+        self._import_jobs.append(row)
+        return ImportJob.from_row(copy.deepcopy(row))
+
+    def get_import_job(self, job_id: int) -> ImportJob | None:
+        for row in self._import_jobs:
+            if row["id"] == job_id:
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def get_import_job_by_dedupe_key(
+        self,
+        dedupe_key: str,
+        *,
+        active_only: bool = True,
+    ) -> ImportJob | None:
+        rows = [
+            row for row in self._import_jobs
+            if row.get("dedupe_key") == dedupe_key
+            and (
+                not active_only
+                or row.get("status") in ("queued", "running")
+            )
+        ]
+        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]), reverse=True)
+        return ImportJob.from_row(copy.deepcopy(rows[0])) if rows else None
+
+    def list_import_jobs(
+        self,
+        *,
+        status: str | None = None,
+        request_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        if status is not None:
+            validate_status(status)
+        rows = list(self._import_jobs)
+        if status is not None:
+            rows = [row for row in rows if row.get("status") == status]
+        if request_id is not None:
+            rows = [row for row in rows if row.get("request_id") == request_id]
+        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]), reverse=True)
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
+    def list_active_import_jobs(
+        self,
+        *,
+        request_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        rows = [
+            row for row in self._import_jobs
+            if row.get("status") in ("queued", "running")
+            and (request_id is None or row.get("request_id") == request_id)
+        ]
+        rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
+    def count_import_jobs_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self._import_jobs:
+            status = str(row.get("status"))
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    def claim_next_import_job(
+        self,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        queued = [
+            row for row in self._import_jobs
+            if row.get("status") == "queued"
+        ]
+        queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        if not queued:
+            return None
+        row = queued[0]
+        now = _utcnow()
+        row["status"] = "running"
+        row["attempts"] = int(row.get("attempts") or 0) + 1
+        row["worker_id"] = worker_id
+        row["started_at"] = row.get("started_at") or now
+        row["heartbeat_at"] = now
+        row["updated_at"] = now
+        return ImportJob.from_row(copy.deepcopy(row))
+
+    def heartbeat_import_job(self, job_id: int) -> bool:
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") == "running":
+                now = _utcnow()
+                row["heartbeat_at"] = now
+                row["updated_at"] = now
+                return True
+        return False
+
+    def mark_import_job_completed(
+        self,
+        job_id: int,
+        *,
+        result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+                now = _utcnow()
+                row["status"] = "completed"
+                row["result"] = copy.deepcopy(result or {})
+                row["message"] = message
+                row["error"] = None
+                row["completed_at"] = now
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def mark_import_job_failed(
+        self,
+        job_id: int,
+        *,
+        error: str,
+        result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+                now = _utcnow()
+                row["status"] = "failed"
+                row["result"] = copy.deepcopy(result or {})
+                row["message"] = message
+                row["error"] = error
+                row["completed_at"] = now
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def list_stale_running_import_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = _utcnow() - older_than
+        rows = []
+        for row in self._import_jobs:
+            if row.get("status") != "running":
+                continue
+            last = _as_datetime(
+                row.get("heartbeat_at")
+                or row.get("started_at")
+                or row.get("updated_at")
+            )
+            if last < cutoff:
+                rows.append(row)
+        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
+    def fail_stale_running_import_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        stale = self.list_stale_running_import_jobs(
+            older_than=older_than,
+            limit=limit,
+        )
+        failed = []
+        for job in stale:
+            updated = self.mark_import_job_failed(
+                job.id,
+                error=message,
+                message=message,
+            )
+            if updated is not None:
+                failed.append(updated)
+        return failed
+
+    def requeue_running_import_jobs(
+        self,
+        *,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        running = [
+            row for row in self._import_jobs
+            if row.get("status") == "running"
+        ]
+        running.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
+        updated_jobs = []
+        for row in running[:limit]:
+            now = _utcnow()
+            row["status"] = "queued"
+            row["message"] = message
+            row["error"] = None
+            row["worker_id"] = None
+            row["started_at"] = None
+            row["heartbeat_at"] = None
+            row["updated_at"] = now
+            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
+        return updated_jobs
 
     # --- PipelineDB interface methods ---
 

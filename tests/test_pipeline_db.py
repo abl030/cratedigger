@@ -35,7 +35,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -57,8 +57,85 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("search_log", table_names)
         self.assertIn("source_denylist", table_names)
         self.assertIn("user_cooldowns", table_names)
+        self.assertIn("import_jobs", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
+        db.close()
+
+    def test_import_jobs_schema_constraints_and_indexes(self):
+        """Migration 003 creates the durable shared importer queue."""
+        db = make_db()
+        req_id = db.add_request(
+            mb_release_id="queue-schema-mbid",
+            artist_name="Queue",
+            album_title="Schema",
+            source="request",
+        )
+
+        cur = db._execute("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload
+            )
+            VALUES (
+                'force_import', 'queued', %s, 'force_import:download_log:1',
+                '{"failed_path": "/tmp/failed"}'::jsonb
+            )
+            RETURNING id
+        """, (req_id,))
+        first_id = cur.fetchone()["id"]
+        self.assertIsInstance(first_id, int)
+
+        with self.assertRaises(Exception):
+            db._execute("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, dedupe_key, payload
+                )
+                VALUES (
+                    'force_import', 'queued', %s, 'force_import:download_log:1',
+                    '{"failed_path": "/tmp/other"}'::jsonb
+                )
+            """, (req_id,))
+        db.conn.rollback()
+
+        db._execute(
+            "UPDATE import_jobs SET status = 'completed' WHERE id = %s",
+            (first_id,),
+        )
+        db._execute("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload
+            )
+            VALUES (
+                'force_import', 'queued', %s, 'force_import:download_log:1',
+                '{"failed_path": "/tmp/new"}'::jsonb
+            )
+        """, (req_id,))
+
+        for column, bad_value in (("status", "bogus"), ("job_type", "bogus")):
+            with self.subTest(column=column):
+                with self.assertRaises(Exception):
+                    db._execute(f"""
+                        INSERT INTO import_jobs (
+                            job_type, status, payload
+                        )
+                        VALUES (
+                            %s, %s, '{"failed_path": "/tmp/bad"}'::jsonb
+                        )
+                    """, (
+                        bad_value if column == "job_type" else "force_import",
+                        bad_value if column == "status" else "queued",
+                    ))
+                db.conn.rollback()
+
+        indexes = db._execute("""
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'import_jobs'
+        """).fetchall()
+        index_names = {row["indexname"] for row in indexes}
+        self.assertIn("idx_import_jobs_active_dedupe", index_names)
+        self.assertIn("idx_import_jobs_claim", index_names)
         db.close()
 
 
@@ -171,6 +248,172 @@ class TestAddAndGetRequest(unittest.TestCase):
         )
         self.db.delete_request(req_id)
         self.assertIsNone(self.db.get_request(req_id))
+
+
+@requires_postgres
+class TestImportJobQueueAPI(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="queue-api-mbid",
+            artist_name="Queue",
+            album_title="API",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_enqueue_dedupes_active_job_and_allows_after_completion(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+
+        dedupe = force_import_dedupe_key(17)
+        payload = force_import_payload(
+            download_log_id=17,
+            failed_path="/tmp/failed",
+            source_username="alice",
+        )
+        first = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=dedupe,
+            payload=payload,
+        )
+        duplicate = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=dedupe,
+            payload=payload,
+        )
+
+        self.assertEqual(first.id, duplicate.id)
+        self.assertFalse(first.deduped)
+        self.assertTrue(duplicate.deduped)
+
+        self.db.mark_import_job_completed(
+            first.id,
+            result={"success": True},
+            message="done",
+        )
+        later = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=dedupe,
+            payload=payload,
+        )
+        self.assertNotEqual(first.id, later.id)
+
+    def test_claim_complete_and_fail_lifecycle(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:1",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        claimed = self.db.claim_next_import_job(worker_id="test-worker")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.worker_id, "test-worker")
+        self.assertEqual(claimed.attempts, 1)
+        self.assertIsNone(self.db.claim_next_import_job(worker_id="other"))
+
+        completed = self.db.mark_import_job_completed(
+            claimed.id,
+            result={"success": True},
+            message="imported",
+        )
+        assert completed is not None
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.result, {"success": True})
+
+        missing = self.db.mark_import_job_failed(
+            999999,
+            error="missing",
+            message="missing",
+        )
+        self.assertIsNone(missing)
+
+    def test_two_sessions_cannot_claim_same_job(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib import pipeline_db
+
+        self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:claim-once",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        other = pipeline_db.PipelineDB(TEST_DSN)
+        try:
+            first = self.db.claim_next_import_job(worker_id="one")
+            second = other.claim_next_import_job(worker_id="two")
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+        finally:
+            other.close()
+
+    def test_stale_running_jobs_are_listed_and_failed_conservatively(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:stale",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        claimed = self.db.claim_next_import_job(worker_id="stale-worker")
+        assert claimed is not None
+        old = datetime.now(timezone.utc) - timedelta(hours=8)
+        self.db._execute(
+            "UPDATE import_jobs SET heartbeat_at = %s, updated_at = %s WHERE id = %s",
+            (old, old, claimed.id),
+        )
+
+        stale = self.db.list_stale_running_import_jobs(
+            older_than=timedelta(hours=4),
+        )
+        self.assertEqual([job.id for job in stale], [claimed.id])
+
+        failed = self.db.fail_stale_running_import_jobs(
+            older_than=timedelta(hours=4),
+            message="stale importer job",
+        )
+        self.assertEqual([job.id for job in failed], [claimed.id])
+        self.assertEqual(failed[0].status, "failed")
+
+    def test_running_jobs_can_be_requeued_immediately_after_worker_restart(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:restart-retry",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        claimed = self.db.claim_next_import_job(worker_id="old-worker")
+        assert claimed is not None
+
+        recovered = self.db.requeue_running_import_jobs(
+            message="worker restarted",
+        )
+        self.assertEqual([job.id for job in recovered], [claimed.id])
+        self.assertEqual(recovered[0].status, "queued")
+        self.assertIsNone(recovered[0].worker_id)
+        self.assertIsNone(recovered[0].started_at)
+        self.assertIsNone(recovered[0].heartbeat_at)
+        self.assertEqual(recovered[0].attempts, 1)
+
+        retried = self.db.claim_next_import_job(worker_id="new-worker")
+        assert retried is not None
+        self.assertEqual(retried.id, claimed.id)
+        self.assertEqual(retried.attempts, 2)
+        self.assertEqual(retried.worker_id, "new-worker")
 
 
 @requires_postgres

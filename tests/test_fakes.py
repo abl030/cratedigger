@@ -505,6 +505,67 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         db.close()
         self.assertTrue(db.closed)
 
+    def test_import_job_queue_methods_mirror_core_lifecycle(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        first = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:42",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        duplicate = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:42",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        self.assertEqual(first.id, duplicate.id)
+        self.assertTrue(duplicate.deduped)
+        self.assertEqual(db.count_import_jobs_by_status(), {"queued": 1})
+
+        claimed = db.claim_next_import_job(worker_id="fake-worker")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.attempts, 1)
+        self.assertEqual(claimed.worker_id, "fake-worker")
+        self.assertTrue(db.heartbeat_import_job(claimed.id))
+
+        requeued = db.requeue_running_import_jobs(message="retry")
+        self.assertEqual([job.id for job in requeued], [claimed.id])
+        self.assertEqual(requeued[0].status, "queued")
+        self.assertIsNone(requeued[0].worker_id)
+
+        claimed = db.claim_next_import_job(worker_id="fake-worker-2")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.attempts, 2)
+        self.assertEqual(claimed.worker_id, "fake-worker-2")
+
+        completed = db.mark_import_job_completed(
+            claimed.id,
+            result={"success": True},
+            message="done",
+        )
+        assert completed is not None
+        self.assertEqual(completed.status, "completed")
+
+        later = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:42",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        self.assertNotEqual(first.id, later.id)
+        failed = db.mark_import_job_failed(
+            later.id,
+            error="boom",
+            message="failed",
+        )
+        assert failed is not None
+        self.assertEqual(failed.status, "failed")
+
     def test_add_request_assigns_monotonic_id(self):
         db = FakePipelineDB()
         rid1 = db.add_request("Artist A", "Album A", source="request")

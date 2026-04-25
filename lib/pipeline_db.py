@@ -20,6 +20,12 @@ from typing import Any, Iterator
 import psycopg2
 import psycopg2.extras
 
+from lib.import_queue import (
+    ImportJob,
+    validate_job_type,
+    validate_payload,
+    validate_status,
+)
 from lib.quality import CooldownConfig, SpectralMeasurement, should_cooldown
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
@@ -52,6 +58,12 @@ ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50
 # the lock were missing. Key = ``release_id_to_lock_key(mb_release_id)``.
 # ``0x52454C45`` = ASCII "RELE", recognisable alongside FIMP in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_RELEASE = 0x52454C45
+
+# Singleton importer-worker lock. The DB queue serializes claims, but beets
+# mutation is intentionally a single lane, so the worker process itself also
+# takes a process-wide lock before recovering or claiming jobs.
+# ``0x51554555`` = ASCII "QUEU", recognisable in ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_IMPORTER = 0x51554555
 
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
@@ -180,6 +192,301 @@ class PipelineDB:
                         "SELECT pg_advisory_unlock(%s, %s)", (namespace, key)
                     )
                     cur.fetchone()
+
+    # --- import_jobs queue ---
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob:
+        """Create an import job or return the active job with the same key."""
+        validate_job_type(job_type)
+        payload = validate_payload(job_type, payload or {})
+        cur = self._execute("""
+            WITH inserted AS (
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload, message
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (dedupe_key)
+                    WHERE dedupe_key IS NOT NULL
+                      AND status IN ('queued', 'running')
+                DO NOTHING
+                RETURNING *
+            )
+            SELECT inserted.*, false AS deduped
+            FROM inserted
+            UNION ALL
+            SELECT import_jobs.*, true AS deduped
+            FROM import_jobs
+            WHERE %s IS NOT NULL
+              AND dedupe_key = %s
+              AND status IN ('queued', 'running')
+              AND NOT EXISTS (SELECT 1 FROM inserted)
+            ORDER BY deduped
+            LIMIT 1
+        """, (
+            job_type,
+            request_id,
+            dedupe_key,
+            psycopg2.extras.Json(payload),
+            message,
+            dedupe_key,
+            dedupe_key,
+        ))
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("import job enqueue returned no row")
+        return ImportJob.from_row(dict(row), deduped=bool(row["deduped"]))
+
+    def get_import_job(self, job_id: int) -> ImportJob | None:
+        cur = self._execute(
+            "SELECT * FROM import_jobs WHERE id = %s",
+            (job_id,),
+        )
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def get_import_job_by_dedupe_key(
+        self,
+        dedupe_key: str,
+        *,
+        active_only: bool = True,
+    ) -> ImportJob | None:
+        status_filter = (
+            "AND status IN ('queued', 'running')"
+            if active_only
+            else ""
+        )
+        cur = self._execute(f"""
+            SELECT *
+            FROM import_jobs
+            WHERE dedupe_key = %s
+            {status_filter}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+        """, (dedupe_key,))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def list_import_jobs(
+        self,
+        *,
+        status: str | None = None,
+        request_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        params: list[Any] = []
+        clauses: list[str] = []
+        if status is not None:
+            validate_status(status)
+            clauses.append("status = %s")
+            params.append(status)
+        if request_id is not None:
+            clauses.append("request_id = %s")
+            params.append(request_id)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
+        cur = self._execute(f"""
+            SELECT *
+            FROM import_jobs
+            {where}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT %s
+        """, tuple(params))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def list_active_import_jobs(
+        self,
+        *,
+        request_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        params: list[Any] = []
+        request_filter = ""
+        if request_id is not None:
+            request_filter = "AND request_id = %s"
+            params.append(request_id)
+        params.append(limit)
+        cur = self._execute(f"""
+            SELECT *
+            FROM import_jobs
+            WHERE status IN ('queued', 'running')
+            {request_filter}
+            ORDER BY created_at ASC, id ASC
+            LIMIT %s
+        """, tuple(params))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def count_import_jobs_by_status(self) -> dict[str, int]:
+        cur = self._execute("""
+            SELECT status, COUNT(*) AS count
+            FROM import_jobs
+            GROUP BY status
+        """)
+        return {str(row["status"]): int(row["count"]) for row in cur.fetchall()}
+
+    def claim_next_import_job(
+        self,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        cur = self._execute("""
+            WITH next_job AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE import_jobs
+            SET status = 'running',
+                attempts = attempts + 1,
+                worker_id = %s,
+                started_at = COALESCE(started_at, NOW()),
+                heartbeat_at = NOW(),
+                updated_at = NOW()
+            FROM next_job
+            WHERE import_jobs.id = next_job.id
+            RETURNING import_jobs.*
+        """, (worker_id,))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def heartbeat_import_job(self, job_id: int) -> bool:
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET heartbeat_at = NOW(), updated_at = NOW()
+            WHERE id = %s AND status = 'running'
+            RETURNING id
+        """, (job_id,))
+        return cur.fetchone() is not None
+
+    def mark_import_job_completed(
+        self,
+        job_id: int,
+        *,
+        result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET status = 'completed',
+                result = %s,
+                message = %s,
+                error = NULL,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+              AND status IN ('queued', 'running')
+            RETURNING *
+        """, (psycopg2.extras.Json(result or {}), message, job_id))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def mark_import_job_failed(
+        self,
+        job_id: int,
+        *,
+        error: str,
+        result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET status = 'failed',
+                result = %s,
+                message = %s,
+                error = %s,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+              AND status IN ('queued', 'running')
+            RETURNING *
+        """, (psycopg2.extras.Json(result or {}), message, error, job_id))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def list_stale_running_import_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = datetime.now(timezone.utc) - older_than
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE status = 'running'
+              AND COALESCE(heartbeat_at, started_at, updated_at) < %s
+            ORDER BY updated_at ASC, id ASC
+            LIMIT %s
+        """, (cutoff, limit))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def fail_stale_running_import_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = datetime.now(timezone.utc) - older_than
+        cur = self._execute("""
+            WITH stale AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'running'
+                  AND COALESCE(heartbeat_at, started_at, updated_at) < %s
+                ORDER BY updated_at ASC, id ASC
+                LIMIT %s
+            )
+            UPDATE import_jobs
+            SET status = 'failed',
+                error = %s,
+                message = %s,
+                completed_at = NOW(),
+                updated_at = NOW()
+            FROM stale
+            WHERE import_jobs.id = stale.id
+            RETURNING import_jobs.*
+        """, (cutoff, limit, message, message))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def requeue_running_import_jobs(
+        self,
+        *,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        """Reset abandoned running jobs to queued for immediate retry."""
+        cur = self._execute("""
+            WITH running AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'running'
+                ORDER BY updated_at ASC, id ASC
+                LIMIT %s
+            )
+            UPDATE import_jobs
+            SET status = 'queued',
+                message = %s,
+                error = NULL,
+                worker_id = NULL,
+                started_at = NULL,
+                heartbeat_at = NULL,
+                updated_at = NOW()
+            FROM running
+            WHERE import_jobs.id = running.id
+            RETURNING import_jobs.*
+        """, (limit, message))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
     # --- album_requests CRUD ---
 

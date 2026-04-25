@@ -39,6 +39,11 @@ from lib import transitions
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core)
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    automation_import_dedupe_key,
+    automation_import_payload,
+)
 from lib.staged_album import StagedAlbum
 from lib.util import move_failed_import, log_validation_result
 
@@ -1429,7 +1434,7 @@ def _run_completed_processing(
     state: ActiveDownloadState,
     db: Any,
     ctx: CratediggerContext,
-) -> None:
+) -> bool | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
         if entry.import_folder is None:
@@ -1445,7 +1450,7 @@ def _run_completed_processing(
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
-        return
+        return None
 
     # Three-valued return from ``process_completed_album``:
     # - True  → processing succeeded; flip to 'imported' if status is
@@ -1457,7 +1462,7 @@ def _run_completed_processing(
     #   request rejects that require manual recovery. Do NOT touch state
     #   here.
     if outcome is None:
-        return
+        return None
 
     refreshed = db.get_request(request_id)
     if refreshed and refreshed["status"] == "downloading":
@@ -1482,6 +1487,136 @@ def _run_completed_processing(
                     attempt_type="download",
                 ),
             )
+    return outcome
+
+
+def _active_automation_import_job(db: Any, request_id: int):
+    return db.get_import_job_by_dedupe_key(
+        automation_import_dedupe_key(request_id),
+        active_only=True,
+    )
+
+
+def _enqueue_completed_processing(
+    entry: GrabListEntry,
+    request_id: int,
+    state: ActiveDownloadState,
+    db: Any,
+    ctx: CratediggerContext,
+) -> Any:
+    """Submit completed-download processing to the shared import queue."""
+    if state.processing_started_at is None:
+        if entry.import_folder is None:
+            entry.import_folder = _canonical_import_folder_path(
+                entry,
+                ctx.cfg.slskd_download_dir,
+            )
+        state.processing_started_at = datetime.now(timezone.utc).isoformat()
+        _persist_updated_download_state(db, request_id, entry, state)
+    job = db.enqueue_import_job(
+        IMPORT_JOB_AUTOMATION,
+        request_id=request_id,
+        dedupe_key=automation_import_dedupe_key(request_id),
+        payload=automation_import_payload(),
+        message=f"Automation import queued for {entry.artist} - {entry.title}",
+    )
+    if getattr(job, "deduped", False):
+        logger.info(
+            "Automation import already queued/running for request %s "
+            "(job %s)",
+            request_id,
+            getattr(job, "id", "?"),
+        )
+    else:
+        logger.info(
+            "Queued automation import for request %s as job %s",
+            request_id,
+            getattr(job, "id", "?"),
+        )
+    return job
+
+
+def _processing_path_ready_for_importer(
+    entry: GrabListEntry,
+    request_id: int,
+    state: ActiveDownloadState,
+    db: Any,
+    ctx: CratediggerContext,
+) -> bool:
+    """Fail closed before enqueueing a job that cannot resume local files."""
+    if state.processing_started_at is None or state.current_path is None:
+        return True
+
+    current_path_location = classify_processing_path(
+        current_path=state.current_path,
+        artist=entry.artist,
+        title=entry.title,
+        year=entry.year,
+        request_id=request_id,
+        staging_dir=ctx.cfg.beets_staging_dir,
+        slskd_download_dir=ctx.cfg.slskd_download_dir,
+    )
+    if not os.path.isdir(state.current_path):
+        if current_path_location.blocks_post_move_retry:
+            _log_post_move_resume_blocked(
+                entry,
+                current_path=state.current_path,
+                detail=(
+                    "already lives at the request-scoped auto-import "
+                    "staged path but the directory is missing. "
+                    "Automatic retry is disabled because beets may "
+                    "already have consumed the staged folder; manual "
+                    "recovery is required."
+                ),
+            )
+            return False
+        logger.error("Current staged path missing: %s", state.current_path)
+        transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+                attempt_type="download",
+            ),
+        )
+        return False
+
+    staged_album = StagedAlbum.from_entry(entry, default_path=state.current_path)
+    staged_album.bind_import_paths(entry.files)
+    missing_paths: list[str] = []
+    for file in entry.files:
+        import_path = file.import_path
+        if import_path is not None and not os.path.isfile(import_path):
+            missing_paths.append(import_path)
+    if not missing_paths:
+        return True
+
+    if current_path_location.blocks_post_move_retry:
+        _log_post_move_resume_blocked(
+            entry,
+            current_path=state.current_path,
+            detail=(
+                "already lives at the request-scoped auto-import "
+                f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
+                "Automatic retry is disabled because import may "
+                "already have started; manual recovery is required."
+            ),
+        )
+        return False
+
+    logger.error(
+        "Current staged path is missing tracked files: %s",
+        ", ".join(missing_paths),
+    )
+    transitions.finalize_request(
+        db,
+        request_id,
+        transitions.RequestTransition.to_wanted(
+            from_status="downloading",
+            attempt_type="download",
+        ),
+    )
+    return False
 
 
 def poll_active_downloads(ctx: CratediggerContext) -> None:
@@ -1533,6 +1668,15 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_dict(raw_state)
         else:
             state = ActiveDownloadState.from_json(raw_state)
+        active_import_job = _active_automation_import_job(db, request_id)
+        if active_import_job is not None:
+            logger.info(
+                "Request %s is waiting on importer job %s (%s)",
+                request_id,
+                getattr(active_import_job, "id", "?"),
+                getattr(active_import_job, "status", "?"),
+            )
+            continue
         if state.processing_started_at is not None:
             recovery_decision = reconcile_processing_current_path(
                 current_path=state.current_path,
@@ -1585,7 +1729,15 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
         entry = reconstruct_grab_list_entry(row, state)
 
         if state.processing_started_at is not None:
-            _run_completed_processing(entry, request_id, state, db, ctx)
+            if not _processing_path_ready_for_importer(
+                entry,
+                request_id,
+                state,
+                db,
+                ctx,
+            ):
+                continue
+            _enqueue_completed_processing(entry, request_id, state, db, ctx)
             continue
 
         # Re-derive transfer IDs from pre-fetched snapshot
@@ -1652,7 +1804,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
         if verdict.decision == DownloadDecision.complete:
             logger.info(f"Download complete: {entry.artist} - {entry.title}")
-            _run_completed_processing(entry, request_id, state, db, ctx)
+            _enqueue_completed_processing(entry, request_id, state, db, ctx)
             continue
 
         if verdict.decision == DownloadDecision.timeout_all_errored:

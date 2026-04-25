@@ -62,6 +62,43 @@ export function renderManualImport(data, el) {
 }
 
 /**
+ * Poll a queued import job until completion or failure.
+ * @param {number} jobId
+ * @param {HTMLButtonElement} btn
+ */
+async function pollImportJob(jobId, btn) {
+  for (let i = 0; i < 240; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const r = await fetch(`${API}/api/import-jobs/${jobId}`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const job = data.job || {};
+      if (job.status === 'queued' || job.status === 'running') {
+        btn.textContent = job.status[0].toUpperCase() + job.status.slice(1);
+        continue;
+      }
+      if (job.status === 'completed') {
+        btn.textContent = 'Imported';
+        btn.style.background = '#1a4a2a';
+        toast(job.message || 'Import completed');
+        return;
+      }
+      if (job.status === 'failed') {
+        btn.textContent = 'Failed';
+        btn.style.background = '#5a2a2a';
+        btn.style.color = '#f88';
+        toast(job.message || job.error || 'Import failed', true);
+        return;
+      }
+    } catch (_e) {
+      // Keep polling through transient request failures.
+    }
+  }
+  btn.textContent = 'Queued';
+}
+
+/**
  * Run manual import for a folder matched to a pipeline request.
  * @param {number} requestId
  * @param {string} path
@@ -78,10 +115,13 @@ export async function runManualImport(requestId, path, btn) {
       body: JSON.stringify({request_id: requestId, path: path}),
     });
     const data = await r.json();
-    if (data.status === 'ok') {
-      btn.textContent = 'Imported';
-      btn.style.background = '#1a4a2a';
-      toast(`Imported: ${data.artist} - ${data.album}`);
+    if (data.status === 'queued') {
+      btn.textContent = 'Queued';
+      btn.style.background = '#1a3654';
+      toast(`Queued import: ${data.artist} - ${data.album}`);
+      if (data.job_id) {
+        await pollImportJob(data.job_id, btn);
+      }
     } else {
       btn.textContent = 'Failed';
       btn.style.background = '#5a2a2a';

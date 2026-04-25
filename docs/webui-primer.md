@@ -41,7 +41,10 @@ Browser → https://music.ablz.au
 | `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` or `{"discogs_release_id": "..."}` |
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
 | `/api/pipeline/<id>` | GET | Single request details |
-| `/api/pipeline/force-import` | POST | Force-import a rejected download `{"download_log_id": N}` |
+| `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
+| `/api/manual-import/import` | POST | Queue manual import for a matched folder |
+| `/api/import-jobs` | GET | List recent import queue jobs |
+| `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's releases grouped by master (via `/api/artists/{id}/releases`) |
@@ -62,6 +65,8 @@ Browser → https://music.ablz.au
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
 - **Pipeline tab** — status dashboard (wanted/imported/manual counts + wanted list)
+- **Wrong Matches / Manual Import** — import buttons queue work and poll
+  `import_jobs`, so long beets imports do not block the web request.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration
@@ -90,6 +95,8 @@ homelab.services.cratedigger.enable = true;
 
 What this creates on doc2:
 - `cratedigger-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
+- `cratedigger-importer.service` — long-lived worker that drains queued
+  force/manual/automation imports after DB migrations have run
 - `services.redis.servers.cratedigger` — provided by the homelab wrapper (not the upstream module)
 - `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
 - Cloudflare DNS + ACME cert auto-provisioned

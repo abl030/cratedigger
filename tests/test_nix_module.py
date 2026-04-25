@@ -74,5 +74,18 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
         )
 
 
+class TestImporterServiceContract(unittest.TestCase):
+    def test_importer_wrapper_and_service_are_defined(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('writeShellScriptBin "cratedigger-importer"', text)
+        self.assertIn("${src}/scripts/importer.py", text)
+        self.assertIn("systemd.services.cratedigger-importer", text)
+        self.assertIn('after = ["cratedigger-db-migrate.service"]', text)
+        self.assertIn('requires = ["cratedigger-db-migrate.service"]', text)
+        self.assertIn('ExecStart = "${importerPkg}/bin/cratedigger-importer"', text)
+        self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
+        self.assertIn("WorkingDirectory = cfg.stateDir", text)
+
+
 if __name__ == "__main__":
     unittest.main()
