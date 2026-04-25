@@ -136,7 +136,23 @@ Schema fields, JSONB audit blobs, search_log outcomes, and the force-import flow
 
 ## Decision architecture
 
-All quality/import decisions are pure functions in `lib/quality.py` — no I/O, no database, fully unit-tested. Key entries: `spectral_import_decision`, `import_quality_decision`, `transcode_detection`, `quality_gate_decision`, `determine_verified_lossless`, `dispatch_action`, `compute_effective_override_bitrate`, `verify_filetype`, `should_cooldown`, `get_decision_tree` (feeds the web UI Decisions tab). Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`, not `@dataclass` — see `.claude/rules/code-quality.md` § "Wire-boundary types".
+Quality policy should stay pure where possible: facts in, decision out, no I/O,
+database, or filesystem side effects. Key entries in `lib/quality.py` include
+`spectral_import_decision`, `import_quality_decision`,
+`transcode_detection`, `quality_gate_decision`,
+`determine_verified_lossless`, `dispatch_action`,
+`compute_effective_override_bitrate`, `verify_filetype`, `should_cooldown`,
+and `get_decision_tree` (feeds the web UI Decisions tab).
+
+Do not preserve the current scattered import orchestration boundary as a design
+goal. The existing split across `dispatch_import_core`,
+`dispatch_import_from_db`, `process_completed_album`, release locks, deferred
+outcomes, and status recovery is the complexity the importer-queue redesign is
+intended to replace. Keep pure quality decisions; move beets-mutating import
+ownership toward a single importer boundary.
+
+Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`,
+not `@dataclass` — see `.claude/rules/code-quality.md` § "Wire-boundary types".
 
 ## Deploying changes
 
