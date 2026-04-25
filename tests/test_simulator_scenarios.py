@@ -591,8 +591,8 @@ class TestNamedRegressions(unittest.TestCase):
             "Stage 2 must return 'downgrade' — pins the AVG-metric "
             "rank comparison with VBR existing preserving its real avg")
 
-    def test_eno_generative_music_shared_spectral_floor(self):
-        """Shared 96k spectral floor on both sides — not an upgrade.
+    def test_eno_generative_music_shared_spectral_floor_still_grinds_up_avg(self):
+        """Shared 96k spectral floor keeps rank bucket, but avg still wins.
 
         Live reproduction: Brian Eno - Generative Music I (req 1486),
         force-import ``download_log.id=3291`` on 2026-04-12.
@@ -603,38 +603,23 @@ class TestNamedRegressions(unittest.TestCase):
           new download: MP3, min=128, avg=290, median≈320, is_cbr=False,
             spectral_grade=genuine, spectral_bitrate=96.
 
-        Both sides carry the same 96k spectral floor with the same grade.
-        ``compare_quality`` currently uses the configured bitrate metric
-        (AVG by default) and classifies new (290 → TRANSPARENT rank) over
-        existing (128 → ACCEPTABLE rank) → verdict ``better`` → stage 2
-        returns ``import``. The force-import proceeded on an album whose
-        underlying audio is the same 96k material, per the spectral signal
-        both sides agree on.
-
-        The spectral clamp that would catch this lives only in
-        ``gate_rank`` (post-import) and is gated on
-        ``SPECTRAL_TRANSCODE_GRADES`` (``suspect``/``likely_transcode``).
-        Both sides here are ``genuine`` → clamp never fires → 290-vs-128
-        comparison wins.
-
-        Expected after fix: when new and existing both carry a
-        ``spectral_bitrate`` at the same value, the comparison must treat
-        them as equivalent (i.e. not ``import``) — no perceptual upgrade
-        is possible when both sources agree on the audio floor.
+        Both sides carry the same 96k spectral floor with the same grade. The
+        shared-spectral bucket demotes the rank comparison, but the same-bucket
+        tie-breaker must still use the raw AVG metric. That lets the pipeline
+        keep replacing 128avg files with 290avg files when the spectral floor
+        is a pessimistic or genre-sensitive signal.
         """
         album = ALBUM_MAP["eno_genuine_spectral96_mp3_128"]
         r = simulate(album, DL_MAP["eno_mp3_mixed_avg_290_genuine_96"])
 
-        self.assertFalse(
+        self.assertTrue(
             r.imported,
-            "New download whose spectral floor matches existing's spectral "
-            "floor (both 96kbps) must not import — container-avg comparison "
-            "is misleading when spectral agrees on the underlying quality.")
-        self.assertNotEqual(
+            "Equal spectral floors must not erase a higher raw AVG bitrate "
+            "inside the same spectral bucket.")
+        self.assertEqual(
             r.stage2_import, "import",
-            "Stage 2 must not return 'import' when new.spectral_bitrate == "
-            "existing.spectral_bitrate — no upgrade is possible at the same "
-            "spectral floor.")
+            "Stage 2 must still import when equal spectral buckets have a "
+            "higher raw AVG bitrate.")
 
     def test_unter_null_failure_epiphany_vbr_real_upgrade(self):
         """VBR existing (1749 shape) + genuine V0 upgrade still imports.

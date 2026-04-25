@@ -1224,14 +1224,18 @@ def _shared_spectral_bitrates(
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
 ) -> "tuple[Optional[int], Optional[int]] | None":
-    """Return ``(new_effective_br, existing_effective_br)`` when BOTH sides
-    carry a ``spectral_bitrate_kbps``, else ``None``.
+    """Return rank-bucket bitrates when BOTH sides carry spectral estimates.
 
     The clamp takes ``min(selected_metric, spectral_bitrate)`` per side — the
-    spectral estimate becomes an upper bound on the "honest" bitrate for the
-    comparison. This is deliberately *narrow*: it only fires when new and
-    existing both measured a spectral floor, so a stale estimate on only one
-    side (Springsteen shape: existing CBR 320 genuine+96, new MP3 V0 240 no
+    spectral estimate becomes an upper bound on the rank bucket. Same-bucket
+    tie-breaks still use the raw configured bitrate metric in
+    ``compare_quality()``; otherwise an equal spectral floor would erase a
+    real avg-bitrate upgrade and stop the pipeline from grinding upward when
+    spectral analysis is too pessimistic.
+
+    This is deliberately *narrow*: it only fires when new and existing both
+    measured a spectral floor, so a stale estimate on only one side
+    (Springsteen shape: existing CBR 320 genuine+96, new MP3 V0 240 no
     spectral) keeps the container comparison — the rule that
     ``test_springsteen_genuine_but_96kbps`` pins.
 
@@ -1274,12 +1278,15 @@ def compare_quality(
     - Same codec family, both bare codec names → compare the configured metric
       with cfg.within_rank_tolerance_kbps tolerance.
 
-    Shared-spectral clamp: when BOTH measurements carry ``spectral_bitrate_kbps``,
-    clamp each side's classified bitrate to ``min(selected_metric, spectral)``.
-    Two independent spectral estimates agreeing on the same audio floor is
-    stronger evidence than either alone — the clamp applies regardless of
-    grade. See ``_shared_spectral_bitrates`` for the narrow guard that keeps
-    the Springsteen case (single stale estimate) on the container path.
+    Shared-spectral bucket: when BOTH measurements carry ``spectral_bitrate_kbps``,
+    clamp each side's classified bitrate to ``min(selected_metric, spectral)``
+    for rank only. Same-rank tie-breaks still use the raw configured metric
+    so higher-average files can replace lower-average files within the same
+    spectral bucket. This keeps spectral as a demotion signal without letting
+    a pessimistic estimate permanently freeze the album at the first source
+    that happened to land in that bucket. See ``_shared_spectral_bitrates``
+    for the narrow guard that keeps the Springsteen case (single stale
+    estimate) on the container path.
 
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
@@ -1315,17 +1322,12 @@ def compare_quality(
     if _is_explicit_label(new.format) or _is_explicit_label(existing.format):
         return "equivalent"
 
-    # Both bare codec names — compare the chosen metric with tolerance.
-    # Use the shared-spectral-clamped bitrates if the clamp fired, otherwise
-    # fall back to the raw selected metric. This keeps the tiebreaker in
-    # lockstep with the rank: if ranks were computed from clamped bitrates,
-    # the tiebreaker must be too (otherwise new avg=290 could still "beat"
-    # existing avg=128 after both ranks clamp to the same POOR tier).
-    if shared is not None:
-        new_br, existing_br = shared
-    else:
-        new_br = _selected_bitrate(new, cfg)
-        existing_br = _selected_bitrate(existing, cfg)
+    # Both bare codec names — compare the chosen raw metric with tolerance.
+    # When the shared-spectral bucket fired, rank has already been demoted by
+    # the spectral floor. The tiebreaker deliberately stays on the raw metric
+    # so equal spectral buckets can still converge upward by bitrate.
+    new_br = _selected_bitrate(new, cfg)
+    existing_br = _selected_bitrate(existing, cfg)
     if new_br is None or existing_br is None:
         return "equivalent"
     delta = new_br - existing_br
@@ -2577,9 +2579,9 @@ def get_decision_tree(
                     {"condition": "existing is VBR: override_min_bitrate drives min only; avg + median keep beets values",
                      "result": "preserved", "color": "green",
                      "effect": "real avg signal survives — a 152kbps transcode can't win against a genuine 225-avg VBR album"},
-                    {"condition": "BOTH new and existing have spectral_bitrate: compare_quality clamps each side to min(selected_metric, spectral_bitrate) — grade-independent",
+                    {"condition": "BOTH new and existing have spectral_bitrate: compare_quality uses min(selected_metric, spectral_bitrate) for rank bucket only — grade-independent",
                      "result": "shared_spectral_clamp", "color": "amber",
-                     "effect": "two agreeing estimates corroborate the audio floor — 290-avg vs 128-avg with both spectral=96 compares as 96-vs-96 → equivalent (Eno case, download_log 3291)"},
+                     "effect": "spectral can demote both sides into the same bucket, but raw avg/median/min still breaks ties so the pipeline can grind upward when spectral is pessimistic"},
                     {"condition": "new.verified_lossless = true AND compare_quality(new, existing) in {better,equivalent}",
                      "result": "import", "color": "green",
                      "effect": "verified-lossless imports only when it is not worse"},
@@ -2609,12 +2611,14 @@ def get_decision_tree(
                          "comparison sees the real signal — the "
                          "loop-breaking fix for Unter Null - The Failure "
                          "Epiphany (req 1749, 2026-04-21). The "
-                         "shared-spectral clamp is independent: it fires "
-                         "ONLY when both sides carry spectral_bitrate, so "
-                         "a single stale estimate (Springsteen shape — "
-                         "existing genuine 320 with spectral=96, new V0 "
-                         "240 with no spectral) still follows the "
-                         "container path."),
+                         "shared-spectral bucket is independent: it fires "
+                         "ONLY when both sides carry spectral_bitrate and "
+                         "only for rank bucketing, so a single stale "
+                         "estimate (Springsteen shape — existing genuine "
+                         "320 with spectral=96, new V0 240 with no "
+                         "spectral) still follows the container path, and "
+                         "equal buckets still converge upward by the "
+                         "configured bitrate metric."),
             },
             {
                 "id": "quality_gate",
@@ -2864,11 +2868,10 @@ def full_pipeline_decision(
     else:
         _effective_existing_avg = _raw_avg
     # spectral_bitrate_kbps is passed through so compare_quality's
-    # shared-spectral clamp can fire in-sim (Eno case, req 1486). Production
+    # shared-spectral bucket can fire in-sim (Eno case, req 1486). Production
     # always populates this via build_existing_measurement in the harness —
-    # the simulator had been dropping it, which is exactly why
-    # test_eno_generative_music_shared_spectral_floor could never surface
-    # the bug until now.
+    # the simulator had been dropping it, which is exactly why the Eno
+    # shared-floor scenario could not surface the bug originally.
     existing_m = (AudioQualityMeasurement(
                       min_bitrate_kbps=_effective_existing_min,
                       avg_bitrate_kbps=_effective_existing_avg,
