@@ -240,6 +240,8 @@ function renderGroup(g) {
 function renderEntry(e) {
   const detailId = `wm-entry-${e.download_log_id}`;
   const dist = e.distance != null ? e.distance.toFixed(3) : '?';
+  const job = e.import_job || null;
+  const jobBadge = job ? `<span class="badge" style="background:#222;color:#9bf;margin-left:8px;">${esc(job.status)}</span>` : '';
 
   const header = `
     <div class="p-item" style="background:#1a1a1a;margin:4px 0;" onclick="window.toggleWrongMatchEntry('${detailId}')">
@@ -247,6 +249,7 @@ function renderEntry(e) {
         <div>
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
           <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
+          ${jobBadge}
         </div>
       </div>
       <div class="p-meta">
@@ -255,7 +258,7 @@ function renderEntry(e) {
       </div>
     </div>
     <div class="p-detail" id="${detailId}">
-      ${renderEntryDetail(e)}
+      ${renderEntryDetail(e, job)}
     </div>`;
 
   return header;
@@ -266,7 +269,7 @@ function renderEntry(e) {
  * @param {Object} e - entry payload
  * @returns {string}
  */
-function renderEntryDetail(e) {
+function renderEntryDetail(e, job) {
   let html = '';
   const c = e.candidate;
 
@@ -337,7 +340,9 @@ function renderEntryDetail(e) {
   }
 
   html += '<div class="p-actions" style="margin-top:10px;">';
-  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">Force Import</button>`;
+  const active = job && (job.status === 'queued' || job.status === 'running');
+  const label = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
+  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${label}</button>`;
   html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
 
@@ -388,6 +393,45 @@ async function _refreshWrongMatches() {
 }
 
 /**
+ * Poll a queued import job until it reaches a terminal state.
+ * @param {number} jobId
+ * @param {HTMLButtonElement} btn
+ */
+async function _pollImportJob(jobId, btn) {
+  for (let i = 0; i < 240; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const r = await fetch(`${API}/api/import-jobs/${jobId}`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const job = data.job || {};
+      if (job.status === 'queued' || job.status === 'running') {
+        btn.textContent = job.status[0].toUpperCase() + job.status.slice(1);
+        continue;
+      }
+      if (job.status === 'completed') {
+        btn.textContent = 'Imported';
+        btn.style.borderColor = '#6d6';
+        btn.style.color = '#6d6';
+        toast(job.message || 'Import completed');
+        invalidateWrongMatches();
+        await _refreshWrongMatches();
+        return;
+      }
+      if (job.status === 'failed') {
+        btn.textContent = 'Failed';
+        btn.style.color = '#f88';
+        toast(job.message || job.error || 'Import failed', true);
+        return;
+      }
+    } catch (_e) {
+      // Keep polling through transient web/DB errors.
+    }
+  }
+  btn.textContent = 'Queued';
+}
+
+/**
  * Force-import a wrong match.
  * @param {number} logId
  * @param {HTMLButtonElement} btn
@@ -403,16 +447,14 @@ export async function forceImportWrongMatch(logId, btn) {
       body: JSON.stringify({download_log_id: logId}),
     });
     const data = await r.json();
-    if (data.status === 'ok') {
-      btn.textContent = 'Imported';
-      btn.style.borderColor = '#6d6';
-      btn.style.color = '#6d6';
-      toast(`Force imported: ${data.artist} - ${data.album}`);
-      invalidateWrongMatches();
-      // A successful force-import cleans the source folder, so the entry (and
-      // possibly the whole group) should disappear. Refresh the view so the
-      // count badge and sibling list reflect the new state.
-      await _refreshWrongMatches();
+    if (data.status === 'queued') {
+      btn.textContent = data.deduped ? 'Queued' : 'Queued';
+      btn.style.borderColor = '#9bf';
+      btn.style.color = '#9bf';
+      toast(`Queued import: ${data.artist} - ${data.album}`);
+      if (data.job_id) {
+        await _pollImportJob(data.job_id, btn);
+      }
     } else {
       btn.textContent = 'Failed';
       btn.style.color = '#f88';

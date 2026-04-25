@@ -1,7 +1,7 @@
 ---
 title: "refactor: Centralize imports behind a shared importer queue"
 type: refactor
-status: active
+status: completed
 date: 2026-04-25
 origin: docs/brainstorms/importer-queue-requirements.md
 ---

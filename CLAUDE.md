@@ -14,7 +14,7 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
    ```
    The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 3. **nixosconfig changes MUST be made on doc1.** The repo lives at `~/nixosconfig` on doc1. Doc1 has the git push credentials; doc2 and Windows do not. SSH to doc1 first, edit, commit, push, then deploy to doc2.
-4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. 4 statuses: `wanted`, `downloading`, `imported`, `manual`.
+4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated music collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — they are different MusicBrainz releases (countries, track counts, labels) and the user wants them all. Beets must disambiguate them into separate folders.
 
 ## Subsystems
@@ -84,6 +84,7 @@ Key `lib/` modules:
 - `quality.py` — pure decision functions + all typed dataclasses (`ImportResult`, `ValidationResult`, `DispatchAction`, `QualityRankConfig`, `CooldownConfig`, ...)
 - `preimport.py` — shared pre-import gates (audio integrity + spectral) called by both auto and force/manual paths
 - `download.py` — async polling + completion processing + slskd transfers
+- `import_queue.py` — typed shared queue payload/result helpers
 - `import_dispatch.py` — decision tree + quality gate + dispatch_import_from_db
 - `import_service.py` — force-import / manual-import service layer
 - `grab_list.py`, `search.py`, `beets.py`, `beets_db.py`, `spectral_check.py`, `util.py`
@@ -144,12 +145,13 @@ database, or filesystem side effects. Key entries in `lib/quality.py` include
 `compute_effective_override_bitrate`, `verify_filetype`, `should_cooldown`,
 and `get_decision_tree` (feeds the web UI Decisions tab).
 
-Do not preserve the current scattered import orchestration boundary as a design
-goal. The existing split across `dispatch_import_core`,
-`dispatch_import_from_db`, `process_completed_album`, release locks, deferred
-outcomes, and status recovery is the complexity the importer-queue redesign is
-intended to replace. Keep pure quality decisions; move beets-mutating import
-ownership toward a single importer boundary.
+The importer queue is the beets-mutating ownership boundary. Web, CLI, and the
+automation poller enqueue import jobs; `cratedigger-importer` drains them
+serially. Keep pure quality decisions; avoid adding new direct beets-mutating
+entry points outside the importer worker. On startup the importer immediately
+requeues any `running` import job left by a previous worker process, then
+retries it; the worker holds a DB advisory singleton lock so only one importer
+can drain the queue.
 
 Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`,
 not `@dataclass` — see `.claude/rules/code-quality.md` § "Wire-boundary types".
@@ -173,7 +175,7 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 ## Database migrations
 
-Schema lives in `migrations/NNN_name.sql`. `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs on every `nixos-rebuild switch` BEFORE `cratedigger.service` and `cratedigger-web.service`. Both `requires` the migrate unit, so a failed migration blocks the app from coming up.
+Schema lives in `migrations/NNN_name.sql`. `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs on every `nixos-rebuild switch` BEFORE `cratedigger.service`, `cratedigger-web.service`, and `cratedigger-importer.service`. These services require the migrate unit, so a failed migration blocks the app from coming up.
 
 To add a schema change: drop a new numbered SQL file in `migrations/`, test with `nix-shell --run "python3 -m unittest tests.test_migrator -v"`, commit, deploy. No manual psql. **Never** edit an already-shipped migration — frozen history. **Never** add DDL inside `PipelineDB` methods. For destructive changes, back up first: `ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/backup.sql`. Verify after deploy: `ssh doc2 'pipeline-cli query "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5"'`.
 

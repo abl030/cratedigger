@@ -1,9 +1,11 @@
 # PostgreSQL Advisory Locks
 
 Cratedigger uses PostgreSQL advisory locks to serialise pipeline
-operations that must not run concurrently across different DB sessions
-(the auto cycle on the systemd timer, the web UI's force-import path,
-CLI force/manual invocations). Every lock in this codebase is
+operations that must not run concurrently across different DB sessions.
+Import entry points now enqueue `import_jobs`; the long-lived importer worker
+is the intended owner of beets-mutating work. The advisory locks below remain
+as defensive guards inside the existing dispatch internals until a cleanup pass
+proves they are redundant. Every lock in this codebase is
 **non-blocking** (`pg_try_advisory_lock`), **session-scoped** (held until
 release or session close), and **reentrant within a session** (a second
 acquire of the same `(namespace, key)` in the same session always
@@ -42,6 +44,7 @@ namespace, second is the per-lock key.
 |---|---|---|---|---|---|
 | Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Force/manual-import double-click protection |
 | Per-release pipeline | `ADVISORY_LOCK_NAMESPACE_RELEASE` | `0x52454C45` | "RELE" | `release_id_to_lock_key(mb_release_id)` | Cross-process same-MBID serialisation |
+| Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
 
 The ASCII-visible hex lets `pg_locks` rows be interpreted at a glance
 during debugging:
@@ -50,6 +53,7 @@ during debugging:
 SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory';
 -- classid=0x46494D50 → force/manual-import lock
 -- classid=0x52454C45 → release-level lock
+-- classid=0x51554555 → importer-worker singleton lock
 ```
 
 ### IMPORT — per-request lock
@@ -60,11 +64,10 @@ on the same `request_id`, writing duplicate `download_log` rows and
 running `import_one.py` twice against the same files. The second caller
 would crash or produce bogus state.
 
-**Scope**: Only held by `dispatch_import_from_db` — the sole entry
-point for force/manual imports. The auto-import path does not acquire
-this lock because it has no concurrent-duplicate vector (the systemd
-timer only fires one pipeline at a time, and the RELEASE lock already
-covers cross-timer-cycle races).
+**Scope**: Held by `dispatch_import_from_db` inside the importer worker.
+Web and CLI force/manual paths no longer call this directly; they dedupe at
+`import_jobs` enqueue time. Keep this lock until a follow-up cleanup proves the
+queue invariant fully replaces the old double-click protection.
 
 **Key**: The raw `request_id` (int4 auto-increment on
 `album_requests.id` — fits trivially in an int4 lock key).
@@ -77,7 +80,7 @@ incident itself had a different proximate cause — see `CLAUDE.md` §
 Resolved canonical RCs — but this race is a real independent vector
 worth closing).
 
-The race: two processes (the auto cycle and a web force-import, or
+The historical race: two processes (the auto cycle and a web force-import, or
 two racing force-import clicks on sibling requests for the same MBID)
 each hold their own per-request lock while targeting the same
 MusicBrainz release. The harness's post-import `max(post_import_ids)`
@@ -96,6 +99,18 @@ Covers both MB UUIDs and Discogs numeric IDs since both share the
 `mb_release_id` column. See the docstring on `release_id_to_lock_key`
 in `lib/pipeline_db.py` for the collision analysis (probability
 ~N²/2^31; false collision delays an unrelated release by one cycle).
+
+### IMPORTER — worker singleton lock
+
+**Why**: The import queue is the durable state owner, but beets mutation is
+still intentionally one lane. A second accidentally-started importer must not
+claim another queued job in parallel, and it must not requeue a live worker's
+`running` job during startup recovery.
+
+**Scope**: Held by `scripts/importer.py` for the full worker process lifetime
+before it requeues abandoned `running` jobs or claims new jobs.
+
+**Key**: Constant `1`. There is only one logical importer lane.
 
 ## Acquisition order
 
@@ -231,10 +246,12 @@ session and returns False — revisit the ordering rules.
 | Auto-import outer | `lib/download.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
 | Auto + force/manual inner | `lib/import_dispatch.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Force/manual outer | `lib/import_dispatch.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
+| Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
+| Import queue dedupe | `lib/pipeline_db.py` | `enqueue_import_job` | unique index | `dedupe_key` |
 
 Every acquire site carries a comment linking back here. Line numbers
 are intentionally omitted — grep for `advisory_lock(` to find them.
-`git log -S 'advisory_lock(' -- lib/` is the archaeology path.
+`git log -S 'advisory_lock(' -- lib/ scripts/` is the archaeology path.
 
 ## Extending
 

@@ -43,7 +43,7 @@ SAMPLE_MB_RELEASE = {
 def make_db():
     from lib.pipeline_db import PipelineDB
     db = PipelineDB(TEST_DSN)
-    for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
+    for table in ["import_jobs", "source_denylist", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -179,8 +179,8 @@ class TestTracksFromMbRelease(unittest.TestCase):
 class TestCmdForceImport(unittest.TestCase):
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Test Album")
-    def test_force_import_passes_source_username_to_dispatch(self, _mock_resolve, _mock_print):
-        from lib.import_dispatch import DispatchOutcome
+    def test_force_import_passes_source_username_to_queue(self, _mock_resolve, _mock_print):
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
         db = MagicMock()
         db.get_download_log_entry.return_value = {
@@ -192,63 +192,69 @@ class TestCmdForceImport(unittest.TestCase):
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         )
-
-        mock_outcome = DispatchOutcome(success=True, message="ok")
-        with patch("lib.import_dispatch.dispatch_import_from_db",
-                    return_value=mock_outcome) as mock_dispatch:
-            args = MagicMock(download_log_id=42)
-            pipeline_cli.cmd_force_import(db, args)
-
-        mock_dispatch.assert_called_once_with(
-            db, request_id=123, failed_path="/tmp/Test Album",
-            force=True, outcome_label="force_import",
-            source_username="baduser",
+        db.enqueue_import_job.return_value = SimpleNamespace(
+            id=55,
+            status="queued",
+            deduped=False,
         )
+
+        args = MagicMock(download_log_id=42)
+        pipeline_cli.cmd_force_import(db, args)
+
+        db.enqueue_import_job.assert_called_once()
+        args_, kwargs = db.enqueue_import_job.call_args
+        self.assertEqual(args_, (IMPORT_JOB_FORCE,))
+        self.assertEqual(kwargs["request_id"], 123)
+        self.assertEqual(kwargs["dedupe_key"], force_import_dedupe_key(42))
+        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Test Album")
+        self.assertEqual(kwargs["payload"]["source_username"], "baduser")
 
 
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
-    def test_failed_manual_import_prints_error(self, _mock_resolve, _mock_print):
-        from lib.import_dispatch import DispatchOutcome
+    def test_manual_import_prints_queued_job(self, _mock_resolve, _mock_print):
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         )
-
-        mock_outcome = DispatchOutcome(
-            success=False,
-            message="Rejected: quality_downgrade — new 192kbps <= existing 320kbps",
+        db.enqueue_import_job.return_value = SimpleNamespace(
+            id=66,
+            status="queued",
+            deduped=False,
         )
-        with patch("lib.import_dispatch.dispatch_import_from_db",
-                    return_value=mock_outcome):
-            args = MagicMock(id=123, path="/tmp/Album")
-            pipeline_cli.cmd_manual_import(db, args)
 
-        # Should print failure message
-        _mock_print.assert_any_call("  [FAIL] Rejected: quality_downgrade — new 192kbps <= existing 320kbps")
+        args = MagicMock(id=123, path="/tmp/Album")
+        pipeline_cli.cmd_manual_import(db, args)
+
+        _mock_print.assert_any_call("  [OK] Queued import job #66 (queued).")
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
-    def test_manual_import_calls_dispatch_from_db(self, _mock_resolve, _mock_print):
-        from lib.import_dispatch import DispatchOutcome
+    def test_manual_import_enqueues_job(self, _mock_resolve, _mock_print):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_dedupe_key
+
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         )
-
-        mock_outcome = DispatchOutcome(success=True, message="ok")
-        with patch("lib.import_dispatch.dispatch_import_from_db",
-                    return_value=mock_outcome) as mock_dispatch:
-            args = MagicMock(id=123, path="/tmp/Album")
-            pipeline_cli.cmd_manual_import(db, args)
-
-        mock_dispatch.assert_called_once_with(
-            db, request_id=123, failed_path="/tmp/Album",
-            force=False, outcome_label="manual_import",
+        db.enqueue_import_job.return_value = SimpleNamespace(
+            id=66,
+            status="queued",
+            deduped=False,
         )
+
+        args = MagicMock(id=123, path="/tmp/Album")
+        pipeline_cli.cmd_manual_import(db, args)
+
+        db.enqueue_import_job.assert_called_once()
+        args_, kwargs = db.enqueue_import_job.call_args
+        self.assertEqual(args_, (IMPORT_JOB_MANUAL,))
+        self.assertEqual(kwargs["request_id"], 123)
+        self.assertEqual(kwargs["dedupe_key"], manual_import_dedupe_key(123, "/tmp/Album"))
+        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Album")
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path",
@@ -258,23 +264,23 @@ class TestCmdManualImport(unittest.TestCase):
         does, so a user can type ``failed_imports/Foo - Bar`` without
         pre-absolutizing. Matches cmd_force_import behavior.
         """
-        from lib.import_dispatch import DispatchOutcome
         db = MagicMock()
         db.get_request.return_value = make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         )
-        mock_outcome = DispatchOutcome(success=True, message="ok")
-        with patch("lib.import_dispatch.dispatch_import_from_db",
-                    return_value=mock_outcome) as mock_dispatch:
-            args = MagicMock(id=123, path="failed_imports/Foo - Bar")
-            pipeline_cli.cmd_manual_import(db, args)
+        db.enqueue_import_job.return_value = SimpleNamespace(
+            id=66,
+            status="queued",
+            deduped=False,
+        )
+        args = MagicMock(id=123, path="failed_imports/Foo - Bar")
+        pipeline_cli.cmd_manual_import(db, args)
 
         _mock_resolve.assert_called_once_with("failed_imports/Foo - Bar")
-        mock_dispatch.assert_called_once_with(
-            db, request_id=123,
-            failed_path="/mnt/virtio/music/slskd/failed_imports/Foo - Bar",
-            force=False, outcome_label="manual_import",
+        self.assertEqual(
+            db.enqueue_import_job.call_args.kwargs["payload"]["failed_path"],
+            "/mnt/virtio/music/slskd/failed_imports/Foo - Bar",
         )
 
     @patch("builtins.print")
@@ -288,10 +294,9 @@ class TestCmdManualImport(unittest.TestCase):
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         )
-        with patch("lib.import_dispatch.dispatch_import_from_db") as mock_dispatch:
-            args = MagicMock(id=123, path="nonexistent/path")
-            pipeline_cli.cmd_manual_import(db, args)
-        mock_dispatch.assert_not_called()
+        args = MagicMock(id=123, path="nonexistent/path")
+        pipeline_cli.cmd_manual_import(db, args)
+        db.enqueue_import_job.assert_not_called()
         mock_print.assert_any_call("  Files not found at: nonexistent/path")
 
 

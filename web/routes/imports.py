@@ -8,7 +8,13 @@ from lib.manual_import import (
     match_folders_to_requests,
     ImportRequest,
 )
+from lib.import_queue import (
+    IMPORT_JOB_MANUAL,
+    manual_import_dedupe_key,
+    manual_import_payload,
+)
 from lib.util import resolve_failed_path
+from web.routes.pipeline import _serialize_import_job
 
 
 def _server():
@@ -128,19 +134,29 @@ def post_manual_import(h, body: dict) -> None:
         h._error("Request has no MusicBrainz release ID")
         return
 
-    from lib.import_dispatch import dispatch_import_from_db
-    outcome = dispatch_import_from_db(
-        srv._db(), request_id=int(request_id), failed_path=path,
-        force=False, outcome_label="manual_import",
+    resolved_path = resolve_failed_path(str(path))
+    if resolved_path is None:
+        h._error(f"Files not found at: {path}")
+        return
+
+    job = srv._db().enqueue_import_job(
+        IMPORT_JOB_MANUAL,
+        request_id=int(request_id),
+        dedupe_key=manual_import_dedupe_key(int(request_id), resolved_path),
+        payload=manual_import_payload(failed_path=resolved_path),
+        message=f"Manual import queued for {req['artist_name']} - {req['album_title']}",
     )
 
     h._json({
-        "status": "ok" if outcome.success else "error",
-        "message": outcome.message,
+        "status": "queued",
+        "message": "Import queued",
+        "job_id": job.id,
+        "job": _serialize_import_job(job),
+        "deduped": bool(getattr(job, "deduped", False)),
         "request_id": request_id,
         "artist": req["artist_name"],
         "album": req["album_title"],
-    })
+    }, status=202)
 
 
 def _quality_summary(row: dict[str, object],
@@ -271,6 +287,17 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     srv = _server()
     pdb = srv._db()
     rows = pdb.get_wrong_matches()
+    active_import_jobs = pdb.list_active_import_jobs(limit=200)
+    active_jobs_by_log_id: dict[int, object] = {}
+    active_jobs_by_request_id: dict[int, list[object]] = {}
+    for job in active_import_jobs:
+        payload = getattr(job, "payload", {}) or {}
+        request_id = getattr(job, "request_id", None)
+        if isinstance(request_id, int):
+            active_jobs_by_request_id.setdefault(request_id, []).append(job)
+        download_log_id = payload.get("download_log_id")
+        if isinstance(download_log_id, int):
+            active_jobs_by_log_id[download_log_id] = job
     mbids = [
         mbid for row in rows
         for mbid in [row.get("mb_release_id")]
@@ -309,6 +336,10 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 "in_library": in_library,
                 "pending_count": 0,
                 "entries": [],
+                "import_jobs": [
+                    _serialize_import_job(job)
+                    for job in active_jobs_by_request_id.get(request_id, [])
+                ],
                 "latest_import": None,  # filled in after the loop
                 **_quality_summary(row, beets_info, presence),
             }
@@ -329,6 +360,11 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
                 or vr.get("soulseek_username"),
             "candidate": target,
             "local_items": vr.get("items", []),
+            "import_job": (
+                _serialize_import_job(active_jobs_by_log_id[row["download_log_id"]])
+                if row["download_log_id"] in active_jobs_by_log_id
+                else None
+            ),
         })
         group["pending_count"] = len(entries_list)
 

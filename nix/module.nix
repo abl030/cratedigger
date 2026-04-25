@@ -63,6 +63,13 @@
       --migrations-dir "${src}/migrations" "$@"
   '';
 
+  importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
+    export PATH="${runtimePath}:$PATH"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    exec ${pythonEnv}/bin/python ${src}/scripts/importer.py \
+      --dsn "${cfg.pipelineDb.dsn}" "$@"
+  '';
+
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
@@ -288,6 +295,14 @@ in {
         type = types.str;
         default = "5min";
         description = "Interval between cycles.";
+      };
+    };
+
+    importer = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Run the long-lived importer worker that drains the shared import queue.";
       };
     };
 
@@ -617,7 +632,7 @@ in {
       }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg pkgs.postgresql];
 
     users.users = mkIf (cfg.user != "root") {
       ${cfg.user} = {
@@ -689,6 +704,26 @@ in {
         OnBootSec = cfg.timer.onBootSec;
         OnUnitActiveSec = cfg.timer.onUnitActiveSec;
         Persistent = true;
+      };
+    };
+
+    systemd.services.cratedigger-importer = mkIf cfg.importer.enable {
+      description = "Cratedigger importer queue worker";
+      after = ["cratedigger-db-migrate.service"];
+      requires = ["cratedigger-db-migrate.service"];
+      wantedBy = ["multi-user.target"];
+      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        UMask = "0000";
+        ExecStartPre = [preStartScript];
+        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        ExecStart = "${importerPkg}/bin/cratedigger-importer";
+        WorkingDirectory = cfg.stateDir;
+        Restart = "on-failure";
+        RestartSec = 5;
       };
     };
 

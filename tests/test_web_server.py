@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
+from lib.import_queue import ImportJob
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
@@ -180,6 +181,29 @@ def _make_server():
     mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
     mock_db.clear_wrong_match_path.return_value = True
     mock_db.list_requests_by_artist.return_value = []
+    mock_job = ImportJob(
+        id=77,
+        job_type="force_import",
+        status="queued",
+        request_id=100,
+        dedupe_key="force_import:download_log:42",
+        payload={"failed_path": "/tmp/Test Album"},
+        result=None,
+        message="Import queued",
+        error=None,
+        attempts=0,
+        worker_id=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        started_at=None,
+        heartbeat_at=None,
+        completed_at=None,
+    )
+    mock_db.enqueue_import_job.return_value = mock_job
+    mock_db.get_import_job.return_value = mock_job
+    mock_db.list_import_jobs.return_value = [mock_job]
+    mock_db.list_active_import_jobs.return_value = []
+    mock_db.count_import_jobs_by_status.return_value = {"queued": 1}
 
     def _get_request_by_release_id(release_id):
         normalized = normalize_release_id(release_id)
@@ -373,8 +397,9 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(data["intent"], "lossless")
 
     @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
-    @patch("lib.import_dispatch.dispatch_import_from_db")
-    def test_post_force_import_passes_source_username(self, mock_dispatch, _mock_resolve):
+    def test_post_force_import_passes_source_username(self, _mock_resolve):
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
+
         self.mock_db.get_download_log_entry.return_value = {
             "id": 42,
             "request_id": 100,
@@ -384,22 +409,20 @@ class TestServerEndpoints(unittest.TestCase):
                 "scenario": "high_distance",
             },
         }
-        mock_dispatch.return_value = MagicMock(success=True, message="Import successful")
 
         status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
 
-        self.assertEqual(status, 200)
-        self.assertEqual(data["status"], "ok")
+        self.assertEqual(status, 202)
+        self.assertEqual(data["status"], "queued")
         self.assertEqual(data["artist"], _MOCK_PIPELINE_REQUEST["artist_name"])
         self.assertEqual(data["album"], _MOCK_PIPELINE_REQUEST["album_title"])
-        mock_dispatch.assert_called_once_with(
-            self.mock_db,
-            request_id=100,
-            failed_path="/tmp/Test Album",
-            force=True,
-            outcome_label="force_import",
-            source_username="baduser",
-        )
+        self.mock_db.enqueue_import_job.assert_called_once()
+        args, kwargs = self.mock_db.enqueue_import_job.call_args
+        self.assertEqual(args, (IMPORT_JOB_FORCE,))
+        self.assertEqual(kwargs["request_id"], 100)
+        self.assertEqual(kwargs["dedupe_key"], force_import_dedupe_key(42))
+        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Test Album")
+        self.assertEqual(kwargs["payload"]["source_username"], "baduser")
 
     def test_post_set_intent_default_clears_stale_lossless_override(self):
         self.mock_db.get_request.return_value = make_request_row(
@@ -596,6 +619,8 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/ban-source",
         "/api/pipeline/force-import",
         "/api/pipeline/delete",
+        "/api/import-jobs",
+        r"^/api/import-jobs/(\d+)$",
         "/api/beets/search",
         "/api/beets/recent",
         r"^/api/beets/album/(\d+)$",
@@ -661,6 +686,11 @@ class TestPipelineRouteContracts(_WebServerCase):
         "stage1_spectral", "stage2_import", "stage3_quality_gate",
         "final_status", "imported", "denylisted", "keep_searching",
         "target_final_format",
+    }
+    IMPORT_JOB_REQUIRED_FIELDS = {
+        "id", "job_type", "status", "request_id", "dedupe_key", "payload",
+        "result", "message", "error", "attempts", "worker_id", "created_at",
+        "updated_at", "started_at", "heartbeat_at", "completed_at", "deduped",
     }
 
     def setUp(self) -> None:
@@ -794,6 +824,31 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
                                 "pipeline simulate response")
+
+    def test_import_jobs_contract(self):
+        status, data = self._get("/api/import-jobs")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"jobs", "counts"}, "import jobs response")
+        _assert_required_fields(self, data["jobs"][0], self.IMPORT_JOB_REQUIRED_FIELDS,
+                                "import jobs item")
+
+    def test_import_job_detail_contract(self):
+        status, data = self._get("/api/import-jobs/77")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"job"}, "import job detail response")
+        _assert_required_fields(self, data["job"], self.IMPORT_JOB_REQUIRED_FIELDS,
+                                "import job detail")
+
+    def test_import_jobs_rejects_invalid_filters(self):
+        status, data = self._get("/api/import-jobs?status=bad")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+        status, data = self._get("/api/import-jobs?request_id=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
 
     @patch("web.routes.pipeline.full_pipeline_decision")
     def test_pipeline_simulate_threads_target_format(self, mock_simulate):
@@ -1236,13 +1291,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                 "pipeline ban-source response")
 
     @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
-    @patch("lib.import_dispatch.dispatch_import_from_db")
-    def test_pipeline_force_import_contract(self, mock_dispatch, _mock_resolve):
-        mock_dispatch.return_value = MagicMock(success=True, message="Import successful")
-
+    def test_pipeline_force_import_contract(self, _mock_resolve):
         status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 202)
         _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
                                 "pipeline force-import response")
 
@@ -1772,16 +1824,15 @@ class TestManualImportRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["folders"][0]["match"], self.MATCH_REQUIRED_FIELDS,
                                 "manual import match")
 
-    @patch("lib.import_dispatch.dispatch_import_from_db")
-    def test_manual_import_post_contract(self, mock_dispatch):
-        mock_dispatch.return_value = MagicMock(success=True, message="Imported")
-
+    @patch("web.routes.imports.resolve_failed_path",
+           return_value="/complete/Test Artist - Test Album")
+    def test_manual_import_post_contract(self, _mock_resolve):
         status, data = self._post(
             "/api/manual-import/import",
             {"request_id": 100, "path": "/complete/Test Artist - Test Album"},
         )
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 202)
         _assert_required_fields(self, data, self.IMPORT_REQUIRED_FIELDS,
                                 "manual import response")
 
