@@ -970,6 +970,71 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertIs(result, mock_validation.return_value)
             mock_validation.assert_called_once()
 
+    @patch("lib.beets.beets_validate")
+    @patch("lib.download.music_tag")
+    def test_beets_rejection_summary_is_returned_to_queue_owner(
+        self,
+        mock_mt,
+        mock_beets_validate,
+    ):
+        """Validation rejections must fail the queue job, not look completed."""
+        from lib.download import process_completed_album
+        from lib.import_dispatch import DispatchOutcome
+        from lib.quality import ValidationResult
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads_root = os.path.join(tmpdir, "downloads")
+            source_dir = os.path.join(downloads_root, "Music")
+            os.makedirs(source_dir)
+            with open(os.path.join(source_dir, "01 - Track.mp3"), "w") as f:
+                f.write("fake audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                artist_name="Artist",
+                album_title="Album",
+                year=2024,
+                mb_release_id="test-mbid",
+            ))
+            cfg = cast(Any, _make_ctx().cfg)
+            cfg.slskd_download_dir = downloads_root
+            cfg.beets_validation_enabled = True
+            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            mock_mt.load_file.return_value = MagicMock()
+            mock_beets_validate.return_value = ValidationResult(
+                valid=False,
+                distance=0.1919,
+                scenario="high_distance",
+                detail="distance=0.1919",
+            )
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    filename="user1\\Music\\01 - Track.mp3",
+                    file_dir="user1\\Music",
+                )],
+                artist="Artist",
+                title="Album",
+                year="2024",
+                mb_release_id="test-mbid",
+                db_request_id=42,
+                db_source="request",
+            )
+
+            result = process_completed_album(album, [], ctx)
+
+            assert isinstance(result, DispatchOutcome)
+            self.assertFalse(result.success)
+            self.assertFalse(result.deferred)
+            self.assertEqual(
+                result.message,
+                "Rejected: high_distance - distance=0.1919",
+            )
+            ctx.pipeline_db_source.reject_and_requeue.assert_called_once()
+
     def test_returns_false_on_file_move_failure(self):
         """File move failure returns False."""
         from lib.download import process_completed_album

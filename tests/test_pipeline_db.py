@@ -636,6 +636,62 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual([job.id for job in timeline[:2]], [importable.id, waiting.id])
         self.assertEqual(timeline[0].preview_status, "would_import")
 
+    def test_import_job_timeline_orders_recent_terminal_jobs_after_active(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        importable = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:timeline-active",
+            payload=manual_import_payload(failed_path="/tmp/active"),
+            preview_enabled=True,
+        )
+        self.db.mark_import_job_preview_importable(
+            importable.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        older = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:timeline-old-terminal",
+            payload=manual_import_payload(failed_path="/tmp/old"),
+        )
+        newer = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:timeline-new-terminal",
+            payload=manual_import_payload(failed_path="/tmp/new"),
+        )
+        self.db.mark_import_job_failed(
+            older.id,
+            error="old",
+            message="old",
+        )
+        self.db.mark_import_job_failed(
+            newer.id,
+            error="new",
+            message="new",
+        )
+        old_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        new_time = datetime.now(timezone.utc) - timedelta(minutes=1)
+        self.db._execute(
+            "UPDATE import_jobs SET updated_at = %s WHERE id = %s",
+            (old_time, older.id),
+        )
+        self.db._execute(
+            "UPDATE import_jobs SET updated_at = %s WHERE id = %s",
+            (new_time, newer.id),
+        )
+
+        timeline = self.db.list_import_job_timeline(limit=10)
+
+        self.assertEqual([job.id for job in timeline[:3]], [
+            importable.id,
+            newer.id,
+            older.id,
+        ])
+
     def test_preview_claim_and_importable_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 

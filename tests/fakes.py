@@ -507,7 +507,7 @@ class FakePipelineDB:
         return counts
 
     def list_import_job_timeline(self, *, limit: int = 50) -> list[ImportJob]:
-        def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, datetime, int]:
+        def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, float, int, int]:
             status = row.get("status")
             preview_status = row.get("preview_status")
             if status == "queued" and preview_status == "would_import":
@@ -520,12 +520,15 @@ class FakePipelineDB:
                 bucket = 3
             else:
                 bucket = 4
+            is_active = status in ("queued", "running")
             return (
                 bucket,
-                _as_datetime(row.get("importable_at")),
-                _as_datetime(row.get("created_at")),
-                _as_datetime(row.get("updated_at")),
-                int(row["id"]),
+                _as_datetime(row.get("importable_at")) if is_active else datetime.max.replace(tzinfo=timezone.utc),
+                _as_datetime(row.get("created_at")) if is_active else datetime.max.replace(tzinfo=timezone.utc),
+                -_as_datetime(row.get("updated_at")).timestamp()
+                if not is_active else 0.0,
+                int(row["id"]) if is_active else 0,
+                -int(row["id"]) if not is_active else 0,
             )
 
         rows = sorted(self._import_jobs, key=sort_key)
