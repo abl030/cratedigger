@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.insert(0, os.path.dirname(__file__))
@@ -177,12 +178,16 @@ class TestSchemaCreation(unittest.TestCase):
                 'manual_import', %s,
                 '{"failed_path": "/tmp/manual"}'::jsonb
             )
-            RETURNING preview_status, preview_attempts
+            RETURNING preview_status, preview_message, preview_attempts,
+                      preview_completed_at, importable_at
         """, (req_id,))
         row = cur.fetchone()
         assert row is not None
-        self.assertEqual(row["preview_status"], "waiting")
+        self.assertEqual(row["preview_status"], "would_import")
+        self.assertEqual(row["preview_message"], "Preview gate disabled")
         self.assertEqual(row["preview_attempts"], 0)
+        self.assertIsNotNone(row["preview_completed_at"])
+        self.assertIsNotNone(row["importable_at"])
 
         with self.assertRaises(Exception):
             db._execute("""
@@ -385,6 +390,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:1",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -414,6 +420,30 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertIsNone(missing)
 
+    def test_enqueue_defaults_to_importable_when_preview_env_absent(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        with patch.dict(os.environ, {}, clear=True):
+            job = self.db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=self.req_id,
+                dedupe_key="manual:preview-disabled",
+                payload=manual_import_payload(failed_path="/tmp/manual"),
+            )
+
+        self.assertEqual(job.preview_status, "would_import")
+        self.assertEqual(job.preview_message, "Preview gate disabled")
+        self.assertIsNotNone(job.preview_completed_at)
+        self.assertIsNotNone(job.importable_at)
+        self.assertIsNone(
+            self.db.claim_next_import_preview_job(worker_id="preview-worker")
+        )
+
+        claimed = self.db.claim_next_import_job(worker_id="test-worker")
+        assert claimed is not None
+        self.assertEqual(claimed.id, job.id)
+        self.assertEqual(claimed.status, "running")
+
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
         from lib import pipeline_db
@@ -423,6 +453,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -446,6 +477,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:stale",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -480,6 +512,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:restart-retry",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -513,6 +546,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-gate",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
 
@@ -534,12 +568,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:timeline-waiting",
             payload=manual_import_payload(failed_path="/tmp/waiting"),
+            preview_enabled=True,
         )
         importable = self.db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=self.req_id,
             dedupe_key="manual:timeline-importable",
             payload=manual_import_payload(failed_path="/tmp/importable"),
+            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -560,6 +596,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
@@ -601,6 +638,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-reject",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
 
         failed = self.db.mark_import_job_preview_failed(
@@ -629,6 +667,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:

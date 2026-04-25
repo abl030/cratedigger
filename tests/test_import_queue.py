@@ -64,6 +64,7 @@ class TestImporterWorker(unittest.TestCase):
                 failed_path="/tmp/failed",
                 source_username="alice",
             ),
+            preview_enabled=True,
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
@@ -97,6 +98,7 @@ class TestImporterWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
@@ -131,6 +133,7 @@ class TestImporterWorker(unittest.TestCase):
                     failed_path=source,
                     source_username="alice",
                 ),
+                preview_enabled=True,
             )
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
@@ -167,6 +170,7 @@ class TestImporterWorker(unittest.TestCase):
                     failed_path=source,
                     source_username="alice",
                 ),
+                preview_enabled=True,
             )
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
@@ -209,6 +213,7 @@ class TestImporterWorker(unittest.TestCase):
                 request_id=42,
                 dedupe_key=manual_import_dedupe_key(42, source),
                 payload=manual_import_payload(failed_path=source),
+                preview_enabled=True,
             )
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
@@ -243,6 +248,7 @@ class TestImporterWorker(unittest.TestCase):
                     download_log_id=log_id,
                     failed_path=source,
                 ),
+                preview_enabled=True,
             )
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
@@ -275,6 +281,7 @@ class TestImporterWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="old-worker")
@@ -299,6 +306,23 @@ class TestImporterWorker(unittest.TestCase):
         assert retried is not None
         self.assertEqual(retried.attempts, 2)
 
+    def test_importer_claims_job_immediately_when_preview_disabled_by_default(self):
+        db = FakePipelineDB()
+        with patch.dict(os.environ, {}, clear=True):
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
+                payload=manual_import_payload(failed_path="/tmp/manual"),
+            )
+
+        claimed = db.claim_next_import_job(worker_id="worker")
+
+        assert claimed is not None
+        self.assertEqual(claimed.id, job.id)
+        self.assertEqual(claimed.preview_status, "would_import")
+        self.assertEqual(claimed.preview_message, "Preview gate disabled")
+
     def test_importer_does_not_claim_job_waiting_for_preview(self):
         from scripts import importer
 
@@ -308,6 +332,7 @@ class TestImporterWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
 
         self.assertIsNone(importer.run_once(db, worker_id="worker"))
@@ -335,6 +360,7 @@ class TestImporterWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=automation_import_dedupe_key(42),
             payload={},
+            preview_enabled=True,
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
@@ -387,6 +413,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 failed_path="/tmp/failed",
                 source_username="alice",
             ),
+            preview_enabled=True,
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -420,6 +447,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -465,6 +493,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             request_id=42,
             dedupe_key=automation_import_dedupe_key(42),
             payload={},
+            preview_enabled=True,
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -499,6 +528,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 failed_path="/tmp/failed",
                 source_username="alice",
             ),
+            preview_enabled=True,
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -528,6 +558,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 failed_path="/tmp/failed",
                 source_username="alice",
             ),
+            preview_enabled=True,
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None

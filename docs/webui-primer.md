@@ -123,7 +123,8 @@ What this creates on doc2:
 - `cratedigger-importer.service` — long-lived worker that drains queued
   force/manual/automation imports after DB migrations have run
 - `cratedigger-import-preview-worker.service` — long-lived async preview worker
-  that prepares queued jobs for the serial importer; defaults to two worker
+  that prepares queued jobs for the serial importer when
+  `services.cratedigger.importer.preview.enable = true`; defaults to two worker
   loops via `services.cratedigger.importer.previewWorkers`
 - `services.redis.servers.cratedigger` — provided by the homelab wrapper (not the upstream module)
 - `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
@@ -146,6 +147,9 @@ After deploy, check `systemctl status cratedigger-import-preview-worker
 cratedigger-importer` and the worker journals. The Recents Queue subview should
 show new rows move from waiting preview, to previewing, to importable or a
 terminal preview failure; only importable rows enter the serial importer lane.
+On doc2 the homelab wrapper opts into the preview gate explicitly. Deployments
+that leave `services.cratedigger.importer.preview.enable = false` should not
+start the preview worker; their newly queued jobs are importable immediately.
 
 ## MusicBrainz API Usage
 

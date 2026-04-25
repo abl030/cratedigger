@@ -23,6 +23,10 @@ import psycopg2.extras
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+    IMPORT_JOB_PREVIEW_WAITING,
+    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
+    import_preview_enabled_from_env,
     validate_preview_failure_status,
     validate_job_type,
     validate_payload,
@@ -205,16 +209,32 @@ class PipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
+        preview_enabled: bool | None = None,
     ) -> ImportJob:
         """Create an import job or return the active job with the same key."""
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
+        preview_enabled = (
+            import_preview_enabled_from_env()
+            if preview_enabled is None
+            else preview_enabled
+        )
+        preview_status = (
+            IMPORT_JOB_PREVIEW_WAITING
+            if preview_enabled
+            else IMPORT_JOB_PREVIEW_WOULD_IMPORT
+        )
+        preview_message = None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
+        preview_completed_at = None if preview_enabled else datetime.now(timezone.utc)
+        importable_at = None if preview_enabled else preview_completed_at
         cur = self._execute("""
             WITH inserted AS (
                 INSERT INTO import_jobs (
-                    job_type, request_id, dedupe_key, payload, message
+                    job_type, request_id, dedupe_key, payload, message,
+                    preview_status, preview_message, preview_completed_at,
+                    importable_at
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (dedupe_key)
                     WHERE dedupe_key IS NOT NULL
                       AND status IN ('queued', 'running')
@@ -238,6 +258,10 @@ class PipelineDB:
             dedupe_key,
             psycopg2.extras.Json(payload),
             message,
+            preview_status,
+            preview_message,
+            preview_completed_at,
+            importable_at,
             dedupe_key,
             dedupe_key,
         ))

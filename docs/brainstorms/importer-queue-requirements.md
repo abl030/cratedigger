@@ -361,7 +361,15 @@ The async preview queue plan implemented the R12-R20 follow-on work:
 - Recents has a Queue subview backed by `/api/import-jobs/timeline`.
 - Wrong Matches preview backfill is an explicit operator command.
 - The NixOS module starts `cratedigger-import-preview-worker.service` with a
-  deployment-tunable worker count that defaults to two.
+  deployment-tunable worker count that defaults to two when
+  `services.cratedigger.importer.preview.enable = true`.
+- The async preview gate is opt-in for backward compatibility. When preview is
+  disabled, application and database defaults mark new jobs
+  `preview_status='would_import'` with `preview_message='Preview gate disabled'`
+  so the serial importer drains without preview workers.
+- Nix prestart now renders the shared `config.ini` atomically because importer,
+  preview, web, and timer-driven services can start concurrently after DB
+  migrations.
 
 Remaining long-tail work is not required for the feature to deploy:
 

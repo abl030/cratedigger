@@ -443,11 +443,11 @@ Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) bu
 - `cratedigger-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
 - `cratedigger.service` — oneshot pipeline run, triggered by `cratedigger.timer`. Runs healthcheck → prestart (renders `config.ini`) → `cratedigger.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
 - `cratedigger.timer` — fires every 5 minutes by default (`services.cratedigger.timer.onUnitActiveSec`).
-- `cratedigger-importer.service` — long-running serial importer that drains `import_jobs` whose async preview stage marked them importable.
-- `cratedigger-import-preview-worker.service` — long-running async preview worker. It defaults to `services.cratedigger.importer.previewWorkers = 2`, claims queued preview work, and runs validation/spectral/measurement preview before the importer sees the job.
+- `cratedigger-importer.service` — long-running serial importer that drains `import_jobs` whose async preview stage marked them importable. When the async preview gate is disabled, newly queued jobs are marked importable immediately.
+- `cratedigger-import-preview-worker.service` — optional long-running async preview worker enabled by `services.cratedigger.importer.preview.enable = true`. It defaults to `services.cratedigger.importer.previewWorkers = 2`, claims queued preview work, and runs validation/spectral/measurement preview before the importer sees the job.
 - `cratedigger-web.service` — long-running web UI bound to `services.cratedigger.web.port` (default 8085).
 
-`cratedigger.service`, `cratedigger-importer.service`, `cratedigger-import-preview-worker.service`, and `cratedigger-web.service` all require the migrate unit, so the app cannot start against an un-migrated DB.
+`cratedigger.service`, `cratedigger-importer.service`, `cratedigger-import-preview-worker.service` when enabled, and `cratedigger-web.service` all require the migrate unit, so the app cannot start against an un-migrated DB. These units can start in parallel after migration; their prestart renders `/var/lib/cratedigger/config.ini` through an atomic temp-file-and-rename step so concurrent service starts do not race on the shared config file.
 
 To deploy a new revision:
 
@@ -473,11 +473,17 @@ systemctl status cratedigger-db-migrate cratedigger-import-preview-worker crated
 journalctl -u cratedigger-import-preview-worker -u cratedigger-importer -n 100 --no-pager
 ```
 
-Healthy state is: migrations applied, the preview worker running, queued jobs moving from `preview_status='waiting'` to `would_import` or a terminal preview failure, and the importer only claiming `would_import` jobs.
+With preview enabled, healthy state is: migrations applied, the preview worker
+running, queued jobs moving from `preview_status='waiting'` to `would_import`
+or a terminal preview failure, and the importer only claiming `would_import`
+jobs.
+If `services.cratedigger.importer.preview.enable = false`, the preview worker
+is intentionally absent and new jobs should enter the queue as
+`preview_status='would_import'` with `preview_message='Preview gate disabled'`.
 
 ### Schema migrations
 
-Schema lives in `migrations/NNN_name.sql`, applied by a tiny custom migrator (`lib/migrator.py`) that tracks applied versions in a `schema_migrations` table. The deploy systemd unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE the app services start. `cratedigger.service` and `cratedigger-web.service` both `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
+Schema lives in `migrations/NNN_name.sql`, applied by a tiny custom migrator (`lib/migrator.py`) that tracks applied versions in a `schema_migrations` table. The deploy systemd unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs the migrator on every `nixos-rebuild switch` BEFORE the app services start. The app services `requires` the migrate unit, so a failed migration blocks the app from coming up against an inconsistent schema.
 
 To add a schema change:
 

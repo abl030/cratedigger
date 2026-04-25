@@ -34,10 +34,12 @@
     pkgs.flac
     pkgs.sox
   ];
+  importPreviewEnableEnv = if cfg.importer.preview.enable then "1" else "0";
 
   # CLI wrappers — the only place PYTHONPATH is set.
   cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
+    export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
     exec ${pythonEnv}/bin/python ${src}/cratedigger.py "$@"
   '';
 
@@ -52,6 +54,7 @@
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
     exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
@@ -66,6 +69,7 @@
   importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
     exec ${pythonEnv}/bin/python ${src}/scripts/importer.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
@@ -73,6 +77,7 @@
   previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
     exec ${pythonEnv}/bin/python ${src}/scripts/import_preview_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --workers ${toString cfg.importer.previewWorkers} "$@"
@@ -81,6 +86,7 @@
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
     exec ${pythonEnv}/bin/python ${src}/web/server.py \
       --port ${toString cfg.web.port} \
       --dsn "${cfg.pipelineDb.dsn}" \
@@ -197,7 +203,12 @@
     set -euo pipefail
     config_dir="${cfg.stateDir}"
     mkdir -p "$config_dir"
-    ${pkgs.coreutils}/bin/install -m 0644 ${configTemplate} "$config_dir/config.ini"
+    tmp="$(${pkgs.coreutils}/bin/mktemp "$config_dir/.config.ini.XXXXXX")"
+    trap '${pkgs.coreutils}/bin/rm -f "$tmp"' EXIT
+    ${pkgs.coreutils}/bin/cp ${configTemplate} "$tmp"
+    ${pkgs.coreutils}/bin/chmod 0644 "$tmp"
+    ${pkgs.coreutils}/bin/mv -f "$tmp" "$config_dir/config.ini"
+    trap - EXIT
     rm -f "$config_dir/.cratedigger.lock"
   '';
 
@@ -311,6 +322,15 @@ in {
         type = types.bool;
         default = true;
         description = "Run the long-lived importer worker that drains the shared import queue.";
+      };
+      preview.enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable the async preview gate before the serial importer. When false,
+          newly enqueued import jobs are marked importable immediately for
+          backward-compatible draining without preview workers.
+        '';
       };
       previewWorkers = mkOption {
         type = types.int;
@@ -744,7 +764,7 @@ in {
       };
     };
 
-    systemd.services.cratedigger-import-preview-worker = mkIf cfg.importer.enable {
+    systemd.services.cratedigger-import-preview-worker = mkIf (cfg.importer.enable && cfg.importer.preview.enable) {
       description = "Cratedigger async import preview worker";
       after = ["cratedigger-db-migrate.service"];
       requires = ["cratedigger-db-migrate.service"];
