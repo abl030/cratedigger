@@ -1095,6 +1095,26 @@ class PipelineDB:
         """, (log_id,))
         return cur.rowcount > 0
 
+    def clear_wrong_match_paths(
+        self,
+        request_id: int,
+        failed_paths: list[str] | tuple[str, ...] | set[str],
+    ) -> int:
+        """Null out failed_path for rejected rows matching request/path pairs."""
+        paths = [str(path) for path in dict.fromkeys(failed_paths) if path]
+        if not paths:
+            return 0
+        placeholders = ", ".join(["%s"] * len(paths))
+        cur = self._execute(f"""
+            UPDATE download_log
+            SET validation_result = validation_result - 'failed_path'
+            WHERE request_id = %s
+              AND outcome = 'rejected'
+              AND validation_result->>'failed_path' IN ({placeholders})
+        """, tuple([request_id, *paths]))
+        self.conn.commit()
+        return cur.rowcount
+
     # -- Search log -----------------------------------------------------------
 
     def log_search(self, request_id: int, query: str | None = None,

@@ -41,6 +41,41 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
+def _cleanup_failed_force_import(
+    db: PipelineDB,
+    job: ImportJob,
+    outcome: DispatchOutcome,
+) -> dict[str, object] | None:
+    if job.job_type != IMPORT_JOB_FORCE or outcome.deferred:
+        return None
+    payload = job.payload or {}
+    download_log_id = payload.get("download_log_id")
+    if not isinstance(download_log_id, int):
+        return None
+    failed_path = payload.get("failed_path")
+    failed_path_hint = failed_path if isinstance(failed_path, str) else None
+    try:
+        from lib.wrong_matches import cleanup_wrong_match_source
+
+        cleanup = cleanup_wrong_match_source(
+            db,
+            download_log_id,
+            failed_path_hint=failed_path_hint,
+        )
+        return cleanup.to_dict()
+    except Exception as exc:
+        logger.exception(
+            "Failed to clean wrong-match source for import job %s",
+            job.id,
+        )
+        return {
+            "success": False,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def execute_import_job(
     db: PipelineDB,
     job: ImportJob,
@@ -178,6 +213,9 @@ def process_claimed_job(
             result=result,
             message=outcome.message,
         )
+    cleanup = _cleanup_failed_force_import(db, job, outcome)
+    if cleanup is not None:
+        result["cleanup"] = cleanup
     return db.mark_import_job_failed(
         job.id,
         error=outcome.message,

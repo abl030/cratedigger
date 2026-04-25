@@ -855,6 +855,49 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
         self.assertNotIn("failed_path", stored)
 
+    def test_clear_wrong_match_paths_clears_matching_request_and_paths(self):
+        db = FakePipelineDB()
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "failed_imports/A",
+                                           "x": 1})
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/abs/A",
+                                           "x": 2})
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/abs/B",
+                                           "x": 3})
+        db.log_download(2, outcome="rejected",
+                        validation_result={"failed_path": "/abs/A",
+                                           "x": 4})
+        db.log_download(1, outcome="success",
+                        validation_result={"failed_path": "/abs/A",
+                                           "x": 5})
+
+        cleared = db.clear_wrong_match_paths(
+            1, ["failed_imports/A", "/abs/A"])
+
+        self.assertEqual(cleared, 2)
+        rows = db.get_wrong_matches()
+        remaining = {
+            (row["request_id"], row["validation_result"]["failed_path"])  # type: ignore[index]
+            for row in rows
+        }
+        self.assertEqual(remaining, {(1, "/abs/B"), (2, "/abs/A")})
+
+    def test_clear_wrong_match_paths_handles_json_string_payloads(self):
+        import json as _json
+        db = FakePipelineDB()
+        db.log_download(1, outcome="rejected",
+                        validation_result=_json.dumps(
+                            {"failed_path": "/p", "x": 1}))
+
+        cleared = db.clear_wrong_match_paths(1, ["/p"])
+
+        self.assertEqual(cleared, 1)
+        stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
+        self.assertNotIn("failed_path", stored)
+        self.assertEqual(stored["x"], 1)
+
     def test_search_log_history_and_batch(self):
         db = FakePipelineDB()
         db.log_search(1, query="a b", outcome="found", result_count=10,

@@ -1264,6 +1264,30 @@ class FakePipelineDB:
             return True
         return False
 
+    def clear_wrong_match_paths(
+        self,
+        request_id: int,
+        failed_paths: list[str] | tuple[str, ...] | set[str],
+    ) -> int:
+        """Strip ``failed_path`` from rejected rows for request/path pairs."""
+        paths = {str(path) for path in failed_paths if path}
+        if not paths:
+            return 0
+        cleared = 0
+        for entry in self.download_logs:
+            if entry.request_id != request_id or entry.outcome != "rejected":
+                continue
+            vr = self._validation_result_dict(entry.validation_result)
+            if not vr or vr.get("failed_path") not in paths:
+                continue
+            new_vr = {k: v for k, v in vr.items() if k != "failed_path"}
+            if isinstance(entry.validation_result, str):
+                entry.validation_result = json.dumps(new_vr)
+            else:
+                entry.validation_result = new_vr
+            cleared += 1
+        return cleared
+
     @staticmethod
     def _validation_result_dict(vr: Any) -> dict[str, Any] | None:
         if isinstance(vr, dict):

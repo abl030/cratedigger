@@ -1,5 +1,8 @@
 """Tests for the shared import queue worker."""
 
+import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -19,6 +22,25 @@ from tests.helpers import make_request_row
 
 
 class TestImporterWorker(unittest.TestCase):
+    def _log_wrong_match(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int = 42,
+        failed_path: str,
+        username: str = "alice",
+    ) -> int:
+        db.log_download(
+            request_id,
+            soulseek_username=username,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "failed_path": failed_path,
+            },
+        )
+        return db.download_logs[-1].id
+
     def test_force_import_job_calls_existing_dispatch_and_completes(self):
         from scripts import importer
 
@@ -78,6 +100,155 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.error, "quality gate rejected")
         self.assertEqual(updated.result["success"], False)
+
+    def test_failed_force_import_job_cleans_wrong_match_source(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(False, "Pre-import gate rejected"),
+            ):
+                updated = importer.process_claimed_job(db, claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
+            self.assertEqual(updated.result["cleanup"]["success"], True)
+            self.assertEqual(updated.result["cleanup"]["cleared_rows"], 1)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_failed_force_import_job_clears_newer_duplicate_rejection(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            log_id = self._log_wrong_match(db, failed_path=source, username="old")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            def reject_again(*_args, **kwargs):
+                db.log_download(
+                    kwargs["request_id"],
+                    soulseek_username="new",
+                    outcome="rejected",
+                    validation_result={
+                        "scenario": "quality_downgrade",
+                        "failed_path": kwargs["failed_path"],
+                    },
+                )
+                return DispatchOutcome(False, "Rejected: quality_downgrade")
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                side_effect=reject_again,
+            ):
+                updated = importer.process_claimed_job(db, claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(updated.result["cleanup"]["cleared_rows"], 2)
+            self.assertEqual(db.get_wrong_matches(), [])
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_manual_import_failure_preserves_source_and_wrong_match(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            self._log_wrong_match(db, failed_path=source)
+            db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, source),
+                payload=manual_import_payload(failed_path=source),
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(False, "manual import failed"),
+            ):
+                updated = importer.process_claimed_job(db, claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertNotIn("cleanup", updated.result)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_deferred_force_import_preserves_source_and_wrong_match(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            log_id = self._log_wrong_match(db, failed_path=source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(
+                    False,
+                    "Another import is already in progress",
+                    deferred=True,
+                ),
+            ):
+                updated = importer.process_claimed_job(db, claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertNotIn("cleanup", updated.result)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
 
     def test_startup_requeues_abandoned_running_job_for_retry(self):
         from scripts import importer

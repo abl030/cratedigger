@@ -422,6 +422,8 @@ async function _pollImportJob(jobId, btn) {
         btn.textContent = 'Failed';
         btn.style.color = '#f88';
         toast(job.message || job.error || 'Import failed', true);
+        invalidateWrongMatches();
+        await _refreshWrongMatches();
         return;
       }
     } catch (_e) {
@@ -430,6 +432,10 @@ async function _pollImportJob(jobId, btn) {
   }
   btn.textContent = 'Queued';
 }
+
+export const __test__ = {
+  pollImportJob: _pollImportJob,
+};
 
 /**
  * Force-import a wrong match.

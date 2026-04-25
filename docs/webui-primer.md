@@ -66,7 +66,9 @@ Browser → https://music.ablz.au
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
 - **Pipeline tab** — status dashboard (wanted/imported/manual counts + wanted list)
 - **Wrong Matches / Manual Import** — import buttons queue work and poll
-  `import_jobs`, so long beets imports do not block the web request.
+  `import_jobs`, so long beets imports do not block the web request. Failed
+  queued force-imports remove the reviewed wrong-match source from the
+  actionable list while preserving the failed job/download audit.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls `full_pipeline_decision()` via `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration

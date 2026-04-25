@@ -1933,6 +1933,33 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertNotIn("alice-old", by_path)
         self.assertIn("bob", by_path)
 
+    def test_clear_wrong_match_paths_clears_matching_request_and_paths(self):
+        """Force-import cleanup clears every observed representation of one source."""
+        self._log_rejected(self.req1, "raw", "failed_imports/Album")
+        self._log_rejected(self.req1, "absolute", "/abs/Album")
+        self._log_rejected(self.req1, "other-path", "/abs/Other")
+        self._log_rejected(self.req2, "other-request", "/abs/Album")
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="successful",
+            outcome="success",
+            validation_result=json.dumps({"failed_path": "/abs/Album"}),
+        )
+
+        cleared = self.db.clear_wrong_match_paths(
+            self.req1, ["failed_imports/Album", "/abs/Album"])
+
+        self.assertEqual(cleared, 2)
+        rows = self.db.get_wrong_matches()
+        remaining = {
+            (r["request_id"], r["soulseek_username"])
+            for r in rows
+        }
+        self.assertEqual(remaining, {
+            (self.req1, "other-path"),
+            (self.req2, "other-request"),
+        })
+
     def test_excludes_non_rejected_outcomes(self):
         """success / force_import / timeout must never surface in wrong-matches."""
         self._log_rejected(self.req1, "reject-me", "/fi/keep")
