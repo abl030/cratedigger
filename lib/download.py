@@ -764,9 +764,8 @@ def _process_beets_validation(album_data: GrabListEntry,
     if bv_result.valid:
         return _handle_valid_result(
             album_data, bv_result, staged_album, ctx)
-    _handle_rejected_result(
+    return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
-    return None
 
 
 def _resolved_request_rejection_id(
@@ -1073,7 +1072,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
                             staged_album: StagedAlbum,
-                            ctx: CratediggerContext) -> None:
+                            ctx: CratediggerContext) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
     failed_dest = move_failed_import(
         staged_album.current_path,
@@ -1113,6 +1112,12 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
                    f"distance={bv_result.distance}, "
                    f"detail={bv_result.detail}) "
                    f"| denylisted users: {', '.join(usernames)}")
+    scenario = bv_result.scenario or "validation_rejected"
+    detail = bv_result.detail or bv_result.error
+    message = f"Rejected: {scenario}"
+    if detail:
+        message = f"{message} - {detail}"
+    return DispatchOutcome(success=False, message=message)
 
 
 def _compute_rejection_backfill(album_data: GrabListEntry,

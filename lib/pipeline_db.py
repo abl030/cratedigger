@@ -369,10 +369,21 @@ class PipelineDB:
                 WHEN status = 'queued' AND preview_status = 'waiting' THEN 3
                 ELSE 4
               END,
-              importable_at ASC NULLS LAST,
-              created_at ASC,
-              updated_at DESC,
-              id ASC
+              CASE
+                WHEN status IN ('queued', 'running') THEN importable_at
+              END ASC NULLS LAST,
+              CASE
+                WHEN status IN ('queued', 'running') THEN created_at
+              END ASC NULLS LAST,
+              CASE
+                WHEN status NOT IN ('queued', 'running') THEN updated_at
+              END DESC NULLS LAST,
+              CASE
+                WHEN status IN ('queued', 'running') THEN id
+              END ASC NULLS LAST,
+              CASE
+                WHEN status NOT IN ('queued', 'running') THEN id
+              END DESC NULLS LAST
             LIMIT %s
         """, (limit,))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
