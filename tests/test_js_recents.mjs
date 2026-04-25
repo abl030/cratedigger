@@ -61,5 +61,23 @@ console.log('renderImportQueueItems() shows uncertain preview failures without n
   assertExcludes(html, 'next import', 'uncertain rows are not marked next');
 }
 
+console.log('renderImportQueueItems() prefers terminal import messages over stale preview messages');
+{
+  const html = __test__.renderImportQueueItems([{
+    id: 731,
+    job_type: 'automation_import',
+    status: 'failed',
+    preview_status: 'would_import',
+    artist_name: 'Muse',
+    album_title: 'Origin Of Symmetry',
+    preview_message: 'Preview gate disabled',
+    message: 'Rejected: high_distance - distance=0.1611',
+  }]);
+  assertContains(html, 'Rejected: high_distance - distance=0.1611',
+    'terminal failure message rendered');
+  assertExcludes(html, 'Preview gate disabled',
+    'stale preview message hidden for terminal rows');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

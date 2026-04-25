@@ -104,6 +104,9 @@ function queueBorderColor(job) {
 }
 
 function queueMessage(job) {
+  if (job.status === 'completed' || job.status === 'failed') {
+    return job.message || job.error || job.preview_message || job.preview_error || '';
+  }
   return job.preview_message || job.message || job.preview_error || job.error || '';
 }
 

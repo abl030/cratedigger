@@ -361,6 +361,7 @@ class PipelineDB:
         cur = self._execute("""
             SELECT *
             FROM import_jobs
+            WHERE status IN ('queued', 'running')
             ORDER BY
               CASE
                 WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
@@ -370,20 +371,10 @@ class PipelineDB:
                 ELSE 4
               END,
               CASE
-                WHEN status IN ('queued', 'running') THEN importable_at
+                WHEN status = 'queued' THEN importable_at
               END ASC NULLS LAST,
-              CASE
-                WHEN status IN ('queued', 'running') THEN created_at
-              END ASC NULLS LAST,
-              CASE
-                WHEN status NOT IN ('queued', 'running') THEN updated_at
-              END DESC NULLS LAST,
-              CASE
-                WHEN status IN ('queued', 'running') THEN id
-              END ASC NULLS LAST,
-              CASE
-                WHEN status NOT IN ('queued', 'running') THEN id
-              END DESC NULLS LAST
+              created_at ASC,
+              id ASC
             LIMIT %s
         """, (limit,))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]

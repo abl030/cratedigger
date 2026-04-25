@@ -636,7 +636,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual([job.id for job in timeline[:2]], [importable.id, waiting.id])
         self.assertEqual(timeline[0].preview_status, "would_import")
 
-    def test_import_job_timeline_orders_recent_terminal_jobs_after_active(self):
+    def test_import_job_timeline_excludes_terminal_jobs(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         importable = self.db.enqueue_import_job(
@@ -673,24 +673,10 @@ class TestImportJobQueueAPI(unittest.TestCase):
             error="new",
             message="new",
         )
-        old_time = datetime.now(timezone.utc) - timedelta(hours=2)
-        new_time = datetime.now(timezone.utc) - timedelta(minutes=1)
-        self.db._execute(
-            "UPDATE import_jobs SET updated_at = %s WHERE id = %s",
-            (old_time, older.id),
-        )
-        self.db._execute(
-            "UPDATE import_jobs SET updated_at = %s WHERE id = %s",
-            (new_time, newer.id),
-        )
 
         timeline = self.db.list_import_job_timeline(limit=10)
 
-        self.assertEqual([job.id for job in timeline[:3]], [
-            importable.id,
-            newer.id,
-            older.id,
-        ])
+        self.assertEqual([job.id for job in timeline], [importable.id])
 
     def test_preview_claim_and_importable_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -727,6 +713,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             message="Preview would import",
         )
         assert marked is not None
+        assert marked.preview_result is not None
         self.assertEqual(marked.status, "queued")
         self.assertEqual(marked.preview_status, "would_import")
         self.assertEqual(marked.preview_result["verdict"], "would_import")
@@ -753,6 +740,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             message="Preview failed: path_missing",
         )
         assert failed is not None
+        assert failed.preview_result is not None
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.preview_status, "uncertain")
         self.assertEqual(failed.preview_error, "path_missing")

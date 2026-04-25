@@ -47,7 +47,7 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/delete-transparent-non-flac` | POST | Bulk-delete wrong-match folders whose exact library copy is already transparent and whose pending downloads are non-FLAC |
 | `/api/import-jobs` | GET | List recent import queue jobs |
-| `/api/import-jobs/timeline` | GET | List import queue jobs in Recents timeline order |
+| `/api/import-jobs/timeline` | GET | List active queued/running import jobs in Recents queue order |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
@@ -144,9 +144,10 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 The service auto-restarts when the Nix store path changes.
 
 After deploy, check `systemctl status cratedigger-import-preview-worker
-cratedigger-importer` and the worker journals. The Recents Queue subview should
-show new rows move from waiting preview, to previewing, to importable or a
-terminal preview failure; only importable rows enter the serial importer lane.
+cratedigger-importer` and the worker journals. The Recents Queue subview shows
+only active queued/running import jobs as they move from waiting preview, to
+previewing, to importable, to importing. Completed, failed, or preview-rejected
+rows are history/audit rows, not live queue rows.
 On doc2 the homelab wrapper opts into the preview gate explicitly. Deployments
 that leave `services.cratedigger.importer.preview.enable = false` should not
 start the preview worker; their newly queued jobs are importable immediately.

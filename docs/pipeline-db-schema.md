@@ -77,6 +77,9 @@ is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema
 defaults both make jobs importable immediately. Legacy completed/failed rows
 from before async previews are also normalized to `would_import` so historical
 terminal import history does not look like active preview backlog.
+The Recents Queue endpoint lists only active `queued`/`running` jobs; terminal
+`completed`/`failed` rows remain durable audit history and must not be rendered
+as live queue work.
 
 ## `download_log.import_result` JSONB
 
