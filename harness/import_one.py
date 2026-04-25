@@ -454,16 +454,36 @@ def _get_folder_avg_bitrate(folder_path,
 _ALWAYS_LOSSLESS_EXTS = {".flac", ".wav"}
 
 
-def _is_m4a_alac(fpath: str) -> bool:
-    """Check if an .m4a file contains ALAC (lossless) via ffprobe."""
+def _ffprobe_audio_codec_name(fpath: str) -> str | None:
+    """Return the first audio stream codec name reported by ffprobe."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", fpath],
+             "-show_entries", "stream=codec_name", "-of", "json", fpath],
             capture_output=True, text=True, timeout=10)
-        return result.stdout.strip().lower() == "alac"
+        if result.returncode != 0:
+            return None
+        payload: object = json.loads(result.stdout or "{}")
     except Exception:
-        return False
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    streams = payload.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return None
+    stream = streams[0]
+    if not isinstance(stream, dict):
+        return None
+    codec = stream.get("codec_name")
+    if not isinstance(codec, str):
+        return None
+    return codec.strip().lower() or None
+
+
+def _is_m4a_alac(fpath: str) -> bool:
+    """Check if an .m4a file contains ALAC (lossless) via ffprobe."""
+    return _ffprobe_audio_codec_name(fpath) == "alac"
 
 
 def _is_lossless_file(fname: str, folder: str = "") -> bool:

@@ -240,6 +240,39 @@ class TestConversionDecision(unittest.TestCase):
         self.assertFalse(r.is_terminal)
 
 
+class TestM4aAlacDetection(unittest.TestCase):
+    """ALAC .m4a detection gates lossless conversion."""
+
+    @patch("harness.import_one.subprocess.run")
+    def test_parses_structured_ffprobe_codec_output(self, mock_run):
+        """Structured ffprobe output must identify ALAC as lossless."""
+        from harness.import_one import _is_m4a_alac
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"streams":[{"codec_name":"alac"}]}',
+            stderr="",
+        )
+
+        self.assertTrue(_is_m4a_alac("track.m4a"))
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("-of") + 1], "json")
+
+    @patch("harness.import_one.subprocess.run")
+    def test_non_alac_m4a_is_not_lossless(self, mock_run):
+        from harness.import_one import _is_m4a_alac
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"streams":[{"codec_name":"aac"}]}',
+            stderr="",
+        )
+
+        self.assertFalse(_is_m4a_alac("track.m4a"))
+
+
 # ============================================================================
 # quality_decision_stage
 # ============================================================================
