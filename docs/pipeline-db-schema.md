@@ -97,9 +97,9 @@ defaults each release to a `180` milli-distance loosen threshold, marks
 candidate rows green when `validation_result.distance <= 0.180`, then posts to
 `/api/wrong-matches/converge`. Green rows are enqueued as `force_import` jobs
 and dismissed from the actionable Wrong Matches list without deleting their
-folders; the queued job still owns the source path. If the operator enables
-cleanup, non-green rows for that release are deleted from disk and cleared from
-the review list.
+folders; the queued job still owns the source path. When Converge runs,
+non-green rows for that release are deleted from disk and cleared from the
+review list.
 
 1. Look up `download_log` entry by ID via `get_download_log_entry()` → extract `failed_path` from `validation_result` JSONB.
 2. Resolve path (handle both relative and absolute) → verify files still exist.

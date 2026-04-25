@@ -480,7 +480,7 @@ def post_wrong_match_delete_group(h, body: dict) -> None:
 
 
 def post_wrong_match_converge(h, body: dict) -> None:
-    """Queue acceptable candidates and optionally delete the rest."""
+    """Queue acceptable candidates and delete the rest for the release."""
     request_id = body.get("request_id")
     if request_id is None:
         h._error("Missing request_id")
@@ -492,7 +492,11 @@ def post_wrong_match_converge(h, body: dict) -> None:
         return
 
     threshold_milli = _threshold_milli(body.get("threshold_milli"))
-    delete_unmatched = bool(body.get("delete_unmatched"))
+    # Converge is intentionally a one-click cleanup workflow: green rows are
+    # queued, and non-green rows for the same release are removed immediately.
+    # Keep accepting the legacy field from older clients, but do not let it
+    # leave high-distance leftovers behind.
+    delete_unmatched = True
 
     srv = _server()
     pdb = srv._db()
@@ -505,6 +509,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
     unmatched: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     jobs: list[dict[str, object]] = []
+    unmatched_log_ids: list[int] = []
     deduped = 0
     dismissed = 0
     deleted = 0
@@ -572,7 +577,10 @@ def post_wrong_match_converge(h, body: dict) -> None:
             "download_log_id": lid,
             "distance": distance,
         })
-        if delete_unmatched:
+        unmatched_log_ids.append(lid)
+
+    if selected:
+        for lid in unmatched_log_ids:
             if _delete_wrong_match_row(pdb, lid):
                 deleted += 1
             else:
@@ -581,7 +589,8 @@ def post_wrong_match_converge(h, body: dict) -> None:
                     "reason": "delete_failed",
                 })
                 remaining += 1
-        else:
+    else:
+        for _lid in unmatched_log_ids:
             remaining += 1
 
     h._json({

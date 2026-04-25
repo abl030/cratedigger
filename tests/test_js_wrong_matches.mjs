@@ -148,9 +148,9 @@ console.log('converge helpers classify green candidates');
   assert(!__test__.isConvergeGreen({ distance: 0.226 }, 180), '0.226 is not green at 180');
   assert(!__test__.isConvergeGreen({ distance: null }, 180), 'missing distance is not green');
   assertDeepEqual(
-    __test__.convergeRequestBody('42', '180', true),
+    __test__.convergeRequestBody('42', '180', false),
     { request_id: 42, threshold_milli: 180, delete_unmatched: true },
-    'converge request body matches API contract',
+    'converge always asks the API to delete non-green rows',
   );
 }
 
@@ -162,15 +162,51 @@ console.log('renderWrongMatches() shows threshold controls and green state');
   assert(dom.wrongMatches.innerHTML.includes('Loosen'), 'renders threshold input');
   assert(dom.wrongMatches.innerHTML.includes('2 green'), 'renders default green count');
   assert(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'converge button includes count');
-  assert(dom.wrongMatches.innerHTML.includes('remove all wrong matches when converging'), 'renders cleanup checkbox');
+  assert(!dom.wrongMatches.innerHTML.includes('remove all wrong matches when converging'), 'cleanup checkbox is gone');
   assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'), 'keeps delete-all action');
 
   __test__.setWrongMatchConvergeThreshold(42, 230);
-  assert(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit re-renders green count');
+  assert(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');
   assert(dom.wrongMatches.innerHTML.includes('Converge (3)'), 'threshold edit updates converge count');
 }
 
-console.log('convergeWrongMatches() posts selected threshold and refreshes');
+console.log('setWrongMatchConvergeThreshold() updates expanded group in place');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const originalHtml = dom.wrongMatches.innerHTML;
+  const elements = new Map();
+  const el = (initial = {}) => ({
+    textContent: '',
+    disabled: false,
+    style: {},
+    removed: false,
+    remove() { this.removed = true; },
+    ...initial,
+  });
+  elements.set('wm-green-count-42', el());
+  elements.set('wm-converge-btn-42', el({ textContent: 'Converge (2)' }));
+  for (const id of [100, 101, 102]) {
+    elements.set(`wm-entry-card-${id}`, el());
+    elements.set(`wm-entry-green-${id}`, el());
+    elements.set(`wm-entry-dist-${id}`, el());
+  }
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+
+  __test__.setWrongMatchConvergeThreshold(42, 230);
+
+  assertEqual(dom.wrongMatches.innerHTML, originalHtml, 'threshold edit does not rerender the pane');
+  assertEqual(elements.get('wm-green-count-42').textContent, '3 green', 'updates green count badge');
+  assertEqual(elements.get('wm-converge-btn-42').textContent, 'Converge (3)', 'updates converge button text');
+  assert(!String(elements.get('wm-entry-green-102').style.cssText || '').includes('display:none'), 'newly green entry badge is shown');
+}
+
+console.log('convergeWrongMatches() posts selected threshold and removes row in place');
 {
   installStorage();
   const dom = installDom();
@@ -186,8 +222,9 @@ console.log('convergeWrongMatches() posts selected threshold and refreshes');
         json: async () => ({
           status: 'ok',
           queued: 2,
-          deleted: 0,
+          deleted: 1,
           skipped: [],
+          group_empty: true,
         }),
       };
     }
@@ -204,11 +241,12 @@ console.log('convergeWrongMatches() posts selected threshold and refreshes');
   assertEqual(calls[0].url, '/api/wrong-matches/converge', 'posts to converge endpoint');
   assertDeepEqual(
     JSON.parse(calls[0].options.body),
-    { request_id: 42, threshold_milli: 180, delete_unmatched: false },
+    { request_id: 42, threshold_milli: 180, delete_unmatched: true },
     'posts converge payload',
   );
-  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes after converge');
+  assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole wrong-matches pane');
   assert(dom.toast.textContent.includes('Queued 2 candidates'), 'toasts converge result');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

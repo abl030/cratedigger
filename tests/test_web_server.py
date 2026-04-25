@@ -3673,8 +3673,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertGreater(len(data["groups"]), 0)
 
-    def test_converge_queues_green_candidates_and_leaves_unmatched(self):
-        """Converge queues every row at/below the loosen threshold."""
+    def test_converge_queues_green_candidates_and_deletes_unmatched(self):
+        """Converge queues green rows and deletes high-distance leftovers."""
         self.mock_db.get_wrong_matches.return_value = [
             self._row(100, 42, "u1", "/fi/a", distance=0.167),
             self._row(101, 42, "u2", "/fi/b", distance=0.180),
@@ -3705,10 +3705,11 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["queued"], 2)
         self.assertEqual(data["selected_count"], 2)
         self.assertEqual(data["unmatched_count"], 1)
-        self.assertEqual(data["deleted"], 0)
+        self.assertTrue(data["delete_unmatched"])
+        self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["dismissed"], 2)
-        self.assertEqual(data["remaining"], 1)
-        self.assertFalse(data["group_empty"])
+        self.assertEqual(data["remaining"], 0)
+        self.assertTrue(data["group_empty"])
         self.assertEqual(
             {item["download_log_id"] for item in data["selected"]},
             {100, 101},
@@ -3722,10 +3723,11 @@ class TestWrongMatchesContract(unittest.TestCase):
             ],
         )
         self.assertEqual(self.mock_db.clear_wrong_match_paths.call_count, 2)
-        self.mock_rmtree.assert_not_called()
+        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
 
-    def test_converge_deletes_unmatched_when_requested(self):
-        """When opted in, non-green rows are deleted while selected rows are dismissed."""
+    def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
+        """Legacy true payloads still delete non-green rows while selected rows are dismissed."""
         self.mock_db.get_wrong_matches.return_value = [
             self._row(100, 42, "u1", "/fi/a", distance=0.167),
             self._row(101, 42, "u2", "/fi/b", distance=0.180),
