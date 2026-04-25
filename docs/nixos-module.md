@@ -30,12 +30,13 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See README § "Tuning the quality rank model". |
 | `timer.{enable,onBootSec,onUnitActiveSec}` | every 5 min | Cycle frequency. |
+| `importer.{enable,previewWorkers}` | enabled, `2` preview workers | Long-lived serial importer plus async preview worker concurrency. `previewWorkers` must be at least 1. |
 | `logging.{level,format,datefmt}` | INFO | Python logging config. |
 
 ## What the module does
 
 1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, slskd-api).
-2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
+2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
 3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path.
 4. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
 
@@ -44,6 +45,8 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 - `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. Both `cratedigger.service` and `cratedigger-web.service` `requires` it, so the app cannot start against an un-migrated DB.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
 - `cratedigger.timer` — fires every 5 minutes (configurable via `timer.onUnitActiveSec`).
+- `cratedigger-importer.service` — long-running serial beets import worker. It only claims queued import jobs after async preview marks them `would_import`.
+- `cratedigger-import-preview-worker.service` — long-running async preview worker. It starts after DB migrations, defaults to two worker loops, and runs validation/spectral/measurement preview outside the beets mutation lane.
 - `cratedigger-web.service` — long-running web UI for music.ablz.au.
 
 ## Sops + per-key secrets
@@ -89,3 +92,13 @@ nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
 ```
 
 This catches: option surface breakage, prestart sed-substitution bugs, systemd dep graph cycles, wrapper script PYTHONPATH errors, missing python deps. It does NOT exercise slskd interaction or real downloads (those need fixture data — see the python suite). Run before any `nix/module.nix` change.
+
+After deploy, verify the queue workers before assuming imports will drain:
+
+```bash
+systemctl status cratedigger-db-migrate cratedigger-import-preview-worker cratedigger-importer
+journalctl -u cratedigger-import-preview-worker -u cratedigger-importer -n 100 --no-pager
+```
+
+Queued jobs should move from `preview_status='waiting'` to `would_import` or a
+terminal preview failure. The importer should only claim `would_import` jobs.

@@ -438,14 +438,16 @@ Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/help
 
 ## Deployment
 
-Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) builds a Python environment with dependencies and registers four systemd units:
+Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) builds a Python environment with dependencies and registers the runtime systemd units:
 
 - `cratedigger-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
 - `cratedigger.service` — oneshot pipeline run, triggered by `cratedigger.timer`. Runs healthcheck → prestart (renders `config.ini`) → `cratedigger.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
 - `cratedigger.timer` — fires every 5 minutes by default (`services.cratedigger.timer.onUnitActiveSec`).
+- `cratedigger-importer.service` — long-running serial importer that drains `import_jobs` whose async preview stage marked them importable.
+- `cratedigger-import-preview-worker.service` — long-running async preview worker. It defaults to `services.cratedigger.importer.previewWorkers = 2`, claims queued preview work, and runs validation/spectral/measurement preview before the importer sees the job.
 - `cratedigger-web.service` — long-running web UI bound to `services.cratedigger.web.port` (default 8085).
 
-`cratedigger.service` and `cratedigger-web.service` both `requires` the migrate unit, so the app cannot start against an un-migrated DB.
+`cratedigger.service`, `cratedigger-importer.service`, `cratedigger-import-preview-worker.service`, and `cratedigger-web.service` all require the migrate unit, so the app cannot start against an un-migrated DB.
 
 To deploy a new revision:
 
@@ -463,6 +465,15 @@ sudo nixos-rebuild switch --flake .       # or via --flake github:user/repo#host
 ```
 
 `restartIfChanged = false` on `cratedigger.service` means the deploy completes without restarting an in-flight cycle; the next 5-min timer fire runs the new code.
+
+After deploying importer queue changes, check:
+
+```bash
+systemctl status cratedigger-db-migrate cratedigger-import-preview-worker cratedigger-importer
+journalctl -u cratedigger-import-preview-worker -u cratedigger-importer -n 100 --no-pager
+```
+
+Healthy state is: migrations applied, the preview worker running, queued jobs moving from `preview_status='waiting'` to `would_import` or a terminal preview failure, and the importer only claiming `would_import` jobs.
 
 ### Schema migrations
 

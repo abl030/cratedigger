@@ -8,7 +8,7 @@
 import { state } from './state.js';
 import { searchArtists, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow } from './browse.js';
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
-import { loadRecents, setRecentsFilter, renderRecentsItems } from './recents.js';
+import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
@@ -77,6 +77,7 @@ Object.assign(window, {
   toggleReleaseDetail,
   loadRecents,
   setRecentsFilter,
+  setRecentsSub,
   loadPipeline,
   setFilter,
   renderPipeline,

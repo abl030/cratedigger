@@ -23,6 +23,7 @@ import psycopg2.extras
 
 from lib.import_queue import (
     ImportJob,
+    validate_preview_failure_status,
     validate_job_type,
     validate_payload,
     validate_status,
@@ -332,6 +333,26 @@ class PipelineDB:
         """)
         return {str(row["status"]): int(row["count"]) for row in cur.fetchall()}
 
+    def list_import_job_timeline(self, *, limit: int = 50) -> list[ImportJob]:
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            ORDER BY
+              CASE
+                WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
+                WHEN status = 'running' THEN 1
+                WHEN status = 'queued' AND preview_status = 'running' THEN 2
+                WHEN status = 'queued' AND preview_status = 'waiting' THEN 3
+                ELSE 4
+              END,
+              importable_at ASC NULLS LAST,
+              created_at ASC,
+              updated_at DESC,
+              id ASC
+            LIMIT %s
+        """, (limit,))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
     def claim_next_import_job(
         self,
         *,
@@ -342,7 +363,8 @@ class PipelineDB:
                 SELECT id
                 FROM import_jobs
                 WHERE status = 'queued'
-                ORDER BY created_at ASC, id ASC
+                  AND preview_status = 'would_import'
+                ORDER BY importable_at ASC NULLS LAST, created_at ASC, id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
@@ -487,6 +509,171 @@ class PipelineDB:
             WHERE import_jobs.id = running.id
             RETURNING import_jobs.*
         """, (limit, message))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def claim_next_import_preview_job(
+        self,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        cur = self._execute("""
+            WITH next_job AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'queued'
+                  AND preview_status = 'waiting'
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE import_jobs
+            SET preview_status = 'running',
+                preview_attempts = preview_attempts + 1,
+                preview_worker_id = %s,
+                preview_started_at = COALESCE(preview_started_at, NOW()),
+                preview_heartbeat_at = NOW(),
+                preview_message = NULL,
+                preview_error = NULL,
+                updated_at = NOW()
+            FROM next_job
+            WHERE import_jobs.id = next_job.id
+            RETURNING import_jobs.*
+        """, (worker_id,))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def heartbeat_import_job_preview(self, job_id: int) -> bool:
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET preview_heartbeat_at = NOW(), updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+              AND preview_status = 'running'
+            RETURNING id
+        """, (job_id,))
+        return cur.fetchone() is not None
+
+    def mark_import_job_preview_importable(
+        self,
+        job_id: int,
+        *,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET preview_status = 'would_import',
+                preview_result = %s,
+                preview_message = %s,
+                preview_error = NULL,
+                preview_completed_at = NOW(),
+                importable_at = COALESCE(importable_at, NOW()),
+                preview_worker_id = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+              AND preview_status IN ('waiting', 'running')
+            RETURNING *
+        """, (
+            psycopg2.extras.Json(preview_result or {}),
+            message,
+            job_id,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def mark_import_job_preview_failed(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        validate_preview_failure_status(preview_status)
+        result = dict(preview_result or {})
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET status = 'failed',
+                preview_status = %s,
+                preview_result = %s,
+                preview_message = %s,
+                preview_error = %s,
+                result = %s,
+                message = %s,
+                error = %s,
+                preview_completed_at = NOW(),
+                completed_at = NOW(),
+                preview_worker_id = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+              AND preview_status IN ('waiting', 'running')
+            RETURNING *
+        """, (
+            preview_status,
+            psycopg2.extras.Json(result),
+            message,
+            error,
+            psycopg2.extras.Json({"preview": result}),
+            message,
+            error,
+            job_id,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def list_stale_import_preview_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = datetime.now(timezone.utc) - older_than
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE status = 'queued'
+              AND preview_status = 'running'
+              AND COALESCE(preview_heartbeat_at, preview_started_at, updated_at) < %s
+            ORDER BY updated_at ASC, id ASC
+            LIMIT %s
+        """, (cutoff, limit))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def requeue_stale_import_preview_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = datetime.now(timezone.utc) - older_than
+        cur = self._execute("""
+            WITH stale AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'queued'
+                  AND preview_status = 'running'
+                  AND COALESCE(preview_heartbeat_at, preview_started_at, updated_at) < %s
+                ORDER BY updated_at ASC, id ASC
+                LIMIT %s
+            )
+            UPDATE import_jobs
+            SET preview_status = 'waiting',
+                preview_message = %s,
+                preview_error = NULL,
+                preview_worker_id = NULL,
+                preview_started_at = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            FROM stale
+            WHERE import_jobs.id = stale.id
+            RETURNING import_jobs.*
+        """, (cutoff, limit, message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
     # --- album_requests CRUD ---

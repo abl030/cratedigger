@@ -46,12 +46,27 @@ Key fields:
   and CLI callers.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
+- `preview_status TEXT` — async readiness stage: `waiting`, `running`,
+  `would_import`, `confident_reject`, `uncertain`, or `error`.
+- `preview_result JSONB`, `preview_message`, `preview_error` — durable
+  no-mutation preview audit visible in Recents and CLI output.
+- `preview_attempts`, `preview_worker_id`, `preview_started_at`,
+  `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
+  recovery metadata.
+- `importable_at TIMESTAMPTZ` — set when preview returns `would_import`; the
+  serial importer claims only queued jobs with this importable preview state.
 
 On importer startup, any pre-existing `running` job is treated as abandoned
 state from a previous worker process, reset to `queued`, and retried
 immediately. The importer also holds a DB advisory singleton lock while it
 runs, so an accidentally-started second worker exits instead of requeueing a
 live worker's job.
+
+Async preview workers run outside the beets mutation lane. They claim queued
+jobs with `preview_status='waiting'`, call the no-mutation import preview path,
+then either set `preview_status='would_import'` and `importable_at` or fail the
+job with preview audit details. This lets spectral/measurement work run with
+tunable parallelism while beets writes stay serial.
 
 ## `download_log.import_result` JSONB
 
@@ -127,5 +142,13 @@ review list.
 ```bash
 pipeline_cli.py force-import <download_log_id>
 pipeline_cli.py import-jobs --status failed
+pipeline_cli.py wrong-match-preview-backfill --json
 # or: POST /api/pipeline/force-import {"download_log_id": N}
 ```
+
+`wrong-match-preview-backfill` is intentionally one-shot maintenance, not a
+daemon. It previews currently visible Wrong Matches rows with resolvable source
+folders, skips rows whose files are gone, skips rows already represented by an
+active force-import job, and records preview audit without creating import jobs.
+Use `--cleanup` only when you want cleanup-eligible confident rejects deleted as
+part of the same pass.
