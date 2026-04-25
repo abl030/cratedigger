@@ -117,6 +117,9 @@ def triage_wrong_matches(
     request_id: int | None = None,
     limit: int | None = None,
 ) -> list[WrongMatchTriageResult]:
+    if limit is not None and limit <= 0:
+        return []
+
     rows = db.get_wrong_matches()
     results: list[WrongMatchTriageResult] = []
     for row in rows:
@@ -137,6 +140,7 @@ def _summary_template() -> dict[str, int]:
         "would_import": 0,
         "confident_reject": 0,
         "uncertain_or_error": 0,
+        "cleanup_candidates": 0,
         "cleaned": 0,
         "cleanup_failed": 0,
         "skipped_missing_files": 0,
@@ -169,15 +173,28 @@ def _count_preview(summary: dict[str, int], preview: ImportPreviewResult) -> Non
         summary["uncertain_or_error"] += 1
 
 
+def _count_cleanup_candidate(summary: dict[str, int], preview: ImportPreviewResult) -> None:
+    if preview.confident_reject and preview.cleanup_eligible:
+        summary["cleanup_candidates"] += 1
+
+
 def backfill_wrong_match_previews(
     db: Any,
     *,
     request_id: int | None = None,
     limit: int | None = None,
     cleanup: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, int]:
-    """Explicit one-shot preview backfill for current Wrong Matches rows."""
+    """Explicit one-shot preview backfill for current Wrong Matches rows.
+
+    ``dry_run`` previews and counts candidate outcomes without persisting audit
+    details or deleting cleanup-eligible rows.
+    """
     summary = _summary_template()
+    if limit is not None and limit <= 0:
+        return summary
+
     for row in db.get_wrong_matches():
         if request_id is not None and row.get("request_id") != request_id:
             continue
@@ -196,10 +213,15 @@ def backfill_wrong_match_previews(
             summary["skipped_active_jobs"] += 1
             continue
 
-        if cleanup:
+        if dry_run:
+            preview = preview_import_from_download_log(db, raw_id)
+            _count_preview(summary, preview)
+            _count_cleanup_candidate(summary, preview)
+        elif cleanup:
             result = triage_wrong_match(db, raw_id)
             if result.preview is not None:
                 _count_preview(summary, result.preview)
+                _count_cleanup_candidate(summary, result.preview)
             if result.action == "deleted_reject" and result.success:
                 summary["cleaned"] += 1
             elif result.action == "delete_failed":
@@ -207,6 +229,7 @@ def backfill_wrong_match_previews(
         else:
             preview = preview_import_from_download_log(db, raw_id)
             _count_preview(summary, preview)
+            _count_cleanup_candidate(summary, preview)
             _persist_triage_audit(db, WrongMatchTriageResult(
                 download_log_id=raw_id,
                 action="preview_backfilled",

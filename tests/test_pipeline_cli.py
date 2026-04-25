@@ -375,6 +375,9 @@ class TestCmdWrongMatchPreviewBackfill(unittest.TestCase):
             request_id=42,
             limit=5,
             cleanup=False,
+            apply=False,
+            all=False,
+            dry_run=False,
             json=True,
         )
         stdout = io.StringIO()
@@ -395,9 +398,213 @@ class TestCmdWrongMatchPreviewBackfill(unittest.TestCase):
             request_id=42,
             limit=5,
             cleanup=False,
+            dry_run=False,
         )
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["previewed"], 1)
+
+    def test_cleanup_without_apply_runs_dry_run(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            request_id=None,
+            limit=None,
+            cleanup=True,
+            apply=False,
+            all=False,
+            dry_run=False,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.wrong_match_triage.backfill_wrong_match_previews",
+            return_value={
+                "previewed": 1,
+                "confident_reject": 1,
+                "cleanup_candidates": 1,
+                "cleaned": 0,
+            },
+        ) as backfill, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_preview_backfill(db, args)
+
+        self.assertEqual(rc, 0)
+        backfill.assert_called_once_with(
+            db,
+            request_id=None,
+            limit=None,
+            cleanup=True,
+            dry_run=True,
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["cleanup_candidates"], 1)
+        self.assertEqual(payload["cleaned"], 0)
+
+    def test_cleanup_apply_requires_scope_or_all(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            request_id=None,
+            limit=None,
+            cleanup=True,
+            apply=True,
+            all=False,
+            dry_run=False,
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch(
+            "lib.wrong_match_triage.backfill_wrong_match_previews",
+        ) as backfill, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_preview_backfill(db, args)
+
+        self.assertEqual(rc, 2)
+        backfill.assert_not_called()
+        self.assertIn("--request-id, --limit, or --all", stderr.getvalue())
+
+    def test_cleanup_rejects_non_positive_limit(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            request_id=None,
+            limit=0,
+            cleanup=True,
+            apply=True,
+            all=False,
+            dry_run=False,
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch(
+            "lib.wrong_match_triage.backfill_wrong_match_previews",
+        ) as backfill, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_preview_backfill(db, args)
+
+        self.assertEqual(rc, 2)
+        backfill.assert_not_called()
+        self.assertIn("--limit must be positive", stderr.getvalue())
+
+    def test_cleanup_apply_delegates_when_scoped(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            request_id=42,
+            limit=None,
+            cleanup=True,
+            apply=True,
+            all=False,
+            dry_run=False,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.wrong_match_triage.backfill_wrong_match_previews",
+            return_value={"previewed": 1, "cleaned": 1},
+        ) as backfill, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_preview_backfill(db, args)
+
+        self.assertEqual(rc, 0)
+        backfill.assert_called_once_with(
+            db,
+            request_id=42,
+            limit=None,
+            cleanup=True,
+            dry_run=False,
+        )
+
+
+class TestCmdWrongMatchTriage(unittest.TestCase):
+    def test_triage_requires_apply(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=99,
+            request_id=None,
+            limit=None,
+            apply=False,
+            all=False,
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch("lib.wrong_match_triage.triage_wrong_match") as triage, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+
+        self.assertEqual(rc, 2)
+        triage.assert_not_called()
+        self.assertIn("--apply", stderr.getvalue())
+
+    def test_bulk_triage_apply_requires_scope_or_all(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            limit=None,
+            apply=True,
+            all=False,
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch("lib.wrong_match_triage.triage_wrong_matches") as triage, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+
+        self.assertEqual(rc, 2)
+        triage.assert_not_called()
+        self.assertIn("--request-id, --limit, or --all", stderr.getvalue())
+
+    def test_triage_rejects_non_positive_limit(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            limit=0,
+            apply=True,
+            all=False,
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch("lib.wrong_match_triage.triage_wrong_matches") as triage, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+
+        self.assertEqual(rc, 2)
+        triage.assert_not_called()
+        self.assertIn("--limit must be positive", stderr.getvalue())
+
+    def test_triage_apply_delegates_when_scoped(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=42,
+            limit=None,
+            apply=True,
+            all=False,
+            json=True,
+        )
+        result = MagicMock()
+        result.to_dict.return_value = {"action": "deleted_reject"}
+        with patch(
+            "lib.wrong_match_triage.triage_wrong_matches",
+            return_value=[result],
+        ) as triage, redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+
+        self.assertEqual(rc, 0)
+        triage.assert_called_once_with(db, request_id=42, limit=None)
+
+
+class TestMainExitCodes(unittest.TestCase):
+    def test_main_propagates_command_return_code(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "wrong-match-preview-backfill",
+            "--cleanup",
+            "--apply",
+        ]
+        db = MagicMock()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.PipelineDB",
+            return_value=db,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        db.close.assert_called_once_with()
 
 
 class TestCmdQuery(unittest.TestCase):
