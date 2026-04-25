@@ -74,7 +74,9 @@ tunable parallelism while beets writes stay serial.
 
 The preview gate is opt-in at deployment time. When disabled, no preview worker
 is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema
-defaults both make jobs importable immediately.
+defaults both make jobs importable immediately. Legacy completed/failed rows
+from before async previews are also normalized to `would_import` so historical
+terminal import history does not look like active preview backlog.
 
 ## `download_log.import_result` JSONB
 

@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 # Bootstrap ephemeral PostgreSQL if available
@@ -139,6 +140,53 @@ class TestSchemaCreation(unittest.TestCase):
         index_names = {row["indexname"] for row in indexes}
         self.assertIn("idx_import_jobs_active_dedupe", index_names)
         self.assertIn("idx_import_jobs_claim", index_names)
+        db.close()
+
+    def test_legacy_terminal_preview_jobs_are_normalized(self):
+        """Migration 006 keeps old terminal history out of preview backlog."""
+        db = make_db()
+        req_id = db.add_request(
+            mb_release_id="queue-preview-legacy-terminal-mbid",
+            artist_name="Queue",
+            album_title="Legacy Terminal Preview",
+            source="request",
+        )
+        cur = db._execute("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload, preview_status,
+                preview_attempts, message, completed_at
+            )
+            VALUES (
+                'automation_import', 'completed', %s, '{}'::jsonb, 'waiting',
+                0, 'Automation import processing completed', NOW()
+            )
+            RETURNING id
+        """, (req_id,))
+        row = cur.fetchone()
+        assert row is not None
+
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations"
+            / "006_normalize_legacy_terminal_preview_jobs.sql"
+        )
+        db._execute(migration.read_text(encoding="utf-8"))
+
+        cur = db._execute("""
+            SELECT preview_status, preview_message, preview_completed_at,
+                   importable_at
+            FROM import_jobs
+            WHERE id = %s
+        """, (row["id"],))
+        normalized = cur.fetchone()
+        assert normalized is not None
+        self.assertEqual(normalized["preview_status"], "would_import")
+        self.assertEqual(
+            normalized["preview_message"],
+            "Queued before async preview gate",
+        )
+        self.assertIsNotNone(normalized["preview_completed_at"])
+        self.assertIsNotNone(normalized["importable_at"])
         db.close()
 
     def test_import_job_preview_schema_constraints_and_indexes(self):
