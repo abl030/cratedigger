@@ -11,7 +11,6 @@ let _lastEl = null;
 
 const DEFAULT_CONVERGE_THRESHOLD_MILLI = 180;
 const CONVERGE_THRESHOLD_KEY_PREFIX = 'wrongMatches.converge.threshold.';
-const ACTIVE_IMPORT_STATUSES = new Set(['queued', 'running']);
 
 /**
  * Format seconds as m:ss.
@@ -147,26 +146,6 @@ function greenEntries(group, thresholdMilli) {
 }
 
 /**
- * @param {any} job
- * @returns {boolean}
- */
-function isActiveImportJob(job) {
-  return job && ACTIVE_IMPORT_STATUSES.has(String(job.status || ''));
-}
-
-/**
- * @param {any} group
- * @returns {boolean}
- */
-function groupHasActiveJob(group) {
-  const groupJobs = group.import_jobs || [];
-  const entryJobs = (group.entries || [])
-    .map((/** @type {any} */ entry) => entry.import_job)
-    .filter(Boolean);
-  return [...groupJobs, ...entryJobs].some(isActiveImportJob);
-}
-
-/**
  * @param {number|string} requestId
  * @param {unknown} thresholdMilli
  * @param {boolean} deleteUnmatched
@@ -213,12 +192,11 @@ function greenCountStyle(greenCount) {
 }
 
 /**
- * @param {boolean} hasActiveJob
  * @param {number} greenCount
  * @returns {string}
  */
-function convergeButtonLabel(hasActiveJob, greenCount) {
-  return hasActiveJob ? 'Import Active' : `Converge${greenCount ? ` (${greenCount})` : ''}`;
+function convergeButtonLabel(greenCount) {
+  return `Converge${greenCount ? ` (${greenCount})` : ''}`;
 }
 
 /**
@@ -259,7 +237,6 @@ function updateConvergeGroup(requestId) {
   if (!group) return false;
   const thresholdMilli = thresholdForGroup(requestId);
   const greenCount = greenEntries(group, thresholdMilli).length;
-  const hasActiveJob = groupHasActiveJob(group);
   let touched = false;
 
   const badge = document.getElementById(`wm-green-count-${requestId}`);
@@ -271,8 +248,8 @@ function updateConvergeGroup(requestId) {
 
   const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-converge-btn-${requestId}`));
   if (btn) {
-    btn.disabled = hasActiveJob || greenCount === 0;
-    btn.textContent = convergeButtonLabel(hasActiveJob, greenCount);
+    btn.disabled = greenCount === 0;
+    btn.textContent = convergeButtonLabel(greenCount);
     touched = true;
   }
 
@@ -557,9 +534,8 @@ function renderGroup(g) {
  */
 function renderConvergeControls(g, count, thresholdMilli) {
   const greenCount = greenEntries(g, thresholdMilli).length;
-  const hasActiveJob = groupHasActiveJob(g);
-  const disabled = hasActiveJob || greenCount === 0;
-  const label = convergeButtonLabel(hasActiveJob, greenCount);
+  const disabled = greenCount === 0;
+  const label = convergeButtonLabel(greenCount);
   const releaseName = esc(String(g.artist) + ' — ' + String(g.album));
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 0;padding:6px 8px;background:#151515;border:1px solid #242424;border-radius:4px;">

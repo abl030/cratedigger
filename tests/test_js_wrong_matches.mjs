@@ -170,6 +170,24 @@ console.log('renderWrongMatches() shows threshold controls and green state');
   assert(dom.wrongMatches.innerHTML.includes('Converge (3)'), 'threshold edit updates converge count');
 }
 
+console.log('renderWrongMatches() keeps converge usable with active import jobs');
+{
+  installStorage();
+  const dom = installDom();
+  const data = JSON.parse(JSON.stringify(wrongMatchesData()));
+  data.groups[0].import_jobs = [{
+    id: 9,
+    status: 'queued',
+    request_id: 42,
+    job_type: 'force_import',
+  }];
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+
+  assert(!dom.wrongMatches.innerHTML.includes('Import Active'), 'does not replace converge with Import Active');
+  assert(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'keeps converge label with active jobs');
+  assert(!/id="wm-converge-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML), 'active jobs do not disable converge');
+}
+
 console.log('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
