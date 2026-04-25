@@ -2158,6 +2158,36 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(jobs[0].job_type, IMPORT_JOB_AUTOMATION)
         self.assertEqual(jobs[0].request_id, 1)
 
+    def test_poll_active_all_complete_bypasses_async_preview_gate(self):
+        """Automation jobs need importer-owned path materialization before preview."""
+        from lib.download import poll_active_downloads
+
+        row = self._make_downloading_row()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
+
+        with patch.dict("os.environ", {"CRATEDIGGER_IMPORT_PREVIEW_ENABLE": "1"}):
+            poll_active_downloads(ctx)
+
+        jobs = fake_db.list_import_jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].preview_status, "would_import")
+        self.assertEqual(jobs[0].preview_message, "Preview gate disabled")
+        self.assertIsNone(fake_db.claim_next_import_preview_job(worker_id="preview"))
+        claimed = fake_db.claim_next_import_job(worker_id="importer")
+        assert claimed is not None
+        self.assertEqual(claimed.id, jobs[0].id)
+
     def test_poll_active_all_complete_no_beets(self):
         """beets_validation_enabled=False still queues importer ownership."""
         from lib.download import poll_active_downloads
@@ -2927,6 +2957,39 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             self.assertEqual(fake_db.request(1)["status"], "wanted")
             self.assertIn((1, "wanted"), fake_db.status_history)
+
+    def test_poll_missing_canonical_processing_path_queues_importer(self):
+        """Missing canonical path can be pre-materialization, not post-move loss."""
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import canonical_processing_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = os.path.join(tmpdir, "downloads")
+            current_path = canonical_processing_path(
+                artist="Test Artist",
+                title="Test Album",
+                year="2020",
+                slskd_download_dir=download_root,
+            )
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": current_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = download_root
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_post_move_staged_path_without_validation_queues(self):
         """Staged retries are queued for importer ownership."""

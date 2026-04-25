@@ -1574,6 +1574,11 @@ def _enqueue_completed_processing(
         dedupe_key=automation_import_dedupe_key(request_id),
         payload=automation_import_payload(),
         message=f"Automation import queued for {entry.artist} - {entry.title}",
+        # Automation downloads are not yet safe for the async preview lane:
+        # the importer owns materializing slskd files into the stable
+        # processing folder. Previewing first checks a path that may not exist
+        # yet and terminal-fails valid completed downloads as path_missing.
+        preview_enabled=False,
     )
     if getattr(job, "deduped", False):
         logger.info(
@@ -1612,6 +1617,10 @@ def _processing_path_ready_for_importer(
         slskd_download_dir=ctx.cfg.slskd_download_dir,
     )
     if not os.path.isdir(state.current_path):
+        # The canonical processing folder may not exist yet. The importer
+        # materializes it from the completed slskd files as its first step.
+        if current_path_location.kind == "canonical":
+            return True
         if current_path_location.blocks_post_move_retry:
             _log_post_move_resume_blocked(
                 entry,
