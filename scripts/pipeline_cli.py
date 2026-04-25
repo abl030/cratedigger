@@ -1268,6 +1268,28 @@ def cmd_wrong_match_triage(db, args):
     """Run conservative preview-driven cleanup for Wrong Matches rows."""
     from lib.wrong_match_triage import triage_wrong_match, triage_wrong_matches
 
+    if args.limit is not None and args.limit <= 0:
+        print("  --limit must be positive.", file=sys.stderr)
+        return 2
+    if not args.apply:
+        print(
+            "  Refusing destructive wrong-match triage without --apply. "
+            "Use wrong-match-preview-backfill --cleanup for a dry run.",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.download_log_id is None
+        and args.request_id is None
+        and args.limit is None
+        and not args.all
+    ):
+        print(
+            "  Refusing bulk triage without --request-id, --limit, or --all.",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.download_log_id is not None:
         results = [triage_wrong_match(db, args.download_log_id)]
     else:
@@ -1299,16 +1321,44 @@ def cmd_wrong_match_preview_backfill(db, args):
     """Run explicit preview backfill for current Wrong Matches rows."""
     from lib.wrong_match_triage import backfill_wrong_match_previews
 
+    if args.limit is not None and args.limit <= 0:
+        print("  --limit must be positive.", file=sys.stderr)
+        return 2
+    if args.apply and args.dry_run:
+        print("  --apply and --dry-run cannot be combined.", file=sys.stderr)
+        return 2
+    if args.apply and not args.cleanup:
+        print("  --apply is only valid with --cleanup.", file=sys.stderr)
+        return 2
+    if (
+        args.cleanup
+        and args.apply
+        and args.request_id is None
+        and args.limit is None
+        and not args.all
+    ):
+        print(
+            "  Refusing cleanup apply without --request-id, --limit, or --all.",
+            file=sys.stderr,
+        )
+        return 2
+
+    dry_run = args.dry_run or (args.cleanup and not args.apply)
     summary = backfill_wrong_match_previews(
         db,
         request_id=args.request_id,
         limit=args.limit,
         cleanup=args.cleanup,
+        dry_run=dry_run,
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
+    if dry_run:
+        print("  mode: dry_run")
+    elif args.cleanup:
+        print("  mode: apply")
     for key, count in sorted(summary.items()):
         print(f"  {key}: {count}")
     return 0
@@ -1434,6 +1484,10 @@ def main():
                           help="Limit batch triage to one request")
     p_triage.add_argument("--limit", type=int,
                           help="Maximum candidates to triage")
+    p_triage.add_argument("--apply", action="store_true",
+                          help="Allow destructive triage")
+    p_triage.add_argument("--all", action="store_true",
+                          help="Allow --apply to process every candidate")
     p_triage.add_argument("--json", action="store_true")
 
     # wrong-match-preview-backfill
@@ -1446,7 +1500,13 @@ def main():
     p_backfill.add_argument("--limit", type=int,
                             help="Maximum candidates to preview")
     p_backfill.add_argument("--cleanup", action="store_true",
-                            help="Delete only cleanup-eligible confident rejects")
+                            help="Preview cleanup-eligible confident rejects; add --apply to delete")
+    p_backfill.add_argument("--apply", action="store_true",
+                            help="Allow --cleanup to delete candidates")
+    p_backfill.add_argument("--all", action="store_true",
+                            help="Allow --cleanup --apply to process every candidate")
+    p_backfill.add_argument("--dry-run", action="store_true",
+                            help="Preview without writing audit or deleting files")
     p_backfill.add_argument("--json", action="store_true")
 
     # repair-spectral
@@ -1481,8 +1541,12 @@ def main():
         "wrong-match-preview-backfill": cmd_wrong_match_preview_backfill,
         "repair-spectral": cmd_repair_spectral,
     }
-    commands[args.command](db, args)
-    db.close()
+    try:
+        rc = commands[args.command](db, args)
+    finally:
+        db.close()
+    if isinstance(rc, int):
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

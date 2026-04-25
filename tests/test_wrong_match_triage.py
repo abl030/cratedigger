@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key, force_import_payload
-from lib.wrong_match_triage import backfill_wrong_match_previews, triage_wrong_match
+from lib.wrong_match_triage import (
+    backfill_wrong_match_previews,
+    triage_wrong_match,
+    triage_wrong_matches,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -164,6 +168,81 @@ class TestWrongMatchTriage(unittest.TestCase):
             audit = vr["wrong_match_triage"]
             self.assertEqual(audit["action"], "preview_backfilled")
             self.assertEqual(audit["preview_verdict"], "would_import")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_backfill_dry_run_counts_cleanup_candidates_without_mutating(self):
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db, log_id = self._db_with_wrong_match(source)
+
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=ImportPreviewResult(
+                    mode="download_log",
+                    verdict="confident_reject",
+                    confident_reject=True,
+                    cleanup_eligible=True,
+                    decision="requeue_upgrade",
+                    reason="requeue_upgrade",
+                    source_path=source,
+                ),
+            ) as preview:
+                summary = backfill_wrong_match_previews(
+                    db,
+                    cleanup=True,
+                    dry_run=True,
+                )
+
+            preview.assert_called_once_with(db, log_id)
+            self.assertEqual(summary["previewed"], 1)
+            self.assertEqual(summary["confident_reject"], 1)
+            self.assertEqual(summary["cleanup_candidates"], 1)
+            self.assertEqual(summary["cleaned"], 0)
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            entry = db.get_download_log_entry(log_id)
+            assert entry is not None
+            vr = entry["validation_result"]
+            assert isinstance(vr, dict)
+            self.assertNotIn("wrong_match_triage", vr)
+            self.assertIn("failed_path", vr)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_backfill_non_positive_limit_does_not_process_rows(self):
+        source = tempfile.mkdtemp()
+        try:
+            db, _log_id = self._db_with_wrong_match(source)
+
+            with patch("lib.wrong_match_triage.preview_import_from_download_log") as preview:
+                summary = backfill_wrong_match_previews(
+                    db,
+                    cleanup=True,
+                    limit=0,
+                )
+
+            preview.assert_not_called()
+            self.assertEqual(summary["previewed"], 0)
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_triage_non_positive_limit_does_not_process_rows(self):
+        source = tempfile.mkdtemp()
+        try:
+            db, _log_id = self._db_with_wrong_match(source)
+
+            with patch("lib.wrong_match_triage.preview_import_from_download_log") as preview:
+                results = triage_wrong_matches(db, limit=0)
+
+            preview.assert_not_called()
+            self.assertEqual(results, [])
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
         finally:
             shutil.rmtree(source, ignore_errors=True)
 

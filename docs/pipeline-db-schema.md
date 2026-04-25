@@ -153,6 +153,8 @@ review list.
 pipeline_cli.py force-import <download_log_id>
 pipeline_cli.py import-jobs --status failed
 pipeline_cli.py wrong-match-preview-backfill --json
+pipeline_cli.py wrong-match-preview-backfill --cleanup --json
+pipeline_cli.py wrong-match-preview-backfill --cleanup --apply --request-id <id>
 # or: POST /api/pipeline/force-import {"download_log_id": N}
 ```
 
@@ -160,5 +162,8 @@ pipeline_cli.py wrong-match-preview-backfill --json
 daemon. It previews currently visible Wrong Matches rows with resolvable source
 folders, skips rows whose files are gone, skips rows already represented by an
 active force-import job, and records preview audit without creating import jobs.
-Use `--cleanup` only when you want cleanup-eligible confident rejects deleted as
-part of the same pass.
+Use `--cleanup` by itself as the cleanup dry-run: it counts cleanup-eligible
+confident rejects without writing audit rows or deleting files. Destructive
+cleanup requires `--cleanup --apply` and either `--request-id`, `--limit`, or
+explicit `--all`. The older `wrong-match-triage` command follows the same
+destructive-operation guard: `--apply` plus a scope, or explicit `--all`.
