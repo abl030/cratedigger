@@ -79,5 +79,24 @@ console.log('renderImportQueueItems() prefers terminal import messages over stal
     'stale preview message hidden for terminal rows');
 }
 
+console.log('renderRecentsItems() shows bad-extension postflight warning chip');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 584,
+    request_id: 604,
+    created_at: '2026-04-02T12:55:41+00:00',
+    album_title: 'Sleeps Like a Curse',
+    artist_name: 'The Panics',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'MP3 320 · user',
+    bad_extensions: ['01 One Too Many Itches.bak'],
+  }]);
+  assertContains(html, 'bad ext: 1', 'bad extension chip rendered');
+  assertContains(html, '01 One Too Many Itches.bak',
+    'bad extension filename appears in hover detail');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

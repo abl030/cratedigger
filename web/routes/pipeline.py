@@ -67,6 +67,7 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         # operator to query JSONB manually. Null on clean rows.
         item["disambiguation_failure"] = classified.disambiguation_failure
         item["disambiguation_detail"] = classified.disambiguation_detail
+        item["bad_extensions"] = classified.bad_extensions
         result.append(item)
     # Count outcomes for filter buttons (single query, no limit)
     count_cur = _server()._db()._execute("""
@@ -336,7 +337,7 @@ def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
     for job in jobs:
         item = _serialize_import_job(job)
         request_id = item.get("request_id")
-        if request_id is not None:
+        if isinstance(request_id, (int, str)) and not isinstance(request_id, bool):
             req = db.get_request(int(request_id))
             if req:
                 item["artist_name"] = req.get("artist_name")

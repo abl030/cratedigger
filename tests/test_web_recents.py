@@ -123,6 +123,7 @@ class TestClassifiedEntry(unittest.TestCase):
                             border_color="#1a4a2a", verdict="", summary="")
         self.assertIsNone(c.disambiguation_failure)
         self.assertIsNone(c.disambiguation_detail)
+        self.assertEqual(c.bad_extensions, [])
 
 
 # ============================================================================
@@ -222,6 +223,33 @@ class TestClassifyDisambiguationFailure(unittest.TestCase):
                    beets_scenario="high_distance", beets_distance=0.4))
         self.assertIsNone(result.disambiguation_failure)
         self.assertIsNone(result.disambiguation_detail)
+
+
+class TestClassifyBadExtensions(unittest.TestCase):
+    """Bad postflight extensions should be visible without parsing JSONB."""
+
+    def test_bad_extensions_surface_from_import_result(self):
+        result = classify_log_entry(_entry(
+            outcome="success",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "postflight": {
+                    "beets_id": 123,
+                    "track_count": 2,
+                    "imported_path": "/Beets/Artist/Album",
+                    "bad_extensions": ["01 Track.bak"],
+                    "disambiguation_failure": None,
+                    "moved_siblings": [],
+                },
+            },
+        ))
+
+        self.assertEqual(result.bad_extensions, ["01 Track.bak"])
+
+    def test_no_import_result_has_no_bad_extensions(self):
+        result = classify_log_entry(_entry(import_result=None))
+        self.assertEqual(result.bad_extensions, [])
 
 
 # ============================================================================

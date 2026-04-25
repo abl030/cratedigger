@@ -45,6 +45,7 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     verdict: str
     disambiguation_failure: str | None
     disambiguation_detail: str | None
+    bad_extensions: list[str]
     spectral_grade: str | None
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
@@ -93,6 +94,7 @@ def build_download_history_row(
             "verdict": classified.verdict,
             "disambiguation_failure": classified.disambiguation_failure,
             "disambiguation_detail": classified.disambiguation_detail,
+            "bad_extensions": classified.bad_extensions,
         },
         type=DownloadHistoryViewRow,
     )

@@ -15,6 +15,7 @@ Usage:
         python3 scripts/fix_bak_files.py --dry-run
 """
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -22,21 +23,68 @@ import sys
 
 BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 VALID_AUDIO_EXT = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
-EXT_MAP = {"mp3": ".mp3", "flac": ".flac", "ogg": ".ogg",
-           "opus": ".opus", "wav": ".wav", "mp4": ".m4a"}
+CODEC_EXT_MAP = {
+    "mp3": ".mp3",
+    "flac": ".flac",
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "wav": ".wav",
+    "pcm_s16le": ".wav",
+    "pcm_s24le": ".wav",
+    "pcm_s32le": ".wav",
+    "wmav1": ".wma",
+    "wmav2": ".wma",
+    "wmalossless": ".wma",
+}
+FORMAT_EXT_MAP = {
+    "mp3": ".mp3",
+    "flac": ".flac",
+    "ogg": ".ogg",
+    "wav": ".wav",
+    "asf": ".wma",
+    "mp4": ".m4a",
+    "mov": ".m4a",
+    "m4a": ".m4a",
+}
 
 
-def detect_format(path: str) -> str:
-    """Detect audio format via ffprobe. Returns extension like '.mp3'."""
+def detect_format(path: str) -> str | None:
+    """Detect audio format via ffprobe. Returns extension like '.mp3'.
+
+    Prefer the audio stream codec over the container name. Containers are
+    ambiguous: Ogg can carry Opus or Vorbis, and MP4/M4A can carry AAC or
+    ALAC. Unknown probes return None so the manual repair never guesses MP3.
+    """
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=format_name",
-             "-of", "csv=p=0", path],
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_type,codec_name:format=format_name",
+             "-of", "json", path],
             capture_output=True, text=True, timeout=15)
-        fmt = result.stdout.strip().split(",")[0] if result.stdout.strip() else ""
-        return EXT_MAP.get(fmt, ".mp3")
-    except Exception:
-        return ".mp3"
+        if result.returncode != 0:
+            return None
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams")
+        if isinstance(streams, list):
+            for stream in streams:
+                if not isinstance(stream, dict):
+                    continue
+                if stream.get("codec_type") != "audio":
+                    continue
+                codec = str(stream.get("codec_name") or "").lower()
+                if codec in CODEC_EXT_MAP:
+                    return CODEC_EXT_MAP[codec]
+        fmt_obj = payload.get("format")
+        if isinstance(fmt_obj, dict):
+            names = str(fmt_obj.get("format_name") or "").lower().split(",")
+            for name in names:
+                if name in FORMAT_EXT_MAP:
+                    return FORMAT_EXT_MAP[name]
+        return None
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def main() -> None:
@@ -80,6 +128,10 @@ def main() -> None:
             continue
 
         correct_ext = detect_format(path)
+        if correct_ext is None:
+            print(f"  UNKNOWN: could not detect audio codec, skipping {os.path.basename(path)}")
+            errors += 1
+            continue
         new_path = os.path.splitext(path)[0] + correct_ext
 
         if os.path.exists(new_path):

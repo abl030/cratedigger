@@ -7,7 +7,7 @@ No I/O, no database — fully unit-testable.
 """
 
 import json
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 import msgspec
@@ -108,6 +108,7 @@ class ClassifiedEntry:
     # ``detail`` for hover/tooltip — do not parse it.
     disambiguation_failure: Optional[str] = None
     disambiguation_detail: Optional[str] = None
+    bad_extensions: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +149,14 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     summary = _build_summary(entry, badge, verdict)
     downloaded_label = _build_downloaded_label(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
+    bad_extensions = _extract_bad_extensions(entry)
     return ClassifiedEntry(
         badge=badge, badge_class=badge_class,
         border_color=border_color, verdict=verdict,
         summary=summary, downloaded_label=downloaded_label,
         disambiguation_failure=disambig_reason,
         disambiguation_detail=disambig_detail,
+        bad_extensions=bad_extensions,
     )
 
 
@@ -171,6 +174,14 @@ def _extract_disambiguation_failure(
     if fail is None:
         return (None, None)
     return (fail.reason, fail.detail)
+
+
+def _extract_bad_extensions(entry: LogEntry) -> list[str]:
+    """Pull postflight bad-extension filenames out of ImportResult JSONB."""
+    ir = _parse_import_result(entry)
+    if ir is None or ir.postflight is None:
+        return []
+    return list(ir.postflight.bad_extensions)
 
 
 def _classify(entry: LogEntry) -> tuple[str, str, str, str]:

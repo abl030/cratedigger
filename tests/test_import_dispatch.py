@@ -332,6 +332,22 @@ class TestDispatchImport(unittest.TestCase):
         r["mock_cleanup"].assert_called_once()
         r["mock_gate"].assert_called_once()
 
+    def test_import_with_bad_extensions_logs_error_and_persists_jsonb(self):
+        from lib.quality import ImportResult
+
+        ir = make_import_result(decision="import")
+        ir.postflight.bad_extensions = ["01 Track.bak"]
+
+        with self.assertLogs("cratedigger", level="ERROR") as logs:
+            r = self._dispatch(ir)
+
+        self.assertIn("POSTFLIGHT BAD EXTENSIONS", "\n".join(logs.output))
+        raw = r["db"].download_logs[0].import_result
+        assert isinstance(raw, str)
+        persisted = ImportResult.from_json(raw)
+        self.assertEqual(persisted.postflight.bad_extensions,
+                         ["01 Track.bak"])
+
     def test_preflight_existing(self):
         ir = make_import_result(decision="preflight_existing")
         r = self._dispatch(ir)

@@ -458,6 +458,28 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
         dl_info.final_format = ir.final_format
 
 
+def _log_postflight_bad_extensions(
+    *,
+    ir: ImportResult,
+    mode: str,
+    request_id: int,
+    label: str,
+) -> None:
+    """Emit an error-level service log for warning-only postflight anomalies."""
+    bad_extensions = ir.postflight.bad_extensions
+    if not bad_extensions:
+        return
+    logger.error(
+        "POSTFLIGHT BAD EXTENSIONS: %s request_id=%s label=%s files=%s; "
+        "import remains successful but warning is persisted in "
+        "download_log.import_result.postflight.bad_extensions",
+        mode,
+        request_id,
+        label,
+        ", ".join(bad_extensions),
+    )
+
+
 def _cleanup_staged_dir(dest: str) -> None:
     """Remove a staged directory and its parent if empty."""
     if os.path.isdir(dest):
@@ -873,6 +895,12 @@ def dispatch_import_core(
                 outcome_message = f"No JSON result (rc={run.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
+                _log_postflight_bad_extensions(
+                    ir=ir,
+                    mode=mode,
+                    request_id=request_id,
+                    label=label,
+                )
                 # Propagate sibling path updates BEFORE dispatch
                 # branches. Rationale: the sibling files are already
                 # moved on disk by the time the harness returns —

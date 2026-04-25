@@ -670,12 +670,16 @@ class TestPipelineRouteContracts(_WebServerCase):
         # reason + detail so the frontend can render a warning chip.
         # Null on clean rows; the field must always be present.
         "disambiguation_failure", "disambiguation_detail",
+        # Postflight bad-extension detection is warning-only but must be
+        # surfaced in Recents so it is not buried in JSONB.
+        "bad_extensions",
     }
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
-        "disambiguation_failure", "disambiguation_detail", "spectral_grade",
-        "spectral_bitrate", "existing_min_bitrate", "existing_spectral_bitrate",
+        "disambiguation_failure", "disambiguation_detail", "bad_extensions",
+        "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
+        "existing_spectral_bitrate",
     }
     STATUS_WANTED_REQUIRED_FIELDS = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
@@ -2676,8 +2680,9 @@ class TestBeetsRouteContracts(_WebServerCase):
         "bitrate", "was_converted", "original_filetype", "actual_filetype",
         "actual_min_bitrate", "slskd_filetype", "slskd_bitrate",
         "downloaded_label", "verdict", "disambiguation_failure",
-        "disambiguation_detail", "spectral_grade", "spectral_bitrate",
-        "existing_min_bitrate", "existing_spectral_bitrate", "album_title",
+        "disambiguation_detail", "bad_extensions", "spectral_grade",
+        "spectral_bitrate", "existing_min_bitrate",
+        "existing_spectral_bitrate", "album_title",
         "artist_name", "mb_release_id", "request_status",
         "request_min_bitrate", "search_filetype_override", "source",
     }

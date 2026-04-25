@@ -10,6 +10,7 @@ import importlib
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -179,6 +180,46 @@ class TestStageResult(unittest.TestCase):
         self.assertEqual(r.exit_code, 0)
         self.assertIsNone(r.error)
         self.assertFalse(r.terminal)
+
+
+class TestPostflightBadExtensionWarnings(unittest.TestCase):
+    """Postflight must warn and persist, not mutate already-imported files."""
+
+    def test_bad_extension_detection_records_without_renaming(self):
+        from harness import import_one
+        from lib.quality import ImportResult, PostflightInfo
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_path = os.path.join(tmpdir, "01 Track.bak")
+            good_path = os.path.join(tmpdir, "02 Track.mp3")
+            with open(bad_path, "wb") as f:
+                f.write(b"not real audio")
+            with open(good_path, "wb") as f:
+                f.write(b"not real audio")
+
+            beets = MagicMock()
+            beets.get_item_paths.return_value = [
+                (11, bad_path),
+                (12, good_path),
+            ]
+            result = ImportResult(
+                postflight=PostflightInfo(
+                    beets_id=99,
+                    track_count=2,
+                    imported_path=tmpdir,
+                )
+            )
+
+            with patch("os.rename") as mock_rename, \
+                 patch("sqlite3.connect") as mock_connect:
+                found = import_one._record_bad_extension_warnings(
+                    beets, "mbid-123", result)
+
+            self.assertEqual(found, ["01 Track.bak"])
+            self.assertEqual(result.postflight.bad_extensions, ["01 Track.bak"])
+            self.assertTrue(os.path.exists(bad_path))
+            mock_rename.assert_not_called()
+            mock_connect.assert_not_called()
 
 
 # ============================================================================

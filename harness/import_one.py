@@ -1074,6 +1074,37 @@ def _emit_and_exit(r) -> NoReturn:
     sys.exit(r.exit_code)
 
 
+def _record_bad_extension_warnings(
+    beets: BeetsDB,
+    mbid: str,
+    r: ImportResult,
+) -> list[str]:
+    """Record postflight bad extensions without mutating imported files.
+
+    This used to automatically rename ``.bak`` files and rewrite beets'
+    SQLite paths. That repair was a workaround for ``mp3val -f`` creating
+    backup files, fixed by running mp3val with ``-nb``. If a bad extension
+    appears now, it is an upstream corruption signal, not a normal recovery
+    path. The album is already imported at this point, so preserve the
+    successful import result and make the anomaly loud + durable instead.
+    """
+    bad_ext_files: list[str] = []
+    for _item_id, item_path in beets.get_item_paths(mbid):
+        ext = os.path.splitext(item_path)[1].lower()
+        if ext not in AUDIO_EXTENSIONS and os.path.isfile(item_path):
+            bad_ext_files.append(os.path.basename(item_path))
+
+    if bad_ext_files:
+        r.postflight.bad_extensions = bad_ext_files
+        joined = ", ".join(bad_ext_files)
+        _log("[POSTFLIGHT BAD EXTENSIONS] CRITICAL: imported album contains "
+             f"non-audio extension(s): {joined}")
+        _log("[POSTFLIGHT BAD EXTENSIONS] Automatic rename repair is disabled; "
+             "warning recorded in import_result.postflight.bad_extensions")
+
+    return bad_ext_files
+
+
 def main():
     # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
     # Done in main() (not at module import) so importing this module for tests
@@ -1603,39 +1634,10 @@ def main():
         r.postflight.moved_siblings = _canonicalize_siblings(
             sibling_album_ids, beets)
 
-    # --- Post-import extension check ---
-    # Detect .bak files (known bug: track 01 sometimes renamed to .bak during import)
-    VALID_AUDIO_EXT = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
-    item_paths = beets.get_item_paths(mbid)
-    bad_ext_files = []
-    for item_id, item_path in item_paths:
-        ext = os.path.splitext(item_path)[1].lower()
-        if ext not in VALID_AUDIO_EXT and os.path.isfile(item_path):
-            # Determine correct extension from actual audio format
-            try:
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=format_name",
-                     "-of", "csv=p=0", item_path],
-                    capture_output=True, text=True, timeout=15)
-                fmt = probe.stdout.strip().split(",")[0] if probe.stdout.strip() else ""
-                ext_map = {"mp3": ".mp3", "flac": ".flac", "ogg": ".ogg",
-                           "opus": ".opus", "wav": ".wav", "mp4": ".m4a"}
-                correct_ext = ext_map.get(fmt, ".mp3")
-            except Exception:
-                correct_ext = ".mp3"
-            new_path = os.path.splitext(item_path)[0] + correct_ext
-            _log(f"[EXT-FIX] {os.path.basename(item_path)} → {os.path.basename(new_path)}")
-            os.rename(item_path, new_path)
-            # Update beets DB (writable connection for this fix)
-            import sqlite3 as _sqlite3
-            from lib.beets_db import DEFAULT_BEETS_DB
-            with _sqlite3.connect(DEFAULT_BEETS_DB) as fix_conn:
-                fix_conn.execute("UPDATE items SET path = ? WHERE id = ?",
-                                 (new_path.encode(), item_id))
-            bad_ext_files.append(os.path.basename(item_path))
-    if bad_ext_files:
-        r.postflight.bad_extensions = bad_ext_files
-        _log(f"[EXT-FIX] Fixed {len(bad_ext_files)} file(s) with bad extensions")
+    # --- Post-import bad-extension detection ---
+    # This is warning-only. The old automatic repair path rewrote filenames
+    # and beets DB paths after import, which is too late and too risky.
+    _record_bad_extension_warnings(beets, mbid, r)
 
     # --- Force library modes ---
     # Guards against any subprocess layer that dropped umask and created

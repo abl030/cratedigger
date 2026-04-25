@@ -53,6 +53,14 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
   }
 
+  const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
+  if (badExtensions.length > 0) {
+    rows.push([
+      'Bad extension',
+      `<span style="color:#ec6;">${esc(badExtensions.join(', '))}</span>`,
+    ]);
+  }
+
   for (const [label, value] of rows) {
     html += `<div class="p-hist-row"><span class="p-hist-label">${label}</span> ${value}</div>`;
   }
