@@ -70,6 +70,14 @@
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
 
+  previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
+    export PATH="${runtimePath}:$PATH"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    exec ${pythonEnv}/bin/python ${src}/scripts/import_preview_worker.py \
+      --dsn "${cfg.pipelineDb.dsn}" \
+      --workers ${toString cfg.importer.previewWorkers} "$@"
+  '';
+
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}:''${PYTHONPATH:-}"
@@ -303,6 +311,11 @@ in {
         type = types.bool;
         default = true;
         description = "Run the long-lived importer worker that drains the shared import queue.";
+      };
+      previewWorkers = mkOption {
+        type = types.int;
+        default = 2;
+        description = "Number of async import preview workers to run before the serial importer lane.";
       };
     };
 
@@ -630,9 +643,13 @@ in {
         assertion = !cfg.notifiers.jellyfin.enable || (cfg.notifiers.jellyfin.tokenFile != null && cfg.notifiers.jellyfin.url != "");
         message = "services.cratedigger.notifiers.jellyfin: enable requires url and tokenFile";
       }
+      {
+        assertion = cfg.importer.previewWorkers >= 1;
+        message = "services.cratedigger.importer.previewWorkers must be at least 1";
+      }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg pkgs.postgresql];
 
     users.users = mkIf (cfg.user != "root") {
       ${cfg.user} = {
@@ -721,6 +738,26 @@ in {
         ExecStartPre = [preStartScript];
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
+        WorkingDirectory = cfg.stateDir;
+        Restart = "on-failure";
+        RestartSec = 5;
+      };
+    };
+
+    systemd.services.cratedigger-import-preview-worker = mkIf cfg.importer.enable {
+      description = "Cratedigger async import preview worker";
+      after = ["cratedigger-db-migrate.service"];
+      requires = ["cratedigger-db-migrate.service"];
+      wantedBy = ["multi-user.target"];
+      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        UMask = "0000";
+        ExecStartPre = [preStartScript];
+        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
         RestartSec = 5;

@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from lib.import_preview import ImportPreviewResult
-from lib.wrong_match_triage import triage_wrong_match
+from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key, force_import_payload
+from lib.wrong_match_triage import backfill_wrong_match_previews, triage_wrong_match
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -131,6 +132,76 @@ class TestWrongMatchTriage(unittest.TestCase):
         self.assertEqual(audit["action"], "stale_path_cleared")
         self.assertEqual(audit["reason"], "path_missing")
         self.assertNotIn("failed_path", vr)
+
+    def test_backfill_audit_only_records_resolvable_preview(self):
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db, log_id = self._db_with_wrong_match(source)
+
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=ImportPreviewResult(
+                    mode="download_log",
+                    verdict="would_import",
+                    would_import=True,
+                    decision="import",
+                    reason="import",
+                    source_path=source,
+                ),
+            ) as preview:
+                summary = backfill_wrong_match_previews(db)
+
+            preview.assert_called_once_with(db, log_id)
+            self.assertEqual(summary["previewed"], 1)
+            self.assertEqual(summary["would_import"], 1)
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            entry = db.get_download_log_entry(log_id)
+            assert entry is not None
+            vr = entry["validation_result"]
+            assert isinstance(vr, dict)
+            audit = vr["wrong_match_triage"]
+            self.assertEqual(audit["action"], "preview_backfilled")
+            self.assertEqual(audit["preview_verdict"], "would_import")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_backfill_skips_missing_files_without_clearing(self):
+        source = tempfile.mkdtemp()
+        shutil.rmtree(source)
+        db, _log_id = self._db_with_wrong_match(source)
+
+        with patch("lib.wrong_match_triage.preview_import_from_download_log") as preview:
+            summary = backfill_wrong_match_previews(db)
+
+        preview.assert_not_called()
+        self.assertEqual(summary["previewed"], 0)
+        self.assertEqual(summary["skipped_missing_files"], 1)
+        self.assertEqual(len(db.get_wrong_matches()), 1)
+
+    def test_backfill_skips_active_force_import_job(self):
+        source = tempfile.mkdtemp()
+        try:
+            db, log_id = self._db_with_wrong_match(source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=1,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+
+            with patch("lib.wrong_match_triage.preview_import_from_download_log") as preview:
+                summary = backfill_wrong_match_previews(db)
+
+            preview.assert_not_called()
+            self.assertEqual(summary["previewed"], 0)
+            self.assertEqual(summary["skipped_active_jobs"], 1)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/delete-transparent-non-flac` | POST | Bulk-delete wrong-match folders whose exact library copy is already transparent and whose pending downloads are non-FLAC |
 | `/api/import-jobs` | GET | List recent import queue jobs |
+| `/api/import-jobs/timeline` | GET | List import queue jobs in Recents timeline order |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
@@ -72,6 +73,10 @@ Browser → https://music.ablz.au
   `import_jobs`, so long beets imports do not block the web request. Failed
   queued force-imports remove the reviewed wrong-match source from the
   actionable list while preserving the failed job/download audit.
+- **Recents Queue subview** — Recents has History and Queue subviews. Queue
+  shows import jobs in beets-import order, with preview states (`waiting`,
+  `previewing`, `importable`, `uncertain`, `failed`) and preview messages
+  visible before the serial importer claims work.
 - **Wrong Matches Converge** — each release starts with a `180` milli-distance
   loosen threshold. Candidates at or below that threshold turn green; Converge
   queues those folders as force-import jobs and deletes the non-green folders
@@ -117,6 +122,9 @@ What this creates on doc2:
 - `cratedigger-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
 - `cratedigger-importer.service` — long-lived worker that drains queued
   force/manual/automation imports after DB migrations have run
+- `cratedigger-import-preview-worker.service` — long-lived async preview worker
+  that prepares queued jobs for the serial importer; defaults to two worker
+  loops via `services.cratedigger.importer.previewWorkers`
 - `services.redis.servers.cratedigger` — provided by the homelab wrapper (not the upstream module)
 - `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
 - Cloudflare DNS + ACME cert auto-provisioned
@@ -133,6 +141,11 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 ```
 
 The service auto-restarts when the Nix store path changes.
+
+After deploy, check `systemctl status cratedigger-import-preview-worker
+cratedigger-importer` and the worker journals. The Recents Queue subview should
+show new rows move from waiting preview, to previewing, to importable or a
+terminal preview failure; only importable rows enter the serial importer lane.
 
 ## MusicBrainz API Usage
 

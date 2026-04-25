@@ -7,7 +7,7 @@
 
 import { normalizeReleaseId } from './util.js';
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -18,6 +18,7 @@ export const state = {
   pipelineFilter: 'wanted',
   recentsCounts: { all: 0, imported: 0, rejected: 0 },
   recentsFilter: 'all',
+  recentsSub: 'history',
   dsConstants: null,
   disambData: null,
   searchTimer: null,

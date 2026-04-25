@@ -525,6 +525,11 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(first.id, duplicate.id)
         self.assertTrue(duplicate.deduped)
         self.assertEqual(db.count_import_jobs_by_status(), {"queued": 1})
+        db.mark_import_job_preview_importable(
+            first.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
 
         claimed = db.claim_next_import_job(worker_id="fake-worker")
         assert claimed is not None
@@ -566,6 +571,58 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         )
         assert failed is not None
         self.assertEqual(failed.status, "failed")
+
+    def test_import_job_preview_methods_mirror_core_lifecycle(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        queued = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:preview",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        self.assertEqual(queued.preview_status, "waiting")
+
+        claimed = db.claim_next_import_preview_job(worker_id="fake-preview")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "queued")
+        self.assertEqual(claimed.preview_status, "running")
+        self.assertEqual(claimed.preview_attempts, 1)
+        self.assertEqual(claimed.preview_worker_id, "fake-preview")
+        self.assertTrue(db.heartbeat_import_job_preview(claimed.id))
+
+        importable = db.mark_import_job_preview_importable(
+            claimed.id,
+            preview_result={"verdict": "would_import"},
+            message="Preview would import",
+        )
+        assert importable is not None
+        self.assertEqual(importable.preview_status, "would_import")
+        self.assertEqual(importable.preview_result, {"verdict": "would_import"})
+        self.assertIsNotNone(importable.importable_at)
+
+        rejected = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=43,
+            dedupe_key="manual:preview-reject",
+            payload=manual_import_payload(failed_path="/tmp/reject"),
+        )
+        failed = db.mark_import_job_preview_failed(
+            rejected.id,
+            preview_status="confident_reject",
+            error="spectral_reject",
+            preview_result={
+                "verdict": "confident_reject",
+                "reason": "spectral_reject",
+            },
+            message="Preview rejected: spectral_reject",
+        )
+        assert failed is not None
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.preview_status, "confident_reject")
+        self.assertEqual(failed.preview_error, "spectral_reject")
+        self.assertEqual(failed.error, "spectral_reject")
 
     def test_add_request_assigns_monotonic_id(self):
         db = FakePipelineDB()

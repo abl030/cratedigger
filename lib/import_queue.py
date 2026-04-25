@@ -18,6 +18,25 @@ IMPORT_JOB_TYPES = frozenset({
 })
 IMPORT_JOB_STATUSES = frozenset({"queued", "running", "completed", "failed"})
 IMPORT_JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
+IMPORT_JOB_PREVIEW_WAITING = "waiting"
+IMPORT_JOB_PREVIEW_RUNNING = "running"
+IMPORT_JOB_PREVIEW_WOULD_IMPORT = "would_import"
+IMPORT_JOB_PREVIEW_CONFIDENT_REJECT = "confident_reject"
+IMPORT_JOB_PREVIEW_UNCERTAIN = "uncertain"
+IMPORT_JOB_PREVIEW_ERROR = "error"
+IMPORT_JOB_PREVIEW_STATUSES = frozenset({
+    IMPORT_JOB_PREVIEW_WAITING,
+    IMPORT_JOB_PREVIEW_RUNNING,
+    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
+    IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
+    IMPORT_JOB_PREVIEW_UNCERTAIN,
+    IMPORT_JOB_PREVIEW_ERROR,
+})
+IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
+    IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
+    IMPORT_JOB_PREVIEW_UNCERTAIN,
+    IMPORT_JOB_PREVIEW_ERROR,
+})
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,16 @@ class ImportJob:
     started_at: datetime | None
     heartbeat_at: datetime | None
     completed_at: datetime | None
+    preview_status: str | None = None
+    preview_result: dict[str, Any] | None = None
+    preview_message: str | None = None
+    preview_error: str | None = None
+    preview_attempts: int = 0
+    preview_worker_id: str | None = None
+    preview_started_at: datetime | None = None
+    preview_heartbeat_at: datetime | None = None
+    preview_completed_at: datetime | None = None
+    importable_at: datetime | None = None
     deduped: bool = False
 
     @classmethod
@@ -47,6 +76,12 @@ class ImportJob:
         payload = _json_dict(row.get("payload"))
         result_raw = row.get("result")
         result = _json_dict(result_raw) if result_raw is not None else None
+        preview_result_raw = row.get("preview_result")
+        preview_result = (
+            _json_dict(preview_result_raw)
+            if preview_result_raw is not None
+            else None
+        )
         return cls(
             id=int(row["id"]),
             job_type=str(row["job_type"]),
@@ -84,6 +119,32 @@ class ImportJob:
             started_at=row.get("started_at"),
             heartbeat_at=row.get("heartbeat_at"),
             completed_at=row.get("completed_at"),
+            preview_status=(
+                str(row["preview_status"])
+                if row.get("preview_status") is not None
+                else None
+            ),
+            preview_result=preview_result,
+            preview_message=(
+                str(row["preview_message"])
+                if row.get("preview_message") is not None
+                else None
+            ),
+            preview_error=(
+                str(row["preview_error"])
+                if row.get("preview_error") is not None
+                else None
+            ),
+            preview_attempts=int(row.get("preview_attempts") or 0),
+            preview_worker_id=(
+                str(row["preview_worker_id"])
+                if row.get("preview_worker_id") is not None
+                else None
+            ),
+            preview_started_at=row.get("preview_started_at"),
+            preview_heartbeat_at=row.get("preview_heartbeat_at"),
+            preview_completed_at=row.get("preview_completed_at"),
+            importable_at=row.get("importable_at"),
             deduped=deduped,
         )
 
@@ -105,12 +166,32 @@ class ImportJob:
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
             "completed_at": self.completed_at,
+            "preview_status": self.preview_status,
+            "preview_result": self.preview_result,
+            "preview_message": self.preview_message,
+            "preview_error": self.preview_error,
+            "preview_attempts": self.preview_attempts,
+            "preview_worker_id": self.preview_worker_id,
+            "preview_started_at": self.preview_started_at,
+            "preview_heartbeat_at": self.preview_heartbeat_at,
+            "preview_completed_at": self.preview_completed_at,
+            "importable_at": self.importable_at,
             "deduped": self.deduped,
         }
 
     def to_json_dict(self) -> dict[str, Any]:
         result = self.to_dict()
-        for key in ("created_at", "updated_at", "started_at", "heartbeat_at", "completed_at"):
+        for key in (
+            "created_at",
+            "updated_at",
+            "started_at",
+            "heartbeat_at",
+            "completed_at",
+            "preview_started_at",
+            "preview_heartbeat_at",
+            "preview_completed_at",
+            "importable_at",
+        ):
             value = result[key]
             if hasattr(value, "isoformat"):
                 result[key] = value.isoformat()
@@ -138,6 +219,19 @@ def validate_job_type(job_type: str) -> str:
 def validate_status(status: str) -> str:
     if status not in IMPORT_JOB_STATUSES:
         raise ValueError(f"Invalid import job status: {status}")
+    return status
+
+
+def validate_preview_status(status: str) -> str:
+    if status not in IMPORT_JOB_PREVIEW_STATUSES:
+        raise ValueError(f"Invalid import job preview status: {status}")
+    return status
+
+
+def validate_preview_failure_status(status: str) -> str:
+    validate_preview_status(status)
+    if status not in IMPORT_JOB_PREVIEW_FAILURE_STATUSES:
+        raise ValueError(f"Invalid import job preview failure status: {status}")
     return status
 
 

@@ -86,6 +86,21 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
         self.assertIn("WorkingDirectory = cfg.stateDir", text)
 
+    def test_preview_worker_wrapper_service_and_worker_count_are_defined(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('writeShellScriptBin "cratedigger-import-preview-worker"', text)
+        self.assertIn("${src}/scripts/import_preview_worker.py", text)
+        self.assertIn("systemd.services.cratedigger-import-preview-worker", text)
+        self.assertIn("previewWorkers", text)
+        self.assertIn("default = 2", text)
+        self.assertIn("cfg.importer.previewWorkers >= 1", text)
+        self.assertIn("services.cratedigger.importer.previewWorkers must be at least 1", text)
+        self.assertIn('--workers ${toString cfg.importer.previewWorkers}', text)
+        self.assertIn('after = ["cratedigger-db-migrate.service"]', text)
+        self.assertIn('requires = ["cratedigger-db-migrate.service"]', text)
+        self.assertIn('ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker"', text)
+        self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

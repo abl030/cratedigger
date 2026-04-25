@@ -11,6 +11,18 @@ release or session close), and **reentrant within a session** (a second
 acquire of the same `(namespace, key)` in the same session always
 returns true).
 
+Async import preview workers do not take the importer singleton lock because
+they must not mutate beets or source folders. They claim `import_jobs` preview
+work through row-level `FOR UPDATE SKIP LOCKED` semantics, persist preview
+audit state, and mark only `would_import` jobs as importable for the serial
+worker.
+
+Outstanding follow-up: after the preview-gated queue has run in production,
+inventory IMPORT/RELEASE lock call sites and remove any lock whose only
+remaining purpose was cross-entrypoint beets import ownership. Until then, keep
+the locks as defensive guards around the existing dispatch internals. Tracking
+issue: <https://github.com/abl030/cratedigger/issues/169>.
+
 This doc is the single source of truth for namespaces, keys, ordering,
 and reentrancy. Add a new lock only after reading the rules below and
 updating both the **namespace table** and the **call-site index**.

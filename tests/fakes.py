@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
-from lib.import_queue import ImportJob, validate_job_type, validate_payload, validate_status
+from lib.import_queue import (
+    ImportJob,
+    validate_job_type,
+    validate_preview_failure_status,
+    validate_payload,
+    validate_status,
+)
 from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
@@ -408,6 +414,16 @@ class FakePipelineDB:
             "started_at": None,
             "heartbeat_at": None,
             "completed_at": None,
+            "preview_status": "waiting",
+            "preview_result": None,
+            "preview_message": None,
+            "preview_error": None,
+            "preview_attempts": 0,
+            "preview_worker_id": None,
+            "preview_started_at": None,
+            "preview_heartbeat_at": None,
+            "preview_completed_at": None,
+            "importable_at": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -473,6 +489,31 @@ class FakePipelineDB:
             counts[status] = counts.get(status, 0) + 1
         return counts
 
+    def list_import_job_timeline(self, *, limit: int = 50) -> list[ImportJob]:
+        def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, datetime, int]:
+            status = row.get("status")
+            preview_status = row.get("preview_status")
+            if status == "queued" and preview_status == "would_import":
+                bucket = 0
+            elif status == "running":
+                bucket = 1
+            elif status == "queued" and preview_status == "running":
+                bucket = 2
+            elif status == "queued" and preview_status == "waiting":
+                bucket = 3
+            else:
+                bucket = 4
+            return (
+                bucket,
+                _as_datetime(row.get("importable_at")),
+                _as_datetime(row.get("created_at")),
+                _as_datetime(row.get("updated_at")),
+                int(row["id"]),
+            )
+
+        rows = sorted(self._import_jobs, key=sort_key)
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
     def claim_next_import_job(
         self,
         *,
@@ -481,8 +522,13 @@ class FakePipelineDB:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
+            and row.get("preview_status") == "would_import"
         ]
-        queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        queued.sort(key=lambda row: (
+            _as_datetime(row.get("importable_at")),
+            _as_datetime(row.get("created_at")),
+            row["id"],
+        ))
         if not queued:
             return None
         row = queued[0]
@@ -608,6 +654,153 @@ class FakePipelineDB:
             row["heartbeat_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
+        return updated_jobs
+
+    def claim_next_import_preview_job(
+        self,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        queued = [
+            row for row in self._import_jobs
+            if row.get("status") == "queued"
+            and row.get("preview_status") == "waiting"
+        ]
+        queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        if not queued:
+            return None
+        row = queued[0]
+        now = _utcnow()
+        row["preview_status"] = "running"
+        row["preview_attempts"] = int(row.get("preview_attempts") or 0) + 1
+        row["preview_worker_id"] = worker_id
+        row["preview_started_at"] = row.get("preview_started_at") or now
+        row["preview_heartbeat_at"] = now
+        row["preview_message"] = None
+        row["preview_error"] = None
+        row["updated_at"] = now
+        return ImportJob.from_row(copy.deepcopy(row))
+
+    def heartbeat_import_job_preview(self, job_id: int) -> bool:
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "queued"
+                and row.get("preview_status") == "running"
+            ):
+                now = _utcnow()
+                row["preview_heartbeat_at"] = now
+                row["updated_at"] = now
+                return True
+        return False
+
+    def mark_import_job_preview_importable(
+        self,
+        job_id: int,
+        *,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "queued"
+                and row.get("preview_status") in ("waiting", "running")
+            ):
+                now = _utcnow()
+                row["preview_status"] = "would_import"
+                row["preview_result"] = copy.deepcopy(preview_result or {})
+                row["preview_message"] = message
+                row["preview_error"] = None
+                row["preview_completed_at"] = now
+                row["importable_at"] = row.get("importable_at") or now
+                row["preview_worker_id"] = None
+                row["preview_heartbeat_at"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def mark_import_job_preview_failed(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        validate_preview_failure_status(preview_status)
+        result = copy.deepcopy(preview_result or {})
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "queued"
+                and row.get("preview_status") in ("waiting", "running")
+            ):
+                now = _utcnow()
+                row["status"] = "failed"
+                row["preview_status"] = preview_status
+                row["preview_result"] = result
+                row["preview_message"] = message
+                row["preview_error"] = error
+                row["result"] = {"preview": copy.deepcopy(result)}
+                row["message"] = message
+                row["error"] = error
+                row["preview_completed_at"] = now
+                row["completed_at"] = now
+                row["preview_worker_id"] = None
+                row["preview_heartbeat_at"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def list_stale_import_preview_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        cutoff = _utcnow() - older_than
+        rows = []
+        for row in self._import_jobs:
+            if row.get("status") != "queued" or row.get("preview_status") != "running":
+                continue
+            last = _as_datetime(
+                row.get("preview_heartbeat_at")
+                or row.get("preview_started_at")
+                or row.get("updated_at")
+            )
+            if last < cutoff:
+                rows.append(row)
+        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
+    def requeue_stale_import_preview_jobs(
+        self,
+        *,
+        older_than: timedelta,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        stale = self.list_stale_import_preview_jobs(
+            older_than=older_than,
+            limit=limit,
+        )
+        updated_jobs = []
+        for job in stale:
+            for row in self._import_jobs:
+                if row["id"] != job.id:
+                    continue
+                now = _utcnow()
+                row["preview_status"] = "waiting"
+                row["preview_message"] = message
+                row["preview_error"] = None
+                row["preview_worker_id"] = None
+                row["preview_started_at"] = None
+                row["preview_heartbeat_at"] = None
+                row["updated_at"] = now
+                updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
+                break
         return updated_jobs
 
     # --- PipelineDB interface methods ---

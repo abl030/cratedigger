@@ -368,6 +368,38 @@ class TestCmdImportPreview(unittest.TestCase):
         self.assertIn("cleanup_eligible: yes", stdout.getvalue())
 
 
+class TestCmdWrongMatchPreviewBackfill(unittest.TestCase):
+    def test_json_output_delegates_to_backfill_service(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            request_id=42,
+            limit=5,
+            cleanup=False,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.wrong_match_triage.backfill_wrong_match_previews",
+            return_value={
+                "previewed": 1,
+                "would_import": 1,
+                "skipped_missing_files": 0,
+                "skipped_active_jobs": 0,
+            },
+        ) as backfill, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_preview_backfill(db, args)
+
+        self.assertEqual(rc, 0)
+        backfill.assert_called_once_with(
+            db,
+            request_id=42,
+            limit=5,
+            cleanup=False,
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["previewed"], 1)
+
+
 class TestCmdQuery(unittest.TestCase):
     def test_query_renders_table_output_in_read_only_mode(self):
         db = MagicMock()

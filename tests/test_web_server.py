@@ -202,6 +202,7 @@ def _make_server():
     mock_db.enqueue_import_job.return_value = mock_job
     mock_db.get_import_job.return_value = mock_job
     mock_db.list_import_jobs.return_value = [mock_job]
+    mock_db.list_import_job_timeline.return_value = [mock_job]
     mock_db.list_active_import_jobs.return_value = []
     mock_db.count_import_jobs_by_status.return_value = {"queued": 1}
 
@@ -620,6 +621,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/force-import",
         "/api/pipeline/delete",
         "/api/import-jobs",
+        "/api/import-jobs/timeline",
         r"^/api/import-jobs/(\d+)$",
         "/api/beets/search",
         "/api/beets/recent",
@@ -702,6 +704,9 @@ class TestPipelineRouteContracts(_WebServerCase):
         "id", "job_type", "status", "request_id", "dedupe_key", "payload",
         "result", "message", "error", "attempts", "worker_id", "created_at",
         "updated_at", "started_at", "heartbeat_at", "completed_at", "deduped",
+        "preview_status", "preview_result", "preview_message", "preview_error",
+        "preview_attempts", "preview_worker_id", "preview_started_at",
+        "preview_heartbeat_at", "preview_completed_at", "importable_at",
     }
 
     def setUp(self) -> None:
@@ -901,6 +906,18 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, {"job"}, "import job detail response")
         _assert_required_fields(self, data["job"], self.IMPORT_JOB_REQUIRED_FIELDS,
                                 "import job detail")
+
+    def test_import_jobs_timeline_contract(self):
+        status, data = self._get("/api/import-jobs/timeline")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"jobs", "counts"},
+                                "import jobs timeline response")
+        _assert_required_fields(self, data["jobs"][0], self.IMPORT_JOB_REQUIRED_FIELDS,
+                                "import jobs timeline item")
+        _assert_required_fields(self, data["jobs"][0], {"artist_name", "album_title"},
+                                "import jobs timeline identity")
+        self.mock_db.list_import_job_timeline.assert_called_once_with(limit=50)
 
     def test_import_jobs_rejects_invalid_filters(self):
         status, data = self._get("/api/import-jobs?status=bad")

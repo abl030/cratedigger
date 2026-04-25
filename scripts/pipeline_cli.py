@@ -1295,6 +1295,25 @@ def cmd_wrong_match_triage(db, args):
     return 0
 
 
+def cmd_wrong_match_preview_backfill(db, args):
+    """Run explicit preview backfill for current Wrong Matches rows."""
+    from lib.wrong_match_triage import backfill_wrong_match_previews
+
+    summary = backfill_wrong_match_previews(
+        db,
+        request_id=args.request_id,
+        limit=args.limit,
+        cleanup=args.cleanup,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    for key, count in sorted(summary.items()):
+        print(f"  {key}: {count}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -1417,6 +1436,19 @@ def main():
                           help="Maximum candidates to triage")
     p_triage.add_argument("--json", action="store_true")
 
+    # wrong-match-preview-backfill
+    p_backfill = sub.add_parser(
+        "wrong-match-preview-backfill",
+        help="One-shot preview audit for current Wrong Matches rows",
+    )
+    p_backfill.add_argument("--request-id", type=int,
+                            help="Limit backfill to one request")
+    p_backfill.add_argument("--limit", type=int,
+                            help="Maximum candidates to preview")
+    p_backfill.add_argument("--cleanup", action="store_true",
+                            help="Delete only cleanup-eligible confident rejects")
+    p_backfill.add_argument("--json", action="store_true")
+
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
                               help="Fix albums stuck by stale current_spectral_bitrate (#18)")
@@ -1446,6 +1478,7 @@ def main():
         "import-jobs": cmd_import_jobs,
         "import-preview": cmd_import_preview,
         "wrong-match-triage": cmd_wrong_match_triage,
+        "wrong-match-preview-backfill": cmd_wrong_match_preview_backfill,
         "repair-spectral": cmd_repair_spectral,
     }
     commands[args.command](db, args)

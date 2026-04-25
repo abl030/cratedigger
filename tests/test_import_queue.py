@@ -17,11 +17,21 @@ from lib.import_queue import (
     manual_import_dedupe_key,
     manual_import_payload,
 )
+from lib.import_preview import ImportPreviewResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 
 class TestImporterWorker(unittest.TestCase):
+    def _mark_importable(self, db: FakePipelineDB, job):
+        updated = db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        assert updated is not None
+        return updated
+
     def _log_wrong_match(
         self,
         db: FakePipelineDB,
@@ -55,6 +65,7 @@ class TestImporterWorker(unittest.TestCase):
                 source_username="alice",
             ),
         )
+        self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
         assert claimed is not None
 
@@ -81,12 +92,13 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
-        db.enqueue_import_job(
+        job = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
         )
+        self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
         assert claimed is not None
 
@@ -110,7 +122,7 @@ class TestImporterWorker(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
             log_id = self._log_wrong_match(db, failed_path=source)
-            db.enqueue_import_job(
+            job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key=force_import_dedupe_key(log_id),
@@ -120,6 +132,7 @@ class TestImporterWorker(unittest.TestCase):
                     source_username="alice",
                 ),
             )
+            self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -145,7 +158,7 @@ class TestImporterWorker(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             log_id = self._log_wrong_match(db, failed_path=source, username="old")
-            db.enqueue_import_job(
+            job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key=force_import_dedupe_key(log_id),
@@ -155,6 +168,7 @@ class TestImporterWorker(unittest.TestCase):
                     source_username="alice",
                 ),
             )
+            self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -190,12 +204,13 @@ class TestImporterWorker(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             self._log_wrong_match(db, failed_path=source)
-            db.enqueue_import_job(
+            job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 dedupe_key=manual_import_dedupe_key(42, source),
                 payload=manual_import_payload(failed_path=source),
             )
+            self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -220,7 +235,7 @@ class TestImporterWorker(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             log_id = self._log_wrong_match(db, failed_path=source)
-            db.enqueue_import_job(
+            job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key=force_import_dedupe_key(log_id),
@@ -229,6 +244,7 @@ class TestImporterWorker(unittest.TestCase):
                     failed_path=source,
                 ),
             )
+            self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -254,12 +270,13 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
-        db.enqueue_import_job(
+        job = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
             dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
             payload=manual_import_payload(failed_path="/tmp/manual"),
         )
+        self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="old-worker")
         assert claimed is not None
 
@@ -282,6 +299,19 @@ class TestImporterWorker(unittest.TestCase):
         assert retried is not None
         self.assertEqual(retried.attempts, 2)
 
+    def test_importer_does_not_claim_job_waiting_for_preview(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+
+        self.assertIsNone(importer.run_once(db, worker_id="worker"))
+
     def test_automation_job_reconstructs_active_state_and_uses_processing_path(self):
         from scripts import importer
 
@@ -300,12 +330,13 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        db.enqueue_import_job(
+        job = db.enqueue_import_job(
             IMPORT_JOB_AUTOMATION,
             request_id=42,
             dedupe_key=automation_import_dedupe_key(42),
             payload={},
         )
+        self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="worker")
         assert claimed is not None
 
@@ -323,3 +354,192 @@ class TestImporterWorker(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Automation import processing completed")
+
+
+class TestImportPreviewWorker(unittest.TestCase):
+    def _preview(
+        self,
+        verdict: str,
+        *,
+        reason: str | None = None,
+    ) -> ImportPreviewResult:
+        return ImportPreviewResult(
+            mode="path",
+            verdict=verdict,
+            would_import=verdict == "would_import",
+            confident_reject=verdict == "confident_reject",
+            uncertain=verdict == "uncertain",
+            decision=reason,
+            reason=reason,
+            stage_chain=[f"preview:{reason or verdict}"],
+        )
+
+    def test_force_job_preview_would_import_marks_importable(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=self._preview("would_import", reason="import"),
+        ) as preview:
+            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+
+        preview.assert_called_once_with(
+            db,
+            request_id=42,
+            path="/tmp/failed",
+            force=True,
+            source_username="alice",
+            download_log_id=7,
+        )
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "would_import")
+        self.assertEqual(updated.preview_result["verdict"], "would_import")
+        self.assertIsNotNone(updated.importable_at)
+
+    def test_manual_job_preview_uses_non_force_semantics(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=self._preview("would_import", reason="import"),
+        ) as preview:
+            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+
+        preview.assert_called_once_with(
+            db,
+            request_id=42,
+            path="/tmp/manual",
+            force=False,
+            source_username=None,
+            download_log_id=None,
+        )
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "would_import")
+
+    def test_automation_job_preview_uses_active_download_current_path(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "current_path": "/tmp/staged",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=self._preview("would_import", reason="import"),
+        ) as preview:
+            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+
+        preview.assert_called_once_with(
+            db,
+            request_id=42,
+            path="/tmp/staged",
+            force=False,
+            source_username="alice",
+            download_log_id=None,
+        )
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "would_import")
+
+    def test_confident_reject_fails_job_and_denylists_source(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=self._preview("confident_reject", reason="spectral_reject"),
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.preview_status, "confident_reject")
+        self.assertEqual(updated.preview_error, "spectral_reject")
+        self.assertEqual(db.get_denylisted_users(42)[0]["username"], "alice")
+
+    def test_uncertain_preview_fails_without_denylisting(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=self._preview("uncertain", reason="path_missing"),
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.preview_status, "uncertain")
+        self.assertEqual(updated.preview_error, "path_missing")
+        self.assertEqual(db.get_denylisted_users(42), [])

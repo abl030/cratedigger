@@ -329,6 +329,26 @@ def get_import_jobs(h, params: dict[str, list[str]]) -> None:
     })
 
 
+def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
+    db = _server()._db()
+    jobs = db.list_import_job_timeline(limit=50)
+    serialized = []
+    for job in jobs:
+        item = _serialize_import_job(job)
+        request_id = item.get("request_id")
+        if request_id is not None:
+            req = db.get_request(int(request_id))
+            if req:
+                item["artist_name"] = req.get("artist_name")
+                item["album_title"] = req.get("album_title")
+                item["mb_release_id"] = req.get("mb_release_id")
+        serialized.append(item)
+    h._json({
+        "jobs": serialized,
+        "counts": db.count_import_jobs_by_status(),
+    })
+
+
 def get_import_job(h, params: dict[str, list[str]], job_id_str: str) -> None:
     job = _server()._db().get_import_job(int(job_id_str))
     if job is None:
@@ -874,6 +894,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/constants": get_pipeline_constants,
     "/api/pipeline/simulate": get_pipeline_simulate,
     "/api/import-jobs": get_import_jobs,
+    "/api/import-jobs/timeline": get_import_jobs_timeline,
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
