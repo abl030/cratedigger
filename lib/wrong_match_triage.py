@@ -59,9 +59,37 @@ def _persist_triage_audit(
     return result
 
 
+_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
+    "import",
+    "preflight_existing",
+    "transcode_upgrade",
+    "transcode_first",
+})
+_IMPORT_STAGE_CHAIN_ENTRIES: frozenset[str] = frozenset(
+    f"stage2_import:{decision}" for decision in _IMPORT_STAGE_DECISIONS
+)
+
+
+def _preview_has_import_stage(preview: ImportPreviewResult) -> bool:
+    if preview.would_import:
+        return True
+    if preview.decision in _IMPORT_STAGE_DECISIONS:
+        return True
+    return any(stage in _IMPORT_STAGE_CHAIN_ENTRIES for stage in preview.stage_chain)
+
+
 def triage_wrong_match(db: Any, download_log_id: int) -> WrongMatchTriageResult:
     """Preview one wrong-match row and clean only explicit safe rejects."""
     preview = preview_import_from_download_log(db, download_log_id)
+
+    if _preview_has_import_stage(preview):
+        return _persist_triage_audit(db, WrongMatchTriageResult(
+            download_log_id=download_log_id,
+            action="kept_would_import",
+            success=True,
+            reason=preview.reason,
+            preview=preview,
+        ))
 
     if preview.confident_reject and preview.cleanup_eligible:
         cleanup = cleanup_wrong_match_source(

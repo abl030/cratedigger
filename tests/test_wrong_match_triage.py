@@ -106,6 +106,49 @@ class TestWrongMatchTriage(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_import_stage_requeue_preview_leaves_candidate_visible(self):
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db, log_id = self._db_with_wrong_match(source)
+
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=ImportPreviewResult(
+                    mode="download_log",
+                    verdict="confident_reject",
+                    confident_reject=True,
+                    cleanup_eligible=True,
+                    decision="import",
+                    reason="requeue_upgrade",
+                    source_path=source,
+                    stage_chain=[
+                        "stage2_import:import",
+                        "stage3_quality_gate:requeue_upgrade",
+                    ],
+                ),
+            ):
+                result = triage_wrong_match(db, log_id)
+
+            self.assertEqual(result.action, "kept_would_import")
+            self.assertTrue(result.success)
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            entry = db.get_download_log_entry(log_id)
+            assert entry is not None
+            vr = entry["validation_result"]
+            assert isinstance(vr, dict)
+            audit = vr["wrong_match_triage"]
+            assert isinstance(audit, dict)
+            self.assertEqual(audit["action"], "kept_would_import")
+            self.assertEqual(audit["preview_verdict"], "confident_reject")
+            self.assertEqual(audit["preview_decision"], "import")
+            self.assertEqual(audit["reason"], "requeue_upgrade")
+            self.assertIn("failed_path", vr)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_missing_path_clears_stale_pointer_without_successful_reject(self):
         source = tempfile.mkdtemp()
         shutil.rmtree(source)

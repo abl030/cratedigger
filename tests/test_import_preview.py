@@ -64,6 +64,33 @@ class TestImportPreviewValues(unittest.TestCase):
         self.assertTrue(preview.cleanup_eligible)
         self.assertEqual(preview.reason, "spectral_reject")
 
+    def test_values_preview_keeps_import_that_quality_gate_would_requeue(self):
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=False,
+                min_bitrate=160,
+                avg_bitrate=160,
+                is_cbr=False,
+                is_vbr=True,
+            )
+        )
+
+        self.assertEqual(preview.verdict, "would_import")
+        self.assertTrue(preview.would_import)
+        self.assertFalse(preview.confident_reject)
+        self.assertFalse(preview.cleanup_eligible)
+        self.assertEqual(preview.reason, "requeue_upgrade")
+        self.assertEqual(
+            preview.stage_chain,
+            [
+                "preimport_nested:skipped_auto",
+                "preimport_audio:pass",
+                "stage0_spectral_gate:would_run",
+                "stage2_import:import",
+                "stage3_quality_gate:requeue_upgrade",
+            ],
+        )
+
 
 class TestImportPreviewPath(unittest.TestCase):
     def _db(self) -> FakePipelineDB:
@@ -177,6 +204,53 @@ class TestImportPreviewPath(unittest.TestCase):
         self.assertEqual(preview.verdict, "uncertain")
         self.assertEqual(preview.decision, "path_missing")
         self.assertFalse(preview.cleanup_eligible)
+
+    def test_path_preview_keeps_import_that_quality_gate_would_requeue(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=160000,
+                           is_vbr=True,
+                       )), \
+                 patch("lib.import_preview.run_preimport_gates",
+                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.run_import_one",
+                       return_value=SimpleNamespace(
+                           import_result=ImportResult(
+                               decision="import",
+                               new_measurement=AudioQualityMeasurement(
+                                   min_bitrate_kbps=160,
+                                   avg_bitrate_kbps=160,
+                                   median_bitrate_kbps=160,
+                                   format="mp3",
+                               ),
+                           )
+                       )):
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "would_import")
+            self.assertEqual(preview.decision, "import")
+            self.assertEqual(preview.reason, "requeue_upgrade")
+            self.assertFalse(preview.cleanup_eligible)
+            self.assertEqual(
+                preview.stage_chain,
+                ["stage2_import:import", "stage3_quality_gate:requeue_upgrade"],
+            )
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
 
 
 if __name__ == "__main__":

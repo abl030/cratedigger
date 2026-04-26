@@ -137,6 +137,48 @@ def _stage_chain_from_simulation(simulation: dict[str, Any]) -> list[str]:
     return chain
 
 
+_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
+    "import",
+    "preflight_existing",
+    "transcode_upgrade",
+    "transcode_first",
+})
+_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
+    "downgrade",
+    "transcode_downgrade",
+})
+_QUALITY_GATE_REQUEUE_DECISIONS: frozenset[str] = frozenset({
+    "requeue_upgrade",
+    "requeue_lossless",
+})
+
+
+def _classify_import_stages(
+    stage2: object,
+    stage3: object,
+    *,
+    imported: bool,
+) -> tuple[str, bool, str | None]:
+    stage2_decision = str(stage2) if isinstance(stage2, str) else None
+    stage3_decision = str(stage3) if isinstance(stage3, str) else None
+
+    if stage2_decision in _REJECT_STAGE_DECISIONS:
+        return "confident_reject", True, stage2_decision
+
+    if stage2_decision in _IMPORT_STAGE_DECISIONS or imported:
+        reason = (
+            stage3_decision
+            if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS
+            else stage2_decision or stage3_decision or "import"
+        )
+        return "would_import", False, reason
+
+    if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS:
+        return "uncertain", False, stage3_decision
+
+    return "uncertain", False, stage2_decision or stage3_decision or "unknown"
+
+
 def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | None]:
     if simulation.get("preimport_nested") == "reject_nested":
         return "confident_reject", True, "nested_layout"
@@ -144,15 +186,11 @@ def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | N
         return "confident_reject", True, "audio_corrupt"
     if simulation.get("stage1_spectral") == "reject":
         return "confident_reject", True, "spectral_reject"
-    stage2 = simulation.get("stage2_import")
-    if stage2 in ("downgrade", "transcode_downgrade"):
-        return "confident_reject", True, str(stage2)
-    stage3 = simulation.get("stage3_quality_gate")
-    if stage3 in ("requeue_upgrade", "requeue_lossless"):
-        return "confident_reject", True, str(stage3)
-    if simulation.get("imported") and simulation.get("final_status") == "imported":
-        return "would_import", False, str(stage2 or stage3 or "import")
-    return "uncertain", False, str(stage2 or stage3 or "unknown")
+    return _classify_import_stages(
+        simulation.get("stage2_import"),
+        simulation.get("stage3_quality_gate"),
+        imported=bool(simulation.get("imported")),
+    )
 
 
 def preview_import_from_values(
@@ -228,20 +266,19 @@ def _classify_import_result(
         return "uncertain", False, "no_json_result", ["harness:no_json_result"]
     decision = ir.decision or "unknown"
     chain = [f"stage2_import:{decision}"]
-    if decision in ("downgrade", "transcode_downgrade"):
-        return "confident_reject", True, decision, chain
+    gate: str | None = None
     if decision in ("import", "preflight_existing"):
         gate = _quality_gate_stage(ir.new_measurement, cfg)
         if gate is not None:
             chain.append(f"stage3_quality_gate:{gate}")
-        if gate in ("requeue_upgrade", "requeue_lossless"):
-            return "confident_reject", True, gate, chain
-        return "would_import", False, decision, chain
-    if decision in ("transcode_upgrade", "transcode_first"):
-        return "would_import", False, decision, chain
     if decision in ("conversion_failed", "target_conversion_failed"):
         return "uncertain", False, decision, chain
-    return "uncertain", False, decision, chain
+    verdict, cleanup_eligible, reason = _classify_import_stages(
+        decision,
+        gate if decision in ("import", "preflight_existing") else None,
+        imported=decision in _IMPORT_STAGE_DECISIONS,
+    )
+    return verdict, cleanup_eligible, reason, chain
 
 
 def _request_label(req: dict[str, Any]) -> str:
