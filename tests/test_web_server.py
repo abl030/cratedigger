@@ -1157,6 +1157,7 @@ class TestPipelineRouteDirectEquivalence(_WebServerCase):
         ("spectral_clamp_with_override",
          dict(is_flac=False, min_bitrate=320, is_cbr=True,
               spectral_grade="suspect", spectral_bitrate=160,
+              existing_spectral_grade="genuine",
               existing_spectral_bitrate=160)),
         ("verified_lossless_target_opus",
          dict(is_flac=True, min_bitrate=0, is_cbr=False,

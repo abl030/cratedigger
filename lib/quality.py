@@ -1239,12 +1239,14 @@ def _shared_spectral_bitrates(
     spectral) keeps the container comparison — the rule that
     ``test_springsteen_genuine_but_96kbps`` pins.
 
-    Grade-independent by design. ``compute_effective_override_bitrate`` gates
-    the clamp on ``SPECTRAL_TRANSCODE_GRADES`` because on a single-sided
+    Mostly grade-tolerant by design. ``compute_effective_override_bitrate``
+    gates the clamp on ``SPECTRAL_TRANSCODE_GRADES`` because on a single-sided
     override a genuine grade can't be distinguished from natural lo-fi
-    rolloff. Here, both sides agreeing on the same estimate IS the
-    independent corroboration that makes the floor trustworthy regardless of
-    each side's individual rollup grade (Eno case, ``download_log.id=3291``).
+    rolloff. Here, both sides carrying estimates is usually corroborating
+    evidence (Eno case, ``download_log.id=3291``). The caller still guards the
+    asymmetric case where a transcode-grade candidate would otherwise use a
+    higher spectral floor to replace a non-transcode-grade existing album with
+    a higher real quality rank.
     """
     if (new.spectral_bitrate_kbps is None
             or existing.spectral_bitrate_kbps is None):
@@ -1257,6 +1259,27 @@ def _shared_spectral_bitrates(
                    if existing_br is not None
                    else existing.spectral_bitrate_kbps)
     return new_br, existing_br
+
+
+def _transcode_candidate_real_rank_regresses(
+    new: AudioQualityMeasurement,
+    existing: AudioQualityMeasurement,
+    cfg: QualityRankConfig,
+) -> bool:
+    """Whether a transcode-grade candidate is lower real rank than existing.
+
+    Shared spectral floors are useful supporting evidence, but they must not
+    launder a lower-rank transcode over a higher-rank non-transcode existing
+    album. Compare the real configured measurement rank before the spectral
+    clamp for that asymmetric grade transition only.
+    """
+    if new.spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+        return False
+    if existing.spectral_grade is None:
+        return False
+    if existing.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
+        return False
+    return measurement_rank(new, cfg) < measurement_rank(existing, cfg)
 
 
 def compare_quality(
@@ -1286,10 +1309,15 @@ def compare_quality(
     a pessimistic estimate permanently freeze the album at the first source
     that happened to land in that bucket. See ``_shared_spectral_bitrates``
     for the narrow guard that keeps the Springsteen case (single stale
-    estimate) on the container path.
+    estimate) on the container path. A transcode-grade candidate over a
+    non-transcode-grade existing album has one extra guard: if its real
+    selected-metric rank is lower before the spectral clamp, it is worse.
 
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
+    if _transcode_candidate_real_rank_regresses(new, existing, cfg):
+        return "worse"
+
     shared = _shared_spectral_bitrates(new, existing, cfg)
     if shared is not None:
         clamped_new_br, clamped_existing_br = shared
@@ -2697,9 +2725,9 @@ def get_decision_tree(
                     {"condition": "existing is VBR: override_min_bitrate drives min only; avg + median keep beets values",
                      "result": "preserved", "color": "green",
                      "effect": "real avg signal survives — a 152kbps transcode can't win against a genuine 225-avg VBR album"},
-                    {"condition": "BOTH new and existing have spectral_bitrate: compare_quality uses min(selected_metric, spectral_bitrate) for rank bucket only — grade-independent",
+                    {"condition": "BOTH new and existing have spectral_bitrate: compare_quality uses min(selected_metric, spectral_bitrate) for rank bucket only, except lower-real-rank transcode-grade candidates cannot beat non-transcode existing albums",
                      "result": "shared_spectral_clamp", "color": "amber",
-                     "effect": "spectral can demote both sides into the same bucket, but raw avg/median/min still breaks ties so the pipeline can grind upward when spectral is pessimistic"},
+                     "effect": "spectral can demote both sides into the same bucket, but it cannot promote a lower-rank transcode over a higher-rank genuine/non-transcode existing album; otherwise raw avg/median/min still breaks ties so the pipeline can grind upward when spectral is pessimistic"},
                     {"condition": "new.verified_lossless = true AND compare_quality(new, existing) in {better,equivalent}",
                      "result": "import", "color": "green",
                      "effect": "verified-lossless imports only when it is not worse"},
@@ -2729,14 +2757,17 @@ def get_decision_tree(
                          "comparison sees the real signal — the "
                          "loop-breaking fix for Unter Null - The Failure "
                          "Epiphany (req 1749, 2026-04-21). The "
-                         "shared-spectral bucket is independent: it fires "
-                         "ONLY when both sides carry spectral_bitrate and "
-                         "only for rank bucketing, so a single stale "
-                         "estimate (Springsteen shape — existing genuine "
-                         "320 with spectral=96, new V0 240 with no "
-                         "spectral) still follows the container path, and "
-                         "equal buckets still converge upward by the "
-                         "configured bitrate metric."),
+                         "shared-spectral bucket fires only when both sides "
+                         "carry spectral_bitrate and only for rank bucketing, "
+                         "so a single stale estimate (Springsteen shape — "
+                         "existing genuine 320 with spectral=96, new V0 240 "
+                         "with no spectral) still follows the container path. "
+                         "A transcode-grade candidate over a non-transcode "
+                         "existing album is first checked against real "
+                         "selected-metric rank; if that rank regresses, the "
+                         "candidate is a downgrade. Otherwise equal buckets "
+                         "still converge upward by the configured bitrate "
+                         "metric."),
             },
             {
                 "id": "quality_gate",
@@ -2816,7 +2847,8 @@ def full_pipeline_decision(
     # Existing state
     existing_min_bitrate=None,
     existing_avg_bitrate: int | None = None,
-    existing_spectral_bitrate=None,
+    existing_spectral_bitrate: int | None = None,
+    existing_spectral_grade: str | None = None,
     override_min_bitrate=None,
     existing_format: str | None = None,
     existing_is_cbr: bool = False,
@@ -2975,6 +3007,7 @@ def full_pipeline_decision(
         format=effective_existing_format,
         is_cbr=existing_is_cbr,
         override_min_bitrate=override_min_bitrate,
+        spectral_grade=existing_spectral_grade,
         spectral_bitrate_kbps=existing_spectral_bitrate,
     )
 
@@ -2986,6 +3019,7 @@ def full_pipeline_decision(
             avg_bitrate_kbps=min_bitrate,
             median_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
+            spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
@@ -3026,6 +3060,7 @@ def full_pipeline_decision(
             median_bitrate_kbps=import_br,
             format=stage2_new_format,
             verified_lossless=will_be_verified,
+            spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m, is_transcode),
@@ -3091,6 +3126,7 @@ def full_pipeline_decision(
             median_bitrate_kbps=_mp3_avg,
             format=stage2_new_format,
             is_cbr=is_cbr,
+            spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
@@ -3122,6 +3158,7 @@ def full_pipeline_decision(
         format=gate_format,
         is_cbr=gate_cbr,
         verified_lossless=verified_lossless,
+        spectral_grade=spectral_grade,
         spectral_bitrate_kbps=gate_spectral_bitrate)
     result["stage3_quality_gate"] = quality_gate_decision(gate_m, cfg=cfg)
 

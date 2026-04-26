@@ -86,5 +86,48 @@ console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values
   assertExcludes(html, 'confident<script>', 'raw preview not rendered');
 }
 
+console.log('renderDownloadHistoryItem() shows actual and spectral existing bitrate');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    existing_min_bitrate: 246,
+    existing_spectral_bitrate: 128,
+  });
+
+  assertContains(html, 'On disk (before)', 'existing bitrate label rendered');
+  assertContains(html, '246kbps', 'actual existing bitrate rendered');
+  assertContains(html, '~128kbps', 'spectral existing bitrate rendered');
+  assertContains(html, '~128kbps (spectral)', 'spectral style retained');
+}
+
+console.log('renderDownloadHistoryItem() keeps single existing bitrate styles');
+{
+  const spectralOnlyHtml = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    existing_spectral_bitrate: 128,
+  });
+  const actualOnlyHtml = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    existing_min_bitrate: 246,
+  });
+
+  assertContains(spectralOnlyHtml, '~128kbps (spectral)',
+    'spectral-only existing bitrate keeps spectral style');
+  assertExcludes(spectralOnlyHtml, '246kbps',
+    'spectral-only existing bitrate does not invent actual bitrate');
+  assertContains(actualOnlyHtml, '246kbps',
+    'actual-only existing bitrate keeps plain style');
+  assertExcludes(actualOnlyHtml, '~246kbps',
+    'actual-only existing bitrate is not shown as spectral');
+  assertExcludes(actualOnlyHtml, '(spectral)',
+    'actual-only existing bitrate has no spectral suffix');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

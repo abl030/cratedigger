@@ -336,6 +336,93 @@ class TestCmdImportPreview(unittest.TestCase):
             320,
         )
 
+    def test_values_args_thread_existing_spectral_grade(self):
+        from lib.import_preview import ImportPreviewResult
+
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            path=None,
+            source_username=None,
+            no_force=False,
+            values=True,
+            values_json=None,
+            json=True,
+            is_flac=False,
+            min_bitrate=171,
+            is_cbr=False,
+            is_vbr=True,
+            avg_bitrate=196,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+            existing_min_bitrate=246,
+            existing_avg_bitrate=261,
+            existing_spectral_bitrate=128,
+            existing_spectral_grade="genuine",
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.import_preview.preview_import_from_values",
+            return_value=ImportPreviewResult(
+                mode="values",
+                verdict="confident_reject",
+                decision="downgrade",
+                confident_reject=True,
+            ),
+        ) as mock_preview, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        self.assertEqual(rc, 0)
+        values = mock_preview.call_args.args[0]
+        self.assertEqual(values.existing_spectral_bitrate, 128)
+        self.assertEqual(values.existing_spectral_grade, "genuine")
+
+    def test_values_json_rejects_invalid_spectral_grade(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            path=None,
+            source_username=None,
+            no_force=False,
+            values=True,
+            values_json='{"spectral_grade": "likely-transcode"}',
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch("lib.import_preview.preview_import_from_values") as preview, \
+                redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        self.assertEqual(rc, 2)
+        preview.assert_not_called()
+        self.assertIn("spectral_grade must be one of", stderr.getvalue())
+
+    def test_values_json_rejects_invalid_existing_spectral_grade(self):
+        db = MagicMock()
+        args = SimpleNamespace(
+            download_log_id=None,
+            request_id=None,
+            path=None,
+            source_username=None,
+            no_force=False,
+            values=True,
+            values_json='{"existing_spectral_grade": "likely-transcode"}',
+            json=False,
+        )
+        stderr = io.StringIO()
+        with patch("lib.import_preview.preview_import_from_values") as preview, \
+                redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        self.assertEqual(rc, 2)
+        preview.assert_not_called()
+        self.assertIn(
+            "existing_spectral_grade must be one of",
+            stderr.getvalue(),
+        )
+
     def test_download_log_mode_delegates_to_preview_service(self):
         from lib.import_preview import ImportPreviewResult
 
@@ -989,6 +1076,7 @@ class TestCmdQuality(unittest.TestCase):
             artist_name="Artist",
             album_title="Album",
             min_bitrate=245,
+            current_spectral_grade="genuine",
             verified_lossless=True,
             final_format="mp3 v0",
             target_format=None,
@@ -999,6 +1087,8 @@ class TestCmdQuality(unittest.TestCase):
         self.assertTrue(calls)
         self.assertTrue(all(
             call["verified_lossless_target"] == "opus 128" for call in calls))
+        self.assertTrue(all(
+            call["existing_spectral_grade"] == "genuine" for call in calls))
         self.assertIn("Verified-lossless output: opus 128", output)
         self.assertIn("Genuine FLAC → opus 128 (high bitrate):", output)
 

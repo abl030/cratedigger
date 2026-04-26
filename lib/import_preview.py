@@ -42,6 +42,7 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     existing_min_bitrate: int | None = None
     existing_avg_bitrate: int | None = None
     existing_spectral_bitrate: int | None = None
+    existing_spectral_grade: str | None = None
     override_min_bitrate: int | None = None
     existing_format: str | None = None
     existing_is_cbr: bool = False
@@ -170,6 +171,7 @@ def preview_import_from_values(
         spectral_bitrate=values.spectral_bitrate,
         existing_min_bitrate=values.existing_min_bitrate,
         existing_avg_bitrate=values.existing_avg_bitrate,
+        existing_spectral_grade=values.existing_spectral_grade,
         existing_spectral_bitrate=values.existing_spectral_bitrate,
         override_min_bitrate=values.override_min_bitrate,
         existing_format=values.existing_format,

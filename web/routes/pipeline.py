@@ -267,6 +267,7 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
             spectral_bitrate=_int("spectral_bitrate"),
             existing_min_bitrate=_int("existing_min_bitrate"),
             existing_avg_bitrate=_int("existing_avg_bitrate"),
+            existing_spectral_grade=_str("existing_spectral_grade"),
             existing_spectral_bitrate=_int("existing_spectral_bitrate"),
             override_min_bitrate=_int("override_min_bitrate"),
             existing_format=_str("existing_format"),

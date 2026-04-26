@@ -63,6 +63,7 @@ from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import resolve_failed_path as _shared_resolve_failed_path
 
 MB_API = "http://192.168.1.35:5200/ws/2"
+SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
 
 
 def _load_runtime_rank_config():
@@ -710,6 +711,7 @@ def cmd_quality(db, args):
             format=existing_format_hint or "MP3",
             is_cbr=is_cbr,
             verified_lossless=verified,
+            spectral_grade=spectral_grade,
             spectral_bitrate_kbps=gate_spectral_br)
         # gate_rank centralizes the spectral clamp the gate applies, so the
         # displayed label always matches the verdict (no more EXCELLENT next
@@ -860,6 +862,7 @@ def cmd_quality(db, args):
             # or VBR albums rank at the wrong tier in stage 2/3 output
             # (issue #93 codex round 4).
             existing_avg_bitrate=avg_br,
+            existing_spectral_grade=spectral_grade,
             existing_spectral_bitrate=current_br,
             override_min_bitrate=override_min_bitrate,
             existing_format=existing_format_hint,
@@ -1178,6 +1181,7 @@ def _preview_values_from_args(args) -> ImportPreviewValues:
         "existing_min_bitrate",
         "existing_avg_bitrate",
         "existing_spectral_bitrate",
+        "existing_spectral_grade",
         "override_min_bitrate",
         "existing_format",
         "existing_is_cbr",
@@ -1195,6 +1199,11 @@ def _preview_values_from_args(args) -> ImportPreviewValues:
         value = getattr(args, attr, None)
         if value is not None:
             raw[attr] = value
+    for attr in ("spectral_grade", "existing_spectral_grade"):
+        value = raw.get(attr)
+        if value is not None and value not in SPECTRAL_GRADE_CHOICES:
+            valid = ", ".join(SPECTRAL_GRADE_CHOICES)
+            raise ValueError(f"{attr} must be one of: {valid}")
     return msgspec.convert(raw, type=ImportPreviewValues)
 
 
@@ -1454,11 +1463,12 @@ def main():
     p_preview.add_argument("--is-cbr", action="store_true", default=None)
     p_preview.add_argument("--is-vbr", action="store_true", default=None)
     p_preview.add_argument("--avg-bitrate", type=int)
-    p_preview.add_argument("--spectral-grade")
+    p_preview.add_argument("--spectral-grade", choices=SPECTRAL_GRADE_CHOICES)
     p_preview.add_argument("--spectral-bitrate", type=int)
     p_preview.add_argument("--existing-min-bitrate", type=int)
     p_preview.add_argument("--existing-avg-bitrate", type=int)
     p_preview.add_argument("--existing-spectral-bitrate", type=int)
+    p_preview.add_argument("--existing-spectral-grade", choices=SPECTRAL_GRADE_CHOICES)
     p_preview.add_argument("--override-min-bitrate", type=int)
     p_preview.add_argument("--existing-format")
     p_preview.add_argument("--existing-is-cbr", action="store_true", default=None)
