@@ -109,7 +109,17 @@ def _build_search_cache(
     Returns (cache_entries, upload_speeds, dir_audio_counts).
     Pure — no I/O, no ctx writes.
     """
-    from lib.quality import file_identity, filetype_matches
+    from lib.quality import (
+        file_identity,
+        filetype_matches,
+        search_cache_keys_for_identity,
+    )
+
+    def cache_dir(username: str, filetype_key: str, file_dir: str) -> None:
+        if filetype_key not in cache_entries[username]:
+            cache_entries[username][filetype_key] = []
+        if file_dir not in cache_entries[username][filetype_key]:
+            cache_entries[username][filetype_key].append(file_dir)
 
     cache_entries: dict[str, dict[str, list[str]]] = {}
     upload_speeds: dict[str, int] = {}
@@ -128,15 +138,16 @@ def _build_search_cache(
         for file in result["files"]:
             file_dir = file["filename"].rsplit("\\", 1)[0]
             identity = file_identity(file)
-            matched = False
+            configured_matches: list[str] = []
             for allowed_filetype, spec in filter_specs:
                 if filetype_matches(identity, spec):
-                    matched = True
-                    if allowed_filetype not in cache_entries[username]:
-                        cache_entries[username][allowed_filetype] = []
-                    if file_dir not in cache_entries[username][allowed_filetype]:
-                        cache_entries[username][allowed_filetype].append(file_dir)
-            if matched:
+                    configured_matches.append(allowed_filetype)
+            cache_keys = search_cache_keys_for_identity(
+                identity, configured_matches
+            )
+            for cache_key in cache_keys:
+                cache_dir(username, cache_key, file_dir)
+            if cache_keys:
                 user_dir_counts[file_dir] = user_dir_counts.get(file_dir, 0) + 1
 
     return cache_entries, upload_speeds, dir_audio_counts

@@ -204,6 +204,46 @@ class TestBuildSearchCache(unittest.TestCase):
         self.assertIn("flac", entries["user1"])
         self.assertIn("mp3 v0", entries["user1"])
 
+    def test_lossless_virtual_tier_is_cached_from_concrete_lossless_files(self):
+        """A lossless override must find FLAC dirs even if config omits 'lossless'."""
+        results = [make_search_result("user1", [
+            {"filename": "A\\01.flac", "size": 100, "bitRate": 1411,
+             "sampleRate": 44100, "bitDepth": 16, "isVariableBitRate": False},
+            {"filename": "B\\01.m4a", "size": 100, "bitRate": 900,
+             "sampleRate": 44100, "bitDepth": 16, "isVariableBitRate": False},
+            {"filename": "C\\01.wav", "size": 100, "bitRate": 1411,
+             "sampleRate": 44100, "bitDepth": 16, "isVariableBitRate": False},
+        ])]
+
+        entries, _, counts = cratedigger._build_search_cache(
+            results, self._specs("mp3 v0", "flac", "alac", "wav")
+        )
+
+        self.assertEqual(entries["user1"]["flac"], ["A"])
+        self.assertEqual(entries["user1"]["alac"], ["B"])
+        self.assertEqual(entries["user1"]["wav"], ["C"])
+        self.assertEqual(entries["user1"]["lossless"], ["A", "B", "C"])
+        self.assertEqual(counts["user1"]["A"], 1)
+        self.assertEqual(counts["user1"]["B"], 1)
+        self.assertEqual(counts["user1"]["C"], 1)
+
+    def test_lossless_virtual_tier_rejects_lossy_files(self):
+        """The virtual lossless bucket must not include MP3 or AAC files."""
+        results = [make_search_result("user1", [
+            {"filename": "A\\01.mp3", "size": 100, "bitRate": 245,
+             "sampleRate": 44100, "bitDepth": 16, "isVariableBitRate": True},
+            {"filename": "B\\01.m4a", "size": 100, "bitRate": 256,
+             "sampleRate": 44100, "isVariableBitRate": False},
+        ])]
+
+        entries, _, _ = cratedigger._build_search_cache(
+            results, self._specs("mp3 v0", "aac")
+        )
+
+        self.assertIn("mp3 v0", entries["user1"])
+        self.assertIn("aac", entries["user1"])
+        self.assertNotIn("lossless", entries["user1"])
+
     def test_non_audio_ignored(self):
         """Non-audio files should not be counted or cached."""
         results = [make_search_result("user1", [
@@ -982,6 +1022,55 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
         self.assertEqual(
             self.slskd.transfers.enqueue_calls[0].files[0]["filename"],
             "Music\\Album\\01 - Track.flac",
+        )
+
+    def test_lossless_override_enqueue_uses_virtual_cache_bucket(self):
+        """A persisted 'lossless' override should enqueue concrete FLAC dirs."""
+        directory = make_directory("Music\\Album", [
+            {"filename": "01 - Track One.flac", "size": 100},
+        ])
+        self.slskd.users.set_directory("user1", "Music\\Album", [directory])
+        self.slskd.queue_download_snapshots([{
+            "username": "user1",
+            "directories": [{"directory": "Music\\Album", "files": [{
+                "filename": "Music\\Album\\01 - Track One.flac",
+                "id": "album-track",
+                "size": 100,
+            }]}],
+        }])
+        from lib.quality import parse_filetype_config
+
+        filter_specs = [
+            (ft, parse_filetype_config(ft))
+            for ft in ("mp3 v0", "flac", "alac", "wav")
+        ]
+        results, _, _ = cratedigger._build_search_cache(
+            [make_search_result("user1", [{
+                "filename": "Music\\Album\\01 - Track One.flac",
+                "size": 100,
+                "bitRate": 1411,
+                "sampleRate": 44100,
+                "bitDepth": 16,
+                "isVariableBitRate": False,
+            }])],
+            filter_specs,
+        )
+
+        with patch("time.sleep"):
+            attempt = cratedigger.try_enqueue(
+                make_tracks((1, "Track One", 1)),
+                results,
+                "lossless",
+                self.ctx,
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertIsNotNone(attempt.downloads)
+        assert attempt.downloads is not None
+        self.assertEqual(attempt.downloads[0].id, "album-track")
+        self.assertEqual(
+            self.slskd.transfers.enqueue_calls[0].files[0]["filename"],
+            "Music\\Album\\01 - Track One.flac",
         )
 
 

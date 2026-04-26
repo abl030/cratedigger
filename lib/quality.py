@@ -2466,6 +2466,24 @@ def filetype_matches(identity: AudioFileSpec, filter_spec: AudioFileSpec) -> boo
     return identity.bitrate is not None and str(identity.bitrate) == quality
 
 
+def search_cache_keys_for_identity(
+    identity: AudioFileSpec,
+    configured_matches: list[str],
+) -> tuple[str, ...]:
+    """Return search-cache keys for a slskd file identity.
+
+    ``search_filetype_override='lossless'`` is a persisted virtual tier used by
+    the quality gate. Runtime ``allowed_filetypes`` usually contains concrete
+    codecs (``flac``, ``alac``, ``wav``), so cache construction must also expose
+    a ``lossless`` key for lossless files or the enqueue path has no exact key
+    to look up.
+    """
+    keys = list(configured_matches)
+    if identity.lossless and QUALITY_LOSSLESS not in keys:
+        keys.append(QUALITY_LOSSLESS)
+    return tuple(keys)
+
+
 # ---------------------------------------------------------------------------
 # Filetype verification — legacy bridge
 # ---------------------------------------------------------------------------
