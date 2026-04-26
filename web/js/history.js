@@ -41,12 +41,15 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Spectral', `<span style="color:${sgColor};">${sgLabel}</span>`]);
   }
 
-  const existBr = h.existing_min_bitrate || h.existing_spectral_bitrate;
-  if (existBr) {
-    const existLabel = h.existing_spectral_bitrate
-      ? `~${h.existing_spectral_bitrate}kbps (spectral)`
-      : `${h.existing_min_bitrate}kbps`;
-    rows.push(['On disk (before)', existLabel]);
+  const existingBitrates = [];
+  if (h.existing_min_bitrate) {
+    existingBitrates.push(`${esc(h.existing_min_bitrate)}kbps`);
+  }
+  if (h.existing_spectral_bitrate) {
+    existingBitrates.push(`~${esc(h.existing_spectral_bitrate)}kbps (spectral)`);
+  }
+  if (existingBitrates.length > 0) {
+    rows.push(['On disk (before)', existingBitrates.join(' / ')]);
   }
 
   if (h.beets_distance != null) {

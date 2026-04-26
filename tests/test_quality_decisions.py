@@ -714,7 +714,7 @@ EXPECTED_PARAMS = {
     "is_vbr", "avg_bitrate",
     "spectral_grade", "spectral_bitrate",
     "existing_min_bitrate", "existing_avg_bitrate",
-    "existing_spectral_bitrate",
+    "existing_spectral_grade", "existing_spectral_bitrate",
     "override_min_bitrate",
     "existing_format", "existing_is_cbr",
     "post_conversion_min_bitrate", "converted_count",
@@ -969,6 +969,14 @@ class TestFullPipelineContract(unittest.TestCase):
         sig = inspect.signature(full_pipeline_decision)
         actual_params = set(sig.parameters.keys())
         self.assertEqual(actual_params, EXPECTED_PARAMS)
+
+    def test_new_existing_spectral_grade_param_preserves_positional_compatibility(self):
+        """New optional simulator fields are appended after older neighbors."""
+        params = list(inspect.signature(full_pipeline_decision).parameters)
+        self.assertLess(
+            params.index("existing_spectral_bitrate"),
+            params.index("existing_spectral_grade"),
+        )
 
     def test_stage1_values_in_contract(self):
         """Stage 1 spectral decisions must be from the known set."""
@@ -2267,7 +2275,10 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
     bitrate metric so the pipeline can converge upward when spectral is too
     pessimistic. A single stale estimate (only one side) does NOT fire the
     clamp; that case still follows ``compute_effective_override_bitrate``'s
-    grade-gated rule elsewhere in the pipeline.
+    grade-gated rule elsewhere in the pipeline. The clamp is also guarded
+    against one important asymmetry: a transcode-grade candidate cannot use a
+    higher spectral floor to beat a non-transcode-grade existing album when
+    its real selected-metric rank is lower.
 
     Regression guard for the Grouper case: a shared 96kbps floor must not
     erase 219avg vs 128avg. Brian Eno's shared-floor scenario remains in this
@@ -2348,19 +2359,109 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
                     f"{desc}: new={new_kw} existing={existing_kw} "
                     f"expected {expected!r} got {result!r}")
 
-    def test_clamp_requires_both_sides_not_grade(self):
-        """The bucket fires on both-sides-have-spectral, grade-independent.
+    def test_same_grade_clamp_still_uses_shared_spectral_floor(self):
+        """The bucket still fires when both sides share a non-transcode grade.
 
         Unlike ``compute_effective_override_bitrate`` (which gates on
-        SPECTRAL_TRANSCODE_GRADES), this rule doesn't consult grade — the
-        agreement between two independent estimates is the corroboration.
-        Verified by passing grade=genuine on both sides and confirming the
-        rank bucket still applies while the raw avg tiebreaker wins.
+        SPECTRAL_TRANSCODE_GRADES), same-grade agreement between two
+        independent estimates is still corroborating evidence. Verified by
+        passing grade=genuine on both sides and confirming the rank bucket
+        still applies while the raw avg tiebreaker wins.
         """
         new = self._m(format="MP3", avg_bitrate_kbps=290,
                       spectral_grade="genuine", spectral_bitrate_kbps=96)
         existing = self._m(format="MP3", avg_bitrate_kbps=128,
                            spectral_grade="genuine", spectral_bitrate_kbps=96)
+        self.assertEqual(compare_quality(new, existing, CFG), "better")
+
+    def test_transcode_candidate_cannot_spectral_floor_past_lower_real_rank(self):
+        """Muse live shape: spectral floor improved, real quality rank regressed.
+
+        The candidate is likely_transcode at ~160k spectral, while the existing
+        album is genuine with a partial ~128k spectral floor. The shared
+        spectral bucket alone would call 160 > 128 an upgrade, but the actual
+        selected metric regressed from TRANSPARENT avg=261 to GOOD avg=196.
+        That must be a downgrade, not an import.
+        """
+        new = self._m(
+            format="MP3",
+            min_bitrate_kbps=171,
+            avg_bitrate_kbps=196,
+            median_bitrate_kbps=196,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=160,
+        )
+        existing = self._m(
+            format="MP3",
+            min_bitrate_kbps=246,
+            avg_bitrate_kbps=261,
+            median_bitrate_kbps=259,
+            is_cbr=False,
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=128,
+        )
+
+        self.assertEqual(compare_quality(new, existing, CFG), "worse")
+        self.assertEqual(import_quality_decision(new, existing, cfg=CFG),
+                         "downgrade")
+
+    def test_transcode_guard_requires_known_non_transcode_existing_grade(self):
+        """Unknown existing grade keeps the backward-compatible shared bucket."""
+        new = self._m(
+            format="MP3",
+            avg_bitrate_kbps=196,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=160,
+        )
+        existing = self._m(
+            format="MP3",
+            avg_bitrate_kbps=261,
+            spectral_bitrate_kbps=128,
+        )
+
+        self.assertEqual(compare_quality(new, existing, CFG), "better")
+
+    def test_transcode_candidate_can_still_import_when_real_rank_does_not_regress(self):
+        """Bay of Biscay shape: spectral and actual selected metric both improve."""
+        new = self._m(
+            format="MP3",
+            min_bitrate_kbps=119,
+            avg_bitrate_kbps=179,
+            median_bitrate_kbps=181,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=160,
+        )
+        existing = self._m(
+            format="MP3",
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=172,
+            median_bitrate_kbps=192,
+            is_cbr=False,
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=128,
+        )
+
+        self.assertEqual(compare_quality(new, existing, CFG), "better")
+        self.assertEqual(import_quality_decision(new, existing, cfg=CFG),
+                         "import")
+
+    def test_transcode_over_transcode_still_uses_shared_spectral_floor(self):
+        """The guard only covers transcode-grade over known non-transcode."""
+        new = self._m(
+            format="MP3",
+            avg_bitrate_kbps=196,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=160,
+        )
+        existing = self._m(
+            format="MP3",
+            avg_bitrate_kbps=261,
+            spectral_grade="suspect",
+            spectral_bitrate_kbps=128,
+        )
+
         self.assertEqual(compare_quality(new, existing, CFG), "better")
 
     def test_equal_spectral_bucket_keeps_raw_avg_tiebreaker(self):

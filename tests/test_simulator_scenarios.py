@@ -262,6 +262,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     result = full_pipeline_decision(
         existing_min_bitrate=album.min_bitrate,
         existing_avg_bitrate=album.avg_bitrate,
+        existing_spectral_grade=album.spectral_grade,
         existing_spectral_bitrate=existing_spectral_bitrate,
         override_min_bitrate=override,
         existing_format=_derive_album_format(album),
@@ -620,6 +621,81 @@ class TestNamedRegressions(unittest.TestCase):
             r.stage2_import, "import",
             "Stage 2 must still import when equal spectral buckets have a "
             "higher raw AVG bitrate.")
+
+    def test_muse_likely_transcode_lower_real_rank_does_not_import(self):
+        """Muse shape: higher spectral floor must not beat lower real rank.
+
+        The preimport spectral stage can reasonably see progress because the
+        candidate's spectral floor rises from 128k to 160k. The composed
+        pipeline still must reject at stage 2 because a likely_transcode MP3
+        with 196k avg is a lower selected-metric rank than the existing
+        genuine VBR-ish MP3 at 261k avg.
+        """
+        album = AlbumState(
+            "muse_origin_of_symmetry_existing",
+            246,
+            False,
+            "genuine",
+            128,
+            False,
+            None,
+            avg_bitrate=261,
+            existing_format="MP3",
+        )
+        dl = DownloadScenario(
+            "muse_origin_of_symmetry_candidate",
+            False,
+            171,
+            False,
+            is_vbr=True,
+            avg_bitrate=196,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+            new_format="MP3",
+        )
+
+        r = simulate(album, dl)
+
+        self.assertEqual(r.stage1_spectral, "import_upgrade")
+        self.assertFalse(r.imported)
+        self.assertEqual(r.stage2_import, "downgrade")
+
+    def test_bay_likely_transcode_non_regressing_real_rank_still_imports(self):
+        """Bay shape: transcode-grade candidate can still be real progress.
+
+        Velella Velella - The Bay of Biscay remains valid because the
+        likely_transcode candidate's selected-metric rank does not regress:
+        avg rises from 172k to 179k while the spectral floor rises from 128k
+        to 160k. The Muse guard should block only lower-rank transcodes over
+        non-transcode existing albums.
+        """
+        album = AlbumState(
+            "bay_of_biscay_existing",
+            128,
+            False,
+            "genuine",
+            128,
+            False,
+            None,
+            avg_bitrate=172,
+            existing_format="MP3",
+        )
+        dl = DownloadScenario(
+            "bay_of_biscay_candidate",
+            False,
+            119,
+            False,
+            is_vbr=True,
+            avg_bitrate=179,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+            new_format="MP3",
+        )
+
+        r = simulate(album, dl)
+
+        self.assertTrue(r.imported)
+        self.assertIn(r.stage2_import, ("import", "transcode_upgrade"))
 
     def test_unter_null_failure_epiphany_vbr_real_upgrade(self):
         """VBR existing (1749 shape) + genuine V0 upgrade still imports.

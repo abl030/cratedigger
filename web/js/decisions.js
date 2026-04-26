@@ -228,6 +228,16 @@ export function renderSimulatorForm() {
         <input type="number" id="ds-existing_avg_bitrate" placeholder="AVG policy">
       </div>
       <div class="ds-field">
+        <label>Existing spectral grade</label>
+        <select id="ds-existing_spectral_grade">
+          <option value="">(none)</option>
+          <option value="genuine">genuine</option>
+          <option value="marginal">marginal</option>
+          <option value="suspect">suspect</option>
+          <option value="likely_transcode">likely_transcode</option>
+        </select>
+      </div>
+      <div class="ds-field">
         <label>Existing spectral bitrate</label>
         <input type="number" id="ds-existing_spectral_bitrate" placeholder="on disk">
       </div>
@@ -351,6 +361,7 @@ export const DS_PRESETS = {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
     existing_min_bitrate: '192', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
     converted_count: '12', verified_lossless: 'false',
@@ -361,6 +372,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '138', is_cbr: 'false', avg_bitrate: '138',
     spectral_grade: 'genuine', spectral_bitrate: '128',
     existing_min_bitrate: '173', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '128',
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -371,6 +383,7 @@ export const DS_PRESETS = {
     is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
     spectral_grade: 'genuine', spectral_bitrate: '',
     existing_min_bitrate: '192', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
     converted_count: '12', verified_lossless: 'false',
@@ -381,6 +394,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
     spectral_grade: '', spectral_bitrate: '',
     existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -392,6 +406,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '245', is_cbr: 'false', avg_bitrate: '245',
     spectral_grade: '', spectral_bitrate: '',
     existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -404,6 +419,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '126', is_cbr: 'false', avg_bitrate: '182',
     spectral_grade: 'likely_transcode', spectral_bitrate: '96',
     existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -415,6 +431,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '256', is_cbr: 'false', avg_bitrate: '256',
     spectral_grade: '', spectral_bitrate: '',
     existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -427,6 +444,7 @@ export const DS_PRESETS = {
     is_flac: 'false', min_bitrate: '320', is_cbr: 'true', avg_bitrate: '320',
     spectral_grade: '', spectral_bitrate: '',
     existing_min_bitrate: '', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
     existing_spectral_bitrate: '',
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
@@ -457,7 +475,7 @@ export async function runSimulator() {
   const fields = ['is_flac','min_bitrate','is_cbr','avg_bitrate',
     'spectral_grade','spectral_bitrate',
     'existing_min_bitrate','existing_avg_bitrate',
-    'existing_spectral_bitrate','override_min_bitrate',
+    'existing_spectral_grade','existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
     'target_format','verified_lossless_target',
     // Preimport gate inputs (issue #91) — audio integrity + nested layout.

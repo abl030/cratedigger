@@ -19,6 +19,13 @@ from tests.helpers import make_request_row
 
 
 class TestImportPreviewValues(unittest.TestCase):
+    def test_existing_spectral_grade_field_preserves_struct_positional_order(self):
+        fields = list(ImportPreviewValues.__struct_fields__)
+        self.assertLess(
+            fields.index("existing_spectral_bitrate"),
+            fields.index("existing_spectral_grade"),
+        )
+
     def test_values_preview_delegates_to_full_pipeline_shape(self):
         values = ImportPreviewValues(
             is_flac=False,

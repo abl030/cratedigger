@@ -11,7 +11,7 @@
  * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
  */
 
-import { loadDecisions, renderPolicyBadges, DS_PRESETS } from '../web/js/decisions.js';
+import { loadDecisions, renderPolicyBadges, DS_PRESETS, runSimulator } from '../web/js/decisions.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -163,6 +163,8 @@ for (const [name, preset] of Object.entries(DS_PRESETS)) {
          `preset "${name}" missing avg_bitrate — stale field inherited from prior preset`);
   assert('existing_avg_bitrate' in preset,
          `preset "${name}" missing existing_avg_bitrate — stale field inherited from prior preset`);
+  assert('existing_spectral_grade' in preset,
+         `preset "${name}" missing existing_spectral_grade — stale field inherited from prior preset`);
 }
 
 // The vbr_v0 preset must represent genuine V0 (high avg → gate skips)
@@ -174,6 +176,68 @@ assert(DS_PRESETS.vbr_transcode !== undefined,
        'vbr_transcode preset missing — documents the Go! Team shape from issue #93');
 assert(DS_PRESETS.vbr_transcode.avg_bitrate === '182',
        `vbr_transcode preset must have avg_bitrate='182' (below 210 threshold), got ${DS_PRESETS.vbr_transcode.avg_bitrate}`);
+
+console.log('\nrunSimulator()');
+{
+  const resultsEl = { innerHTML: '' };
+  const values = {
+    is_flac: 'false',
+    min_bitrate: '171',
+    is_cbr: 'false',
+    avg_bitrate: '196',
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: '160',
+    existing_min_bitrate: '246',
+    existing_avg_bitrate: '261',
+    existing_spectral_grade: 'genuine',
+    existing_spectral_bitrate: '128',
+    override_min_bitrate: '',
+    post_conversion_min_bitrate: '',
+    converted_count: '0',
+    verified_lossless: 'false',
+    target_format: '',
+    verified_lossless_target: '',
+    audio_check_mode: 'normal',
+    audio_corrupt: 'false',
+    import_mode: 'auto',
+    has_nested_audio: 'false',
+  };
+  global.document = {
+    getElementById(id) {
+      if (id === 'ds-results') return resultsEl;
+      if (!id.startsWith('ds-')) return null;
+      const key = id.slice(3);
+      return key in values ? { value: values[key] } : null;
+    },
+  };
+  let fetchedUrl = '';
+  global.fetch = async (url) => {
+    fetchedUrl = url;
+    return {
+      ok: true,
+      async json() {
+        return {
+          preimport_audio: 'pass',
+          preimport_nested: 'skipped_auto',
+          stage0_spectral_gate: 'would_run',
+          stage1_spectral: 'import_upgrade',
+          stage2_import: 'downgrade',
+          stage3_quality_gate: null,
+          final_status: 'imported',
+          imported: false,
+          denylisted: false,
+          keep_searching: true,
+        };
+      },
+    };
+  };
+
+  await runSimulator();
+  assertContains(fetchedUrl, 'existing_spectral_grade=genuine',
+    'runSimulator serializes existing spectral grade');
+  assertContains(fetchedUrl, 'existing_spectral_bitrate=128',
+    'runSimulator still serializes existing spectral bitrate');
+}
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
