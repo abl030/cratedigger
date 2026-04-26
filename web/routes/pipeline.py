@@ -68,6 +68,19 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         item["disambiguation_failure"] = classified.disambiguation_failure
         item["disambiguation_detail"] = classified.disambiguation_detail
         item["bad_extensions"] = classified.bad_extensions
+        item["wrong_match_triage_action"] = classified.wrong_match_triage_action
+        item["wrong_match_triage_summary"] = classified.wrong_match_triage_summary
+        item["wrong_match_triage_reason"] = classified.wrong_match_triage_reason
+        item["wrong_match_triage_preview_verdict"] = (
+            classified.wrong_match_triage_preview_verdict
+        )
+        item["wrong_match_triage_preview_decision"] = (
+            classified.wrong_match_triage_preview_decision
+        )
+        item["wrong_match_triage_stage_chain"] = (
+            classified.wrong_match_triage_stage_chain
+        )
+        item["wrong_match_triage_detail"] = classified.wrong_match_triage_detail
         result.append(item)
     # Count outcomes for filter buttons (single query, no limit)
     count_cur = _server()._db()._execute("""

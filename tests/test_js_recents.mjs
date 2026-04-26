@@ -98,5 +98,51 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
     'bad extension filename appears in hover detail');
 }
 
+console.log('renderRecentsItems() shows wrong-match triage audit chip');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 725,
+    request_id: 801,
+    created_at: '2026-04-25T23:25:00+00:00',
+    album_title: 'For Screening Purposes Only',
+    artist_name: 'Test Icicles',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    border_color: '#a33',
+    summary: 'Wrong match (dist 0.190) · moundsofass',
+    wrong_match_triage_summary: 'deleted: spectral reject',
+    wrong_match_triage_detail: 'action: deleted reject · stages: mp3_spectral:reject',
+  }]);
+  assertContains(html, 'Wrong match (dist 0.190) · moundsofass',
+    'original wrong-match summary remains visible');
+  assertContains(html, 'triage: deleted: spectral reject',
+    'triage chip rendered next to rejected badge');
+  assertContains(html, 'mp3_spectral:reject',
+    'triage detail appears in hover text');
+}
+
+console.log('renderRecentsItems() escapes wrong-match triage chip fields');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 726,
+    request_id: 802,
+    created_at: '2026-04-25T23:25:00+00:00',
+    album_title: 'Unsafe',
+    artist_name: 'Artist',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    border_color: '#a33',
+    summary: 'Wrong match',
+    wrong_match_triage_summary: '<img src=x>',
+    wrong_match_triage_detail: 'stage:<script>',
+  }]);
+  assertContains(html, '&lt;img src=x&gt;',
+    'triage summary is escaped');
+  assertContains(html, 'stage:&lt;script&gt;',
+    'triage detail is escaped');
+  assertExcludes(html, '<img src=x>',
+    'raw triage summary is not rendered');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -174,6 +174,39 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         )
         self.assertEqual(detail.download_history[0].source, "request")
 
+    def test_build_library_album_detail_surfaces_wrong_match_triage_audit(self) -> None:
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(),
+            pipeline_request=make_request_row(
+                id=42,
+                mb_release_id=RELEASE_ID,
+                status="manual",
+                source="request",
+            ),
+            download_history=[_history_row(
+                outcome="rejected",
+                beets_scenario="high_distance",
+                beets_distance=0.190,
+                validation_result={
+                    "wrong_match_triage": {
+                        "action": "deleted_reject",
+                        "reason": "requeue_upgrade",
+                        "preview_verdict": "confident_reject",
+                        "preview_decision": "requeue_upgrade",
+                        "stage_chain": ["mp3_spectral:reject"],
+                    },
+                },
+            )],
+        )
+
+        history = detail.download_history[0]
+        self.assertEqual(history.wrong_match_triage_action, "deleted_reject")
+        self.assertIn("spectral", history.wrong_match_triage_summary or "")
+        self.assertEqual(history.wrong_match_triage_preview_verdict,
+                         "confident_reject")
+        self.assertEqual(history.wrong_match_triage_stage_chain,
+                         ["mp3_spectral:reject"])
+
     def test_build_library_album_detail_preserves_nullable_legacy_fields(self) -> None:
         detail = build_library_album_detail(
             detail_row=_beets_detail(

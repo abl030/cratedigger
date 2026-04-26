@@ -109,6 +109,13 @@ class ClassifiedEntry:
     disambiguation_failure: Optional[str] = None
     disambiguation_detail: Optional[str] = None
     bad_extensions: list[str] = field(default_factory=list)
+    wrong_match_triage_action: Optional[str] = None
+    wrong_match_triage_summary: Optional[str] = None
+    wrong_match_triage_reason: Optional[str] = None
+    wrong_match_triage_preview_verdict: Optional[str] = None
+    wrong_match_triage_preview_decision: Optional[str] = None
+    wrong_match_triage_stage_chain: list[str] = field(default_factory=list)
+    wrong_match_triage_detail: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +157,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     downloaded_label = _build_downloaded_label(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
+    triage = _extract_wrong_match_triage(entry)
     return ClassifiedEntry(
         badge=badge, badge_class=badge_class,
         border_color=border_color, verdict=verdict,
@@ -157,6 +165,13 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         disambiguation_failure=disambig_reason,
         disambiguation_detail=disambig_detail,
         bad_extensions=bad_extensions,
+        wrong_match_triage_action=triage["action"],
+        wrong_match_triage_summary=triage["summary"],
+        wrong_match_triage_reason=triage["reason"],
+        wrong_match_triage_preview_verdict=triage["preview_verdict"],
+        wrong_match_triage_preview_decision=triage["preview_decision"],
+        wrong_match_triage_stage_chain=triage["stage_chain"],
+        wrong_match_triage_detail=triage["detail"],
     )
 
 
@@ -182,6 +197,189 @@ def _extract_bad_extensions(entry: LogEntry) -> list[str]:
     if ir is None or ir.postflight is None:
         return []
     return list(ir.postflight.bad_extensions)
+
+
+def _empty_wrong_match_triage() -> dict[str, Any]:
+    return {
+        "action": None,
+        "summary": None,
+        "reason": None,
+        "preview_verdict": None,
+        "preview_decision": None,
+        "stage_chain": [],
+        "detail": None,
+    }
+
+
+def _validation_result_dict(entry: LogEntry) -> dict[str, Any] | None:
+    raw = entry.validation_result
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _humanize_token(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.replace("_", " ").replace("-", " ").strip()
+
+
+def _stage_failure_family(stage_chain: list[str]) -> str | None:
+    text = " ".join(stage_chain).lower()
+    if not text:
+        return None
+    if "spectral" in text:
+        return "spectral"
+    if any(token in text for token in ("preimport", "audio", "nested")):
+        return "preimport"
+    if any(token in text for token in ("quality", "downgrade", "requeue")):
+        return "quality"
+    if "post" in text and "gate" in text:
+        return "post-import"
+    return None
+
+
+def _wrong_match_action_label(action: str | None) -> str | None:
+    if action == "deleted_reject":
+        return "deleted"
+    if action == "delete_failed":
+        return "delete failed"
+    if action == "stale_path_cleared":
+        return "stale path cleared"
+    if action == "stale_path_clear_failed":
+        return "stale path clear failed"
+    if action == "kept_would_import":
+        return "kept: would import"
+    if action == "kept_uncertain":
+        return "kept: uncertain"
+    if action == "preview_backfilled":
+        return "previewed"
+    return _humanize_token(action)
+
+
+def _build_wrong_match_triage_summary(
+    action: str | None,
+    reason: str | None,
+    preview_verdict: str | None,
+    preview_decision: str | None,
+    stage_chain: list[str],
+) -> str | None:
+    if not action and not reason and not preview_verdict and not preview_decision:
+        return None
+
+    family = _stage_failure_family(stage_chain)
+    label = _wrong_match_action_label(action)
+
+    if action == "deleted_reject":
+        if family:
+            return f"deleted: {family} reject"
+        detail = (_humanize_token(reason)
+                  or _humanize_token(preview_decision)
+                  or _humanize_token(preview_verdict))
+        return f"deleted: {detail}" if detail else "deleted"
+
+    if action == "kept_would_import":
+        return "kept: would import"
+
+    if action == "kept_uncertain":
+        detail = (_humanize_token(reason)
+                  or _humanize_token(preview_decision)
+                  or _humanize_token(preview_verdict))
+        return f"kept: {detail}" if detail else "kept: uncertain"
+
+    if label:
+        detail = (_humanize_token(reason)
+                  or _humanize_token(preview_decision)
+                  or _humanize_token(preview_verdict))
+        if detail and detail not in label:
+            return f"{label}: {detail}"
+        return label
+
+    return (_humanize_token(reason)
+            or _humanize_token(preview_decision)
+            or _humanize_token(preview_verdict))
+
+
+def _build_wrong_match_triage_detail(
+    action: str | None,
+    reason: str | None,
+    preview_verdict: str | None,
+    preview_decision: str | None,
+    stage_chain: list[str],
+) -> str | None:
+    parts: list[str] = []
+    if action:
+        parts.append(f"action: {_humanize_token(action)}")
+    if preview_verdict:
+        parts.append(f"verdict: {_humanize_token(preview_verdict)}")
+    if preview_decision:
+        parts.append(f"decision: {_humanize_token(preview_decision)}")
+    if reason:
+        parts.append(f"reason: {_humanize_token(reason)}")
+    if stage_chain:
+        parts.append("stages: " + " · ".join(stage_chain))
+    return " · ".join(parts) if parts else None
+
+
+def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
+    """Pull preview-driven wrong-match triage audit out of ValidationResult."""
+    validation_result = _validation_result_dict(entry)
+    if validation_result is None:
+        return _empty_wrong_match_triage()
+    triage = validation_result.get("wrong_match_triage")
+    if not isinstance(triage, dict):
+        return _empty_wrong_match_triage()
+
+    action = _str_or_none(triage.get("action"))
+    reason = _str_or_none(triage.get("reason"))
+    preview_verdict = _str_or_none(triage.get("preview_verdict"))
+    preview_decision = _str_or_none(triage.get("preview_decision"))
+    stage_chain = _string_list(triage.get("stage_chain"))
+    summary = _build_wrong_match_triage_summary(
+        action,
+        reason,
+        preview_verdict,
+        preview_decision,
+        stage_chain,
+    )
+    detail = _build_wrong_match_triage_detail(
+        action,
+        reason,
+        preview_verdict,
+        preview_decision,
+        stage_chain,
+    )
+    return {
+        "action": action,
+        "summary": summary,
+        "reason": reason,
+        "preview_verdict": preview_verdict,
+        "preview_decision": preview_decision,
+        "stage_chain": stage_chain,
+        "detail": detail,
+    }
 
 
 def _classify(entry: LogEntry) -> tuple[str, str, str, str]:

@@ -673,6 +673,12 @@ class TestPipelineRouteContracts(_WebServerCase):
         # Postflight bad-extension detection is warning-only but must be
         # surfaced in Recents so it is not buried in JSONB.
         "bad_extensions",
+        # Wrong-match triage audit is display-only history metadata; clean
+        # rows emit null/empty values so the frontend can render conditionally.
+        "wrong_match_triage_action", "wrong_match_triage_summary",
+        "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
+        "wrong_match_triage_preview_decision",
+        "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
     }
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
@@ -680,6 +686,10 @@ class TestPipelineRouteContracts(_WebServerCase):
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
         "existing_spectral_bitrate",
+        "wrong_match_triage_action", "wrong_match_triage_summary",
+        "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
+        "wrong_match_triage_preview_decision",
+        "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
     }
     STATUS_WANTED_REQUIRED_FIELDS = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
@@ -740,6 +750,44 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["counts"], {"all", "imported", "rejected"},
                                 "pipeline log counts")
 
+    def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
+        original_log = copy.deepcopy(self.mock_db.get_log.return_value)
+        row = copy.deepcopy(self.mock_db.get_log.return_value[0])
+        row.update({
+            "outcome": "rejected",
+            "beets_scenario": "high_distance",
+            "beets_distance": 0.190,
+            "soulseek_username": "moundsofass",
+            "album_title": "For Screening Purposes Only",
+            "artist_name": "Test Icicles",
+            "validation_result": {
+                "scenario": "wrong_match",
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "reason": "requeue_upgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "requeue_upgrade",
+                    "stage_chain": ["mp3_spectral:reject"],
+                },
+            },
+        })
+        self.mock_db.get_log.return_value = [row]
+
+        try:
+            status, data = self._get("/api/pipeline/log")
+        finally:
+            self.mock_db.get_log.return_value = original_log
+
+        self.assertEqual(status, 200)
+        item = data["log"][0]
+        self.assertEqual(item["verdict"], "Wrong match (dist 0.190)")
+        self.assertEqual(item["summary"],
+                         "Wrong match (dist 0.190) · moundsofass")
+        self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
+        self.assertIn("spectral", item["wrong_match_triage_summary"])
+        self.assertEqual(item["wrong_match_triage_stage_chain"],
+                         ["mp3_spectral:reject"])
+
     def test_pipeline_status_contract(self):
         status, data = self._get("/api/pipeline/status")
 
@@ -770,6 +818,39 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline detail request")
         _assert_required_fields(self, data["history"][0], self.HISTORY_REQUIRED_FIELDS,
                                 "pipeline detail history item")
+
+    def test_pipeline_detail_history_surfaces_wrong_match_triage_audit(self):
+        original_history = copy.deepcopy(self.mock_db.get_download_history.return_value)
+        row = copy.deepcopy(self.mock_db.get_download_history.return_value[0])
+        row.update({
+            "outcome": "rejected",
+            "beets_scenario": "high_distance",
+            "beets_distance": 0.190,
+            "validation_result": {
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "reason": "requeue_upgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "requeue_upgrade",
+                    "stage_chain": ["stage1_spectral:reject"],
+                },
+            },
+        })
+        self.mock_db.get_download_history.return_value = [row]
+
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_download_history.return_value = original_history
+
+        self.assertEqual(status, 200)
+        item = data["history"][0]
+        self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
+        self.assertIn("spectral", item["wrong_match_triage_summary"])
+        self.assertEqual(item["wrong_match_triage_preview_verdict"],
+                         "confident_reject")
+        self.assertEqual(item["wrong_match_triage_stage_chain"],
+                         ["stage1_spectral:reject"])
 
     def test_pipeline_recent_contract(self):
         row = make_request_row(id=202, status="imported", album_title="Recent Album")
@@ -2685,6 +2766,10 @@ class TestBeetsRouteContracts(_WebServerCase):
         "existing_spectral_bitrate", "album_title",
         "artist_name", "mb_release_id", "request_status",
         "request_min_bitrate", "search_filetype_override", "source",
+        "wrong_match_triage_action", "wrong_match_triage_summary",
+        "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
+        "wrong_match_triage_preview_decision",
+        "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
     }
     DELETE_REQUIRED_FIELDS = {
         "status", "id", "album", "artist", "deleted_files",

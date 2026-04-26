@@ -91,7 +91,9 @@ Browser → https://music.ablz.au
   candidate. Triage deletes only `cleanup_eligible` confident rejects;
   would-import and uncertain candidates stay visible for operator review. The
   action and reason are stored in
-  `download_log.validation_result.wrong_match_triage`.
+  `download_log.validation_result.wrong_match_triage` and are surfaced in
+  Recents History: collapsed cards show a triage chip, and expanded download
+  history shows action, preview, reason, and stage-chain detail.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls the value-preview adapter through `/api/pipeline/simulate` with presets for known scenarios.
 
 ## NixOS Configuration

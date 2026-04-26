@@ -127,7 +127,10 @@ The triage result is persisted under
 `download_log.validation_result.wrong_match_triage`, so a row that leaves the
 actionable Wrong Matches list still keeps the action, success flag, reason,
 preview verdict/decision, stage chain, and cleanup result for audit. Denylist
-rows written by the rejection path are not removed by triage.
+rows written by the rejection path are not removed by triage. Recents History
+renders this audit as a compact triage chip on the collapsed card and as
+expanded download-history rows; this is display-only and does not change
+cleanup, import, spectral, or match-threshold policy.
 
 After manual review, force-import bypasses the distance check. The request
 handler or CLI command validates the row/path synchronously, then enqueues a

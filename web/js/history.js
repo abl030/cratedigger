@@ -61,6 +61,35 @@ export function renderDownloadHistoryItem(h) {
     ]);
   }
 
+  if (h.wrong_match_triage_summary) {
+    rows.push([
+      'Triage',
+      `<span style="color:#ec6;">${esc(h.wrong_match_triage_summary)}</span>`,
+    ]);
+  }
+
+  const previewParts = [
+    h.wrong_match_triage_preview_verdict,
+    h.wrong_match_triage_preview_decision,
+  ].filter(Boolean);
+  if (previewParts.length > 0) {
+    rows.push(['Preview', esc(previewParts.join(' / '))]);
+  }
+
+  if (
+    h.wrong_match_triage_reason
+    && !previewParts.includes(h.wrong_match_triage_reason)
+  ) {
+    rows.push(['Reason', esc(h.wrong_match_triage_reason)]);
+  }
+
+  const triageStages = Array.isArray(h.wrong_match_triage_stage_chain)
+    ? h.wrong_match_triage_stage_chain
+    : [];
+  if (triageStages.length > 0) {
+    rows.push(['Stages', esc(triageStages.join(' · '))]);
+  }
+
   for (const [label, value] of rows) {
     html += `<div class="p-hist-row"><span class="p-hist-label">${label}</span> ${value}</div>`;
   }

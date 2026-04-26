@@ -46,6 +46,13 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     disambiguation_failure: str | None
     disambiguation_detail: str | None
     bad_extensions: list[str]
+    wrong_match_triage_action: str | None
+    wrong_match_triage_summary: str | None
+    wrong_match_triage_reason: str | None
+    wrong_match_triage_preview_verdict: str | None
+    wrong_match_triage_preview_decision: str | None
+    wrong_match_triage_stage_chain: list[str]
+    wrong_match_triage_detail: str | None
     spectral_grade: str | None
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
@@ -95,6 +102,19 @@ def build_download_history_row(
             "disambiguation_failure": classified.disambiguation_failure,
             "disambiguation_detail": classified.disambiguation_detail,
             "bad_extensions": classified.bad_extensions,
+            "wrong_match_triage_action": classified.wrong_match_triage_action,
+            "wrong_match_triage_summary": classified.wrong_match_triage_summary,
+            "wrong_match_triage_reason": classified.wrong_match_triage_reason,
+            "wrong_match_triage_preview_verdict": (
+                classified.wrong_match_triage_preview_verdict
+            ),
+            "wrong_match_triage_preview_decision": (
+                classified.wrong_match_triage_preview_decision
+            ),
+            "wrong_match_triage_stage_chain": (
+                classified.wrong_match_triage_stage_chain
+            ),
+            "wrong_match_triage_detail": classified.wrong_match_triage_detail,
         },
         type=DownloadHistoryViewRow,
     )

@@ -54,6 +54,11 @@ export function renderRecentsItems(items) {
       const borderColor = item.border_color || '#444';
       const summary = item.summary || '';
       const badExtensions = Array.isArray(item.bad_extensions) ? item.bad_extensions : [];
+      const triageSummary = item.wrong_match_triage_summary || '';
+      const triageDetail = item.wrong_match_triage_detail
+        || (Array.isArray(item.wrong_match_triage_stage_chain)
+          ? item.wrong_match_triage_stage_chain.join(' · ')
+          : '');
 
       // Issue #130: a `disambiguation_failure` chip surfaces post-import
       // `beet move` errors that leave the album in beets at a stale path.
@@ -64,12 +69,15 @@ export function renderRecentsItems(items) {
       const badExtChip = badExtensions.length
         ? `<span class="badge badge-warn" title="${esc(badExtensions.join(', '))}">bad ext: ${badExtensions.length}</span>`
         : '';
+      const triageChip = triageSummary
+        ? `<span class="badge badge-warn" title="${esc(triageDetail)}">triage: ${esc(triageSummary)}</span>`
+        : '';
 
       return `
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}</div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}${triageChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div style="font-size:0.75em;color:#666;">${time}</div>

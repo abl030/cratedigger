@@ -124,6 +124,9 @@ class TestClassifiedEntry(unittest.TestCase):
         self.assertIsNone(c.disambiguation_failure)
         self.assertIsNone(c.disambiguation_detail)
         self.assertEqual(c.bad_extensions, [])
+        self.assertIsNone(c.wrong_match_triage_action)
+        self.assertIsNone(c.wrong_match_triage_summary)
+        self.assertEqual(c.wrong_match_triage_stage_chain, [])
 
 
 # ============================================================================
@@ -250,6 +253,124 @@ class TestClassifyBadExtensions(unittest.TestCase):
     def test_no_import_result_has_no_bad_extensions(self):
         result = classify_log_entry(_entry(import_result=None))
         self.assertEqual(result.bad_extensions, [])
+
+
+class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
+    """Wrong-match triage audit should be visible in Recents without JSONB spelunking."""
+
+    def _rejected_with_triage(self, triage: object) -> LogEntry:
+        return _entry(
+            outcome="rejected",
+            beets_scenario="high_distance",
+            beets_distance=0.190,
+            soulseek_username="moundsofass",
+            album_title="For Screening Purposes Only",
+            artist_name="Test Icicles",
+            validation_result={
+                "scenario": "wrong_match",
+                "wrong_match_triage": triage,
+            },
+        )
+
+    def test_deleted_spectral_reject_surfaces_without_changing_original_verdict(self):
+        result = classify_log_entry(self._rejected_with_triage({
+            "action": "deleted_reject",
+            "reason": "spectral_reject",
+            "preview_verdict": "confident_reject",
+            "preview_decision": "requeue_upgrade",
+            "stage_chain": ["stage1_spectral:reject"],
+        }))
+
+        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.verdict, "Wrong match (dist 0.190)")
+        self.assertEqual(result.summary,
+                         "Wrong match (dist 0.190) · moundsofass")
+        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
+        self.assertEqual(result.wrong_match_triage_preview_verdict,
+                         "confident_reject")
+        self.assertEqual(result.wrong_match_triage_preview_decision,
+                         "requeue_upgrade")
+        self.assertEqual(result.wrong_match_triage_reason, "spectral_reject")
+        self.assertEqual(result.wrong_match_triage_stage_chain,
+                         ["stage1_spectral:reject"])
+        self.assertIn("deleted", result.wrong_match_triage_summary or "")
+        self.assertIn("spectral", result.wrong_match_triage_summary or "")
+
+    def test_stage_chain_supplies_spectral_fallback_when_reason_is_generic(self):
+        result = classify_log_entry(self._rejected_with_triage({
+            "action": "deleted_reject",
+            "reason": "requeue_upgrade",
+            "preview_verdict": "confident_reject",
+            "preview_decision": "requeue_upgrade",
+            "stage_chain": [
+                "stage0_spectral_gate:would_run",
+                "mp3_spectral:reject",
+            ],
+        }))
+
+        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
+        self.assertIn("deleted", result.wrong_match_triage_summary or "")
+        self.assertIn("spectral", result.wrong_match_triage_summary or "")
+        self.assertNotIn("requeue upgrade",
+                         result.wrong_match_triage_summary or "")
+
+    def test_kept_would_import_surfaces_importable_summary(self):
+        result = classify_log_entry(self._rejected_with_triage({
+            "action": "kept_would_import",
+            "reason": "import",
+            "preview_verdict": "would_import",
+            "preview_decision": "import",
+            "stage_chain": ["stage2_import:import"],
+        }))
+
+        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.wrong_match_triage_action, "kept_would_import")
+        self.assertIn("kept", result.wrong_match_triage_summary or "")
+        self.assertIn("import", result.wrong_match_triage_summary or "")
+
+    def test_missing_triage_defaults_empty(self):
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result={"scenario": "wrong_match"},
+        ))
+
+        self.assertIsNone(result.wrong_match_triage_action)
+        self.assertIsNone(result.wrong_match_triage_summary)
+        self.assertEqual(result.wrong_match_triage_stage_chain, [])
+
+    def test_string_validation_result_decodes_same_as_dict(self):
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result=(
+                '{"wrong_match_triage": {"action": "deleted_reject", '
+                '"preview_verdict": "confident_reject", '
+                '"preview_decision": "requeue_upgrade", '
+                '"stage_chain": ["stage1_spectral:reject"]}}'
+            ),
+        ))
+
+        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
+        self.assertIn("spectral", result.wrong_match_triage_summary or "")
+        self.assertEqual(result.wrong_match_triage_stage_chain,
+                         ["stage1_spectral:reject"])
+
+    def test_malformed_validation_result_does_not_raise(self):
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result="{not-json",
+        ))
+
+        self.assertIsNone(result.wrong_match_triage_action)
+        self.assertIsNone(result.wrong_match_triage_summary)
+
+    def test_non_object_triage_does_not_raise(self):
+        result = classify_log_entry(self._rejected_with_triage("deleted_reject"))
+
+        self.assertIsNone(result.wrong_match_triage_action)
+        self.assertIsNone(result.wrong_match_triage_summary)
 
 
 # ============================================================================
