@@ -415,7 +415,10 @@ class TestSimulatorInvariants(unittest.TestCase):
                             r.stage1_spectral == "reject",
                             r.stage2_import in ("transcode_upgrade",
                                                 "transcode_downgrade",
-                                                "transcode_first"),
+                                                "transcode_first",
+                                                "provisional_lossless_upgrade",
+                                                "suspect_lossless_downgrade",
+                                                "suspect_lossless_probe_missing"),
                             r.stage3_quality_gate == "requeue_upgrade",
                         )
                         self.assertTrue(any(causes),
@@ -461,7 +464,8 @@ class TestSimulatorInvariants(unittest.TestCase):
                     if r.imported and r.keep_searching:
                         causes = (
                             r.stage2_import in ("transcode_upgrade",
-                                                "transcode_first"),
+                                                "transcode_first",
+                                                "provisional_lossless_upgrade"),
                             r.stage3_quality_gate in ("requeue_upgrade",
                                                       "requeue_lossless"),
                         )
@@ -954,17 +958,17 @@ class TestFreshRequestOutcomes(unittest.TestCase):
         self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage2_import, "transcode_first")
-        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertEqual(r.stage2_import, "provisional_lossless_upgrade")
+        self.assertIsNone(r.stage3_quality_gate)
 
     def test_flac_suspect_245(self):
         r = self._sim("flac_suspect_245")
         self.assertTrue(r.imported)
         self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
-        self.assertEqual(r.final_status, "imported")
-        self.assertEqual(r.stage2_import, "transcode_first")
-        self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertEqual(r.final_status, "wanted")
+        self.assertEqual(r.stage2_import, "provisional_lossless_upgrade")
+        self.assertIsNone(r.stage3_quality_gate)
 
     # --- MP3 VBR ---
 
@@ -1081,13 +1085,14 @@ class TestCBR320NoSpectralMatrix(unittest.TestCase):
                 self.assertEqual(r.stage3_quality_gate, "accept")
                 self.assertFalse(r.keep_searching)
 
-    def test_suspect_flac_rejected_as_transcode_downgrade(self):
-        """Suspect FLAC: transcode detected, post-conversion bitrate < 320 -> downgrade."""
+    def test_suspect_flac_imports_as_provisional_source_upgrade(self):
+        """Suspect FLAC gets its own provisional source-probe lane."""
         for name in ("flac_suspect_190", "flac_suspect_245"):
             with self.subTest(dl=name):
                 r = self._sim(name)
-                self.assertFalse(r.imported)
-                self.assertEqual(r.stage2_import, "transcode_downgrade")
+                self.assertTrue(r.imported)
+                self.assertEqual(r.stage2_import,
+                                 "provisional_lossless_upgrade")
                 self.assertTrue(r.denylisted)
                 self.assertTrue(r.keep_searching)
 

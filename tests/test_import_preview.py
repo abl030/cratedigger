@@ -91,6 +91,71 @@ class TestImportPreviewValues(unittest.TestCase):
             ],
         )
 
+    def test_values_preview_classifies_provisional_lossless_upgrade(self):
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=True,
+                is_cbr=False,
+                spectral_grade="suspect",
+                spectral_bitrate=160,
+                post_conversion_min_bitrate=228,
+                converted_count=12,
+                candidate_v0_probe_avg=228,
+                existing_v0_probe_avg=171,
+                verified_lossless_target="opus 128",
+            )
+        )
+
+        self.assertEqual(preview.verdict, "would_import")
+        self.assertEqual(preview.reason, "provisional_lossless_upgrade")
+        self.assertIn(
+            "stage2_import:provisional_lossless_upgrade",
+            preview.stage_chain,
+        )
+        assert preview.simulation is not None
+        self.assertEqual(preview.simulation["target_final_format"], "opus 128")
+
+    def test_values_preview_prefers_provisional_over_stage1_reject(self):
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=True,
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate=128,
+                existing_spectral_bitrate=160,
+                post_conversion_min_bitrate=228,
+                converted_count=12,
+                existing_v0_probe_avg=171,
+            )
+        )
+
+        self.assertEqual(preview.verdict, "would_import")
+        self.assertFalse(preview.cleanup_eligible)
+        self.assertEqual(preview.reason, "provisional_lossless_upgrade")
+        self.assertIn("stage1_spectral:reject", preview.stage_chain)
+        self.assertIn(
+            "stage2_import:provisional_lossless_upgrade",
+            preview.stage_chain,
+        )
+
+    def test_values_preview_classifies_suspect_lossless_downgrade(self):
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=True,
+                is_cbr=False,
+                spectral_grade="suspect",
+                spectral_bitrate=160,
+                post_conversion_min_bitrate=175,
+                converted_count=12,
+                candidate_v0_probe_avg=175,
+                existing_v0_probe_avg=171,
+            )
+        )
+
+        self.assertEqual(preview.verdict, "confident_reject")
+        self.assertTrue(preview.cleanup_eligible)
+        self.assertEqual(preview.reason, "suspect_lossless_downgrade")
+
 
 class TestImportPreviewPath(unittest.TestCase):
     def _db(self) -> FakePipelineDB:
@@ -100,6 +165,9 @@ class TestImportPreviewPath(unittest.TestCase):
             mb_release_id="mbid-42",
             status="manual",
             min_bitrate=180,
+            current_lossless_source_v0_probe_min_bitrate=128,
+            current_lossless_source_v0_probe_avg_bitrate=171,
+            current_lossless_source_v0_probe_median_bitrate=169,
             artist_name="Artist",
             album_title="Album",
         ))
@@ -153,6 +221,10 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(db.denylist, [])
             self.assertTrue(mock_run.call_args.kwargs["dry_run"])
             self.assertIsNone(mock_run.call_args.kwargs["request_id"])
+            self.assertEqual(
+                mock_run.call_args.kwargs["existing_v0_probe"].avg_bitrate_kbps,
+                171,
+            )
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

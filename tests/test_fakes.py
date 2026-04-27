@@ -674,6 +674,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             "beets_distance", "beets_scenario", "imported_path",
             "search_attempts", "download_attempts", "validation_attempts",
             "last_download_spectral_grade", "current_spectral_grade",
+            "current_lossless_source_v0_probe_avg_bitrate",
             "verified_lossless", "min_bitrate", "prev_min_bitrate",
             "search_filetype_override", "target_format",
             "active_download_state",

@@ -53,9 +53,12 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          DuplicateRemoveGuardInfo, ImportResult,
                          PostflightInfo, QualityRankConfig,
                          MeasuredImportDecisionInput,
+                         ProvisionalLosslessDecisionInput,
+                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
                          build_existing_quality_measurement,
                          comparison_format_hint, determine_verified_lossless,
-                         measured_import_decision, transcode_detection)
+                         measured_import_decision,
+                         provisional_lossless_decision, transcode_detection)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
@@ -611,6 +614,71 @@ def _is_lossless_file(fname: str, folder: str = "") -> bool:
     return False
 
 
+def _v0_probe_from_bitrates(
+    bitrates: list[int],
+    *,
+    kind: str = V0_PROBE_LOSSLESS_SOURCE,
+) -> V0ProbeEvidence | None:
+    if not bitrates:
+        return None
+    return V0ProbeEvidence(
+        kind=kind,
+        min_bitrate_kbps=min(bitrates),
+        avg_bitrate_kbps=int(sum(bitrates) / len(bitrates)),
+        median_bitrate_kbps=int(statistics.median(bitrates)),
+    )
+
+
+def _existing_v0_probe_from_args(args: argparse.Namespace) -> V0ProbeEvidence | None:
+    if args.existing_v0_probe_avg_bitrate is None:
+        return None
+    return V0ProbeEvidence(
+        kind=V0_PROBE_LOSSLESS_SOURCE,
+        min_bitrate_kbps=args.existing_v0_probe_min_bitrate,
+        avg_bitrate_kbps=args.existing_v0_probe_avg_bitrate,
+        median_bitrate_kbps=args.existing_v0_probe_median_bitrate,
+    )
+
+
+def _probe_lossless_source_as_v0(album_path: str) -> V0ProbeEvidence | None:
+    """Non-destructively encode lossless sources to temp V0 files and measure them."""
+    lossless_files = sorted(
+        f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
+    if not lossless_files:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="cratedigger-v0-probe-") as temp_dir:
+        failed = 0
+        for index, fname in enumerate(lossless_files):
+            src_path = os.path.join(album_path, fname)
+            base = os.path.splitext(os.path.basename(fname))[0]
+            out_path = os.path.join(temp_dir, f"{index:03d}-{base}.mp3")
+            cmd = [
+                "ffmpeg", "-i", src_path,
+                "-c:a", V0_SPEC.codec, *V0_SPEC.codec_args,
+                *V0_SPEC.metadata_args,
+                "-y", out_path,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                failed += 1
+                continue
+            if (
+                result.returncode != 0
+                or not os.path.exists(out_path)
+                or os.path.getsize(out_path) == 0
+            ):
+                failed += 1
+
+        if failed:
+            _log(f"  [V0 PROBE] {failed} temporary probe conversion(s) failed")
+            return None
+        bitrates = _get_folder_bitrates(temp_dir, ext_filter={".mp3"})
+        return _v0_probe_from_bitrates(bitrates)
+
+
 def _remove_files_by_ext(folder: str, ext: str) -> None:
     """Remove all files with the given extension from a directory."""
     for fname in os.listdir(folder):
@@ -983,6 +1051,12 @@ def main():
                              "lib.import_dispatch.dispatch_import_core so the "
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
+    parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
+                        help="Current comparable lossless-source V0 probe min bitrate")
+    parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
+                        help="Current comparable lossless-source V0 probe avg bitrate")
+    parser.add_argument("--existing-v0-probe-median-bitrate", type=int, default=None,
+                        help="Current comparable lossless-source V0 probe median bitrate")
     parser.add_argument("--preserve-source", action="store_true",
                         help="Preserve lossless source files (FLAC/ALAC/WAV) "
                              "during V0 conversion until the quality decision "
@@ -1020,6 +1094,7 @@ def main():
     global _current_result  # noqa: PLW0603
     r = ImportResult()
     r.preview = args.dry_run
+    r.existing_v0_probe = _existing_v0_probe_from_args(args)
     _current_result = r
 
     # --- Pre-flight: already imported? ---
@@ -1110,6 +1185,7 @@ def main():
     v0_ext_filter = None
     post_conv_br = None
     is_transcode = False
+    supported_lossless_source = False
 
     has_target = bool(args.verified_lossless_target)
     # V0 must keep the lossless source when either a second conversion pass
@@ -1127,6 +1203,9 @@ def main():
             r.conversion.was_converted = True
             r.conversion.original_filetype = original_ext or "flac"
             r.conversion.target_filetype = "mp3"
+            supported_lossless_source = (
+                (original_ext or "").lower() in {"flac", "wav", "m4a", "alac"}
+            )
         _log(f"  Converted {converted}, failed {failed}")
         cd = conversion_decision(converted, failed)
         if cd.is_terminal:
@@ -1157,6 +1236,7 @@ def main():
         # Keeping lossless on disk — normalize ALAC/WAV → FLAC if needed
         lossless_files = sorted(
             f for f in os.listdir(work_path) if _is_lossless_file(f, work_path))
+        supported_lossless_source = bool(lossless_files)
         has_non_flac = any(
             not f.lower().endswith(".flac") for f in lossless_files)
         if has_non_flac:
@@ -1180,9 +1260,16 @@ def main():
         else:
             _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
         r.final_format = "flac"
+        r.v0_probe = _probe_lossless_source_as_v0(work_path)
+        if r.v0_probe:
+            _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
 
     # --- Quality comparison ---
     new_bitrates = _get_folder_bitrates(work_path, ext_filter=v0_ext_filter)
+    if not keep_lossless and supported_lossless_source and converted > 0:
+        r.v0_probe = _v0_probe_from_bitrates(new_bitrates)
+        if r.v0_probe:
+            _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
     new_median_br = (
@@ -1243,18 +1330,72 @@ def main():
     r.existing_measurement = existing_m
 
     # --- Quality comparison (pure decision) ---
-    qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode,
-                                cfg=_rank_cfg)
-    decision = qd.decision
-    r.decision = decision
+    provisional = provisional_lossless_decision(
+        ProvisionalLosslessDecisionInput(
+            candidate_probe=r.v0_probe,
+            existing_probe=r.existing_v0_probe,
+            spectral_grade=spectral_grade,
+            supported_lossless_source=supported_lossless_source,
+        ),
+        cfg=_rank_cfg,
+    )
+    qd: StageResult | None = None
+    if provisional.decision is not None:
+        decision = provisional.decision
+        r.decision = decision
+        r.error = provisional.reason if provisional.confident_reject else None
+        if decision == "provisional_lossless_upgrade":
+            _log(f"  [QUALITY] provisional lossless-source upgrade: "
+                 f"source_v0_avg={r.v0_probe.avg_bitrate_kbps if r.v0_probe else None}kbps")
+            if not keep_lossless and args.verified_lossless_target:
+                new_conv_target = args.verified_lossless_target
+                new_format_label = comparison_format_hint(
+                    target_format=args.target_format,
+                    verified_lossless_target=new_conv_target,
+                    converted_count=converted,
+                    is_transcode=is_transcode,
+                    native_codec_family="MP3",
+                )
+                new_m = AudioQualityMeasurement(
+                    min_bitrate_kbps=new_min_br,
+                    avg_bitrate_kbps=new_avg_br,
+                    median_bitrate_kbps=new_median_br,
+                    format=new_format_label,
+                    is_cbr=new_is_cbr,
+                    spectral_grade=spectral_grade,
+                    spectral_bitrate_kbps=spectral_bitrate,
+                    verified_lossless=False,
+                    was_converted_from=(
+                        (original_ext or "flac") if converted > 0 else None
+                    ),
+                )
+                r.new_measurement = new_m
+    else:
+        qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode,
+                                    cfg=_rank_cfg)
+        decision = qd.decision
+        r.decision = decision
 
     if args.dry_run:
-        r.exit_code = qd.exit_code if qd.is_terminal else 0
+        if provisional.decision is not None:
+            r.exit_code = 5 if provisional.confident_reject else 0
+        else:
+            assert qd is not None
+            r.exit_code = qd.exit_code if qd.is_terminal else 0
         _log(f"[DRY-RUN] Preview decision={decision}; stopping before beets import")
         beets.close()
         _emit_and_exit(r)
 
-    if qd.is_terminal:
+    if provisional.confident_reject:
+        r.exit_code = 5
+        _log(f"[SUSPECT LOSSLESS REJECT] {provisional.reason}")
+        if args.preserve_source and not keep_lossless and converted > 0:
+            _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
+            _log(f"  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
+                 f"lossless originals left intact for retry")
+        _emit_and_exit(r)
+
+    if qd is not None and qd.is_terminal:
         r.exit_code = qd.exit_code
         _log(f"[QUALITY DOWNGRADE] new format={new_m.format or 'unknown'} "
              f"min={new_min_br}kbps vs existing format="
@@ -1287,7 +1428,10 @@ def main():
     elif decision == "transcode_first":
         _log(f"  [QUALITY] no existing album in beets — importing transcode")
 
-    if (will_be_verified_lossless and converted > 0
+    if (not keep_lossless
+            and (will_be_verified_lossless
+                 or decision == "provisional_lossless_upgrade")
+            and converted > 0
             and not should_run_target_conversion(new_conv_target)):
         # Persist the V0 label for the post-import quality gate and any
         # downstream UI/CLI consumers. Beets only stores the bare "MP3"
@@ -1303,7 +1447,7 @@ def main():
     if should_run_target_conversion(conv_target):
         assert conv_target is not None
         target_spec = parse_verified_lossless_target(conv_target)
-        _log(f"[TARGET] Converting verified lossless → {target_spec.label}")
+        _log(f"[TARGET] Converting lossless source → {target_spec.label}")
         r.v0_verification_bitrate = post_conv_br
         # If target has same extension as V0 (.mp3), remove V0 files first
         # so convert_lossless doesn't skip due to existing output files.
@@ -1347,7 +1491,7 @@ def main():
             is_cbr=target_is_cbr,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
-            verified_lossless=True,
+            verified_lossless=will_be_verified_lossless,
             was_converted_from=(original_ext or "flac"),
         )
         r.conversion.target_filetype = target_spec.extension
@@ -1485,7 +1629,9 @@ def main():
     # --- Final exit ---
     beets.close()
     r.exit_code = final_exit_decision(is_transcode)
-    if is_transcode:
+    if r.decision == "provisional_lossless_upgrade":
+        _log("[OK] Provisional lossless-source import — denylist user, keep searching")
+    elif is_transcode:
         _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
     else:
         _log("[OK] Import complete")

@@ -18,7 +18,8 @@ from lib.config import CratediggerConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
                          AudioQualityMeasurement, PostflightInfo,
-                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
+                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
+                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
 
@@ -181,6 +182,34 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         ir = ImportResult(decision="import_failed", new_measurement=None)
         _populate_dl_info_from_import_result(dl, ir)
         self.assertIsNone(dl.actual_min_bitrate)
+
+    def test_populates_v0_probe_evidence(self):
+        from lib.import_dispatch import _populate_dl_info_from_import_result
+        dl = DownloadInfo(filetype="flac")
+        probe = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=165,
+            avg_bitrate_kbps=228,
+            median_bitrate_kbps=225,
+        )
+        existing = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=171,
+            median_bitrate_kbps=169,
+        )
+        ir = make_import_result(
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="mp3",
+            v0_probe=probe,
+            existing_v0_probe=existing,
+        )
+
+        _populate_dl_info_from_import_result(dl, ir)
+
+        self.assertEqual(dl.v0_probe, probe)
+        self.assertEqual(dl.existing_v0_probe, existing)
 
 
 class TestCleanupStagedDir(unittest.TestCase):
@@ -362,6 +391,32 @@ class TestDispatchImport(unittest.TestCase):
         r = self._dispatch(ir)
         self.assertEqual(r["db"].request(42)["status"], "imported")
 
+    def test_import_clears_stale_current_source_probe(self):
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        r = self._dispatch(ir, request_overrides={
+            "current_lossless_source_v0_probe_min_bitrate": 165,
+            "current_lossless_source_v0_probe_avg_bitrate": 228,
+            "current_lossless_source_v0_probe_median_bitrate": 225,
+        })
+
+        row = r["db"].request(42)
+        self.assertIsNone(row["current_lossless_source_v0_probe_min_bitrate"])
+        self.assertIsNone(row["current_lossless_source_v0_probe_avg_bitrate"])
+        self.assertIsNone(row["current_lossless_source_v0_probe_median_bitrate"])
+
+    def test_preflight_existing_preserves_current_source_probe(self):
+        ir = make_import_result(decision="preflight_existing")
+        r = self._dispatch(ir, request_overrides={
+            "current_lossless_source_v0_probe_min_bitrate": 165,
+            "current_lossless_source_v0_probe_avg_bitrate": 228,
+            "current_lossless_source_v0_probe_median_bitrate": 225,
+        })
+
+        row = r["db"].request(42)
+        self.assertEqual(row["current_lossless_source_v0_probe_min_bitrate"], 165)
+        self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 228)
+        self.assertEqual(row["current_lossless_source_v0_probe_median_bitrate"], 225)
+
     def test_downgrade_rejected(self):
         ir = make_import_result(decision="downgrade", new_min_bitrate=192,
                                 prev_min_bitrate=320)
@@ -410,6 +465,107 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
         self.assertTrue(len(r["db"].denylist) > 0)
         self.assertEqual(r["db"].request(42)["status"], "wanted")
+
+    def test_provisional_lossless_upgrade_imports_requeues_and_persists_probe(self):
+        probe = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=165,
+            avg_bitrate_kbps=228,
+            median_bitrate_kbps=225,
+        )
+        ir = make_import_result(
+            decision="provisional_lossless_upgrade",
+            new_min_bitrate=128,
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            verified_lossless=False,
+            final_format="opus 128",
+            v0_probe=probe,
+        )
+
+        r = self._dispatch(ir)
+
+        row = r["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertFalse(row["verified_lossless"])
+        self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 228)
+        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertEqual(r["db"].download_logs[0].outcome, "success")
+        self.assertEqual(r["db"].download_logs[0].beets_scenario,
+                         "provisional_lossless_upgrade")
+        self.assertEqual(r["db"].download_logs[0].extra["v0_probe_avg_bitrate"],
+                         228)
+        self.assertTrue(len(r["db"].denylist) > 0)
+        r["mock_meelo"].assert_called_once()
+
+    def test_suspect_lossless_downgrade_rejects_without_probe_update(self):
+        probe = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=165,
+            avg_bitrate_kbps=175,
+            median_bitrate_kbps=174,
+        )
+        existing = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=171,
+            median_bitrate_kbps=169,
+        )
+        ir = make_import_result(
+            decision="suspect_lossless_downgrade",
+            new_min_bitrate=128,
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            verified_lossless=False,
+            v0_probe=probe,
+            existing_v0_probe=existing,
+        )
+
+        r = self._dispatch(ir, request_overrides={
+            "current_lossless_source_v0_probe_avg_bitrate": 171,
+        })
+
+        row = r["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 171)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertEqual(r["db"].download_logs[0].beets_scenario,
+                         "suspect_lossless_downgrade")
+        self.assertEqual(r["db"].download_logs[0].extra["v0_probe_avg_bitrate"],
+                         175)
+        self.assertEqual(
+            r["db"].download_logs[0].extra["existing_v0_probe_avg_bitrate"],
+            171,
+        )
+        self.assertTrue(len(r["db"].denylist) > 0)
+
+    def test_suspect_lossless_probe_missing_requeues_without_probe_update(self):
+        ir = make_import_result(
+            decision="suspect_lossless_probe_missing",
+            new_min_bitrate=128,
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            verified_lossless=False,
+            error="suspect lossless source lacks a comparable V0 probe",
+        )
+
+        r = self._dispatch(ir, request_overrides={
+            "current_lossless_source_v0_probe_min_bitrate": 128,
+            "current_lossless_source_v0_probe_avg_bitrate": 171,
+            "current_lossless_source_v0_probe_median_bitrate": 169,
+        })
+
+        row = r["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 171)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertEqual(r["db"].download_logs[0].beets_scenario,
+                         "suspect_lossless_probe_missing")
+        self.assertIn(
+            "comparable V0 probe",
+            r["db"].download_logs[0].beets_detail,
+        )
+        self.assertTrue(len(r["db"].denylist) > 0)
 
     def test_error_decision(self):
         ir = make_import_result(decision="conversion_failed",
@@ -667,6 +823,26 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         """
         cmd = self._run_dispatch_capture_cmd(None)
         self.assertNotIn("--quality-rank-config", cmd)
+
+    def test_existing_v0_probe_state_serializes_to_argv(self):
+        row = make_request_row(
+            status="downloading",
+            current_lossless_source_v0_probe_min_bitrate=128,
+            current_lossless_source_v0_probe_avg_bitrate=171,
+            current_lossless_source_v0_probe_median_bitrate=169,
+        )
+
+        cmd = _dispatch_valid_result_cmd(db_fields=row)
+
+        self.assertIn("--existing-v0-probe-min-bitrate", cmd)
+        self.assertEqual(
+            cmd[cmd.index("--existing-v0-probe-min-bitrate") + 1], "128")
+        self.assertIn("--existing-v0-probe-avg-bitrate", cmd)
+        self.assertEqual(
+            cmd[cmd.index("--existing-v0-probe-avg-bitrate") + 1], "171")
+        self.assertIn("--existing-v0-probe-median-bitrate", cmd)
+        self.assertEqual(
+            cmd[cmd.index("--existing-v0-probe-median-bitrate") + 1], "169")
 
 
 class TestLoadQualityGateState(unittest.TestCase):

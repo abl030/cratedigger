@@ -1295,6 +1295,9 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
             verified_lossless=True,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=160,
+            current_lossless_source_v0_probe_min_bitrate=165,
+            current_lossless_source_v0_probe_avg_bitrate=171,
+            current_lossless_source_v0_probe_median_bitrate=169,
         )
 
         self.db.clear_on_disk_quality_fields(req_id)
@@ -1304,6 +1307,9 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertFalse(req["verified_lossless"])
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_min_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_avg_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_median_bitrate"])
 
     def test_clears_imported_path(self):
         """After ``beet remove -d`` the on-disk path is stale — the pipeline
@@ -1470,6 +1476,34 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertIsNone(h.get("spectral_bitrate"))
         self.assertIsNone(h.get("slskd_filetype"))
 
+    def test_log_download_with_v0_probe_fields(self):
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="testuser",
+            filetype="flac",
+            outcome="success",
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_min_bitrate=165,
+            v0_probe_avg_bitrate=228,
+            v0_probe_median_bitrate=225,
+            existing_v0_probe_kind="lossless_source_v0",
+            existing_v0_probe_min_bitrate=128,
+            existing_v0_probe_avg_bitrate=171,
+            existing_v0_probe_median_bitrate=169,
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        h = history[0]
+        self.assertEqual(h["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(h["v0_probe_min_bitrate"], 165)
+        self.assertEqual(h["v0_probe_avg_bitrate"], 228)
+        self.assertEqual(h["v0_probe_median_bitrate"], 225)
+        self.assertEqual(h["existing_v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(h["existing_v0_probe_min_bitrate"], 128)
+        self.assertEqual(h["existing_v0_probe_avg_bitrate"], 171)
+        self.assertEqual(h["existing_v0_probe_median_bitrate"], 169)
+
     def test_album_request_spectral_columns(self):
         self.db.update_status(self.req_id, "imported",
                               last_download_spectral_bitrate=128,
@@ -1544,6 +1578,71 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(req["last_download_spectral_bitrate"], 192)
         self.assertEqual(req["current_spectral_grade"], "genuine")
         self.assertIsNone(req["current_spectral_bitrate"])
+
+    def test_update_v0_probe_state_updates_current_source_probe(self):
+        from lib import pipeline_db
+        from lib.quality import V0ProbeEvidence
+
+        self.db.update_v0_probe_state(
+            self.req_id,
+            pipeline_db.RequestV0ProbeStateUpdate(
+                current_lossless_source=V0ProbeEvidence(
+                    kind="lossless_source_v0",
+                    min_bitrate_kbps=165,
+                    avg_bitrate_kbps=228,
+                    median_bitrate_kbps=225,
+                ),
+            ),
+        )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["current_lossless_source_v0_probe_min_bitrate"], 165)
+        self.assertEqual(req["current_lossless_source_v0_probe_avg_bitrate"], 228)
+        self.assertEqual(req["current_lossless_source_v0_probe_median_bitrate"], 225)
+
+    def test_update_v0_probe_state_can_clear_current_source_probe(self):
+        from lib import pipeline_db
+        from lib.quality import V0ProbeEvidence
+
+        self.db.update_v0_probe_state(
+            self.req_id,
+            pipeline_db.RequestV0ProbeStateUpdate(
+                current_lossless_source=V0ProbeEvidence(
+                    kind="lossless_source_v0",
+                    min_bitrate_kbps=165,
+                    avg_bitrate_kbps=228,
+                    median_bitrate_kbps=225,
+                ),
+            ),
+        )
+        self.db.update_v0_probe_state(
+            self.req_id,
+            pipeline_db.RequestV0ProbeStateUpdate(
+                clear_current_lossless_source=True,
+            ),
+        )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["current_lossless_source_v0_probe_min_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_avg_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_median_bitrate"])
+
+    def test_v0_probe_fields_null_by_default(self):
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="testuser",
+            outcome="success",
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertIsNone(history[0].get("v0_probe_kind"))
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["current_lossless_source_v0_probe_min_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_avg_bitrate"])
+        self.assertIsNone(req["current_lossless_source_v0_probe_median_bitrate"])
 
 
 @requires_postgres

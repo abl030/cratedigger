@@ -15,7 +15,7 @@ from lib.quality import (
     ImportResult, ConversionInfo, SpectralDetail, PostflightInfo,
     AudioQualityMeasurement, DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
-    DownloadInfo, SpectralMeasurement,
+    DownloadInfo, SpectralMeasurement, V0ProbeEvidence,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
 
@@ -40,6 +40,8 @@ class TestImportResultConstruction(unittest.TestCase):
         r = ImportResult()
         self.assertIsNone(r.v0_verification_bitrate)
         self.assertIsNone(r.final_format)
+        self.assertIsNone(r.v0_probe)
+        self.assertIsNone(r.existing_v0_probe)
 
     def test_conversion_defaults(self):
         c = ConversionInfo()
@@ -69,6 +71,13 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertIsNone(m.spectral_bitrate_kbps)
         self.assertFalse(m.verified_lossless)
         self.assertIsNone(m.was_converted_from)
+
+    def test_v0_probe_defaults(self):
+        p = V0ProbeEvidence()
+        self.assertEqual(p.kind, "")
+        self.assertIsNone(p.min_bitrate_kbps)
+        self.assertIsNone(p.avg_bitrate_kbps)
+        self.assertIsNone(p.median_bitrate_kbps)
 
     def test_postflight_defaults(self):
         p = PostflightInfo()
@@ -159,6 +168,31 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertEqual(len(guard.candidates), 2)
         self.assertEqual(guard.candidates[0].beets_album_id, 42)
         self.assertEqual(guard.candidates[1].item_count, 11)
+
+    def test_v0_probe_roundtrip(self):
+        r = ImportResult(
+            decision="provisional_lossless_upgrade",
+            v0_probe=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=160,
+                avg_bitrate_kbps=228,
+                median_bitrate_kbps=230,
+            ),
+            existing_v0_probe=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=150,
+                avg_bitrate_kbps=171,
+                median_bitrate_kbps=172,
+            ),
+        )
+
+        r2 = ImportResult.from_json(r.to_json())
+
+        assert r2.v0_probe is not None
+        assert r2.existing_v0_probe is not None
+        self.assertEqual(r2.v0_probe.kind, "lossless_source_v0")
+        self.assertEqual(r2.v0_probe.avg_bitrate_kbps, 228)
+        self.assertEqual(r2.existing_v0_probe.avg_bitrate_kbps, 171)
 
     def test_postflight_legacy_v2_row_without_failure_field(self):
         """Old v2 download_log rows serialized BEFORE issue #127 lack

@@ -73,6 +73,32 @@ Primary key is the rank. Within the same rank:
   metric (`avg_bitrate_kbps`, `median_bitrate_kbps`, or `min_bitrate_kbps`)
   with `cfg.within_rank_tolerance_kbps` tolerance.
 
+## Provisional lossless-source comparison
+
+Suspect lossless-container sources use a separate evidence lane from generic
+rank comparison. When FLAC, ALAC, WAV, or ALAC-in-M4A reaches V0 probing but
+spectral analysis grades it `suspect` or `likely_transcode`, the candidate is
+not treated as verified lossless and does not rely on final stored-format rank.
+
+Instead, `provisional_lossless_decision()` compares the candidate
+`lossless_source_v0` probe average against the request's current comparable
+lossless-source V0 probe average:
+
+- No current comparable source probe: `provisional_lossless_upgrade`.
+- Candidate average more than `within_rank_tolerance_kbps` above current:
+  `provisional_lossless_upgrade`.
+- Candidate average equal, worse, or within tolerance:
+  `suspect_lossless_downgrade`.
+- Missing candidate probe on a suspect lossless source:
+  `suspect_lossless_probe_missing`.
+
+This deliberately reuses `within_rank_tolerance_kbps` so near-equal source
+probes do not churn the library, but it does not use rank bands, codec-family
+parity, or the configured `bitrate_metric`. V1 policy uses the probe average;
+probe min and median are persisted for audit and future tuning. Native lossy
+and on-disk V0 probes can be stored as research evidence, but their lineage is
+non-comparable and they must not update the current source-probe baseline.
+
 ## Bitrate metric — `min` vs `avg` vs `median`
 
 VBR codecs have legitimate per-track variance. Opus 128 unconstrained VBR
@@ -306,7 +332,11 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
   `rank_bitrate_metric` alongside other constants for the Decisions tab UI.
 - `/api/pipeline/simulate?...` (web) — accepts the same params as
   `full_pipeline_decision()` plus `existing_format`, `existing_is_cbr`,
-  `new_format` so the web simulator classifies the same way production does.
+  `new_format`, and provisional probe fields
+  (`candidate_v0_probe_avg`, `existing_v0_probe_avg`,
+  `candidate_v0_probe_kind`, `existing_v0_probe_kind`,
+  `supported_lossless_source`) so the web simulator classifies the same way
+  production does.
 - `/api/import-preview` (web) — returns the common preview verdict shape for
   real-folder preview and typed values.
 

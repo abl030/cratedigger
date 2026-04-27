@@ -639,15 +639,16 @@ class TestLiveBugReproductions(unittest.TestCase):
                         "likely_transcode should trigger keep_searching")
 
     def test_taboo_vi_fake_flac_192_accepted(self):
-        """BUG: Fake FLAC (192k source) converted to V0 at 224kbps, accepted.
+        """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
 
         Request 257, 2026-03-28. amyslskduser uploaded FLAC that was actually
         a 192k transcode. Spectral said likely_transcode but estimated_bitrate
         was None (HF deficit, not cliff). V0 conversion produced 224kbps which
         is above the 210 threshold, so import_one.py didn't flag as transcode.
-        Quality gate saw 224 VBR, no spectral_bitrate override → accepted.
+        The provisional lossless-source lane now records the V0 source probe,
+        imports it as unverified evidence, and keeps searching.
 
-        Root causes:
+        Original root causes:
         1. import_one.py transcode threshold (210) too low for 192k fakes
         2. spectral_bitrate=None when cliff not detected → no quality gate override
         3. verified_lossless correctly NOT set (spectral=likely_transcode)
@@ -664,14 +665,11 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=224,
             converted_count=10,
         )
-        # Currently this ACCEPTS — documenting the bug
-        # When fixed, it should keep_searching
-        self.assertFalse(r.get("verified_lossless", False),
+        self.assertFalse(r["verified_lossless"],
                          "Fake FLAC should never get verified_lossless")
-        # BUG: these assertions document current (wrong) behavior
-        # Uncomment the correct assertions when the bug is fixed:
-        # self.assertTrue(r["keep_searching"])
-        # self.assertTrue(r["denylisted"])
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertTrue(r["keep_searching"])
+        self.assertTrue(r["denylisted"])
 
     def test_taboo_vi_with_spectral_bitrate(self):
         """Same scenario but if spectral_bitrate had been captured."""
@@ -686,9 +684,10 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=224,
             converted_count=10,
         )
-        # With spectral_bitrate=192, quality gate should override:
-        # gate_br = min(224, 192) = 192 < 210 → requeue_upgrade
-        self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
+        # The provisional source-probe decision runs before the generic quality
+        # gate, even when spectral_bitrate is available.
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertIsNone(r["stage3_quality_gate"])
         self.assertTrue(r["keep_searching"])
         self.assertTrue(r["denylisted"])
 
@@ -717,7 +716,8 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=a["post_conversion_min_bitrate"],
             converted_count=a["track_count"],
         )
-        # With fixture data (spectral_bitrate=128), should requeue
+        # With fixture data (spectral_bitrate=128), should remain wanted.
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
         self.assertTrue(r["keep_searching"])
 
 

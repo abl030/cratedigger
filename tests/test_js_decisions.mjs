@@ -11,7 +11,7 @@
  * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
  */
 
-import { loadDecisions, renderPolicyBadges, DS_PRESETS, runSimulator } from '../web/js/decisions.js';
+import { loadDecisions, renderPolicyBadges, DS_PRESETS, runSimulator, renderSimulatorResults } from '../web/js/decisions.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -165,6 +165,12 @@ for (const [name, preset] of Object.entries(DS_PRESETS)) {
          `preset "${name}" missing existing_avg_bitrate — stale field inherited from prior preset`);
   assert('existing_spectral_grade' in preset,
          `preset "${name}" missing existing_spectral_grade — stale field inherited from prior preset`);
+  assert('candidate_v0_probe_avg' in preset,
+         `preset "${name}" missing candidate_v0_probe_avg — stale probe inherited from prior preset`);
+  assert('existing_v0_probe_avg' in preset,
+         `preset "${name}" missing existing_v0_probe_avg — stale probe inherited from prior preset`);
+  assert('supported_lossless_source' in preset,
+         `preset "${name}" missing supported_lossless_source — stale probe source flag inherited`);
 }
 
 // The vbr_v0 preset must represent genuine V0 (high avg → gate skips)
@@ -195,6 +201,9 @@ console.log('\nrunSimulator()');
     post_conversion_min_bitrate: '',
     converted_count: '0',
     verified_lossless: 'false',
+    candidate_v0_probe_avg: '228',
+    existing_v0_probe_avg: '171',
+    supported_lossless_source: 'true',
     target_format: '',
     verified_lossless_target: '',
     audio_check_mode: 'normal',
@@ -233,10 +242,40 @@ console.log('\nrunSimulator()');
   };
 
   await runSimulator();
+  assertContains(fetchedUrl, 'candidate_v0_probe_avg=228',
+    'runSimulator serializes candidate V0 probe average');
+  assertContains(fetchedUrl, 'existing_v0_probe_avg=171',
+    'runSimulator serializes existing V0 probe average');
+  assertContains(fetchedUrl, 'supported_lossless_source=true',
+    'runSimulator serializes supported lossless source flag');
   assertContains(fetchedUrl, 'existing_spectral_grade=genuine',
     'runSimulator serializes existing spectral grade');
   assertContains(fetchedUrl, 'existing_spectral_bitrate=128',
     'runSimulator still serializes existing spectral bitrate');
+}
+
+{
+  const resultsEl = { innerHTML: '' };
+  global.document = {
+    getElementById(id) {
+      return id === 'ds-results' ? resultsEl : null;
+    },
+  };
+  renderSimulatorResults({
+    preimport_audio: 'pass',
+    preimport_nested: 'skipped_auto',
+    stage0_spectral_gate: 'skipped_flac',
+    stage1_spectral: 'reject',
+    stage2_import: 'suspect_lossless_probe_missing',
+    stage3_quality_gate: null,
+    final_status: 'wanted',
+    imported: false,
+    denylisted: true,
+    keep_searching: true,
+  });
+  assertContains(resultsEl.innerHTML,
+    '<span class="ds-outcome ds-red">suspect_lossless_probe_missing</span>',
+    'renderSimulatorResults marks suspect lossless missing-probe as red');
 }
 
 // --- Summary ---

@@ -25,7 +25,9 @@ from lib.import_queue import (
     validate_payload,
     validate_status,
 )
-from lib.pipeline_db import BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES, RequestSpectralStateUpdate
+from lib.pipeline_db import (BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES,
+                             RequestSpectralStateUpdate,
+                             RequestV0ProbeStateUpdate)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -1013,6 +1015,14 @@ class FakePipelineDB:
                      import_result: Any = None,
                      validation_result: Any = None,
                      final_format: str | None = None,
+                     v0_probe_kind: str | None = None,
+                     v0_probe_min_bitrate: int | None = None,
+                     v0_probe_avg_bitrate: int | None = None,
+                     v0_probe_median_bitrate: int | None = None,
+                     existing_v0_probe_kind: str | None = None,
+                     existing_v0_probe_min_bitrate: int | None = None,
+                     existing_v0_probe_avg_bitrate: int | None = None,
+                     existing_v0_probe_median_bitrate: int | None = None,
                      **extra: Any) -> int:
         """Record a download_log row.
 
@@ -1041,6 +1051,14 @@ class FakePipelineDB:
             "existing_min_bitrate": existing_min_bitrate,
             "existing_spectral_bitrate": existing_spectral_bitrate,
             "final_format": final_format,
+            "v0_probe_kind": v0_probe_kind,
+            "v0_probe_min_bitrate": v0_probe_min_bitrate,
+            "v0_probe_avg_bitrate": v0_probe_avg_bitrate,
+            "v0_probe_median_bitrate": v0_probe_median_bitrate,
+            "existing_v0_probe_kind": existing_v0_probe_kind,
+            "existing_v0_probe_min_bitrate": existing_v0_probe_min_bitrate,
+            "existing_v0_probe_avg_bitrate": existing_v0_probe_avg_bitrate,
+            "existing_v0_probe_median_bitrate": existing_v0_probe_median_bitrate,
         }
         auxiliary.update(extra)
         self.download_logs.append(DownloadLogRow(
@@ -1100,6 +1118,14 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    def update_v0_probe_state(self, request_id: int,
+                              update: RequestV0ProbeStateUpdate) -> None:
+        row = self._requests.get(request_id)
+        if row:
+            fields = update.as_update_fields()
+            row.update(fields)
+            row["updated_at"] = _utcnow()
+
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row is None:
@@ -1107,6 +1133,9 @@ class FakePipelineDB:
         row["verified_lossless"] = False
         row["current_spectral_grade"] = None
         row["current_spectral_bitrate"] = None
+        row["current_lossless_source_v0_probe_min_bitrate"] = None
+        row["current_lossless_source_v0_probe_avg_bitrate"] = None
+        row["current_lossless_source_v0_probe_median_bitrate"] = None
         row["imported_path"] = None
         row["updated_at"] = _utcnow()
 
@@ -1183,6 +1212,9 @@ class FakePipelineDB:
             "verified_lossless": False,
             "current_spectral_grade": None,
             "current_spectral_bitrate": None,
+            "current_lossless_source_v0_probe_min_bitrate": None,
+            "current_lossless_source_v0_probe_avg_bitrate": None,
+            "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
             "created_at": now,
             "updated_at": now,

@@ -179,6 +179,7 @@ export function renderSimulatorForm() {
       <span class="ds-preset" onclick="window.dsPreset('cbr320')">CBR 320 (no spectral)</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_v0')">VBR V0 MP3</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_transcode')">VBR Transcode (#93)</span>
+      <span class="ds-preset" onclick="window.dsPreset('provisional_lossless')">Provisional source</span>
       <span class="ds-preset" onclick="window.dsPreset('audio_corrupt')">Audio corrupt (#91)</span>
       <span class="ds-preset" onclick="window.dsPreset('nested_force')">Nested force-import (#91)</span>
     </div>
@@ -248,6 +249,22 @@ export function renderSimulatorForm() {
       <div class="ds-field">
         <label>Post-conversion bitrate</label>
         <input type="number" id="ds-post_conversion_min_bitrate" placeholder="after FLAC\u2192V0">
+      </div>
+      <div class="ds-field">
+        <label>Candidate source V0 avg</label>
+        <input type="number" id="ds-candidate_v0_probe_avg" placeholder="source probe avg">
+      </div>
+      <div class="ds-field">
+        <label>Existing source V0 avg</label>
+        <input type="number" id="ds-existing_v0_probe_avg" placeholder="current probe avg">
+      </div>
+      <div class="ds-field">
+        <label>Supported lossless source?</label>
+        <select id="ds-supported_lossless_source">
+          <option value="">auto</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
       </div>
       <div class="ds-field">
         <label>Converted count</label>
@@ -340,6 +357,11 @@ const _preimport_defaults = {
   audio_check_mode: 'normal', audio_corrupt: 'false',
   import_mode: 'auto', has_nested_audio: 'false',
 };
+const _probe_defaults = {
+  candidate_v0_probe_avg: '',
+  existing_v0_probe_avg: '',
+  supported_lossless_source: '',
+};
 
 /**
  * Merge runtime audio_check_mode from /api/pipeline/constants into preset
@@ -366,6 +388,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '209',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults,
   },
   mtngoats: {
@@ -377,6 +400,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '320', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults,
   },
   genuine_flac: {
@@ -388,6 +412,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '245',
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
+    ..._probe_defaults,
     ..._preimport_defaults,
   },
   cbr320: {
@@ -399,6 +424,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults,
   },
   vbr_v0: {
@@ -411,6 +437,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults,
   },
   vbr_transcode: {
@@ -424,6 +451,21 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
+    ..._preimport_defaults,
+  },
+  provisional_lossless: {
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
+    spectral_grade: 'suspect', spectral_bitrate: '160',
+    existing_min_bitrate: '192', existing_avg_bitrate: '',
+    existing_spectral_grade: '',
+    existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '228',
+    converted_count: '12', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: 'opus 128',
+    candidate_v0_probe_avg: '228',
+    existing_v0_probe_avg: '171',
+    supported_lossless_source: 'true',
     ..._preimport_defaults,
   },
   audio_corrupt: {
@@ -436,6 +478,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults, audio_corrupt: 'true',
   },
   nested_force: {
@@ -449,6 +492,7 @@ export const DS_PRESETS = {
     override_min_bitrate: '', post_conversion_min_bitrate: '',
     converted_count: '0', verified_lossless: 'false',
     target_format: '', verified_lossless_target: '',
+    ..._probe_defaults,
     ..._preimport_defaults, import_mode: 'force', has_nested_audio: 'true',
   },
 };
@@ -477,6 +521,8 @@ export async function runSimulator() {
     'existing_min_bitrate','existing_avg_bitrate',
     'existing_spectral_grade','existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
+    'candidate_v0_probe_avg','existing_v0_probe_avg',
+    'supported_lossless_source',
     'target_format','verified_lossless_target',
     // Preimport gate inputs (issue #91) — audio integrity + nested layout.
     'audio_check_mode','audio_corrupt',
@@ -509,6 +555,7 @@ export function renderSimulatorResults(r) {
          'preflight_existing', 'pass',
          'skipped_vbr_high_avg', 'skipped_flac', 'skipped_auto'].includes(val)) return 'ds-green';
     if (['reject', 'downgrade', 'transcode_downgrade',
+         'suspect_lossless_downgrade', 'suspect_lossless_probe_missing',
          'reject_corrupt', 'reject_nested'].includes(val)) return 'ds-red';
     return 'ds-amber';
   }

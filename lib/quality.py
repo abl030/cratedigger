@@ -15,6 +15,18 @@ import msgspec
 
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
 QUALITY_LOSSLESS = "lossless"
+V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
+V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
+V0_PROBE_ON_DISK_RESEARCH = "on_disk_research_v0"
+V0_PROBE_KINDS = frozenset({
+    V0_PROBE_LOSSLESS_SOURCE,
+    V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    V0_PROBE_ON_DISK_RESEARCH,
+})
+
+DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
+DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
+DECISION_SUSPECT_LOSSLESS_PROBE_MISSING = "suspect_lossless_probe_missing"
 
 # Deprecated aliases — keep for old code that references them
 QUALITY_FLAC_ONLY = QUALITY_LOSSLESS
@@ -581,6 +593,9 @@ class DownloadInfo:
     validation_result: Optional[str] = None
     # Final format on disk after verified-lossless target conversion
     final_format: Optional[str] = None
+    # V0 probe evidence
+    v0_probe: Optional["V0ProbeEvidence"] = None
+    existing_v0_probe: Optional["V0ProbeEvidence"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +648,31 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_bitrate_kbps: Optional[int] = None
     verified_lossless: bool = False
     was_converted_from: Optional[str] = None
+
+
+class V0ProbeEvidence(msgspec.Struct, frozen=True):
+    """MP3 V0 probe metrics used as source-lineage evidence.
+
+    ``kind`` is intentionally explicit because not every V0 probe is eligible
+    for policy decisions. Only ``lossless_source_v0`` proves the candidate came
+    from a supported lossless-container source. Native-lossy and on-disk probes
+    are research evidence in v1.
+    """
+
+    kind: str = ""
+    min_bitrate_kbps: Optional[int] = None
+    avg_bitrate_kbps: Optional[int] = None
+    median_bitrate_kbps: Optional[int] = None
+
+
+def is_comparable_lossless_source_probe(
+    probe: V0ProbeEvidence | None,
+) -> bool:
+    return (
+        probe is not None
+        and probe.kind == V0_PROBE_LOSSLESS_SOURCE
+        and probe.avg_bitrate_kbps is not None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +1567,8 @@ class ImportResult(msgspec.Struct):
     v0_verification_bitrate: Optional[int] = None
     final_format: Optional[str] = None  # configured target, None means keep V0/MP3
     preview: bool = False              # True for no-mutation import preview
+    v0_probe: Optional[V0ProbeEvidence] = None
+    existing_v0_probe: Optional[V0ProbeEvidence] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
@@ -1884,6 +1926,107 @@ class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
     reason: Optional[str] = None
 
 
+class ProvisionalLosslessDecisionInput(msgspec.Struct, frozen=True):
+    """Pure input for suspect lossless-source provisional grind-up."""
+
+    candidate_probe: Optional[V0ProbeEvidence] = None
+    existing_probe: Optional[V0ProbeEvidence] = None
+    spectral_grade: Optional[str] = None
+    supported_lossless_source: bool = False
+
+
+class ProvisionalLosslessDecisionResult(msgspec.Struct, frozen=True):
+    """Decision result for the suspect lossless-source lane."""
+
+    decision: Optional[str] = None
+    would_import: bool = False
+    confident_reject: bool = False
+    cleanup_eligible: bool = False
+    reason: Optional[str] = None
+    stage_chain: list[str] = []
+
+
+def provisional_lossless_decision(
+    candidate: ProvisionalLosslessDecisionInput,
+    *,
+    cfg: "QualityRankConfig | None" = None,
+) -> ProvisionalLosslessDecisionResult:
+    """Compare suspect lossless-source V0 probes inside the provisional lane.
+
+    Returns ``decision=None`` for candidates that should continue through the
+    existing import policy (native lossy, clean lossless, or unsupported
+    sources). For suspect supported lossless sources, V0 probe avg bitrate is
+    the v1 comparison signal and ``within_rank_tolerance_kbps`` is the only
+    tolerance knob.
+    """
+    if cfg is None:
+        cfg = QualityRankConfig.defaults()
+
+    if not candidate.supported_lossless_source:
+        return ProvisionalLosslessDecisionResult()
+
+    if candidate.spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+        return ProvisionalLosslessDecisionResult()
+
+    if not is_comparable_lossless_source_probe(candidate.candidate_probe):
+        decision = DECISION_SUSPECT_LOSSLESS_PROBE_MISSING
+        return ProvisionalLosslessDecisionResult(
+            decision=decision,
+            would_import=False,
+            confident_reject=True,
+            cleanup_eligible=True,
+            reason="suspect lossless source lacks a comparable V0 probe",
+            stage_chain=[f"stage2_provisional:{decision}"],
+        )
+
+    candidate_avg = candidate.candidate_probe.avg_bitrate_kbps
+    assert candidate_avg is not None
+    existing_probe = (
+        candidate.existing_probe
+        if is_comparable_lossless_source_probe(candidate.existing_probe)
+        else None
+    )
+
+    if existing_probe is None:
+        decision = DECISION_PROVISIONAL_LOSSLESS_UPGRADE
+        return ProvisionalLosslessDecisionResult(
+            decision=decision,
+            would_import=True,
+            reason="no existing comparable lossless-source V0 probe",
+            stage_chain=[f"stage2_provisional:{decision}"],
+        )
+
+    existing_avg = existing_probe.avg_bitrate_kbps
+    assert existing_avg is not None
+    delta = candidate_avg - existing_avg
+    if delta <= cfg.within_rank_tolerance_kbps:
+        decision = DECISION_SUSPECT_LOSSLESS_DOWNGRADE
+        return ProvisionalLosslessDecisionResult(
+            decision=decision,
+            would_import=False,
+            confident_reject=True,
+            cleanup_eligible=True,
+            reason=(
+                f"candidate V0 probe avg {candidate_avg}kbps is not more than "
+                f"{cfg.within_rank_tolerance_kbps}kbps above existing "
+                f"{existing_avg}kbps"
+            ),
+            stage_chain=[f"stage2_provisional:{decision}"],
+        )
+
+    decision = DECISION_PROVISIONAL_LOSSLESS_UPGRADE
+    return ProvisionalLosslessDecisionResult(
+        decision=decision,
+        would_import=True,
+        reason=(
+            f"candidate V0 probe avg {candidate_avg}kbps beats existing "
+            f"{existing_avg}kbps by more than "
+            f"{cfg.within_rank_tolerance_kbps}kbps"
+        ),
+        stage_chain=[f"stage2_provisional:{decision}"],
+    )
+
+
 def build_existing_quality_measurement(
     *,
     min_bitrate_kbps: int | None,
@@ -1955,8 +2098,14 @@ def measured_import_decision(
         "import",
         "transcode_upgrade",
         "transcode_first",
+        DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     }
-    confident_reject = decision in {"downgrade", "transcode_downgrade"}
+    confident_reject = decision in {
+        "downgrade",
+        "transcode_downgrade",
+        DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+        DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    }
     reason = decision
     if measured.existing_measurement is None:
         reason = f"{decision}: no existing album"
@@ -2148,9 +2297,18 @@ def dispatch_action(decision: str) -> DispatchAction:
                               run_quality_gate=True, cleanup=True)
     elif decision == "downgrade":
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == DECISION_PROVISIONAL_LOSSLESS_UPGRADE:
+        return DispatchAction(mark_done=True, denylist=True, requeue=True,
+                              trigger_notifiers=True, cleanup=True)
     elif decision in ("transcode_upgrade", "transcode_first"):
         return DispatchAction(mark_done=True, denylist=True, requeue=True,
                               trigger_notifiers=True, cleanup=True)
+    elif decision in (
+        DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+        DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    ):
+        return DispatchAction(record_rejection=True, denylist=True,
+                              requeue=True, cleanup=True)
     elif decision == "transcode_downgrade":
         return DispatchAction(record_rejection=True, denylist=True, requeue=True,
                               cleanup=True)
@@ -2714,6 +2872,46 @@ def get_decision_tree(
                         "may be Opus, MP3, AAC, or any other supported format.",
             },
             {
+                "id": "provisional_lossless",
+                "title": "Provisional Lossless-Source",
+                "path": "flac",
+                "function": "provisional_lossless_decision",
+                "when": "Supported lossless-container sources whose spectral "
+                        "grade is suspect or likely_transcode",
+                "inputs": ["candidate lossless_source_v0 avg",
+                           "current lossless_source_v0 avg",
+                           "spectral_grade",
+                           "cfg.within_rank_tolerance_kbps"],
+                "rules": [
+                    {"condition": "spectral = genuine/marginal",
+                     "result": "continue", "color": "green",
+                     "effect": "clean sources stay on the verified-lossless path"},
+                    {"condition": "suspect source has no comparable V0 probe",
+                     "result": DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+                     "color": "red",
+                     "effect": "reject distinctly; do not invent a probe"},
+                    {"condition": "no existing comparable source probe",
+                     "result": DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                     "color": "amber",
+                     "effect": "import unverified, denylist source, keep searching"},
+                    {"condition": "candidate_avg - existing_avg <= within_rank_tolerance_kbps",
+                     "result": DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                     "color": "red",
+                     "effect": "reject as equivalent/worse suspect source"},
+                    {"condition": "candidate_avg beats existing by more than tolerance",
+                     "result": DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                     "color": "amber",
+                     "effect": "import unverified, update current source probe"},
+                ],
+                "outcomes": [
+                    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+                ],
+                "note": "Uses source-probe avg as evidence. Native lossy "
+                        "research probes are non-comparable in v1.",
+            },
+            {
                 "id": "mp3_spectral_gate",
                 "title": "Spectral Gate Trigger",
                 "path": "mp3",
@@ -2804,7 +3002,10 @@ def get_decision_tree(
                 ],
                 "outcomes": ["import", "downgrade", "transcode_upgrade",
                              "transcode_downgrade", "transcode_first",
-                             "preflight_existing"],
+                             "preflight_existing",
+                             DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                             DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                             DECISION_SUSPECT_LOSSLESS_PROBE_MISSING],
                 "note": ("Caller resolves override_min_bitrate into "
                          "existing.min_bitrate_kbps unconditionally. "
                          "avg/median follow only when existing is CBR "
@@ -2868,13 +3069,23 @@ def get_decision_tree(
                     {"condition": "transcode_downgrade",
                      "result": "record_rejection + denylist + requeue", "color": "red",
                      "effect": "transcode not an upgrade, keep searching"},
+                    {"condition": "provisional_lossless_upgrade",
+                     "result": "mark_done + denylist + requeue", "color": "amber",
+                     "effect": "imported as unverified source-probe upgrade"},
+                    {"condition": "suspect_lossless_downgrade / suspect_lossless_probe_missing",
+                     "result": "record_rejection + denylist + requeue", "color": "red",
+                     "effect": "suspect source not a comparable improvement"},
                     {"condition": "other (error/crash/timeout)",
                      "result": "record_rejection", "color": "red",
                      "effect": "import failed"},
                 ],
                 "outcomes": ["import", "preflight_existing", "downgrade",
                              "transcode_upgrade", "transcode_first",
-                             "transcode_downgrade", "conversion_failed",
+                             "transcode_downgrade",
+                             DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                             DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                             DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+                             "conversion_failed",
                              "import_failed", "mbid_missing"],
             },
         ],
@@ -2927,6 +3138,12 @@ def full_pipeline_decision(
     has_nested_audio: bool = False,
     # Rank-model config (defaults() for legacy callers)
     cfg: "QualityRankConfig | None" = None,
+    *,
+    candidate_v0_probe_avg: int | None = None,
+    existing_v0_probe_avg: int | None = None,
+    candidate_v0_probe_kind: str | None = None,
+    existing_v0_probe_kind: str | None = None,
+    supported_lossless_source: bool | None = None,
 ):
     """Run the full decision chain and return the final outcome.
 
@@ -2964,6 +3181,7 @@ def full_pipeline_decision(
         "denylisted": False,
         "keep_searching": False,
         "target_final_format": None,
+        "verified_lossless": bool(verified_lossless),
     }
 
     # --- Preimport gates (issue #91) ---
@@ -3034,11 +3252,24 @@ def full_pipeline_decision(
     # if the caller supplies a spectral_grade, simulating that gate firing
     # would misrepresent production behavior.
     stage0_gates_stage1 = gate == "would_run" or is_flac
+    provisional_source_candidate = bool(
+        is_flac if supported_lossless_source is None else supported_lossless_source
+    )
+    has_provisional_probe_input = (
+        candidate_v0_probe_avg is not None
+        or (
+            is_flac
+            and target_format not in ("flac", "lossless")
+            and post_conversion_min_bitrate is not None
+        )
+    )
     if spectral_grade and stage0_gates_stage1:
         result["stage1_spectral"] = spectral_import_decision(
             spectral_grade, spectral_bitrate, existing_spectral_bitrate or 0)
 
-        if result["stage1_spectral"] == "reject":
+        if (result["stage1_spectral"] == "reject"
+                and not (provisional_source_candidate
+                         and has_provisional_probe_input)):
             result["final_status"] = "wanted"  # stays wanted, denylist user
             result["denylisted"] = True
             result["keep_searching"] = True
@@ -3077,6 +3308,34 @@ def full_pipeline_decision(
             format=stage2_new_format,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
+        provisional = provisional_lossless_decision(
+            ProvisionalLosslessDecisionInput(
+                candidate_probe=V0ProbeEvidence(
+                    kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=candidate_v0_probe_avg,
+                ) if candidate_v0_probe_avg is not None else None,
+                existing_probe=V0ProbeEvidence(
+                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=existing_v0_probe_avg,
+                ) if existing_v0_probe_avg is not None else None,
+                spectral_grade=spectral_grade,
+                supported_lossless_source=provisional_source_candidate,
+            ),
+            cfg=cfg,
+        )
+        if provisional.decision is not None:
+            result["stage2_import"] = provisional.decision
+            if provisional.confident_reject:
+                result["final_status"] = "wanted"
+                result["denylisted"] = True
+                result["keep_searching"] = True
+                return result
+            result["imported"] = True
+            result["denylisted"] = True
+            result["keep_searching"] = True
+            result["final_status"] = "wanted"
+            result["target_final_format"] = stage2_new_format
+            return result
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
         result["stage2_import"] = measured.decision
@@ -3090,6 +3349,7 @@ def full_pipeline_decision(
         # Genuine FLAC on disk is verified lossless (for quality gate)
         if spectral_grade in ("genuine", "marginal", None):
             verified_lossless = True
+            result["verified_lossless"] = True
 
         gate_bitrate = min_bitrate
         gate_avg_bitrate = min_bitrate  # FLAC: lossless, avg == min is fine
@@ -3118,6 +3378,40 @@ def full_pipeline_decision(
             verified_lossless=will_be_verified,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
+        provisional_probe_avg = (
+            candidate_v0_probe_avg
+            if candidate_v0_probe_avg is not None
+            else post_conversion_min_bitrate
+        )
+        provisional = provisional_lossless_decision(
+            ProvisionalLosslessDecisionInput(
+                candidate_probe=V0ProbeEvidence(
+                    kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=provisional_probe_avg,
+                ) if provisional_probe_avg is not None else None,
+                existing_probe=V0ProbeEvidence(
+                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=existing_v0_probe_avg,
+                ) if existing_v0_probe_avg is not None else None,
+                spectral_grade=spectral_grade,
+                supported_lossless_source=provisional_source_candidate,
+            ),
+            cfg=cfg,
+        )
+        if provisional.decision is not None:
+            result["stage2_import"] = provisional.decision
+            if provisional.confident_reject:
+                result["final_status"] = "wanted"
+                result["denylisted"] = True
+                result["keep_searching"] = True
+                return result
+            result["imported"] = True
+            result["denylisted"] = True
+            result["keep_searching"] = True
+            result["final_status"] = "wanted"
+            if verified_lossless_target:
+                result["target_final_format"] = verified_lossless_target
+            return result
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m, is_transcode),
             cfg=cfg,
@@ -3145,6 +3439,7 @@ def full_pipeline_decision(
         if (converted_count > 0 and not is_transcode and
                 spectral_grade in ("genuine", "marginal", None)):
             verified_lossless = True
+            result["verified_lossless"] = True
 
         # Target format conversion: if verified lossless + target configured,
         # use the target label for the quality gate (e.g. "opus 128") so the

@@ -10,11 +10,14 @@ Full schema lives in `migrations/*.sql`. This doc covers the fields that appear 
 - `target_format TEXT` — persistent user intent for desired format on disk (`"lossless"` or NULL). Set only by user action (CLI/web set-intent toggle). Never cleared by quality gate. When set, keeps lossless on disk (normalizes ALAC/WAV → FLAC) instead of converting to V0/target.
 - `min_bitrate INTEGER` — current min track bitrate in kbps (from beets).
 - `prev_min_bitrate INTEGER` — previous min_bitrate before last upgrade. Shows delta in UI.
-- `verified_lossless BOOLEAN` — True only when imported from spectral-verified genuine FLAC→V0.
+- `verified_lossless BOOLEAN` — True only when imported from a spectral-verified genuine lossless source. Suspect lossless-container imports stay false even when they are accepted provisionally.
 - `last_download_spectral_grade TEXT` — spectral grade of the most recent download attempt.
 - `last_download_spectral_bitrate INTEGER` — estimated bitrate from the most recent download's spectral analysis.
 - `current_spectral_grade TEXT` — spectral grade of files currently on disk in beets.
 - `current_spectral_bitrate INTEGER` — spectral estimated bitrate of files currently on disk. NULL for genuine files (no cliff). Quality gate uses this for gate_bitrate.
+- `current_lossless_source_v0_probe_min_bitrate INTEGER` — min track bitrate of the current comparable V0 probe produced from an accepted lossless-container source.
+- `current_lossless_source_v0_probe_avg_bitrate INTEGER` — avg track bitrate of the current comparable lossless-source V0 probe. Suspect lossless-source grind-up compares against this value.
+- `current_lossless_source_v0_probe_median_bitrate INTEGER` — median track bitrate of the current comparable lossless-source V0 probe. Stored for audit and future policy, not used by v1 decisions.
 - `active_download_state JSONB` — persisted download state for async polling (filetype, enqueued_at, per-file username/filename/size). Set by `set_downloading()`, cleared on completion/timeout.
 
 ## `download_log` — quality-tracking fields
@@ -25,6 +28,10 @@ Full schema lives in `migrations/*.sql`. This doc covers the fields that appear 
 - `spectral_bitrate INTEGER` — estimated original bitrate from spectral.
 - `existing_min_bitrate INTEGER` — beets min bitrate before this download.
 - `existing_spectral_bitrate INTEGER` — spectral estimate of existing files before download.
+- `v0_probe_kind TEXT` — lineage for this attempt's optional V0 probe evidence. `lossless_source_v0` is comparable; `native_lossy_research_v0` and `on_disk_research_v0` are audit-only.
+- `v0_probe_min_bitrate INTEGER`, `v0_probe_avg_bitrate INTEGER`, `v0_probe_median_bitrate INTEGER` — min/avg/median track bitrates for this attempt's probe.
+- `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
+- `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
 - `outcome TEXT` — one of 6 values: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`.
 
 ## `import_jobs` — shared importer queue
@@ -83,11 +90,12 @@ as live queue work.
 
 ## `download_log.import_result` JSONB
 
-`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, per-track spectral analysis (grade, hf_deficit, cliff detection per track), quality comparison (new vs prev bitrate), postflight verification (beets_id, path). Every import path (success, downgrade, transcode, error, timeout, crash) logs to download_log.
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, per-track spectral analysis (grade, hf_deficit, cliff detection per track), quality comparison (new vs prev bitrate), postflight verification (beets_id, path). Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
 
 ```sql
 SELECT import_result->>'decision',
        import_result->'quality'->>'new_min_bitrate',
+       import_result->'v0_probe'->>'avg_bitrate_kbps',
        import_result->'spectral'->>'grade',
        import_result->'spectral'->'per_track'->0->>'hf_deficit_db'
 FROM download_log ORDER BY id DESC LIMIT 10;

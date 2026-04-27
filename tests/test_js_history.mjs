@@ -129,5 +129,25 @@ console.log('renderDownloadHistoryItem() keeps single existing bitrate styles');
     'actual-only existing bitrate has no spectral suffix');
 }
 
+console.log('renderDownloadHistoryItem() shows provisional V0 probe evidence');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_avg_bitrate: 228,
+    existing_v0_probe_avg_bitrate: 171,
+    final_format: 'opus 128',
+    verdict: 'Provisional lossless source',
+  });
+
+  assertContains(html, 'Source V0 probe', 'candidate probe label rendered');
+  assertContains(html, '228kbps avg', 'candidate probe avg rendered');
+  assertContains(html, '171kbps source V0 avg', 'existing probe avg rendered');
+  assertContains(html, 'Stored as', 'final format label rendered');
+  assertContains(html, 'opus 128', 'final format rendered');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

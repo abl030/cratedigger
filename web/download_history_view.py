@@ -57,6 +57,15 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
     existing_spectral_bitrate: int | None
+    final_format: str | None
+    v0_probe_kind: str | None
+    v0_probe_min_bitrate: int | None
+    v0_probe_avg_bitrate: int | None
+    v0_probe_median_bitrate: int | None
+    existing_v0_probe_kind: str | None
+    existing_v0_probe_min_bitrate: int | None
+    existing_v0_probe_avg_bitrate: int | None
+    existing_v0_probe_median_bitrate: int | None
     album_title: str
     artist_name: str
     mb_release_id: str | None

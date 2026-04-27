@@ -32,7 +32,8 @@ from lib.import_queue import (
     validate_payload,
     validate_status,
 )
-from lib.quality import CooldownConfig, SpectralMeasurement, should_cooldown
+from lib.quality import (CooldownConfig, SpectralMeasurement, V0ProbeEvidence,
+                         should_cooldown)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
@@ -120,6 +121,32 @@ class RequestSpectralStateUpdate:
         if self.current is not None:
             fields["current_spectral_grade"] = self.current.grade
             fields["current_spectral_bitrate"] = self.current.bitrate_kbps
+        return fields
+
+
+@dataclass(frozen=True)
+class RequestV0ProbeStateUpdate:
+    """Typed update for current comparable lossless-source V0 probe state."""
+
+    current_lossless_source: V0ProbeEvidence | None = None
+    clear_current_lossless_source: bool = False
+
+    def as_update_fields(self) -> dict[str, object]:
+        fields: dict[str, object] = {}
+        if self.clear_current_lossless_source:
+            fields["current_lossless_source_v0_probe_min_bitrate"] = None
+            fields["current_lossless_source_v0_probe_avg_bitrate"] = None
+            fields["current_lossless_source_v0_probe_median_bitrate"] = None
+        elif self.current_lossless_source is not None:
+            fields["current_lossless_source_v0_probe_min_bitrate"] = (
+                self.current_lossless_source.min_bitrate_kbps
+            )
+            fields["current_lossless_source_v0_probe_avg_bitrate"] = (
+                self.current_lossless_source.avg_bitrate_kbps
+            )
+            fields["current_lossless_source_v0_probe_median_bitrate"] = (
+                self.current_lossless_source.median_bitrate_kbps
+            )
         return fields
 
 
@@ -819,6 +846,14 @@ class PipelineDB:
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
 
+    def update_v0_probe_state(
+        self,
+        request_id: int,
+        update: RequestV0ProbeStateUpdate,
+    ) -> None:
+        """Write current comparable source-probe state together."""
+        self.update_request_fields(request_id, **update.as_update_fields())
+
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         """Zero fields that describe files currently on disk in beets.
 
@@ -846,6 +881,9 @@ class PipelineDB:
                    verified_lossless = FALSE,
                    current_spectral_grade = NULL,
                    current_spectral_bitrate = NULL,
+                   current_lossless_source_v0_probe_min_bitrate = NULL,
+                   current_lossless_source_v0_probe_avg_bitrate = NULL,
+                   current_lossless_source_v0_probe_median_bitrate = NULL,
                    imported_path = NULL,
                    updated_at = %s
                WHERE id = %s""",
@@ -1185,7 +1223,14 @@ class PipelineDB:
                      # Full validation result (JSON string)
                      validation_result=None,
                      # Final format on disk
-                     final_format=None):
+                     final_format=None,
+                     v0_probe_kind=None, v0_probe_min_bitrate=None,
+                     v0_probe_avg_bitrate=None,
+                     v0_probe_median_bitrate=None,
+                     existing_v0_probe_kind=None,
+                     existing_v0_probe_min_bitrate=None,
+                     existing_v0_probe_avg_bitrate=None,
+                     existing_v0_probe_median_bitrate=None):
         cur = self._execute("""
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
@@ -1197,9 +1242,14 @@ class PipelineDB:
                 actual_filetype, actual_min_bitrate,
                 spectral_grade, spectral_bitrate,
                 existing_min_bitrate, existing_spectral_bitrate,
-                import_result, validation_result, final_format
+                import_result, validation_result, final_format,
+                v0_probe_kind, v0_probe_min_bitrate,
+                v0_probe_avg_bitrate, v0_probe_median_bitrate,
+                existing_v0_probe_kind, existing_v0_probe_min_bitrate,
+                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             request_id, soulseek_username, filetype, download_path,
@@ -1212,6 +1262,10 @@ class PipelineDB:
             spectral_grade, spectral_bitrate,
             existing_min_bitrate, existing_spectral_bitrate,
             import_result, validation_result, final_format,
+            v0_probe_kind, v0_probe_min_bitrate,
+            v0_probe_avg_bitrate, v0_probe_median_bitrate,
+            existing_v0_probe_kind, existing_v0_probe_min_bitrate,
+            existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
         ))
         row = cur.fetchone()
         self.conn.commit()

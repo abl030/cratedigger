@@ -19,14 +19,44 @@ Why VBR V0 and not keep FLAC? Because VBR bitrate IS the quality signal. A genui
 
 ### 1. VBR V0 Bitrate Check (implemented)
 
-After FLAC-to-V0 conversion, the resulting bitrate reveals source quality:
+After lossless-to-V0 conversion, the resulting bitrate reveals source quality:
 - **Genuine lossless**: ~220-280kbps (varies by musical complexity)
 - **Transcode from ~192kbps**: ~190-210kbps
 - **Transcode from ~128kbps**: ~160-180kbps
 
 Threshold: `cfg.mp3_vbr.excellent` (default 210 kbps), read by `transcode_detection()` in `lib/quality.py`. The legacy `TRANSCODE_MIN_BITRATE_KBPS = 210` module constant is still exported as the default and used when no cfg is passed; operators who retune `[Quality Ranks] mp3_vbr.excellent` in `config.ini` automatically move both the gate threshold and this fallback (#66).
 
-Limitation: Only works when we download FLAC and convert. Doesn't catch bad MP3 downloads (e.g. 320kbps that was upsampled from 128kbps).
+Limitation: This source-probe signal exists only when a lossless-container
+candidate can be converted or temporarily probed. It does not by itself prove
+native MP3 downloads (e.g. 320kbps that was upsampled from 128kbps).
+
+### Provisional lossless-source probes
+
+When a supported lossless-container download (FLAC, ALAC, WAV, or ALAC-in-M4A)
+is spectrally `suspect` or `likely_transcode`, the importer no longer has to
+discard the source outright. It records the MP3 V0 probe produced from that
+source as `lossless_source_v0` evidence and compares the probe average against
+the current comparable lossless-source probe on the request.
+
+Policy:
+
+- Missing current comparable source probe: import as
+  `provisional_lossless_upgrade`.
+- Candidate probe average above the current comparable probe by more than
+  `QualityRankConfig.within_rank_tolerance_kbps`: import as
+  `provisional_lossless_upgrade`.
+- Candidate probe average equal, worse, or within tolerance: reject as
+  `suspect_lossless_downgrade`.
+- Missing candidate probe on a suspect lossless source: reject as
+  `suspect_lossless_probe_missing`.
+
+Provisional imports are deliberately not verified lossless. They may still use
+the configured lossless-source storage target, but `verified_lossless` remains
+false, the source is denylisted, normal post-import notifications run, and the
+request remains wanted so acquisition continues.
+
+Native lossy and on-disk V0 probes are research evidence only in v1. They are
+stored with non-comparable lineage and do not affect import policy.
 
 ### 2. Spectral Band Energy Analysis (research phase)
 
@@ -151,7 +181,10 @@ The wide-band energy ratio approach (v1) produces too many false positives on lo
 
 ### Two-tier verification
 
-1. **FLAC downloads**: Run spectral check pre-conversion. If cliff detected → transcode in container. Still convert to V0 — if bitrate > existing on disk, import as upgrade.
+1. **Lossless-container downloads**: Run spectral check pre-conversion. Genuine
+   or marginal sources continue through the verified-lossless path. Suspect or
+   likely-transcode sources still produce a V0 source probe, but they use the
+   provisional lossless-source comparison lane instead of becoming verified.
 2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
 3. **Already converted V0 with good bitrate (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)**: Skip spectral check — the V0 conversion already proved source quality.
 
@@ -189,7 +222,11 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 
 - **Lo-fi recordings** (Mountain Goats boombox era): genuine V0 from verified FLAC can produce ~207 kbps. The `"mp3 v0"` label classifies as `TRANSPARENT` via `cfg.mp3_vbr_levels[0]` regardless of bitrate, so the gate accepts without needing a `verified_lossless` blanket bypass.
 - **Mixed-source CBR** (e.g. 13 tracks at 320 + 1 track at 192): looks like VBR to `COUNT(DISTINCT bitrate)` but isn't genuine V0. Quality gate ranks against the bare-codec band table — 192 lands in `GOOD` (< default `EXCELLENT`) → re-queues for upgrade.
-- **Fake FLACs**: MP3 wrapped in FLAC container. Spectral detects the cliff pre-conversion, V0 bitrate confirms post-conversion. Source denylisted, but file imported if better than existing.
+- **Fake FLACs**: MP3 wrapped in a lossless container. Spectral detects the
+  cliff pre-conversion, and the V0 probe becomes the comparable source-lineage
+  evidence. Source denylisted, file imported only as provisional when the probe
+  is meaningfully better than the current comparable source probe, and the
+  request stays wanted.
 - **Discogs-sourced albums**: numeric IDs stored in `mb_release_id` for pipeline compat. Beets auto-routes numeric IDs to the Discogs plugin via `--search-id`. `detect_release_source()` in `lib/quality.py` distinguishes UUID vs numeric format for conditional UI rendering. The full pipeline (search, download, validate, import, quality gate) works identically for both sources.
 
 ## Downgrade prevention
@@ -197,10 +234,10 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 - `--override-min-bitrate` arg: `dispatch_import_core()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
 - `mark_done()` respects `verified_lossless_override` from import_one.py instead of re-deriving via `is_verified_lossless()`. When verified lossless, `current_spectral_bitrate` is set to the actual V0 min bitrate (not the spectral cliff estimate, which can miscalibrate on genuine files).
 - Spectral state writes always go through `RequestSpectralStateUpdate` — grade and bitrate are always written together (including explicit NULLs for genuine files with no cliff). This prevents stale spectral data from persisting after an upgrade.
-- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), skips V0 conversion and keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. Genuine lossless on disk is marked `verified_lossless`. Passed from `dispatch_import_core()` when `album_data.db_target_format` is set.
-- `--verified-lossless-target` flag: target format after verified lossless (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
+- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Genuine lossless on disk is marked `verified_lossless`; suspect lossless sources stay unverified.
+- `--verified-lossless-target` flag: target format after verified lossless, and the configured lossless-source storage target for accepted provisional imports (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
-- Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade, 6=transcode (may or may not have imported as upgrade).
+- Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
 
 ## TODO
 

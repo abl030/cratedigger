@@ -457,6 +457,22 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Rejected")
         self.assertEqual(result.badge_class, "badge-rejected")
 
+    def test_rejected_suspect_lossless_downgrade(self):
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="suspect_lossless_downgrade",
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            v0_probe_avg_bitrate=175,
+            existing_v0_probe_avg_bitrate=171,
+        ))
+        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertIn("source V0 avg 175kbps", result.verdict)
+        self.assertIn("existing source V0 avg 171kbps", result.verdict)
+        self.assertIn("not meaningfully better", result.verdict)
+        self.assertIn("searching continues", result.verdict)
+
     def test_rejected_high_distance(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="high_distance", beets_distance=0.45))
@@ -491,6 +507,34 @@ class TestClassifyBadge(unittest.TestCase):
             was_converted=True, actual_min_bitrate=197))
         self.assertEqual(result.badge, "Transcode")
         self.assertEqual(result.badge_class, "badge-transcode")
+
+    def test_provisional_lossless_upgrade(self):
+        result = classify_log_entry(_entry(
+            outcome="success",
+            beets_scenario="provisional_lossless_upgrade",
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=228,
+            existing_v0_probe_avg_bitrate=171,
+            final_format="opus 128",
+        ))
+        self.assertEqual(result.badge, "Provisional")
+        self.assertEqual(result.badge_class, "badge-provisional")
+        self.assertIn("source V0 avg 228kbps", result.verdict)
+        self.assertIn("existing source V0 avg 171kbps", result.verdict)
+        self.assertIn("stored as opus 128", result.verdict)
+        self.assertIn("searching continues", result.verdict)
+
+    def test_provisional_lossless_first_probe(self):
+        result = classify_log_entry(_entry(
+            outcome="success",
+            beets_scenario="provisional_lossless_upgrade",
+            spectral_grade="likely_transcode",
+            v0_probe_avg_bitrate=250,
+        ))
+        self.assertEqual(result.badge, "Provisional")
+        self.assertIn("no comparable source probe", result.verdict)
 
     def test_force_import(self):
         result = classify_log_entry(_entry(outcome="force_import"))

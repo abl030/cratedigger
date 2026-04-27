@@ -25,6 +25,8 @@ from lib.quality import (
     compute_effective_override_bitrate,
     full_pipeline_decision,
     quality_gate_decision,
+    V0_PROBE_LOSSLESS_SOURCE,
+    V0ProbeEvidence,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
 
@@ -56,6 +58,11 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     audio_corrupt: bool = False
     import_mode: str = "auto"
     has_nested_audio: bool = False
+    candidate_v0_probe_avg: int | None = None
+    existing_v0_probe_avg: int | None = None
+    candidate_v0_probe_kind: str | None = None
+    existing_v0_probe_kind: str | None = None
+    supported_lossless_source: bool | None = None
 
 
 class ImportPreviewResult(msgspec.Struct):
@@ -142,10 +149,13 @@ _IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "preflight_existing",
     "transcode_upgrade",
     "transcode_first",
+    "provisional_lossless_upgrade",
 })
 _REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "downgrade",
     "transcode_downgrade",
+    "suspect_lossless_downgrade",
+    "suspect_lossless_probe_missing",
 })
 _QUALITY_GATE_REQUEUE_DECISIONS: frozenset[str] = frozenset({
     "requeue_upgrade",
@@ -184,12 +194,27 @@ def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | N
         return "confident_reject", True, "nested_layout"
     if simulation.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
-    if simulation.get("stage1_spectral") == "reject":
+    if (simulation.get("stage1_spectral") == "reject"
+            and not simulation.get("stage2_import")):
         return "confident_reject", True, "spectral_reject"
     return _classify_import_stages(
         simulation.get("stage2_import"),
         simulation.get("stage3_quality_gate"),
         imported=bool(simulation.get("imported")),
+    )
+
+
+def _current_lossless_v0_probe(req: dict[str, Any]) -> V0ProbeEvidence | None:
+    avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
+    if not isinstance(avg, int):
+        return None
+    min_br = req.get("current_lossless_source_v0_probe_min_bitrate")
+    median_br = req.get("current_lossless_source_v0_probe_median_bitrate")
+    return V0ProbeEvidence(
+        kind=V0_PROBE_LOSSLESS_SOURCE,
+        min_bitrate_kbps=min_br if isinstance(min_br, int) else None,
+        avg_bitrate_kbps=avg,
+        median_bitrate_kbps=median_br if isinstance(median_br, int) else None,
     )
 
 
@@ -224,6 +249,11 @@ def preview_import_from_values(
         audio_corrupt=values.audio_corrupt,
         import_mode=values.import_mode,
         has_nested_audio=values.has_nested_audio,
+        candidate_v0_probe_avg=values.candidate_v0_probe_avg,
+        existing_v0_probe_avg=values.existing_v0_probe_avg,
+        candidate_v0_probe_kind=values.candidate_v0_probe_kind,
+        existing_v0_probe_kind=values.existing_v0_probe_kind,
+        supported_lossless_source=values.supported_lossless_source,
         cfg=cfg,
     )
     verdict, cleanup_eligible, reason = _classify_simulation(simulation)
@@ -416,6 +446,7 @@ def preview_import_from_path(
             verified_lossless_target=cfg.verified_lossless_target,
             beets_harness_path=cfg.beets_harness_path,
             quality_rank_config_json=cfg.quality_ranks.to_json(),
+            existing_v0_probe=_current_lossless_v0_probe(req),
         )
         verdict, cleanup_eligible, reason, chain = _classify_import_result(
             run.import_result,

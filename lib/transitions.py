@@ -49,6 +49,9 @@ _IMPORTED_FIELDS = frozenset({
     "beets_scenario",
     "current_spectral_bitrate",
     "current_spectral_grade",
+    "current_lossless_source_v0_probe_avg_bitrate",
+    "current_lossless_source_v0_probe_median_bitrate",
+    "current_lossless_source_v0_probe_min_bitrate",
     "final_format",
     "imported_path",
     "last_download_spectral_bitrate",
@@ -186,6 +189,9 @@ class RequestTransition:
         beets_scenario: object = _OMITTED,
         current_spectral_bitrate: object = _OMITTED,
         current_spectral_grade: object = _OMITTED,
+        current_lossless_source_v0_probe_avg_bitrate: object = _OMITTED,
+        current_lossless_source_v0_probe_median_bitrate: object = _OMITTED,
+        current_lossless_source_v0_probe_min_bitrate: object = _OMITTED,
         final_format: object = _OMITTED,
         imported_path: object = _OMITTED,
         last_download_spectral_bitrate: object = _OMITTED,
@@ -203,6 +209,15 @@ class RequestTransition:
                 beets_scenario=beets_scenario,
                 current_spectral_bitrate=current_spectral_bitrate,
                 current_spectral_grade=current_spectral_grade,
+                current_lossless_source_v0_probe_avg_bitrate=(
+                    current_lossless_source_v0_probe_avg_bitrate
+                ),
+                current_lossless_source_v0_probe_median_bitrate=(
+                    current_lossless_source_v0_probe_median_bitrate
+                ),
+                current_lossless_source_v0_probe_min_bitrate=(
+                    current_lossless_source_v0_probe_min_bitrate
+                ),
                 final_format=final_format,
                 imported_path=imported_path,
                 last_download_spectral_bitrate=last_download_spectral_bitrate,
@@ -230,6 +245,12 @@ class RequestTransition:
                 fields, "current_spectral_bitrate"),
             current_spectral_grade=_field_or_omitted(
                 fields, "current_spectral_grade"),
+            current_lossless_source_v0_probe_avg_bitrate=_field_or_omitted(
+                fields, "current_lossless_source_v0_probe_avg_bitrate"),
+            current_lossless_source_v0_probe_median_bitrate=_field_or_omitted(
+                fields, "current_lossless_source_v0_probe_median_bitrate"),
+            current_lossless_source_v0_probe_min_bitrate=_field_or_omitted(
+                fields, "current_lossless_source_v0_probe_min_bitrate"),
             final_format=_field_or_omitted(fields, "final_format"),
             imported_path=_field_or_omitted(fields, "imported_path"),
             last_download_spectral_bitrate=_field_or_omitted(

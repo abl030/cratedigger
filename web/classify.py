@@ -53,6 +53,15 @@ class LogEntry:
     spectral_bitrate: Optional[int] = None     # kbps
     existing_min_bitrate: Optional[int] = None  # kbps
     existing_spectral_bitrate: Optional[int] = None  # kbps
+    final_format: Optional[str] = None
+    v0_probe_kind: Optional[str] = None
+    v0_probe_min_bitrate: Optional[int] = None
+    v0_probe_avg_bitrate: Optional[int] = None
+    v0_probe_median_bitrate: Optional[int] = None
+    existing_v0_probe_kind: Optional[str] = None
+    existing_v0_probe_min_bitrate: Optional[int] = None
+    existing_v0_probe_avg_bitrate: Optional[int] = None
+    existing_v0_probe_median_bitrate: Optional[int] = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
     album_title: str = ""
@@ -407,6 +416,9 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
 
     # --- Success ---
     if entry.outcome == "success":
+        if _entry_decision(entry) == "provisional_lossless_upgrade":
+            return _classify_provisional(entry)
+
         # Transcode scenarios
         if entry.beets_scenario in ("transcode_upgrade", "transcode_first"):
             return _classify_transcode(entry)
@@ -464,6 +476,13 @@ def _parse_import_result(entry: LogEntry) -> ImportResult | None:
     except (json.JSONDecodeError, TypeError, KeyError,
             msgspec.ValidationError):
         return None
+
+
+def _entry_decision(entry: LogEntry) -> str | None:
+    ir = _parse_import_result(entry)
+    if ir is not None and ir.decision:
+        return ir.decision
+    return entry.beets_scenario
 
 
 def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
@@ -579,6 +598,12 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
         return _comparison_verdict(new_kbps, old_kbps,
                                    prefix="Transcode at", metric=metric)
 
+    if ir.decision == "suspect_lossless_downgrade":
+        return _provisional_verdict(entry, imported=False)
+
+    if ir.decision == "suspect_lossless_probe_missing":
+        return _provisional_verdict(entry, imported=False)
+
     if ir.error:
         return f"Import error: {ir.error}"
 
@@ -599,6 +624,64 @@ def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
     else:
         verdict = f"Transcode at {br_str} — imported (nothing on disk), searching for better"
     return ("Transcode", "badge-transcode", "#a93", verdict)
+
+
+def _probe_values(entry: LogEntry) -> tuple[int | None, int | None, str | None]:
+    ir = _parse_import_result(entry)
+    candidate_avg = entry.v0_probe_avg_bitrate
+    existing_avg = entry.existing_v0_probe_avg_bitrate
+    final_format = entry.final_format
+    if ir is not None:
+        if candidate_avg is None and ir.v0_probe is not None:
+            candidate_avg = ir.v0_probe.avg_bitrate_kbps
+        if existing_avg is None and ir.existing_v0_probe is not None:
+            existing_avg = ir.existing_v0_probe.avg_bitrate_kbps
+        if not final_format:
+            final_format = ir.final_format
+        if not final_format and ir.new_measurement is not None:
+            final_format = ir.new_measurement.format
+    return candidate_avg, existing_avg, final_format
+
+
+def _spectral_phrase(entry: LogEntry) -> str | None:
+    if not entry.spectral_grade:
+        return None
+    phrase = f"spectral {entry.spectral_grade}"
+    if entry.spectral_bitrate:
+        phrase += f" ~{entry.spectral_bitrate}kbps"
+    return phrase
+
+
+def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
+    candidate_avg, existing_avg, final_format = _probe_values(entry)
+    parts: list[str] = []
+    spectral = _spectral_phrase(entry)
+    if spectral:
+        parts.append(spectral)
+    if candidate_avg is not None:
+        parts.append(f"source V0 avg {candidate_avg}kbps")
+    if existing_avg is not None:
+        parts.append(f"existing source V0 avg {existing_avg}kbps")
+    else:
+        parts.append("no comparable source probe")
+    if imported:
+        if final_format:
+            parts.append(f"stored as {final_format}")
+        parts.append("source denylisted")
+        parts.append("searching continues")
+        return "Provisional lossless source: " + "; ".join(parts)
+    parts.append("not meaningfully better")
+    parts.append("searching continues")
+    return "Suspect lossless source rejected: " + "; ".join(parts)
+
+
+def _classify_provisional(entry: LogEntry) -> tuple[str, str, str, str]:
+    return (
+        "Provisional",
+        "badge-provisional",
+        "#6a5",
+        _provisional_verdict(entry, imported=True),
+    )
 
 
 def _classify_search_filetype_override(
@@ -644,10 +727,17 @@ def _rejection_verdict(entry: LogEntry) -> str:
     scenario = entry.beets_scenario
 
     # Quality comparison scenarios — delegate to ImportResult when available
-    if scenario in ("quality_downgrade", "transcode_downgrade"):
+    if scenario in (
+        "quality_downgrade",
+        "transcode_downgrade",
+        "suspect_lossless_downgrade",
+        "suspect_lossless_probe_missing",
+    ):
         ir_verdict = _quality_verdict_from_import_result(entry)
         if ir_verdict is not None:
             return ir_verdict
+        if scenario.startswith("suspect_lossless"):
+            return _provisional_verdict(entry, imported=False)
         # Fallback: use real file bitrate, not spectral
         new_kbps = _downloaded_min_bitrate_kbps(entry)
         old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate

@@ -41,6 +41,11 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Spectral', `<span style="color:${sgColor};">${sgLabel}</span>`]);
   }
 
+  if (h.v0_probe_avg_bitrate) {
+    const kind = h.v0_probe_kind ? ` (${esc(h.v0_probe_kind)})` : '';
+    rows.push(['Source V0 probe', `${esc(h.v0_probe_avg_bitrate)}kbps avg${kind}`]);
+  }
+
   const existingBitrates = [];
   if (h.existing_min_bitrate) {
     existingBitrates.push(`${esc(h.existing_min_bitrate)}kbps`);
@@ -48,8 +53,15 @@ export function renderDownloadHistoryItem(h) {
   if (h.existing_spectral_bitrate) {
     existingBitrates.push(`~${esc(h.existing_spectral_bitrate)}kbps (spectral)`);
   }
+  if (h.existing_v0_probe_avg_bitrate) {
+    existingBitrates.push(`${esc(h.existing_v0_probe_avg_bitrate)}kbps source V0 avg`);
+  }
   if (existingBitrates.length > 0) {
     rows.push(['On disk (before)', existingBitrates.join(' / ')]);
+  }
+
+  if (h.final_format) {
+    rows.push(['Stored as', esc(h.final_format)]);
   }
 
   if (h.beets_distance != null) {

@@ -38,6 +38,12 @@ from lib.quality import (
     build_existing_quality_measurement,
     measured_import_decision,
     MeasuredImportDecisionInput,
+    provisional_lossless_decision,
+    ProvisionalLosslessDecisionInput,
+    V0ProbeEvidence,
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
 )
 
 
@@ -351,6 +357,91 @@ class TestMeasuredImportDecision(unittest.TestCase):
         self.assertEqual(vbr.min_bitrate_kbps, 96)
         self.assertEqual(vbr.avg_bitrate_kbps, 225)
         self.assertEqual(vbr.median_bitrate_kbps, 230)
+
+
+class TestProvisionalLosslessDecision(unittest.TestCase):
+    """Suspect lossless-source V0 probe grind-up policy."""
+
+    def _probe(self, avg, kind="lossless_source_v0"):
+        return V0ProbeEvidence(
+            kind=kind,
+            min_bitrate_kbps=avg - 10 if avg is not None else None,
+            avg_bitrate_kbps=avg,
+            median_bitrate_kbps=avg + 1 if avg is not None else None,
+        )
+
+    def _decide(self, *, avg=250, existing=None, grade="suspect",
+                supported=True, kind="lossless_source_v0", tolerance=5):
+        cfg = QualityRankConfig(within_rank_tolerance_kbps=tolerance)
+        return provisional_lossless_decision(
+            ProvisionalLosslessDecisionInput(
+                candidate_probe=self._probe(avg, kind=kind) if avg is not None else None,
+                existing_probe=existing,
+                spectral_grade=grade,
+                supported_lossless_source=supported,
+            ),
+            cfg=cfg,
+        )
+
+    def test_missing_existing_probe_imports_provisionally(self):
+        result = self._decide(avg=250, existing=None)
+        self.assertEqual(result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(result.would_import)
+        self.assertFalse(result.confident_reject)
+
+    def test_candidate_beating_existing_probe_by_tolerance_imports(self):
+        result = self._decide(avg=228, existing=self._probe(171))
+        self.assertEqual(result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(result.would_import)
+        self.assertIn("228", result.reason or "")
+        self.assertIn("171", result.reason or "")
+
+    def test_equal_or_within_tolerance_rejects_as_suspect_lossless_downgrade(self):
+        for avg in (171, 175):
+            with self.subTest(avg=avg):
+                result = self._decide(avg=avg, existing=self._probe(171),
+                                      tolerance=5)
+                self.assertEqual(
+                    result.decision,
+                    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                )
+                self.assertTrue(result.confident_reject)
+                self.assertTrue(result.cleanup_eligible)
+
+    def test_above_tolerance_imports(self):
+        result = self._decide(avg=177, existing=self._probe(171),
+                              tolerance=5)
+        self.assertEqual(result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+
+    def test_genuine_and_marginal_continue_existing_policy(self):
+        for grade in ("genuine", "marginal"):
+            with self.subTest(grade=grade):
+                result = self._decide(avg=250, existing=self._probe(171),
+                                      grade=grade)
+                self.assertIsNone(result.decision)
+                self.assertFalse(result.would_import)
+
+    def test_native_lossy_research_probe_is_ignored(self):
+        result = self._decide(avg=320, existing=self._probe(171),
+                              supported=False,
+                              kind="native_lossy_research_v0")
+        self.assertIsNone(result.decision)
+
+    def test_research_existing_probe_is_not_comparable(self):
+        result = self._decide(
+            avg=250,
+            existing=self._probe(300, kind="on_disk_research_v0"),
+        )
+        self.assertEqual(result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertEqual(
+            result.reason,
+            "no existing comparable lossless-source V0 probe",
+        )
+
+    def test_missing_candidate_probe_rejects_distinctly(self):
+        result = self._decide(avg=None, existing=self._probe(171))
+        self.assertEqual(result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
+        self.assertTrue(result.confident_reject)
 
 
 # ============================================================================
@@ -694,7 +785,7 @@ EXPECTED_RESULT_KEYS = {
     "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
-    "target_final_format",
+    "target_final_format", "verified_lossless",
 }
 
 # Valid values for each stage (None means stage was skipped)
@@ -704,7 +795,10 @@ VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
                 "transcode_downgrade", "transcode_first",
-                "preflight_existing"}
+                "preflight_existing",
+                DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+                DECISION_SUSPECT_LOSSLESS_PROBE_MISSING}
 VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_lossless"}
 VALID_FINAL_STATUS = {None, "imported", "wanted"}
 
@@ -721,6 +815,9 @@ EXPECTED_PARAMS = {
     "verified_lossless", "verified_lossless_target",
     "target_format",
     "new_format", "cfg",
+    "candidate_v0_probe_avg", "existing_v0_probe_avg",
+    "candidate_v0_probe_kind", "existing_v0_probe_kind",
+    "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the
     # pipeline in sync with lib.preimport.run_preimport_gates.
     "audio_check_mode", "audio_corrupt",
@@ -977,6 +1074,48 @@ class TestFullPipelineContract(unittest.TestCase):
             params.index("existing_spectral_bitrate"),
             params.index("existing_spectral_grade"),
         )
+
+    def test_v0_probe_params_do_not_shift_positional_cfg(self):
+        """The old trailing cfg positional slot must keep working."""
+        params = list(inspect.signature(full_pipeline_decision).parameters)
+        self.assertLess(params.index("cfg"), params.index("candidate_v0_probe_avg"))
+        self.assertEqual(
+            inspect.signature(full_pipeline_decision)
+            .parameters["candidate_v0_probe_avg"].kind,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+
+        cfg = QualityRankConfig.defaults()
+        positional = [
+            False,  # is_flac
+            180,  # min_bitrate
+            False,  # is_cbr
+            True,  # is_vbr
+            180,  # avg_bitrate
+            None,  # spectral_grade
+            None,  # spectral_bitrate
+            0,  # existing_min_bitrate
+            None,  # existing_avg_bitrate
+            None,  # existing_spectral_grade
+            None,  # existing_spectral_bitrate
+            None,  # override_min_bitrate
+            "MP3",  # existing_format
+            False,  # existing_is_cbr
+            None,  # post_conversion_min_bitrate
+            0,  # converted_count
+            False,  # verified_lossless
+            None,  # verified_lossless_target
+            None,  # target_format
+            None,  # new_format
+            "auto",  # audio_check_mode
+            False,  # audio_corrupt
+            "auto",  # import_mode
+            False,  # has_nested_audio
+            cfg,  # cfg
+        ]
+
+        r = full_pipeline_decision(*positional)
+        self.assertEqual(r["stage2_import"], "import")
 
     def test_stage1_values_in_contract(self):
         """Stage 1 spectral decisions must be from the known set."""
@@ -1260,8 +1399,10 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(ids, ["preimport_audio", "preimport_nested",
                                "flac_spectral", "flac_convert", "transcode",
                                "verified_lossless", "target_conversion",
+                               "provisional_lossless",
                                "mp3_spectral_gate", "mp3_spectral",
-                               "import_decision", "quality_gate", "dispatch"])
+                               "import_decision",
+                               "quality_gate", "dispatch"])
 
     def test_decision_tree_mp3_gate_exposes_threshold(self):
         """The new mp3_spectral_gate stage must surface the VBR threshold
@@ -1405,8 +1546,59 @@ class TestFullPipelineContract(unittest.TestCase):
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect", converted_count=10,
             post_conversion_min_bitrate=190,
-            verified_lossless_target="aac 128")
+            verified_lossless_target="aac 128",
+            supported_lossless_source=False)
         self.assertIsNone(r["target_final_format"])
+
+    def test_provisional_lossless_upgrade_uses_probe_avg(self):
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect", spectral_bitrate=160,
+            converted_count=10,
+            post_conversion_min_bitrate=228,
+            candidate_v0_probe_avg=228,
+            existing_v0_probe_avg=171,
+            verified_lossless_target="opus 128",
+        )
+        self.assertEqual(
+            r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertEqual(r["target_final_format"], "opus 128")
+        self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_provisional_lossless_uses_converted_v0_when_spectral_would_reject(self):
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+            existing_spectral_bitrate=160,
+            converted_count=10,
+            post_conversion_min_bitrate=228,
+            existing_v0_probe_avg=171,
+        )
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(
+            r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_provisional_lossless_downgrade_rejects_within_tolerance(self):
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect", spectral_bitrate=160,
+            converted_count=10,
+            post_conversion_min_bitrate=175,
+            candidate_v0_probe_avg=175,
+            existing_v0_probe_avg=171,
+        )
+        self.assertEqual(
+            r["stage2_import"], DECISION_SUSPECT_LOSSLESS_DOWNGRADE)
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
 
     def test_target_conversion_mp3_skips(self):
         """MP3 path + verified_lossless_target → no target conversion."""
@@ -1556,6 +1748,15 @@ class TestDispatchAction(unittest.TestCase):
                                      denylist=True, requeue=True)),
         ("transcode_first", dict(mark_done=True, denylist=True, requeue=True,
                                  trigger_notifiers=True)),
+        ("provisional_lossless_upgrade",
+         dict(mark_done=True, denylist=True, requeue=True,
+              trigger_notifiers=True, run_quality_gate=False)),
+        ("suspect_lossless_downgrade",
+         dict(mark_done=False, record_rejection=True, denylist=True,
+              requeue=True, cleanup=True)),
+        ("suspect_lossless_probe_missing",
+         dict(mark_done=False, record_rejection=True, denylist=True,
+              requeue=True, cleanup=True)),
         ("conversion_failed", dict(record_rejection=True, denylist=False)),
         ("import_failed", dict(record_rejection=True)),
         ("target_conversion_failed", dict(record_rejection=True, denylist=False)),

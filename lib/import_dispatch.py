@@ -16,10 +16,12 @@ from typing import Sequence, TYPE_CHECKING
 
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
-                         ImportResult, SpectralMeasurement, ValidationResult,
-                         QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
+                         ImportResult, SpectralMeasurement, V0ProbeEvidence,
+                         ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
+                         V0_PROBE_LOSSLESS_SOURCE,
                          dispatch_action, compute_effective_override_bitrate,
-                         extract_usernames, narrow_override_on_downgrade,
+                         extract_usernames, is_comparable_lossless_source_probe,
+                         narrow_override_on_downgrade,
                          rejection_backfill_override)
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
                       repair_mp3_headers, trigger_meelo_clean)
@@ -183,6 +185,7 @@ def build_import_one_command(
     target_format: str | None = None,
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
+    existing_v0_probe: V0ProbeEvidence | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     cmd = [
@@ -207,6 +210,22 @@ def build_import_one_command(
         cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
     if quality_rank_config_json:
         cmd.extend(["--quality-rank-config", quality_rank_config_json])
+    if existing_v0_probe is not None:
+        if existing_v0_probe.min_bitrate_kbps is not None:
+            cmd.extend([
+                "--existing-v0-probe-min-bitrate",
+                str(existing_v0_probe.min_bitrate_kbps),
+            ])
+        if existing_v0_probe.avg_bitrate_kbps is not None:
+            cmd.extend([
+                "--existing-v0-probe-avg-bitrate",
+                str(existing_v0_probe.avg_bitrate_kbps),
+            ])
+        if existing_v0_probe.median_bitrate_kbps is not None:
+            cmd.extend([
+                "--existing-v0-probe-median-bitrate",
+                str(existing_v0_probe.median_bitrate_kbps),
+            ])
     return cmd
 
 
@@ -223,6 +242,7 @@ def run_import_one(
     target_format: str | None = None,
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
+    existing_v0_probe: V0ProbeEvidence | None = None,
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
@@ -238,6 +258,7 @@ def run_import_one(
         target_format=target_format,
         verified_lossless_target=verified_lossless_target,
         quality_rank_config_json=quality_rank_config_json,
+        existing_v0_probe=existing_v0_probe,
     )
     result = sp.run(
         cmd,
@@ -257,6 +278,52 @@ def run_import_one(
     )
 
 
+def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
+    probe = dl_info.v0_probe
+    existing = dl_info.existing_v0_probe
+    return {
+        "v0_probe_kind": probe.kind if probe else None,
+        "v0_probe_min_bitrate": (
+            probe.min_bitrate_kbps if probe else None
+        ),
+        "v0_probe_avg_bitrate": (
+            probe.avg_bitrate_kbps if probe else None
+        ),
+        "v0_probe_median_bitrate": (
+            probe.median_bitrate_kbps if probe else None
+        ),
+        "existing_v0_probe_kind": existing.kind if existing else None,
+        "existing_v0_probe_min_bitrate": (
+            existing.min_bitrate_kbps if existing else None
+        ),
+        "existing_v0_probe_avg_bitrate": (
+            existing.avg_bitrate_kbps if existing else None
+        ),
+        "existing_v0_probe_median_bitrate": (
+            existing.median_bitrate_kbps if existing else None
+        ),
+    }
+
+
+def _current_lossless_v0_probe_from_request(
+    row: dict[str, object] | None,
+) -> V0ProbeEvidence | None:
+    """Build the current comparable source-probe evidence from album_requests."""
+    if not row:
+        return None
+    avg = row.get("current_lossless_source_v0_probe_avg_bitrate")
+    if avg is None:
+        return None
+    return V0ProbeEvidence(
+        kind=V0_PROBE_LOSSLESS_SOURCE,
+        min_bitrate_kbps=row.get(
+            "current_lossless_source_v0_probe_min_bitrate"),
+        avg_bitrate_kbps=avg,
+        median_bitrate_kbps=row.get(
+            "current_lossless_source_v0_probe_median_bitrate"),
+    )
+
+
 def _do_mark_done(
     db: "PipelineDB",
     request_id: int,
@@ -267,6 +334,7 @@ def _do_mark_done(
     outcome_label: str = "success",
     detail: str | None = None,
     imported_path: str | None = None,
+    clear_stale_v0_probe: bool = True,
 ) -> int | None:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
@@ -283,7 +351,7 @@ def _do_mark_done(
     falls back to ``dest_path`` so legacy behavior is preserved (issue #93).
     """
     from lib.quality import SpectralMeasurement, is_verified_lossless
-    from lib.pipeline_db import RequestSpectralStateUpdate
+    from lib.pipeline_db import RequestSpectralStateUpdate, RequestV0ProbeStateUpdate
 
     update_fields: dict[str, object] = dict(
         beets_distance=distance,
@@ -314,6 +382,18 @@ def _do_mark_done(
                 last_download=dl_info.download_spectral,
                 current=current_spectral,
                 ).as_update_fields()
+        )
+    if is_comparable_lossless_source_probe(dl_info.v0_probe):
+        update_fields.update(
+            RequestV0ProbeStateUpdate(
+                current_lossless_source=dl_info.v0_probe,
+            ).as_update_fields()
+        )
+    elif clear_stale_v0_probe:
+        update_fields.update(
+            RequestV0ProbeStateUpdate(
+                clear_current_lossless_source=True,
+            ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
     transitions.finalize_request(
@@ -352,6 +432,7 @@ def _do_mark_done(
         import_result=dl_info.import_result,
         validation_result=dl_info.validation_result,
         final_format=dl_info.final_format,
+        **_v0_probe_log_fields(dl_info),
     )
 
 
@@ -422,6 +503,7 @@ def _record_rejection_and_maybe_requeue(
         validation_result=(validation_result
                            if validation_result is not None
                            else dl_info.validation_result),
+        **_v0_probe_log_fields(dl_info),
     )
 
 
@@ -454,6 +536,8 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
         if existing_m.min_bitrate_kbps is not None:
             dl_info.existing_min_bitrate = existing_m.min_bitrate_kbps
     dl_info.import_result = ir.to_json()
+    dl_info.v0_probe = ir.v0_probe
+    dl_info.existing_v0_probe = ir.existing_v0_probe
     if ir.final_format:
         dl_info.final_format = ir.final_format
 
@@ -803,6 +887,16 @@ def dispatch_import_core(
             )
 
         try:
+            try:
+                request_row = db.get_request(request_id)
+            except Exception:
+                logger.debug(
+                    "Failed to read current V0 probe state before import",
+                    exc_info=True,
+                )
+                request_row = None
+            existing_v0_probe = _current_lossless_v0_probe_from_request(
+                request_row)
             # Force/manual import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
@@ -822,6 +916,7 @@ def dispatch_import_core(
                 quality_rank_config_json=(
                     cfg.quality_ranks.to_json() if cfg is not None else None
                 ),
+                existing_v0_probe=existing_v0_probe,
             )
             for line in run.stderr.strip().split("\n"):
                 if line.strip():
@@ -872,11 +967,19 @@ def dispatch_import_core(
                 # --- Mark done or failed with decision-specific details ---
                 if action.mark_done:
                     logger.info(f"{mode} OK: {label} (decision={decision})")
+                    mark_scenario = (
+                        decision
+                        if decision == "provisional_lossless_upgrade"
+                        else scenario
+                    )
                     _do_mark_done(
                         db, request_id, dl_info,
-                        distance=distance, scenario=scenario,
+                        distance=distance, scenario=mark_scenario,
                         dest_path=path, outcome_label=outcome_label,
-                        imported_path=ir.postflight.imported_path)
+                        imported_path=ir.postflight.imported_path,
+                        clear_stale_v0_probe=(
+                            decision != "preflight_existing"
+                        ))
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
@@ -905,6 +1008,33 @@ def dispatch_import_core(
                                        f"<= existing {prev_br}kbps")
                         logger.warning(f"TRANSCODE REJECTED: {label} "
                                        f"at {new_br}kbps — not an upgrade")
+                    elif decision == "suspect_lossless_downgrade":
+                        fail_scenario = "suspect_lossless_downgrade"
+                        candidate_avg = (
+                            ir.v0_probe.avg_bitrate_kbps
+                            if ir.v0_probe else None
+                        )
+                        existing_avg = (
+                            ir.existing_v0_probe.avg_bitrate_kbps
+                            if ir.existing_v0_probe else None
+                        )
+                        fail_detail = (
+                            f"lossless-source V0 avg {candidate_avg}kbps "
+                            f"<= existing source V0 avg {existing_avg}kbps "
+                            "within tolerance"
+                        )
+                        logger.warning(
+                            f"SUSPECT LOSSLESS REJECTED: {label} "
+                            f"candidate_v0_avg={candidate_avg} "
+                            f"existing_v0_avg={existing_avg}")
+                    elif decision == "suspect_lossless_probe_missing":
+                        fail_scenario = "suspect_lossless_probe_missing"
+                        fail_detail = ir.error or (
+                            "suspect lossless source lacks comparable V0 probe"
+                        )
+                        logger.warning(
+                            f"SUSPECT LOSSLESS REJECTED: {label} "
+                            "missing comparable V0 probe")
                     elif decision == "duplicate_remove_guard_failed":
                         fail_scenario = "duplicate_remove_guard_failed"
                         fail_detail = _guard_failure_detail(ir)
@@ -940,7 +1070,16 @@ def dispatch_import_core(
                         fail_detail = ir.error
                         logger.error(f"{mode} FAILED: {label} "
                                      f"(decision={decision}, error={ir.error})")
-                    fail_error = ir.error if decision not in ("downgrade", "transcode_downgrade") else None
+                    fail_error = (
+                        ir.error
+                        if decision not in (
+                            "downgrade",
+                            "transcode_downgrade",
+                            "suspect_lossless_downgrade",
+                            "suspect_lossless_probe_missing",
+                        )
+                        else None
+                    )
 
                     if decision == "downgrade":
                         try:
@@ -1004,6 +1143,10 @@ def dispatch_import_core(
                 if action.denylist:
                     if decision == "downgrade":
                         reason = "quality downgrade prevented"
+                    elif decision == "provisional_lossless_upgrade":
+                        reason = "provisional lossless source imported"
+                    elif decision.startswith("suspect_lossless"):
+                        reason = "suspect lossless source not an upgrade"
                     elif decision.startswith("transcode"):
                         reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
                     elif decision == "duplicate_remove_guard_failed":
