@@ -202,6 +202,41 @@ class TestValidateAudio(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_flac_md5_repair_still_runs_when_ffmpeg_exits_zero(self):
+        """FLAC MD5 repair is driven by the stderr signature, not exit status."""
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            first_call = MagicMock(returncode=0, stderr="cannot check MD5 signature")
+            fix_call = MagicMock(returncode=0, stderr="")
+            retest_call = MagicMock(returncode=0, stderr="")
+            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]) as mock_run:
+                result = validate_audio(tmpdir)
+            self.assertTrue(result.valid)
+            self.assertEqual(mock_run.call_count, 3)
+            self.assertEqual(mock_run.call_args_list[1][0][0][0], "flac")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_attached_picture_mimetype_warning_does_not_reject_audio(self):
+        """Malformed cover-art metadata should not be treated as audio corruption."""
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stderr=("[flac @ 0xdeadbeef] "
+                            "Could not read mimetype from an attached picture.\n"),
+                )
+                result = validate_audio(tmpdir)
+            self.assertTrue(result.valid)
+            self.assertEqual(result.failed_files, [])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_single_bad_file_rejects_album(self):
         """Even 1 corrupt file out of many should reject the album."""
         from lib.util import validate_audio
