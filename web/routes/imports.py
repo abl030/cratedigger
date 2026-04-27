@@ -415,7 +415,7 @@ def _latest_import_summary(rows: list[dict[str, object]]
     }
 
 
-def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
+def _build_wrong_match_groups() -> list[dict[str, object]]:
     """Group wrong-match rejections by release (issue #113).
 
     Each ``album_requests`` row becomes one group; every rejected
@@ -524,7 +524,23 @@ def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
             rows_for_req = history.get(rid) or []
             groups[rid]["latest_import"] = _latest_import_summary(rows_for_req)
 
-    h._json({"groups": [groups[rid] for rid in order]})
+    return [groups[rid] for rid in order]
+
+
+def _group_format(group: dict[str, object]) -> str:
+    """Normalized on-disk codec name for bulk-action filtering."""
+    fmt = group.get("format")
+    return fmt.lower() if isinstance(fmt, str) else ""
+
+
+def _is_lossless_opus_group(group: dict[str, object]) -> bool:
+    """Verified-lossless Opus already landed on disk for this release."""
+    return bool(group.get("verified_lossless")) and _group_format(group) == "opus"
+
+
+def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
+    """Return grouped wrong-match rejections for the manual-review UI."""
+    h._json({"groups": _build_wrong_match_groups()})
 
 
 def _delete_wrong_match_row(pdb, log_id: int) -> bool:
@@ -631,6 +647,62 @@ def post_wrong_match_delete_transparent_non_flac(h, body: dict) -> None:
         "deleted": deleted,
         "deleted_request_ids": deleted_request_ids,
         "eligible_groups": len(targets),
+        "skipped": skipped,
+    })
+
+
+def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
+    """Bulk-delete wrong matches once the exact library copy is verified-lossless Opus."""
+    del body  # unused; endpoint intentionally operates on the current visible set
+    request_ids = [
+        request_id
+        for group in _build_wrong_match_groups()
+        for request_id in [group.get("request_id")]
+        if isinstance(request_id, int) and _is_lossless_opus_group(group)
+    ]
+    if not request_ids:
+        h._json({
+            "status": "ok",
+            "groups_deleted": 0,
+            "deleted": 0,
+            "deleted_request_ids": [],
+            "eligible_groups": 0,
+            "skipped": [],
+        })
+        return
+
+    request_id_set = set(request_ids)
+    pdb = _server()._db()
+    deleted = 0
+    deleted_by_request_id: dict[int, int] = {}
+    skipped: list[dict[str, object]] = []
+    for row in pdb.get_wrong_matches():
+        request_id = row.get("request_id")
+        log_id = row.get("download_log_id")
+        if request_id not in request_id_set or not isinstance(log_id, int):
+            continue
+        if _delete_wrong_match_row(pdb, log_id):
+            deleted += 1
+            assert isinstance(request_id, int)
+            deleted_by_request_id[request_id] = (
+                deleted_by_request_id.get(request_id, 0) + 1
+            )
+        else:
+            skipped.append({
+                "download_log_id": log_id,
+                "reason": "delete_failed",
+            })
+
+    deleted_request_ids = [
+        request_id for request_id in request_ids
+        if deleted_by_request_id.get(request_id)
+    ]
+    h._json({
+        "status": "ok",
+        "groups_deleted": len(deleted_request_ids),
+        "deleted": deleted,
+        "deleted_request_ids": deleted_request_ids,
+        "eligible_groups": len(request_ids),
         "skipped": skipped,
     })
 
@@ -836,8 +908,6 @@ def post_wrong_match_triage(h, body: dict) -> None:
         h._error(f"Invalid triage input: {exc}")
         return
     h._json(result.to_dict())
-
-
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
@@ -850,4 +920,5 @@ POST_ROUTES: dict[str, object] = {
     "/api/wrong-matches/delete": post_wrong_match_delete,
     "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
     "/api/wrong-matches/delete-transparent-non-flac": post_wrong_match_delete_transparent_non_flac,
+    "/api/wrong-matches/delete-lossless-opus": post_wrong_match_delete_lossless_opus,
 }

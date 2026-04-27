@@ -260,6 +260,47 @@ function transparentNonFlacButtonLabel(counts) {
 }
 
 /**
+ * @param {any} group
+ * @returns {boolean}
+ */
+function groupIsLosslessOpusCleanupTarget(group) {
+  const entries = Array.isArray(group?.entries) ? group.entries : [];
+  return !!group?.verified_lossless
+    && String(group?.format || '').toLowerCase() === 'opus'
+    && entries.length > 0;
+}
+
+/**
+ * @param {any[]} groups
+ * @returns {any[]}
+ */
+function losslessOpusGroups(groups) {
+  return groups.filter(groupIsLosslessOpusCleanupTarget);
+}
+
+/**
+ * @param {any[]} groups
+ * @returns {{groups: number, entries: number}}
+ */
+function losslessOpusCounts(groups) {
+  const targets = losslessOpusGroups(groups);
+  return {
+    groups: targets.length,
+    entries: targets.reduce((/** @type {number} */ n, /** @type {any} */ g) => (
+      n + (g.pending_count || (Array.isArray(g.entries) ? g.entries.length : 0))
+    ), 0),
+  };
+}
+
+/**
+ * @param {{groups: number, entries: number}} counts
+ * @returns {string}
+ */
+function losslessOpusButtonLabel(counts) {
+  return `Delete lossless-Opus (${counts.entries})`;
+}
+
+/**
  * @param {number} greenCount
  * @returns {string}
  */
@@ -383,6 +424,15 @@ function updateTransparentNonFlacButton() {
   btn.disabled = counts.groups === 0;
 }
 
+function updateLosslessOpusButton() {
+  if (!_lastData || !Array.isArray(_lastData.groups)) return;
+  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('wm-lossless-opus-btn'));
+  if (!btn) return;
+  const counts = losslessOpusCounts(_lastData.groups);
+  btn.textContent = losslessOpusButtonLabel(counts);
+  btn.disabled = counts.groups === 0;
+}
+
 function updateWrongMatchesSummary() {
   if (!_lastData || !Array.isArray(_lastData.groups) || !_lastEl) return;
   const counts = wrongMatchCounts(_lastData.groups);
@@ -395,6 +445,7 @@ function updateWrongMatchesSummary() {
     summary.textContent = `${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review`;
   }
   updateTransparentNonFlacButton();
+  updateLosslessOpusButton();
 }
 
 /**
@@ -450,10 +501,14 @@ function renderWrongMatches(data, el) {
 
   const counts = wrongMatchCounts(groups);
   const cleanupCounts = transparentNonFlacCounts(groups);
+  const losslessCounts = losslessOpusCounts(groups);
   let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
       <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
-      <button id="wm-transparent-nonflac-btn" class="p-btn delete" ${cleanupCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteTransparentNonFlacWrongMatches(this)">${transparentNonFlacButtonLabel(cleanupCounts)}</button>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <button id="wm-transparent-nonflac-btn" class="p-btn delete" ${cleanupCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteTransparentNonFlacWrongMatches(this)">${transparentNonFlacButtonLabel(cleanupCounts)}</button>
+        <button id="wm-lossless-opus-btn" class="p-btn delete" ${losslessCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteLosslessOpusWrongMatches(this)">${losslessOpusButtonLabel(losslessCounts)}</button>
+      </div>
     </div>`;
 
   html += groups.map(renderGroup).join('');
@@ -865,10 +920,12 @@ export const __test__ = {
   pollImportJob: _pollImportJob,
   convergeRequestBody,
   convergeWrongMatches,
+  deleteLosslessOpusWrongMatches,
   deleteTransparentNonFlacWrongMatches,
   deleteUnmatchedOnConverge,
   greenEntries,
   isConvergeGreen,
+  losslessOpusGroups,
   normalizeThreshold,
   renderWrongMatches,
   setWrongMatchConvergeCleanup,
@@ -1033,6 +1090,57 @@ export async function deleteTransparentNonFlacWrongMatches(btn) {
   } catch (_e) {
     btn.disabled = false;
     btn.textContent = transparentNonFlacButtonLabel(counts);
+    toast('Bulk delete request failed', true);
+  }
+}
+
+/**
+ * Delete all visible release groups whose current exact library copy is
+ * verified-lossless Opus.
+ * @param {HTMLButtonElement} btn
+ */
+export async function deleteLosslessOpusWrongMatches(btn) {
+  const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
+  const counts = losslessOpusCounts(groups);
+  if (counts.groups === 0) {
+    toast('No lossless-Opus wrong matches to delete', true);
+    return;
+  }
+  const ok = confirm(
+    `Delete ${counts.entries} wrong-match candidate${counts.entries !== 1 ? 's' : ''} `
+    + `across ${counts.groups} release${counts.groups !== 1 ? 's' : ''} `
+    + `that already reached verified lossless Opus?`,
+  );
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete-lossless-opus`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await r.json();
+    if (r.ok && data.status === 'ok') {
+      toast(
+        `Deleted ${data.deleted || 0} candidate${data.deleted === 1 ? '' : 's'} `
+        + `from ${data.groups_deleted || 0} release${data.groups_deleted === 1 ? '' : 's'}`,
+      );
+      invalidateWrongMatches();
+      if (Array.isArray(data.deleted_request_ids) && data.deleted_request_ids.length > 0) {
+        for (const requestId of data.deleted_request_ids) removeWrongMatchGroup(requestId);
+      } else {
+        await _refreshWrongMatches();
+      }
+    } else {
+      btn.disabled = false;
+      btn.textContent = losslessOpusButtonLabel(counts);
+      toast(data.message || 'Bulk delete failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = losslessOpusButtonLabel(counts);
     toast('Bulk delete request failed', true);
   }
 }

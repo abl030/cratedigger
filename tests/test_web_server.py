@@ -636,6 +636,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/wrong-matches/delete",
         "/api/wrong-matches/delete-group",
         "/api/wrong-matches/delete-transparent-non-flac",
+        "/api/wrong-matches/delete-lossless-opus",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -3329,6 +3330,8 @@ class TestWrongMatchesContract(unittest.TestCase):
     def setUp(self) -> None:
         self.mock_db.get_request.return_value = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
         self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
+        self.mock_db.get_download_log_entry.reset_mock()
+        self.mock_db.get_download_log_entry.side_effect = None
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
         self.mock_db.clear_wrong_match_path.reset_mock()
         self.mock_db.clear_wrong_match_path.return_value = True
@@ -3886,6 +3889,46 @@ class TestWrongMatchesContract(unittest.TestCase):
             [call.args[0] for call in self.mock_db.clear_wrong_match_path.call_args_list],
             [100, 101],
         )
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-transparent": {"beets_format": "MP3", "beets_bitrate": 245},
+        "mb-opus": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_removes_verified_opus_groups_only(
+            self, _mock_beets):
+        transparent = self._row(
+            100, 42, "u1", "/fi/transparent", mb_release_id="mb-transparent")
+        transparent["request_status"] = "imported"
+        transparent["request_min_bitrate"] = 245
+        transparent["request_verified_lossless"] = False
+
+        lossless_opus = self._row(
+            101, 43, "u2", "/fi/lossless-opus", mb_release_id="mb-opus")
+        lossless_opus["request_status"] = "imported"
+        lossless_opus["request_min_bitrate"] = 128
+        lossless_opus["request_verified_lossless"] = True
+
+        self.mock_db.get_wrong_matches.return_value = [transparent, lossless_opus]
+        entries = {
+            100: self._entry(100, 42, "/fi/transparent"),
+            101: self._entry(101, 43, "/fi/lossless-opus"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus",
+            {},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["groups_deleted"], 1)
+        self.assertEqual(data["deleted"], 1)
+        self.assertEqual(data["deleted_request_ids"], [43])
+        called_ids = [c.args[0] for c in self.mock_db.clear_wrong_match_path.call_args_list]
+        self.assertEqual(called_ids, [101])
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""

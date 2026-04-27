@@ -204,6 +204,22 @@ console.log('transparent non-FLAC bulk cleanup targets only transparent on-disk 
   assertDeepEqual(targets.map(g => g.request_id), [42], 'only transparent groups with non-FLAC downloads are targeted');
 }
 
+console.log('lossless-Opus bulk cleanup targets only verified-lossless Opus groups');
+{
+  const data = wrongMatchesData();
+  data.groups[0].verified_lossless = true;
+  data.groups[0].format = 'Opus';
+  const mp3Group = JSON.parse(JSON.stringify(data.groups[0]));
+  mp3Group.request_id = 43;
+  mp3Group.format = 'MP3';
+  const unverifiedGroup = JSON.parse(JSON.stringify(data.groups[0]));
+  unverifiedGroup.request_id = 44;
+  unverifiedGroup.verified_lossless = false;
+
+  const targets = __test__.losslessOpusGroups([data.groups[0], mp3Group, unverifiedGroup]);
+  assertDeepEqual(targets.map(g => g.request_id), [42], 'only verified-lossless Opus groups are targeted');
+}
+
 console.log('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
@@ -320,6 +336,46 @@ console.log('deleteTransparentNonFlacWrongMatches() posts one bulk delete and re
   assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole pane after bulk cleanup');
   assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts bulk cleanup result');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned groups locally');
+}
+
+console.log('deleteLosslessOpusWrongMatches() posts one bulk delete and removes rows in place');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  data.groups[0].verified_lossless = true;
+  data.groups[0].format = 'Opus';
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete lossless-Opus (3)'), 'renders top-level lossless-Opus cleanup button');
+  const calls = [];
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-lossless-opus') {
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          deleted: 3,
+          groups_deleted: 1,
+          deleted_request_ids: [42],
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete lossless-Opus (3)', style: {} };
+  await __test__.deleteLosslessOpusWrongMatches(btn);
+  assertEqual(calls[0].url, '/api/wrong-matches/delete-lossless-opus', 'posts to lossless-Opus cleanup endpoint');
+  assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole pane after lossless-Opus cleanup');
+  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts lossless-Opus bulk cleanup result');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned lossless-Opus groups locally');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
