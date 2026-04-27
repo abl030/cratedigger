@@ -180,6 +180,8 @@ export function renderSimulatorForm() {
       <span class="ds-preset" onclick="window.dsPreset('vbr_v0')">VBR V0 MP3</span>
       <span class="ds-preset" onclick="window.dsPreset('vbr_transcode')">VBR Transcode (#93)</span>
       <span class="ds-preset" onclick="window.dsPreset('provisional_lossless')">Provisional source</span>
+      <span class="ds-preset" onclick="window.dsPreset('provisional_bride')">Bride (live source)</span>
+      <span class="ds-preset" onclick="window.dsPreset('provisional_creek_reject')">Creek reject (live)</span>
       <span class="ds-preset" onclick="window.dsPreset('audio_corrupt')">Audio corrupt (#91)</span>
       <span class="ds-preset" onclick="window.dsPreset('nested_force')">Nested force-import (#91)</span>
     </div>
@@ -465,6 +467,40 @@ export const DS_PRESETS = {
     target_format: '', verified_lossless_target: 'opus 128',
     candidate_v0_probe_avg: '228',
     existing_v0_probe_avg: '171',
+    supported_lossless_source: 'true',
+    ..._preimport_defaults,
+  },
+  provisional_bride: {
+    // Mountain Goats - Bride / durandurfan, 2026-04-27:
+    // first comparable suspect lossless-source probe; store opus 128,
+    // denylist the source, and keep searching.
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
+    spectral_grade: 'likely_transcode', spectral_bitrate: '',
+    existing_min_bitrate: '320', existing_avg_bitrate: '320',
+    existing_spectral_grade: '',
+    existing_spectral_bitrate: '',
+    override_min_bitrate: '', post_conversion_min_bitrate: '214',
+    converted_count: '1', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: 'opus 128',
+    candidate_v0_probe_avg: '214',
+    existing_v0_probe_avg: '',
+    supported_lossless_source: 'true',
+    ..._preimport_defaults,
+  },
+  provisional_creek_reject: {
+    // Iron & Wine - The Creek Drank the Cradle / maplebug, after the
+    // SPENCERTPSN source probe: lower source V0 evidence rejects against a
+    // better comparable suspect-lossless probe.
+    is_flac: 'true', min_bitrate: '', is_cbr: 'false', avg_bitrate: '',
+    spectral_grade: 'likely_transcode', spectral_bitrate: '96',
+    existing_min_bitrate: '220', existing_avg_bitrate: '228',
+    existing_spectral_grade: 'likely_transcode',
+    existing_spectral_bitrate: '96',
+    override_min_bitrate: '', post_conversion_min_bitrate: '165',
+    converted_count: '11', verified_lossless: 'false',
+    target_format: '', verified_lossless_target: 'opus 128',
+    candidate_v0_probe_avg: '171',
+    existing_v0_probe_avg: '228',
     supported_lossless_source: 'true',
     ..._preimport_defaults,
   },

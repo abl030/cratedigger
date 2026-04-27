@@ -1,17 +1,16 @@
 /**
- * Unit tests for web/js/decisions.js — specifically renderPolicyBadges.
+ * Unit tests for web/js/decisions.js.
  * Run with: node tests/test_js_decisions.mjs
  *
- * Scope: covers renderPolicyBadges (issue #68) only. The other pure
- * exports in decisions.js — renderDiagram and renderStage — are exercised
- * end-to-end via the test_pipeline_constants_contract route test plus
- * live deploy verification of the Decisions tab. Future PRs that change
- * the stage/diagram layout should consider adding dedicated unit tests
- * here alongside renderPolicyBadges. DOM-touching entry points
- * (loadDecisions, renderSimulatorForm) stay deferred to live deploy.
+ * Scope: covers renderPolicyBadges (issue #68), Decisions-tab refresh,
+ * simulator serialization, and selected runnable presets. The diagram
+ * layout exports are still exercised end-to-end via the
+ * test_pipeline_constants_contract route test plus live deploy verification
+ * of the Decisions tab. Future PRs that change the stage/diagram layout
+ * should consider adding dedicated unit tests here.
  */
 
-import { loadDecisions, renderPolicyBadges, DS_PRESETS, runSimulator, renderSimulatorResults } from '../web/js/decisions.js';
+import { loadDecisions, renderPolicyBadges, DS_PRESETS, dsPreset, runSimulator, renderSimulatorResults } from '../web/js/decisions.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -42,6 +41,47 @@ function assertNotContains(haystack, needle, msg) {
     failed++;
     console.error(`  FAIL: ${msg} — expected NOT to contain ${JSON.stringify(needle)}\n    in: ${haystack}`);
   }
+}
+
+const SIMULATOR_FIELDS = [
+  'is_flac', 'min_bitrate', 'is_cbr', 'avg_bitrate',
+  'spectral_grade', 'spectral_bitrate',
+  'existing_min_bitrate', 'existing_avg_bitrate',
+  'existing_spectral_grade', 'existing_spectral_bitrate',
+  'override_min_bitrate', 'post_conversion_min_bitrate',
+  'converted_count', 'verified_lossless',
+  'candidate_v0_probe_avg', 'existing_v0_probe_avg',
+  'supported_lossless_source',
+  'target_format', 'verified_lossless_target',
+  'audio_check_mode', 'audio_corrupt',
+  'import_mode', 'has_nested_audio',
+];
+
+function installSimulatorDom() {
+  const resultsEl = { innerHTML: '' };
+  const fields = {};
+  for (const name of SIMULATOR_FIELDS) fields[name] = { value: 'stale' };
+  global.document = {
+    getElementById(id) {
+      if (id === 'ds-results') return resultsEl;
+      if (!id.startsWith('ds-')) return null;
+      const key = id.slice(3);
+      return fields[key] || null;
+    },
+  };
+  return { fields, resultsEl };
+}
+
+function queryParams(url) {
+  return Object.fromEntries(new URL(url, 'http://example.test').searchParams.entries());
+}
+
+function assertQueryEquals(actualUrl, expected, msg) {
+  const actual = queryParams(actualUrl);
+  const actualJson = JSON.stringify(actual, Object.keys(actual).sort());
+  const expectedJson = JSON.stringify(expected, Object.keys(expected).sort());
+  assert(actualJson === expectedJson,
+         `${msg} — expected ${expectedJson}, got ${actualJson}`);
 }
 
 // --- renderPolicyBadges tests ---
@@ -152,6 +192,10 @@ await loadDecisions();
 assert(fetchCalls === 2, `expected loadDecisions() to fetch twice, got ${fetchCalls}`);
 assertContains(decisionsEl.innerHTML, 'GOOD', 'second tab open renders fresh gate rank');
 assertContains(decisionsEl.innerHTML, '10 kbps', 'second tab open renders fresh tolerance');
+assertContains(decisionsEl.innerHTML, "window.dsPreset('provisional_bride')",
+  'Decisions tab renders the Mountain Goats / Bride live preset control');
+assertContains(decisionsEl.innerHTML, "window.dsPreset('provisional_creek_reject')",
+  'Decisions tab renders the Iron & Wine / Creek live preset control');
 
 // --- DS_PRESETS contract: avg_bitrate must be explicit in every preset ---
 // Issue #93 round 3: presets that omit avg_bitrate inherit a stale value
@@ -183,9 +227,35 @@ assert(DS_PRESETS.vbr_transcode !== undefined,
 assert(DS_PRESETS.vbr_transcode.avg_bitrate === '182',
        `vbr_transcode preset must have avg_bitrate='182' (below 210 threshold), got ${DS_PRESETS.vbr_transcode.avg_bitrate}`);
 
+// Live provisional-lossless examples from 2026-04-27 stay pinned as
+// runnable presets so the Decisions tab documents the real V0-probe shapes.
+assert(DS_PRESETS.provisional_bride !== undefined,
+       'provisional_bride preset missing — documents Mountain Goats / Bride live source');
+assert(DS_PRESETS.provisional_bride.spectral_grade === 'likely_transcode',
+       `provisional_bride spectral_grade must be likely_transcode, got ${DS_PRESETS.provisional_bride.spectral_grade}`);
+assert(DS_PRESETS.provisional_bride.candidate_v0_probe_avg === '214',
+       `provisional_bride candidate_v0_probe_avg must be 214, got ${DS_PRESETS.provisional_bride.candidate_v0_probe_avg}`);
+assert(DS_PRESETS.provisional_bride.existing_v0_probe_avg === '',
+       `provisional_bride existing_v0_probe_avg must be empty, got ${DS_PRESETS.provisional_bride.existing_v0_probe_avg}`);
+assert(DS_PRESETS.provisional_bride.verified_lossless_target === 'opus 128',
+       `provisional_bride verified_lossless_target must be opus 128, got ${DS_PRESETS.provisional_bride.verified_lossless_target}`);
+
+assert(DS_PRESETS.provisional_creek_reject !== undefined,
+       'provisional_creek_reject preset missing — documents Iron & Wine / The Creek Drank the Cradle live reject');
+assert(DS_PRESETS.provisional_creek_reject.spectral_grade === 'likely_transcode',
+       `provisional_creek_reject spectral_grade must be likely_transcode, got ${DS_PRESETS.provisional_creek_reject.spectral_grade}`);
+assert(DS_PRESETS.provisional_creek_reject.spectral_bitrate === '96',
+       `provisional_creek_reject spectral_bitrate must be 96, got ${DS_PRESETS.provisional_creek_reject.spectral_bitrate}`);
+assert(DS_PRESETS.provisional_creek_reject.candidate_v0_probe_avg === '171',
+       `provisional_creek_reject candidate_v0_probe_avg must be 171, got ${DS_PRESETS.provisional_creek_reject.candidate_v0_probe_avg}`);
+assert(DS_PRESETS.provisional_creek_reject.existing_v0_probe_avg === '228',
+       `provisional_creek_reject existing_v0_probe_avg must be 228, got ${DS_PRESETS.provisional_creek_reject.existing_v0_probe_avg}`);
+assert(DS_PRESETS.provisional_creek_reject.existing_spectral_grade === 'likely_transcode',
+       `provisional_creek_reject existing_spectral_grade must be likely_transcode, got ${DS_PRESETS.provisional_creek_reject.existing_spectral_grade}`);
+
 console.log('\nrunSimulator()');
 {
-  const resultsEl = { innerHTML: '' };
+  installSimulatorDom();
   const values = {
     is_flac: 'false',
     min_bitrate: '171',
@@ -211,14 +281,9 @@ console.log('\nrunSimulator()');
     import_mode: 'auto',
     has_nested_audio: 'false',
   };
-  global.document = {
-    getElementById(id) {
-      if (id === 'ds-results') return resultsEl;
-      if (!id.startsWith('ds-')) return null;
-      const key = id.slice(3);
-      return key in values ? { value: values[key] } : null;
-    },
-  };
+  for (const [key, value] of Object.entries(values)) {
+    document.getElementById('ds-' + key).value = value;
+  }
   let fetchedUrl = '';
   global.fetch = async (url) => {
     fetchedUrl = url;
@@ -252,6 +317,113 @@ console.log('\nrunSimulator()');
     'runSimulator serializes existing spectral grade');
   assertContains(fetchedUrl, 'existing_spectral_bitrate=128',
     'runSimulator still serializes existing spectral bitrate');
+}
+
+console.log('\ndsPreset() live examples');
+{
+  installSimulatorDom();
+  let fetchedUrl = '';
+  global.fetch = async (url) => {
+    fetchedUrl = url;
+    return {
+      ok: true,
+      async json() {
+        return {
+          preimport_audio: 'pass',
+          preimport_nested: 'skipped_auto',
+          stage0_spectral_gate: 'skipped_flac',
+          stage1_spectral: 'import_no_exist',
+          stage2_import: 'provisional_lossless_upgrade',
+          stage3_quality_gate: null,
+          final_status: 'wanted',
+          imported: true,
+          denylisted: true,
+          keep_searching: true,
+          target_final_format: 'opus 128',
+          verified_lossless: false,
+        };
+      },
+    };
+  };
+
+  dsPreset('provisional_bride');
+  await Promise.resolve();
+  await Promise.resolve();
+  assertQueryEquals(fetchedUrl, {
+    is_flac: 'true',
+    is_cbr: 'false',
+    spectral_grade: 'likely_transcode',
+    existing_min_bitrate: '320',
+    existing_avg_bitrate: '320',
+    post_conversion_min_bitrate: '214',
+    converted_count: '1',
+    verified_lossless: 'false',
+    candidate_v0_probe_avg: '214',
+    supported_lossless_source: 'true',
+    verified_lossless_target: 'opus 128',
+    audio_check_mode: 'normal',
+    audio_corrupt: 'false',
+    import_mode: 'auto',
+    has_nested_audio: 'false',
+  }, 'provisional_bride submits the live Mountain Goats / Bride query');
+  assertContains(document.getElementById('ds-results').innerHTML,
+    'provisional_lossless_upgrade',
+    'provisional_bride renders the mocked provisional upgrade result');
+}
+
+{
+  installSimulatorDom();
+  let fetchedUrl = '';
+  global.fetch = async (url) => {
+    fetchedUrl = url;
+    return {
+      ok: true,
+      async json() {
+        return {
+          preimport_audio: 'pass',
+          preimport_nested: 'skipped_auto',
+          stage0_spectral_gate: 'skipped_flac',
+          stage1_spectral: 'reject',
+          stage2_import: 'suspect_lossless_downgrade',
+          stage3_quality_gate: null,
+          final_status: 'wanted',
+          imported: false,
+          denylisted: true,
+          keep_searching: true,
+          target_final_format: null,
+          verified_lossless: false,
+        };
+      },
+    };
+  };
+
+  dsPreset('provisional_creek_reject');
+  await Promise.resolve();
+  await Promise.resolve();
+  assertQueryEquals(fetchedUrl, {
+    is_flac: 'true',
+    is_cbr: 'false',
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: '96',
+    existing_min_bitrate: '220',
+    existing_avg_bitrate: '228',
+    existing_spectral_grade: 'likely_transcode',
+    existing_spectral_bitrate: '96',
+    post_conversion_min_bitrate: '165',
+    converted_count: '11',
+    verified_lossless: 'false',
+    candidate_v0_probe_avg: '171',
+    existing_v0_probe_avg: '228',
+    supported_lossless_source: 'true',
+    verified_lossless_target: 'opus 128',
+    audio_check_mode: 'normal',
+    audio_corrupt: 'false',
+    import_mode: 'auto',
+    has_nested_audio: 'false',
+  }, 'provisional_creek_reject submits the live Iron & Wine / Creek query');
+  assertContains(document.getElementById('ds-results').innerHTML,
+    'suspect_lossless_downgrade',
+    'provisional_creek_reject renders the mocked source-downgrade result');
 }
 
 {

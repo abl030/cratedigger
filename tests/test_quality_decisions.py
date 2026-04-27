@@ -1600,6 +1600,78 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertTrue(r["keep_searching"])
         self.assertEqual(r["final_status"], "wanted")
 
+    def test_live_mountain_goats_bride_first_provisional_source_import(self):
+        """Mountain Goats - Bride / durandurfan, 2026-04-27 live shape.
+
+        A suspect FLAC source with source-lineage V0 avg 214kbps and no
+        comparable source probe imports provisionally, stores as opus 128,
+        denylists the source, and keeps searching.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            converted_count=1,
+            post_conversion_min_bitrate=214,
+            candidate_v0_probe_avg=214,
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            existing_format="MP3",
+            existing_is_cbr=True,
+            verified_lossless_target="opus 128",
+        )
+
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        self.assertEqual(
+            r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertEqual(r["target_final_format"], "opus 128")
+        self.assertFalse(r["verified_lossless"])
+        self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_live_creek_drank_cradle_lower_source_rejects_after_better_probe(self):
+        """Iron & Wine - The Creek Drank the Cradle / maplebug shape.
+
+        Once a better comparable lossless-source V0 probe exists from the
+        earlier SPENCERTPSN import, a lower 171kbps source probe is a confident
+        suspect-lossless downgrade even though the generic spectral stage would
+        also reject at 96kbps.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=96,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=96,
+            converted_count=11,
+            post_conversion_min_bitrate=165,
+            candidate_v0_probe_avg=171,
+            existing_v0_probe_avg=228,
+            existing_min_bitrate=220,
+            existing_avg_bitrate=228,
+            existing_format="MP3",
+            existing_is_cbr=False,
+            verified_lossless_target="opus 128",
+        )
+
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(
+            r["stage2_import"], DECISION_SUSPECT_LOSSLESS_DOWNGRADE)
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertIsNone(r["target_final_format"])
+        self.assertIsNone(r["stage3_quality_gate"])
+
     def test_target_conversion_mp3_skips(self):
         """MP3 path + verified_lossless_target → no target conversion."""
         r = full_pipeline_decision(
