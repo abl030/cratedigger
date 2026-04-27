@@ -1035,6 +1035,19 @@ def dispatch_import_core(
                         logger.warning(
                             f"SUSPECT LOSSLESS REJECTED: {label} "
                             "missing comparable V0 probe")
+                    elif decision == "lossless_source_locked":
+                        fail_scenario = "lossless_source_locked"
+                        existing_avg = (
+                            ir.existing_v0_probe.avg_bitrate_kbps
+                            if ir.existing_v0_probe else None
+                        )
+                        fail_detail = ir.error or (
+                            f"lossy candidate cannot override existing "
+                            f"lossless-source V0 probe {existing_avg}kbps"
+                        )
+                        logger.warning(
+                            f"LOSSLESS SOURCE LOCKED: {label} "
+                            f"existing_v0_avg={existing_avg}kbps")
                     elif decision == "duplicate_remove_guard_failed":
                         fail_scenario = "duplicate_remove_guard_failed"
                         fail_detail = _guard_failure_detail(ir)
@@ -1077,6 +1090,7 @@ def dispatch_import_core(
                             "transcode_downgrade",
                             "suspect_lossless_downgrade",
                             "suspect_lossless_probe_missing",
+                            "lossless_source_locked",
                         )
                         else None
                     )

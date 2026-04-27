@@ -156,6 +156,31 @@ class TestImportPreviewValues(unittest.TestCase):
         self.assertTrue(preview.cleanup_eligible)
         self.assertEqual(preview.reason, "suspect_lossless_downgrade")
 
+    def test_values_preview_classifies_lossless_source_locked(self):
+        # Lossy candidate (is_flac=False) facing existing with comparable
+        # lossless-source V0 probe — preview must classify as confident
+        # reject so the importer never schedules it. Parallel to the
+        # suspect_lossless_downgrade case above.
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=False,
+                is_cbr=False,
+                is_vbr=True,
+                min_bitrate=176,
+                avg_bitrate=205,
+                spectral_grade="likely_transcode",
+                spectral_bitrate=128,
+                existing_min_bitrate=116,
+                existing_avg_bitrate=131,
+                existing_format="opus",
+                existing_v0_probe_avg=240,
+            )
+        )
+
+        self.assertEqual(preview.verdict, "confident_reject")
+        self.assertTrue(preview.cleanup_eligible)
+        self.assertEqual(preview.reason, "lossless_source_locked")
+
 
 class TestImportPreviewPath(unittest.TestCase):
     def _db(self) -> FakePipelineDB:

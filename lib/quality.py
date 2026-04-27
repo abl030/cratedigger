@@ -27,6 +27,7 @@ V0_PROBE_KINDS = frozenset({
 DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
 DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
 DECISION_SUSPECT_LOSSLESS_PROBE_MISSING = "suspect_lossless_probe_missing"
+DECISION_LOSSLESS_SOURCE_LOCKED = "lossless_source_locked"
 
 # Deprecated aliases — keep for old code that references them
 QUALITY_FLAC_ONLY = QUALITY_LOSSLESS
@@ -1958,11 +1959,42 @@ def provisional_lossless_decision(
     sources). For suspect supported lossless sources, V0 probe avg bitrate is
     the v1 comparison signal and ``within_rank_tolerance_kbps`` is the only
     tolerance knob.
+
+    When ``supported_lossless_source`` is False (lossy candidate) AND
+    ``existing_probe`` is a comparable lossless-source probe, the function
+    returns ``DECISION_LOSSLESS_SOURCE_LOCKED`` — a lossy candidate cannot
+    produce a comparable measurement, and the recorded probe is the truth-
+    of-source anchor. ``candidate_probe`` is ignored in that branch.
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()
 
     if not candidate.supported_lossless_source:
+        # Lossless-source lock: when the existing album was previously
+        # imported as a provisional lossless source we transcoded down (so
+        # current_lossless_source_v0_probe_avg_bitrate is the only V0-grade
+        # signal we have), a lossy candidate cannot produce comparable
+        # evidence and must not be allowed to override on raw avg alone.
+        # The recorded V0 probe is the truth-of-source anchor; only another
+        # lossless-container candidate (which can be ground to V0) is
+        # eligible to displace it.
+        if is_comparable_lossless_source_probe(candidate.existing_probe):
+            assert candidate.existing_probe is not None
+            existing_avg = candidate.existing_probe.avg_bitrate_kbps
+            decision = DECISION_LOSSLESS_SOURCE_LOCKED
+            return ProvisionalLosslessDecisionResult(
+                decision=decision,
+                would_import=False,
+                confident_reject=True,
+                cleanup_eligible=True,
+                reason=(
+                    f"existing has lossless-source V0 probe "
+                    f"{existing_avg}kbps; lossy candidate cannot produce "
+                    f"comparable evidence (only another lossless source "
+                    f"can override)"
+                ),
+                stage_chain=[f"stage2_provisional:{decision}"],
+            )
         return ProvisionalLosslessDecisionResult()
 
     if candidate.spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
@@ -2306,6 +2338,7 @@ def dispatch_action(decision: str) -> DispatchAction:
     elif decision in (
         DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
         DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+        DECISION_LOSSLESS_SOURCE_LOCKED,
     ):
         return DispatchAction(record_rejection=True, denylist=True,
                               requeue=True, cleanup=True)
@@ -2883,6 +2916,10 @@ def get_decision_tree(
                            "spectral_grade",
                            "cfg.within_rank_tolerance_kbps"],
                 "rules": [
+                    {"condition": "lossy candidate AND existing has comparable lossless-source V0 probe",
+                     "result": DECISION_LOSSLESS_SOURCE_LOCKED,
+                     "color": "red",
+                     "effect": "reject; only another lossless source can override the recorded V0 anchor"},
                     {"condition": "spectral = genuine/marginal",
                      "result": "continue", "color": "green",
                      "effect": "clean sources stay on the verified-lossless path"},
@@ -2907,6 +2944,7 @@ def get_decision_tree(
                     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
                     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
                     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+                    DECISION_LOSSLESS_SOURCE_LOCKED,
                 ],
                 "note": "Uses source-probe avg as evidence. Native lossy "
                         "research probes are non-comparable in v1.",
@@ -3479,6 +3517,28 @@ def full_pipeline_decision(
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
+        # Lossless-source lock: a recorded existing lossless-source V0 probe
+        # is the truth-of-source anchor. Lossy candidates have no comparable
+        # measurement and are rejected before measured_import_decision can
+        # be misled by an on-disk avg that is just our own transcode floor.
+        lossy_lock = provisional_lossless_decision(
+            ProvisionalLosslessDecisionInput(
+                candidate_probe=None,
+                existing_probe=V0ProbeEvidence(
+                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=existing_v0_probe_avg,
+                ) if existing_v0_probe_avg is not None else None,
+                spectral_grade=spectral_grade,
+                supported_lossless_source=False,
+            ),
+            cfg=cfg,
+        )
+        if lossy_lock.decision == DECISION_LOSSLESS_SOURCE_LOCKED:
+            result["stage2_import"] = lossy_lock.decision
+            result["final_status"] = "wanted"
+            result["denylisted"] = True
+            result["keep_searching"] = True
+            return result
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
         result["stage2_import"] = measured.decision

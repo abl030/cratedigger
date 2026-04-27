@@ -450,6 +450,32 @@ console.log('\ndsPreset() live examples');
     'renderSimulatorResults marks suspect lossless missing-probe as red');
 }
 
+{
+  // The JS red list and python _REJECT_STAGE_DECISIONS must stay in sync —
+  // a divergence would silently render a real rejection in amber/green.
+  const resultsEl = { innerHTML: '' };
+  global.document = {
+    getElementById(id) {
+      return id === 'ds-results' ? resultsEl : null;
+    },
+  };
+  renderSimulatorResults({
+    preimport_audio: 'pass',
+    preimport_nested: 'skipped_auto',
+    stage0_spectral_gate: 'skipped_vbr_high_avg',
+    stage1_spectral: null,
+    stage2_import: 'lossless_source_locked',
+    stage3_quality_gate: null,
+    final_status: 'wanted',
+    imported: false,
+    denylisted: true,
+    keep_searching: true,
+  });
+  assertContains(resultsEl.innerHTML,
+    '<span class="ds-outcome ds-red">lossless_source_locked</span>',
+    'renderSimulatorResults marks lossless_source_locked as red');
+}
+
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

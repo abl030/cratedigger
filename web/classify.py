@@ -682,6 +682,9 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     if ir.decision == "suspect_lossless_probe_missing":
         return _provisional_verdict(entry, imported=False)
 
+    if ir.decision == "lossless_source_locked":
+        return _lossless_source_locked_verdict(entry)
+
     if ir.error:
         return f"Import error: {ir.error}"
 
@@ -728,6 +731,32 @@ def _spectral_phrase(entry: LogEntry) -> str | None:
     if entry.spectral_bitrate:
         phrase += f" ~{entry.spectral_bitrate}kbps"
     return phrase
+
+
+def _lossless_source_locked_verdict(entry: LogEntry) -> str:
+    """Verdict copy for the lossless-source lock rejection.
+
+    Fires when a lossy candidate is offered against an existing album whose
+    original lossless-source V0 probe is already recorded. The candidate
+    cannot produce comparable evidence — only another lossless-container
+    source can override the recorded probe.
+    """
+    _, existing_avg, _ = _probe_values(entry)
+    new_kbps = _downloaded_min_bitrate_kbps(entry)
+    parts: list[str] = []
+    if new_kbps is not None:
+        spectral = _spectral_phrase(entry)
+        new_phrase = f"{new_kbps}kbps lossy candidate"
+        if spectral:
+            new_phrase += f" ({spectral})"
+        parts.append(new_phrase)
+    if existing_avg is not None:
+        parts.append(
+            f"existing has lossless-source V0 probe {existing_avg}kbps"
+        )
+    parts.append("only another lossless source can override")
+    parts.append("searching continues")
+    return "Lossless-source locked: " + "; ".join(parts)
 
 
 def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
@@ -810,12 +839,15 @@ def _rejection_verdict(entry: LogEntry) -> str:
         "transcode_downgrade",
         "suspect_lossless_downgrade",
         "suspect_lossless_probe_missing",
+        "lossless_source_locked",
     ):
         ir_verdict = _quality_verdict_from_import_result(entry)
         if ir_verdict is not None:
             return ir_verdict
         if scenario.startswith("suspect_lossless"):
             return _provisional_verdict(entry, imported=False)
+        if scenario == "lossless_source_locked":
+            return _lossless_source_locked_verdict(entry)
         # Fallback: use real file bitrate, not spectral
         new_kbps = _downloaded_min_bitrate_kbps(entry)
         old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate

@@ -567,6 +567,50 @@ class TestDispatchImport(unittest.TestCase):
         )
         self.assertTrue(len(r["db"].denylist) > 0)
 
+    def test_lossless_source_locked_rejects_lossy_candidate(self):
+        # Wire-boundary test: import_one.py emits decision=lossless_source_locked
+        # for a lossy candidate the gate refused to compare against an
+        # existing lossless-source V0 probe. Dispatch must:
+        #   - record a rejected download_log with beets_scenario=lossless_source_locked
+        #   - put a human-readable detail referencing the existing probe
+        #   - clear ir.error from the stored row (it's a domain rejection, not a crash)
+        #   - denylist + requeue the request to wanted
+        existing = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=210,
+            avg_bitrate_kbps=240,
+            median_bitrate_kbps=235,
+        )
+        ir = make_import_result(
+            decision="lossless_source_locked",
+            new_min_bitrate=176,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            verified_lossless=False,
+            existing_v0_probe=existing,
+            error=("existing has lossless-source V0 probe 240kbps; lossy "
+                   "candidate cannot produce comparable evidence"),
+        )
+
+        r = self._dispatch(ir, request_overrides={
+            "current_lossless_source_v0_probe_avg_bitrate": 240,
+        })
+
+        row = r["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 240)
+        self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+        self.assertEqual(r["db"].download_logs[0].beets_scenario,
+                         "lossless_source_locked")
+        self.assertIn(
+            "240",
+            r["db"].download_logs[0].beets_detail or "",
+        )
+        # ir.error is suppressed for lossless_source_locked — domain rejections
+        # should not bleed into the error_message column (mirrors suspect_lossless_*).
+        self.assertIsNone(r["db"].download_logs[0].error_message)
+        self.assertTrue(len(r["db"].denylist) > 0)
+
     def test_error_decision(self):
         ir = make_import_result(decision="conversion_failed",
                                 error="ffmpeg failed")

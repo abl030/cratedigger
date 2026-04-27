@@ -156,6 +156,7 @@ _REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "transcode_downgrade",
     "suspect_lossless_downgrade",
     "suspect_lossless_probe_missing",
+    "lossless_source_locked",
 })
 _QUALITY_GATE_REQUEUE_DECISIONS: frozenset[str] = frozenset({
     "requeue_upgrade",

@@ -473,6 +473,31 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertIn("not meaningfully better", result.verdict)
         self.assertIn("searching continues", result.verdict)
 
+    def test_rejected_lossless_source_locked(self):
+        # Lossy candidate offered against an existing album whose original
+        # lossless-source V0 probe is recorded — the lock fires before the
+        # comparator runs. Verdict copy must surface (a) the candidate's real
+        # bitrate + spectral context, (b) the recorded existing probe, and
+        # (c) the structural reason ("only another lossless source can
+        # override"). All three are read by users in the recents log to
+        # understand WHY the candidate was rejected even though its avg
+        # exceeded the on-disk transcode floor.
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="lossless_source_locked",
+            actual_min_bitrate=176,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            existing_v0_probe_avg_bitrate=240,
+        ))
+        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertIn("Lossless-source locked", result.verdict)
+        self.assertIn("240", result.verdict)
+        self.assertIn(
+            "only another lossless source can override", result.verdict)
+        self.assertIn("searching continues", result.verdict)
+
     def test_rejected_high_distance(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="high_distance", beets_distance=0.45))

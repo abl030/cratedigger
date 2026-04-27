@@ -697,6 +697,93 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         self.assertEqual(row["current_spectral_bitrate"], 280)
 
 
+class TestLosslessSourceLockedSlice(unittest.TestCase):
+    """Integration slice: lossy candidate vs existing with lossless-source V0
+    probe → real parse_import_result → lossless_source_locked dispatch path
+    → domain state assertions.
+
+    Replaces the per-step mocking with end-to-end coverage of the wire
+    boundary: import_one.py emits a real ImportResult JSON sentinel,
+    dispatch_import_core parses it, dispatch_action maps the decision to
+    record_rejection+denylist+requeue, and the rejection lands in
+    download_log + denylist + status=wanted.
+    """
+
+    def test_lossy_candidate_locked_records_rejection_and_requeues(self):
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import V0ProbeEvidence, V0_PROBE_LOSSLESS_SOURCE
+
+        existing_probe = V0ProbeEvidence(
+            kind=V0_PROBE_LOSSLESS_SOURCE,
+            min_bitrate_kbps=210,
+            avg_bitrate_kbps=240,
+            median_bitrate_kbps=235,
+        )
+        ir = make_import_result(
+            decision="lossless_source_locked",
+            new_min_bitrate=176,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            verified_lossless=False,
+            existing_v0_probe=existing_probe,
+            error=("existing has lossless-source V0 probe 240kbps; lossy "
+                   "candidate cannot produce comparable evidence"),
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading", mb_release_id="mbid-123",
+            current_lossless_source_v0_probe_min_bitrate=210,
+            current_lossless_source_v0_probe_avg_bitrate=240,
+            current_lossless_source_v0_probe_median_bitrate=235,
+        ))
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                ext.run.return_value = MagicMock(
+                    returncode=5, stdout=_make_stdout(ir), stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.131,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        # The recorded V0 probe must survive the rejection — it's the anchor
+        # the next attempt will compare against, not state to clear.
+        self.assertEqual(
+            row["current_lossless_source_v0_probe_avg_bitrate"], 240)
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(self, 0, outcome="rejected",
+                      beets_scenario="lossless_source_locked")
+        # ir.error is suppressed for domain rejections — error_message
+        # must be None so downstream UIs don't render it as a crash.
+        self.assertIsNone(db.download_logs[0].error_message)
+        self.assertIn("240", db.download_logs[0].beets_detail or "")
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].username, "user1")
+
+
 class TestDispatchNoJsonResult(unittest.TestCase):
     """Integration slice: sp.run returns no sentinel -> record rejection."""
 

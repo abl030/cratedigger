@@ -675,6 +675,10 @@ def cmd_quality(db, args):
     final_format = req.get("final_format")
     target_format = req.get("target_format")
     verified_lossless_target = _load_runtime_verified_lossless_target() or None
+    # Existing-side lossless-source V0 probe — anchors the lossless_source_locked
+    # rule. When set, lossy candidates short-circuit to reject inside the
+    # provisional lane regardless of how their on-disk avg compares.
+    existing_v0_probe_avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
 
     print(f"  {label}")
     print(f"  Status: {req['status']}")
@@ -730,6 +734,9 @@ def cmd_quality(db, args):
             print(f"    current_spectral_bitrate={current_br}kbps")
         if spectral_grade:
             print(f"    current_spectral_grade={spectral_grade}")
+        if existing_v0_probe_avg is not None:
+            print(f"    current_lossless_source_v0_probe_avg={existing_v0_probe_avg}kbps "
+                  f"(locks lossy candidates)")
         if q_override:
             print(f"    searching: {q_override}")
     else:
@@ -870,6 +877,7 @@ def cmd_quality(db, args):
             verified_lossless=verified,
             target_format=target_format,
             verified_lossless_target=verified_lossless_target,
+            existing_v0_probe_avg=existing_v0_probe_avg,
             cfg=rank_cfg,
             **params_with_runtime)
 

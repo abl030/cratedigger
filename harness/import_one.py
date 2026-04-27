@@ -1388,7 +1388,12 @@ def main():
 
     if provisional.confident_reject:
         r.exit_code = 5
-        _log(f"[SUSPECT LOSSLESS REJECT] {provisional.reason}")
+        log_prefix = (
+            "[LOSSLESS SOURCE LOCKED]"
+            if decision == "lossless_source_locked"
+            else "[SUSPECT LOSSLESS REJECT]"
+        )
+        _log(f"{log_prefix} {provisional.reason}")
         if args.preserve_source and not keep_lossless and converted > 0:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
             _log(f"  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
