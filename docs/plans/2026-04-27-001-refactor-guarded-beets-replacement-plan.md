@@ -8,6 +8,11 @@ origin: docs/brainstorms/guarded-beets-replacement-requirements.md
 
 # refactor: Restore guarded Beets replacement
 
+Outcome update: after a live Beets-owned move/import round completed cleanly,
+the follow-up cleanup removed the old Cratedigger-owned replacement state
+machine. Historical implementation notes below still describe the temporary
+one-release overlap that has now ended.
+
 ## Overview
 
 Restore Beets as the owner of duplicate album replacement while keeping

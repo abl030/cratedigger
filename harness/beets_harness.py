@@ -235,9 +235,9 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
 
     The key set also must not include mutable metadata like albumartist/album:
     live upgrade attempts can carry normalized artist/title differences, which
-    makes Beets miss the duplicate callback and pushes replacement back through
-    Cratedigger's temporary stale-row cleanup. Exact release identifiers are the
-    durable duplicate boundary.
+    makes Beets miss the duplicate callback. Cratedigger no longer owns a
+    post-import replacement cleanup state machine, so exact release identifiers
+    are the durable duplicate boundary.
 
     This assertion turns those silent misconfigs into loud startup failures.
     Raises SystemExit(1) on regression.
@@ -251,9 +251,9 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
             "cross-MBID sibling destruction via find_duplicates — the "
             "2026-04-20 Palo Santo bug. Extra mutable keys like albumartist or "
             "album make same-release upgrades miss Beets' duplicate callback, "
-            "leaving Cratedigger's temporary replacement fallback to churn "
-            "folder names. Fix the `duplicate_keys` block under `import:` in "
-            "~/.config/beets/config.yaml (or the equivalent Nix module)."
+            "so replacement would not be atomic. Fix the `duplicate_keys` "
+            "block under `import:` in ~/.config/beets/config.yaml (or the "
+            "equivalent Nix module)."
         )
         print(msg, file=sys.stderr)
         sys.exit(1)

@@ -302,10 +302,10 @@ and moves the staged files to `Incoming/duplicate-remove-guard/`. That folder is
 preserved for diagnostics only; it is separate from Wrong Matches and has no v1
 UI.
 
-TEMPORARY: the old Cratedigger stale-row cleanup and sibling canonicalization
-state machine remains for one release only. After one deployed release proves a
-successful guarded upgrade, remove the temporary fallback code called out in
-`docs/plans/2026-04-27-001-refactor-guarded-beets-replacement-plan.md`.
+The old Cratedigger stale-row cleanup and sibling canonicalization state
+machine has been removed. Beets owns the atomic delete-and-replace operation;
+Cratedigger's job is to fail before mutation when Beets' would-remove set is
+not exactly one same-release album.
 
 ### Exit Codes
 

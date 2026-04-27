@@ -2,12 +2,9 @@
 
 Single source of truth for invoking beets destructive or path-changing
 commands at the subprocess level. Extracted to unify the five+ ad-hoc
-callsites that PR #131 spread across the codebase (pre-flight stale
-cleanup, post-import cleanup, ``_apply_disambiguation``,
-``_canonicalize_siblings``, ``remove_album_by_beets_id``) — each callsite
-had drifted, some missing ``-a``, some missing perm repair, some missing
-DB propagation. Every new callsite that touches ``beet remove`` or
-``beet move`` must route through this module.
+callsites that PR #131 spread across the codebase before the
+Cratedigger-owned replacement state machine was removed. Every new callsite
+that touches ``beet remove`` or ``beet move`` must route through this module.
 
 A contract test (``tests/test_beets_album_op.py::TestBeetOpArgvIsCentralised``)
 greps the repo at test time and fails if any file outside this module

@@ -425,12 +425,11 @@ class BeetsDB:
     def get_album_path_by_id(self, album_id: int) -> Optional[str]:
         """Get an album's directory by beets numeric id. Returns None if not found.
 
-        Used for post-move path lookups where the caller has the
-        album's PK but not its MBID — sibling canonicalization in
-        ``harness/import_one.py::_canonicalize_siblings`` uses this
-        to resolve each sibling's new path so ``fix_library_modes``
-        can repair permissions on any freshly-created disambiguated
-        directory (issue #84, Codex PR #131 round 5 P3).
+        Used for album-id path lookups where the caller has the
+        album's PK but not its MBID. The old sibling canonicalization
+        state machine originally needed this after ``beet move``;
+        the helper remains useful for ID-based Beets diagnostics and
+        compatibility tests.
         """
         row = self._conn.execute(
             "SELECT path FROM items WHERE album_id = ? LIMIT 1",
@@ -451,19 +450,17 @@ class BeetsDB:
         their numeric id in ``mb_albumid`` with an empty
         ``discogs_albumid``.
 
-        Used by sibling ``imported_path`` propagation (issue #132 P2):
-        after ``_canonicalize_siblings`` moves a sibling's files, the
-        dispatcher needs to find any pipeline ``album_requests`` row
-        whose ``mb_release_id`` or ``discogs_release_id`` matches, so
-        the UI doesn't keep pointing at a pre-move directory. Returning
-        both columns lets the caller match across every layout combo.
+        Originally used by sibling ``imported_path`` propagation
+        (issue #132 P2) after the legacy post-import canonicalization
+        move. Returning both columns still lets legacy import-result
+        rows and tests match across every layout combo.
 
         **Type coercion at the boundary.** Beets' ``albums`` table
         declares ``discogs_albumid INTEGER`` in SQLite, so SQLite
         returns a Python ``int`` for that column (not a ``str``).
         ``mb_albumid`` is ``TEXT`` so it arrives as ``str``. The
-        downstream ``MovedSibling`` ``msgspec.Struct`` types both
-        fields as ``str``, so the strict-typed decode via
+        legacy downstream ``MovedSibling`` ``msgspec.Struct`` types
+        both fields as ``str``, so the strict-typed decode via
         ``msgspec.convert(d, type=ImportResult)`` in
         ``ImportResult.from_dict`` WILL reject an int — the
         exception bubbles up through ``parse_import_result`` and the

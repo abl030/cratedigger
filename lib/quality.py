@@ -1412,9 +1412,12 @@ from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
 
 
 class MovedSibling(msgspec.Struct, frozen=True):
-    """Issue #132 P2 / issue #133: record of a sibling album whose
-    ``beet move`` successfully relocated its files during post-import
-    canonicalization.
+    """Legacy issue #132 P2 / issue #133 record of a sibling album whose
+    ``beet move`` relocated its files during post-import canonicalization.
+
+    New imports do not emit this: Beets now owns atomic replacement and
+    Cratedigger no longer runs post-import sibling canonicalization. The type
+    remains so old ``download_log.import_result`` JSONB rows keep decoding.
 
     ``album_id`` is the beets numeric primary key for the sibling.
     ``new_path`` is the on-disk directory after the move.
@@ -1423,11 +1426,9 @@ class MovedSibling(msgspec.Struct, frozen=True):
     so the dispatcher doesn't need a second beets DB connection when
     propagating the new path to the pipeline DB.
 
-    Every field matters for propagation: if the sibling's release id
-    matches a tracked ``album_requests`` row, its ``imported_path``
-    gets updated so the UI stops pointing at the pre-move directory.
-    Untracked siblings (no matching pipeline row) are no-ops at the
-    dispatcher — propagation is best-effort.
+    Every field mattered for propagation: if the sibling's release id
+    matched a tracked ``album_requests`` row, its ``imported_path`` was
+    updated so the UI stopped pointing at the pre-move directory.
 
     Wire-boundary type per ``.claude/rules/code-quality.md`` §
     "Wire-boundary types". Decoded from harness stdout JSON AND from
@@ -1485,20 +1486,10 @@ class PostflightInfo(msgspec.Struct):
     track_count: Optional[int] = None
     imported_path: Optional[str] = None
     bad_extensions: list[str] = []  # files with non-audio extensions
-    disambiguated: bool = False  # True if beet move ran cleanly to fix %aunique paths
-    # Issue #127: when ``beet move`` was attempted but did not exit cleanly
-    # (TimeoutExpired, OSError, or non-zero rc), this carries a typed
-    # failure record. The album was still imported to beets — only the
-    # post-import path-disambiguation move failed. ``None`` means either
-    # ``disambiguated=True`` (clean success) or that no move was
-    # attempted (no duplicate kept).
+    # Legacy issue #127 / #132 fields. New imports do not run post-import
+    # ``beet move``; these remain for old import-result rows and web recents.
+    disambiguated: bool = False
     disambiguation_failure: Optional[DisambiguationFailure] = None
-    # Issue #132 P2 / issue #133: siblings canonicalized post-import.
-    # Empty for non-``kept_duplicate`` imports; populated when the
-    # harness's ``_canonicalize_siblings`` moved one or more siblings
-    # to re-evaluate ``%aunique`` on their paths. The dispatcher
-    # propagates each entry's ``new_path`` to the pipeline DB (the
-    # tracked request row, if any, for that sibling's release).
     moved_siblings: list[MovedSibling] = []
     duplicate_remove_guard: Optional[DuplicateRemoveGuardInfo] = None
 

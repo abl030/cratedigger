@@ -325,7 +325,6 @@ class TestBeetOpArgvIsCentralised(unittest.TestCase):
         "lib/beets_album_op.py",
         # Tests that assert argv shapes — intentional literals:
         "tests/test_beets_album_op.py",
-        "tests/test_preflight_stale_removal.py",
         "tests/test_release_cleanup.py",
         "tests/test_disambiguation.py",
     })

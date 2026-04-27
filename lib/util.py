@@ -47,8 +47,8 @@ def beet_bin() -> str:
     """Locate the ``beet`` executable, preferring PATH.
 
     Single source of truth for "where does ``beet`` live" across every
-    subprocess callsite (harness disambiguation move, release_cleanup
-    remove, force-import, etc). Before this helper, ``release_cleanup``
+    subprocess callsite (release_cleanup remove, force-import, diagnostics,
+    etc). Before this helper, ``release_cleanup``
     used the literal ``"beet"`` and relied on parent PATH resolution
     while ``harness/import_one.py`` had its own ``shutil.which("beet")
     or <hardcoded path>`` fallback — Codex (PR #131 round 1 P3) flagged
