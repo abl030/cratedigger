@@ -10,6 +10,11 @@ files via beets' `task.should_remove_duplicates = True` blast radius.
 
 The assertion lives at harness startup so the misconfig surfaces immediately
 rather than at the next import that happens to hit a sibling pressing.
+
+The live 2026-04-27 guarded-replacement deploy showed the other half of the
+same config boundary: keeping `albumartist`/`album` in the duplicate key is too
+strict for upgrades with normalized metadata drift. Exact release ids only are
+what make Beets ask the harness before replacement.
 """
 
 from __future__ import annotations
@@ -55,7 +60,7 @@ def _make_cfg(keys: list[str]):
 class TestDuplicateKeysGuard(unittest.TestCase):
 
     def test_accepts_correct_config(self):
-        cfg = _make_cfg(["albumartist", "album", "mb_albumid"])
+        cfg = _make_cfg(["mb_albumid", "discogs_albumid"])
         # Does not raise.
         beets_harness._assert_duplicate_keys_include_mb_albumid(cfg)
 
@@ -77,6 +82,16 @@ class TestDuplicateKeysGuard(unittest.TestCase):
         with self.assertRaises(SystemExit):
             beets_harness._assert_duplicate_keys_include_mb_albumid(cfg)
 
+    def test_rejects_mutable_artist_title_keys(self):
+        cfg = _make_cfg(["albumartist", "album", "mb_albumid"])
+        with self.assertRaises(SystemExit):
+            beets_harness._assert_duplicate_keys_include_mb_albumid(cfg)
+
+    def test_rejects_missing_discogs_albumid(self):
+        cfg = _make_cfg(["mb_albumid"])
+        with self.assertRaises(SystemExit):
+            beets_harness._assert_duplicate_keys_include_mb_albumid(cfg)
+
     def test_error_message_names_palo_santo(self):
         # Future-me debugging a rebuild that fails should see the reference
         # without having to grep commit history.
@@ -92,6 +107,7 @@ class TestDuplicateKeysGuard(unittest.TestCase):
             sys.stderr = old_stderr
         self.assertIn("Palo Santo", captured.getvalue())
         self.assertIn("duplicate_keys", captured.getvalue())
+        self.assertIn("exactly", captured.getvalue())
 
 
 if __name__ == "__main__":

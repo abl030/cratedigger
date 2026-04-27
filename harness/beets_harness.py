@@ -223,7 +223,7 @@ def _append_mutation_log(event: dict, log_path: str = MUTATIONS_LOG_PATH) -> Non
 
 
 def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
-    """Fail loud if beets' `import.duplicate_keys.album` omits `mb_albumid`.
+    """Fail loud unless beets duplicate detection uses exact release IDs only.
 
     Beets reads this strictly from `config["import"]["duplicate_keys"]["album"]`.
     If the key is misplaced (e.g. top-level `duplicate_keys =` in config.yaml)
@@ -233,16 +233,26 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
     beets' `task.should_remove_duplicates = True` blast radius — the exact shape
     of the 2026-04-20 Shearwater "Palo Santo" data-loss event.
 
-    This assertion turns that silent misconfig into a loud startup failure.
+    The key set also must not include mutable metadata like albumartist/album:
+    live upgrade attempts can carry normalized artist/title differences, which
+    makes Beets miss the duplicate callback and pushes replacement back through
+    Cratedigger's temporary stale-row cleanup. Exact release identifiers are the
+    durable duplicate boundary.
+
+    This assertion turns those silent misconfigs into loud startup failures.
     Raises SystemExit(1) on regression.
     """
     keys = list(cfg["import"]["duplicate_keys"]["album"].as_str_seq())
-    if "mb_albumid" not in keys:
+    expected = {"mb_albumid", "discogs_albumid"}
+    if set(keys) != expected:
         msg = (
-            "FATAL: beets config import.duplicate_keys.album does not include "
-            f"'mb_albumid' (got {keys!r}). This enables cross-MBID sibling "
-            "destruction via find_duplicates — the 2026-04-20 Palo Santo bug. "
-            "Fix: move the `duplicate_keys` block under `import:` in "
+            "FATAL: beets config import.duplicate_keys.album must be exactly "
+            f"{sorted(expected)!r} (got {keys!r}). Missing mb_albumid enables "
+            "cross-MBID sibling destruction via find_duplicates — the "
+            "2026-04-20 Palo Santo bug. Extra mutable keys like albumartist or "
+            "album make same-release upgrades miss Beets' duplicate callback, "
+            "leaving Cratedigger's temporary replacement fallback to churn "
+            "folder names. Fix the `duplicate_keys` block under `import:` in "
             "~/.config/beets/config.yaml (or the equivalent Nix module)."
         )
         print(msg, file=sys.stderr)

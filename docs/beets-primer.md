@@ -275,8 +275,11 @@ The one-shot import script used by Cratedigger for auto-importing `source='reque
 Beets owns duplicate replacement again for safe upgrades. The Palo Santo root
 cause was a misplaced Beets `duplicate_keys` config block, not Beets' atomic
 replacement model. Cratedigger now keeps the startup guard that requires
-`import.duplicate_keys.album` to include `mb_albumid`, then validates Beets'
-`found_duplicates` set inside `resolve_duplicate`.
+`import.duplicate_keys.album` to be exact release identifiers only:
+`mb_albumid` and `discogs_albumid`. Including mutable metadata such as
+`albumartist` or `album` can make same-release upgrades with normalized
+metadata drift miss Beets' duplicate callback and fall back to Cratedigger's
+temporary cleanup path.
 
 The controller answers `{"action": "remove"}` only when Beets reports exactly
 one duplicate album and that album's exact release identity matches the import
