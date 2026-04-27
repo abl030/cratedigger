@@ -14,7 +14,9 @@ rather than at the next import that happens to hit a sibling pressing.
 The live 2026-04-27 guarded-replacement deploy showed the other half of the
 same config boundary: keeping `albumartist`/`album` in the duplicate key is too
 strict for upgrades with normalized metadata drift. Exact release ids only are
-what make Beets ask the harness before replacement.
+what make Beets ask the harness before replacement, but the harness must map
+Beets provider metadata (`album_id`) into library metadata (`mb_albumid`) before
+Beets builds that duplicate query.
 """
 
 from __future__ import annotations
@@ -108,6 +110,84 @@ class TestDuplicateKeysGuard(unittest.TestCase):
         self.assertIn("Palo Santo", captured.getvalue())
         self.assertIn("duplicate_keys", captured.getvalue())
         self.assertIn("exactly", captured.getvalue())
+
+
+class TestDuplicateLookupMetadata(unittest.TestCase):
+
+    def test_uses_album_info_item_data_mapping(self):
+        class FakeAlbumInfo:
+            item_data = {
+                "albumartist": "The National",
+                "album": "High Violet",
+                "mb_albumid": "mb-123",
+                "discogs_albumid": 0,
+            }
+
+        task = SimpleNamespace(chosen_info=lambda: FakeAlbumInfo())
+
+        data = beets_harness._duplicate_lookup_metadata(task)
+
+        self.assertEqual(data["mb_albumid"], "mb-123")
+        self.assertEqual(data["discogs_albumid"], 0)
+        self.assertEqual(data["albumartist"], "The National")
+
+    def test_maps_raw_album_id_to_mb_albumid(self):
+        task = SimpleNamespace(chosen_info=lambda: {
+            "artist": "The National",
+            "album": "High Violet",
+            "album_id": "mb-123",
+        })
+
+        data = beets_harness._duplicate_lookup_metadata(task)
+
+        self.assertEqual(data["mb_albumid"], "mb-123")
+        self.assertEqual(data["albumartist"], "The National")
+
+    def test_find_duplicates_queries_mapped_release_fields(self):
+        class FakeAlbumInfo:
+            item_data = {
+                "albumartist": "The National",
+                "album": "High Violet",
+                "mb_albumid": "mb-123",
+                "discogs_albumid": 0,
+            }
+
+        class FakeAlbum:
+            last = None
+
+            def __init__(self, lib, **kwargs):
+                self.kwargs = kwargs
+                FakeAlbum.last = self
+
+            def duplicates_query(self, keys):
+                self.keys = list(keys)
+                return ("query", tuple(keys), self.kwargs)
+
+        duplicate = SimpleNamespace(
+            items=lambda: [SimpleNamespace(path=b"/beets/old/01.opus")])
+        lib = MagicMock()
+        lib.albums.return_value = [duplicate]
+        task = SimpleNamespace(
+            chosen_info=lambda: FakeAlbumInfo(),
+            items=[SimpleNamespace(path=b"/incoming/new/01.opus")],
+        )
+
+        old_config = beets_harness.config
+        old_album = beets_harness.library.Album
+        beets_harness.config = _make_cfg(["mb_albumid", "discogs_albumid"])
+        beets_harness.library.Album = FakeAlbum
+        try:
+            duplicates = beets_harness._find_duplicates_with_mapped_release_ids(
+                task, lib)
+        finally:
+            beets_harness.config = old_config
+            beets_harness.library.Album = old_album
+
+        self.assertEqual(duplicates, [duplicate])
+        self.assertEqual(FakeAlbum.last.kwargs["mb_albumid"], "mb-123")
+        self.assertEqual(FakeAlbum.last.kwargs["discogs_albumid"], 0)
+        self.assertEqual(FakeAlbum.last.keys,
+                         ["mb_albumid", "discogs_albumid"])
 
 
 if __name__ == "__main__":

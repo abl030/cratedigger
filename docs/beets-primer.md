@@ -288,6 +288,14 @@ target. MusicBrainz rows match on `mb_albumid`; Discogs rows match on
 identity fails closed with `duplicate_remove_guard_failed` before Beets can
 remove anything.
 
+The harness also patches Beets 2.9 duplicate lookup inside the harness process.
+Beets builds the duplicate query before applying provider metadata to library
+field names, so a MusicBrainz candidate still carries `album_id` while the
+library column is `mb_albumid`. The harness maps duplicate lookup metadata
+through Beets' media-field names first; otherwise exact release-id
+`duplicate_keys` silently query an empty `mb_albumid` and never reach the
+guarded duplicate callback.
+
 Guard failures are source failures. Dispatch records the structured
 would-remove set in `download_log.import_result`, denylists the source/user,
 and moves the staged files to `Incoming/duplicate-remove-guard/`. That folder is

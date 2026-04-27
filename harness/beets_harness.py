@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from beets import config, library, plugins  # type: ignore[attr-defined]
 from beets.importer.session import ImportSession
-from beets.importer.tasks import Action
+from beets.importer.tasks import Action, ImportTask as BeetsImportTask
 from beets.ui import get_path_formats, get_replacements
 
 if TYPE_CHECKING:
@@ -257,6 +257,69 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
         )
         print(msg, file=sys.stderr)
         sys.exit(1)
+
+
+def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
+    """Return album metadata in beets library field names for duplicate lookup.
+
+    Beets 2.9 builds the duplicate query from ``AlbumInfo.copy()`` before
+    metadata is applied. MusicBrainz release ids are named ``album_id`` there,
+    but the library column and ``duplicate_keys`` field are ``mb_albumid``.
+    Without applying AlbumInfo's media-field mapping, Beets queries
+    ``albums.mb_albumid = ''`` and never reaches ``resolve_duplicate``.
+    """
+    info = task.chosen_info()
+    if hasattr(info, "item_data"):
+        data = dict(info.item_data)
+    else:
+        data = dict(info)
+
+    if data.get("album_id") and not data.get("mb_albumid"):
+        data["mb_albumid"] = data["album_id"]
+
+    # Preserve beets' original find_duplicates behavior for metadata that
+    # still has an item-level artist field.
+    if data.get("artist") is not None:
+        data["albumartist"] = data["artist"]
+
+    return data
+
+
+def _find_duplicates_with_mapped_release_ids(
+    task: "ImportTask",
+    lib: library.Library,
+) -> list[library.Album]:
+    """Beets ``ImportTask.find_duplicates`` with provider IDs mapped first."""
+    info = _duplicate_lookup_metadata(task)
+    if info.get("albumartist") is None and info.get("artist") is None:
+        return []
+
+    tmp_album = library.Album(lib, **info)
+    keys = config["import"]["duplicate_keys"]["album"].as_str_seq()
+    dup_query = tmp_album.duplicates_query(keys)
+
+    # Same exclusion as upstream beets: a task re-importing exactly the same
+    # file paths is not a duplicate replacement.
+    task_paths = {i.path for i in task.items if i}
+    duplicates = []
+    for album in lib.albums(dup_query):
+        album_paths = {i.path for i in album.items()}
+        if not (album_paths <= task_paths):
+            duplicates.append(album)
+    return duplicates
+
+
+def _install_release_id_duplicate_lookup() -> None:
+    """Patch beets duplicate lookup so release-id duplicate_keys work."""
+    current = getattr(BeetsImportTask, "find_duplicates", None)
+    if getattr(current, "_cratedigger_release_id_mapping", False):
+        return
+
+    def find_duplicates(self, lib):
+        return _find_duplicates_with_mapped_release_ids(self, lib)
+
+    find_duplicates._cratedigger_release_id_mapping = True
+    BeetsImportTask.find_duplicates = find_duplicates
 
 
 def _send(msg: dict):
@@ -543,6 +606,7 @@ def main():
     # Structural guard against the 2026-04-20 Palo Santo misconfig class.
     # Must fire before any import work touches beets' duplicate-detection path.
     _assert_duplicate_keys_include_mb_albumid(config)
+    _install_release_id_duplicate_lookup()
 
     # Config overrides MUST happen before plugins.load_plugins() because the
     # musicbrainz plugin reads host/https settings at load time.
