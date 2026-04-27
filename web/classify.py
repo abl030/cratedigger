@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import msgspec
 
-from lib.quality import ImportResult
+from lib.quality import AudioQualityMeasurement, ImportResult
 
 # ---------------------------------------------------------------------------
 # Types
@@ -525,6 +525,10 @@ def _comparison_verdict(
     old_kbps: int | None,
     prefix: str = "",
     metric: str | None = None,
+    new_spectral_kbps: int | None = None,
+    old_spectral_kbps: int | None = None,
+    new_spectral_grade: str | None = None,
+    old_spectral_grade: str | None = None,
 ) -> str:
     """Build a '… is not better than existing …' verdict string.
 
@@ -536,15 +540,58 @@ def _comparison_verdict(
     min was shown and looked inverted). Pass ``None`` to omit the label when
     both sides come from the same raw min.
     """
-    suffix = f" {metric}" if metric else ""
-    new_s = f"{new_kbps}kbps{suffix}" if new_kbps is not None else "unknown"
-    old_s = f"{old_kbps}kbps{suffix}" if old_kbps is not None else "unknown"
+    new_s = _measurement_phrase(
+        new_kbps,
+        metric,
+        spectral_kbps=new_spectral_kbps,
+        spectral_grade=new_spectral_grade,
+    )
+    old_s = _measurement_phrase(
+        old_kbps,
+        metric,
+        spectral_kbps=old_spectral_kbps,
+        spectral_grade=old_spectral_grade,
+    )
     if prefix:
         return f"{prefix} {new_s} — not better than existing {old_s}"
     return f"{new_s} is not better than existing {old_s}"
 
 
-def _verdict_bitrate(m) -> tuple[int | None, str | None]:
+def _measurement_spectral_phrase(
+    spectral_kbps: int | None,
+    spectral_grade: str | None,
+) -> str | None:
+    if spectral_kbps is None and not spectral_grade:
+        return None
+    if spectral_grade and spectral_kbps is not None:
+        return f"spectral {spectral_grade} ~{spectral_kbps}kbps"
+    if spectral_grade:
+        return f"spectral {spectral_grade}"
+    return f"spectral ~{spectral_kbps}kbps"
+
+
+def _measurement_phrase(
+    bitrate_kbps: int | None,
+    metric: str | None,
+    *,
+    spectral_kbps: int | None = None,
+    spectral_grade: str | None = None,
+) -> str:
+    suffix = f" {metric}" if metric else ""
+    primary = (
+        f"{bitrate_kbps}kbps{suffix}"
+        if bitrate_kbps is not None
+        else "unknown"
+    )
+    spectral = _measurement_spectral_phrase(spectral_kbps, spectral_grade)
+    if spectral:
+        return f"{primary} ({spectral})"
+    return primary
+
+
+def _verdict_bitrate(
+    m: AudioQualityMeasurement | None,
+) -> tuple[int | None, str | None]:
     """Pick the bitrate and metric label to display for a measurement.
 
     Prefers ``avg_bitrate_kbps`` when present (production's default
@@ -558,7 +605,9 @@ def _verdict_bitrate(m) -> tuple[int | None, str | None]:
     carries the real signal that drove the rank comparison while
     ``min_bitrate_kbps`` has been clamped by the spectral override.
     Displaying min alone produced contradictory-looking verdicts
-    ("new 152 is not better than existing 96").
+    ("new 152 is not better than existing 96"). Spectral is rendered as
+    separate context by ``_comparison_verdict`` so the selected real bitrate
+    and source-quality estimate remain visible together.
     """
     if m is None:
         return None, None
@@ -592,11 +641,40 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     metric = new_metric if new_metric == old_metric else None
 
     if ir.decision == "downgrade":
-        return _comparison_verdict(new_kbps, old_kbps, metric=metric)
+        return _comparison_verdict(
+            new_kbps, old_kbps, metric=metric,
+            new_spectral_kbps=(
+                new_m.spectral_bitrate_kbps if new_m is not None else None
+            ),
+            old_spectral_kbps=(
+                existing_m.spectral_bitrate_kbps
+                if existing_m is not None else None
+            ),
+            new_spectral_grade=(
+                new_m.spectral_grade if new_m is not None else None
+            ),
+            old_spectral_grade=(
+                existing_m.spectral_grade if existing_m is not None else None
+            ),
+        )
 
     if ir.decision == "transcode_downgrade":
-        return _comparison_verdict(new_kbps, old_kbps,
-                                   prefix="Transcode at", metric=metric)
+        return _comparison_verdict(
+            new_kbps, old_kbps, prefix="Transcode at", metric=metric,
+            new_spectral_kbps=(
+                new_m.spectral_bitrate_kbps if new_m is not None else None
+            ),
+            old_spectral_kbps=(
+                existing_m.spectral_bitrate_kbps
+                if existing_m is not None else None
+            ),
+            new_spectral_grade=(
+                new_m.spectral_grade if new_m is not None else None
+            ),
+            old_spectral_grade=(
+                existing_m.spectral_grade if existing_m is not None else None
+            ),
+        )
 
     if ir.decision == "suspect_lossless_downgrade":
         return _provisional_verdict(entry, imported=False)
@@ -742,8 +820,21 @@ def _rejection_verdict(entry: LogEntry) -> str:
         new_kbps = _downloaded_min_bitrate_kbps(entry)
         old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate
         if scenario == "transcode_downgrade":
-            return _comparison_verdict(new_kbps, old_kbps, prefix="Transcode at")
-        return _comparison_verdict(new_kbps, old_kbps)
+            return _comparison_verdict(
+                new_kbps,
+                old_kbps,
+                prefix="Transcode at",
+                new_spectral_kbps=entry.spectral_bitrate,
+                old_spectral_kbps=entry.existing_spectral_bitrate,
+                new_spectral_grade=entry.spectral_grade,
+            )
+        return _comparison_verdict(
+            new_kbps,
+            old_kbps,
+            new_spectral_kbps=entry.spectral_bitrate,
+            old_spectral_kbps=entry.existing_spectral_bitrate,
+            new_spectral_grade=entry.spectral_grade,
+        )
 
     if scenario == "spectral_reject":
         # Spectral scenario — spectral_bitrate IS the right field here
