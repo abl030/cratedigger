@@ -270,6 +270,58 @@ def _path_str(path) -> str:
     return str(path)
 
 
+def _album_item_count(album) -> int:
+    """Best-effort item count for a beets Album-like object."""
+    items = getattr(album, "items", None)
+    if callable(items):
+        try:
+            return len(list(items()))
+        except Exception:
+            return 0
+    return 0
+
+
+def _album_path(album) -> str:
+    """Best-effort directory path for a beets Album-like object."""
+    item_dir = getattr(album, "item_dir", None)
+    if callable(item_dir):
+        try:
+            path = item_dir()
+            if path:
+                return _path_str(path)
+        except Exception:
+            pass
+
+    items = getattr(album, "items", None)
+    if callable(items):
+        try:
+            for item in items():
+                path = getattr(item, "path", None)
+                if path:
+                    return os.path.dirname(_path_str(path))
+        except Exception:
+            pass
+    return ""
+
+
+def _serialize_duplicate_album(album) -> dict:
+    """Serialize a beets Album from ``found_duplicates``.
+
+    This is the exact album object Beets will feed to ``duplicate_items()``
+    when ``task.should_remove_duplicates = True``. Keep the payload small but
+    diagnostic: album id, release ids, path, item count, and human labels.
+    """
+    return {
+        "beets_album_id": getattr(album, "id", None),
+        "mb_albumid": _id_str(getattr(album, "mb_albumid", None)),
+        "discogs_albumid": _id_str(getattr(album, "discogs_albumid", None)),
+        "album_path": _album_path(album),
+        "item_count": _album_item_count(album),
+        "albumartist": getattr(album, "albumartist", None) or "",
+        "album": getattr(album, "album", None) or "",
+    }
+
+
 class HarnessImportSession(ImportSession):
     """ImportSession that communicates decisions over JSON stdin/stdout."""
 
@@ -386,12 +438,11 @@ class HarnessImportSession(ImportSession):
           sibling ids were being dropped because the old payload
           only carried mb_albumid).
         """
-        dup_mbids = []
-        dup_album_ids = []
-        for dup in found_duplicates:
-            mbid = getattr(dup, "mb_albumid", None) or ""
-            dup_mbids.append(mbid)
-            dup_album_ids.append(getattr(dup, "id", None))
+        duplicate_candidates = [
+            _serialize_duplicate_album(dup) for dup in found_duplicates
+        ]
+        dup_mbids = [c["mb_albumid"] for c in duplicate_candidates]
+        dup_album_ids = [c["beets_album_id"] for c in duplicate_candidates]
         msg = {
             "type": "resolve_duplicate",
             "path": _path_str(task.paths[0]) if task.paths else "",
@@ -400,6 +451,7 @@ class HarnessImportSession(ImportSession):
             "duplicate_count": len(found_duplicates),
             "duplicate_mbids": dup_mbids,
             "duplicate_album_ids": dup_album_ids,
+            "duplicate_candidates": duplicate_candidates,
         }
         _send(msg)
 

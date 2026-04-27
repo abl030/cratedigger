@@ -48,9 +48,11 @@ from lib.beets_album_op import (BeetsAlbumHandle, BeetsOpFailure,
                                 move_album, remove_album)
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
+from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, ImportResult, MovedSibling,
+                         AudioQualityMeasurement, DuplicateRemoveCandidate,
+                         DuplicateRemoveGuardInfo, ImportResult, MovedSibling,
                          PostflightInfo, QualityRankConfig,
                          MeasuredImportDecisionInput,
                          build_existing_quality_measurement,
@@ -60,6 +62,7 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_ha
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 MAX_DISTANCE = 0.5
+DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
 _current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
 
@@ -84,6 +87,109 @@ def _find_target_candidate(candidates: list, target_mbid) -> int | None:
     return None
 
 
+def _int_or_none(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _duplicate_candidates_from_message(msg: dict) -> list[DuplicateRemoveCandidate]:
+    """Normalize a harness ``resolve_duplicate`` message into typed candidates."""
+    raw_candidates = msg.get("duplicate_candidates")
+    if isinstance(raw_candidates, list):
+        candidates: list[DuplicateRemoveCandidate] = []
+        for raw in raw_candidates:
+            if not isinstance(raw, dict):
+                continue
+            candidates.append(DuplicateRemoveCandidate(
+                beets_album_id=_int_or_none(raw.get("beets_album_id")),
+                mb_albumid=str(raw.get("mb_albumid") or ""),
+                discogs_albumid=str(raw.get("discogs_albumid") or ""),
+                album_path=str(raw.get("album_path") or ""),
+                item_count=_int_or_none(raw.get("item_count")) or 0,
+                albumartist=str(raw.get("albumartist") or ""),
+                album=str(raw.get("album") or ""),
+            ))
+        return candidates
+
+    # Backward-compatible fallback for older harness messages and existing tests.
+    dup_mbids = msg.get("duplicate_mbids", [])
+    dup_album_ids = msg.get("duplicate_album_ids", [])
+    count = msg.get("duplicate_count")
+    if not isinstance(dup_mbids, list):
+        dup_mbids = []
+    if not isinstance(dup_album_ids, list):
+        dup_album_ids = []
+    max_len = max(
+        len(dup_mbids),
+        len(dup_album_ids),
+        count if isinstance(count, int) else 0,
+    )
+    return [
+        DuplicateRemoveCandidate(
+            beets_album_id=(
+                _int_or_none(dup_album_ids[idx])
+                if idx < len(dup_album_ids) else None
+            ),
+            mb_albumid=str(dup_mbids[idx] or "") if idx < len(dup_mbids) else "",
+        )
+        for idx in range(max_len)
+    ]
+
+
+def _duplicate_remove_guard_failure(
+    *,
+    target_release_id: str,
+    candidates: list[DuplicateRemoveCandidate],
+) -> DuplicateRemoveGuardInfo | None:
+    """Return guard failure details, or None when Beets may remove."""
+    target_identity = ReleaseIdentity.from_id(target_release_id)
+    target_source = target_identity.source if target_identity else ""
+    normalized_target = target_identity.release_id if target_identity else str(target_release_id or "")
+
+    def _info(reason: str, message: str) -> DuplicateRemoveGuardInfo:
+        return DuplicateRemoveGuardInfo(
+            reason=reason,
+            target_source=target_source,
+            target_release_id=normalized_target,
+            duplicate_count=len(candidates),
+            candidates=candidates,
+            message=message,
+        )
+
+    if target_identity is None:
+        return _info(
+            "target_identity_unknown",
+            f"target release id {target_release_id!r} is not an exact MB or Discogs id",
+        )
+    if len(candidates) != 1:
+        return _info(
+            "duplicate_count_not_one",
+            f"beets reported {len(candidates)} duplicate albums; expected exactly 1",
+        )
+
+    candidate = candidates[0]
+    candidate_identity = ReleaseIdentity.from_fields(
+        candidate.mb_albumid,
+        candidate.discogs_albumid,
+    )
+    if candidate_identity is None:
+        return _info(
+            "duplicate_identity_unknown",
+            "beets duplicate album has no comparable release identity",
+        )
+    if candidate_identity.key != target_identity.key:
+        return _info(
+            "release_identity_mismatch",
+            "beets duplicate album release identity does not match target",
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Pure stage decision functions — extracted from main() for testability
 # ---------------------------------------------------------------------------
@@ -100,6 +206,29 @@ class StageResult:
     @property
     def is_terminal(self) -> bool:
         return self.terminal
+
+
+@dataclass
+class RunImportOutcome:
+    """Result from the beets harness import subprocess.
+
+    Iterates as the legacy ``(rc, beets_lines, kept_duplicate,
+    sibling_album_ids)`` tuple so older tests and callers can destructure it
+    while ``main()`` reads the new duplicate guard payload.
+    """
+
+    exit_code: int
+    beets_lines: list[str]
+    kept_duplicate: bool
+    sibling_album_ids: frozenset[int]
+    duplicate_remove_guard: DuplicateRemoveGuardInfo | None = None
+    beets_owned_replacement: bool = False
+
+    def __iter__(self):
+        yield self.exit_code
+        yield self.beets_lines
+        yield self.kept_duplicate
+        yield self.sibling_album_ids
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -600,23 +729,12 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 def run_import(path, mb_release_id):
     """Drive the beets harness to import one album.
 
-    Returns (exit_code, beets_lines, kept_duplicate, sibling_album_ids).
+    Returns ``RunImportOutcome``.
 
-    - ``kept_duplicate`` is True whenever beets asked us to resolve a
-      duplicate during this import — we ALWAYS answer "keep" now
-      (never "remove", which has cross-MBID blast radius), so the
-      flag is really "post-import beet move needed". Triggers the
-      ``%aunique`` re-evaluation via ``_apply_disambiguation`` in
-      main().
-    - ``sibling_album_ids`` is the set of beets numeric album ids
-      (``albums.id``) for every non-same-MBID duplicate beets flagged.
-      Keyed by the beets primary key, not ``mb_albumid``, because
-      Discogs-sourced pressings have empty ``mb_albumid`` — Codex
-      (PR #131 round 3 P3) flagged that the earlier MBID-based set
-      silently dropped Discogs siblings, leaving asymmetric folder
-      layouts that this feature was meant to fix. After the new
-      album is in beets, main() runs ``beet move -a id:<N>`` on each
-      so ``%aunique`` re-evaluates their paths too.
+    ``kept_duplicate`` / ``sibling_album_ids`` are retained for the
+    one-release temporary fallback path. The durable path is guarded
+    Beets-owned replacement: answer ``remove`` only when Beets reports
+    exactly one duplicate whose release identity matches the target.
     """
     cmd = [HARNESS, "--noincremental", "--search-id", mb_release_id, path]
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
@@ -632,6 +750,7 @@ def run_import(path, mb_release_id):
 
     applied = False
     kept_duplicate = False
+    beets_owned_replacement = False
     sibling_album_ids: set[int] = set()
     timeout = HARNESS_TIMEOUT
 
@@ -642,7 +761,7 @@ def run_import(path, mb_release_id):
                 print(f"  [TIMEOUT] No output for {timeout}s", file=sys.stderr)
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait()
-                return 2, [], False, frozenset()
+                return RunImportOutcome(2, [], False, frozenset())
 
             line = proc.stdout.readline()
             if not line:
@@ -669,86 +788,41 @@ def run_import(path, mb_release_id):
                 proc.stdin.flush()
 
             elif msg_type == "resolve_duplicate":
-                # Always answer "keep". Never "remove".
-                #
-                # Live 2026-04-20 data-loss event (Shearwater "Palo Santo"):
-                # beets' ``find_duplicates()`` returned a cross-MBID sibling
-                # pressing. The old "same-MBID → remove" branch then called
-                # beets' ``task.should_remove_duplicates = True``, which
-                # iterates ``duplicate_items()`` and calls
-                # ``util.remove(item.path)`` on every item in every found
-                # duplicate — blast radius is whatever find_duplicates chose,
-                # not what we asked for. The 11-track 2006 sibling (mb=
-                # 157b51f8...) lost every mp3 on disk when the 19-track 2007
-                # reissue (mb=168d7fea...) re-imported.
-                #
-                # Actual RC of the cross-MBID return (traced 2026-04-21): the
-                # user's ``duplicate_keys`` YAML block was at top level of
-                # ``~/.config/beets/config.yaml`` instead of under ``import:``.
-                # Beets reads strictly from
-                # ``config["import"]["duplicate_keys"]["album"]``
-                # (``beets/importer/tasks.py:385``); the misplaced block was
-                # silently ignored and beets used the default
-                # ``[albumartist, album]`` — no ``mb_albumid``. find_duplicates
-                # matched the sibling on album title alone. Not a beets bug.
-                # Fixed in ``beets.nix`` + startup assertion
-                # ``_assert_duplicate_keys_include_mb_albumid`` in
-                # ``harness/beets_harness.py``.
-                #
-                # Defense-in-depth: the destructive branch is unrepresentable
-                # from here even if the config regresses. If a stale same-MBID
-                # album exists, main() removes it AFTER the new album is
-                # successfully in beets, using the numeric primary-key
-                # selector ``id:<stale>`` which cannot match any other row.
-                # At this callsite we unconditionally answer "keep" —
-                # preserving every album beets flagged, including legitimate
-                # different-MBID siblings we must not touch.
-                #
-                # Sibling MBIDs (non-target hits) are collected so main()
-                # can re-run ``beet move`` on each after the import —
-                # otherwise ``%aunique`` disambiguates only the new album,
-                # leaving the sibling at an un-suffixed path (ugly, and
-                # music scanners see two differently-shaped folders for
-                # the same album name).
-                #
-                # ``kept_duplicate = True`` unconditionally so post-import
-                # ``beet move mb_albumid:<target>`` re-runs ``%aunique`` to
-                # fix the new album's path.
-                dup_mbids = msg.get("duplicate_mbids", [])
-                dup_album_ids = msg.get("duplicate_album_ids", [])
-                proc.stdin.write(json.dumps({"action": "keep"}) + "\n")
+                candidates = _duplicate_candidates_from_message(msg)
+                failure = _duplicate_remove_guard_failure(
+                    target_release_id=mb_release_id,
+                    candidates=candidates,
+                )
+                if failure is not None:
+                    proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
+                    proc.stdin.flush()
+                    print(
+                        f"  [DUP-GUARD] Refusing beets duplicate remove: "
+                        f"{failure.reason}: {failure.message}",
+                        file=sys.stderr,
+                    )
+                    if proc.poll() is None:
+                        proc.wait()
+                    return RunImportOutcome(
+                        DUPLICATE_REMOVE_GUARD_EXIT_CODE,
+                        [],
+                        False,
+                        frozenset(),
+                        duplicate_remove_guard=failure,
+                    )
+
+                proc.stdin.write(json.dumps({"action": "remove"}) + "\n")
                 proc.stdin.flush()
-                kept_duplicate = True
-                # Collect sibling beets numeric album ids. Paired
-                # index-wise with dup_mbids: skip entries whose MBID
-                # matches our target (those are stale same-MBID rows,
-                # handled by post-import cleanup via id:<N>). Keep
-                # everything else — including Discogs siblings whose
-                # ``mb_albumid`` is empty but whose beets ``album_id``
-                # is always present.
-                for idx, aid in enumerate(dup_album_ids):
-                    if not isinstance(aid, int):
-                        continue
-                    dm = dup_mbids[idx] if idx < len(dup_mbids) else ""
-                    if dm and dm == mb_release_id:
-                        continue  # stale same-MBID — post-import cleanup handles
-                    sibling_album_ids.add(aid)
-                if mb_release_id in dup_mbids:
-                    # Rare: happens when an operator ran an upgrade
-                    # without going through dispatch (or a race allowed
-                    # two rows with the same MBID briefly). main() will
-                    # remove the stale entry by its exact beets numeric
-                    # id after the import finishes.
-                    print(
-                        f"  [DUP] Same MBID in library "
-                        f"(existing: {dup_mbids}); keeping both — "
-                        "main() will remove stale by beets id post-import",
-                        file=sys.stderr)
-                else:
-                    print(
-                        f"  [DUP] Different edition (existing: {dup_mbids}), "
-                        "keeping both",
-                        file=sys.stderr)
+                beets_owned_replacement = True
+                candidate = candidates[0]
+                print(
+                    f"  [DUP-GUARD] Allowing beets remove for "
+                    f"beets album id:{candidate.beets_album_id} "
+                    f"(mb={candidate.mb_albumid or '∅'}, "
+                    f"discogs={candidate.discogs_albumid or '∅'}, "
+                    f"path={candidate.album_path or '∅'})",
+                    file=sys.stderr,
+                )
 
             elif msg_type in ("choose_match", "choose_item"):
                 candidates = msg.get("candidates", [])
@@ -762,7 +836,7 @@ def run_import(path, mb_release_id):
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return 4, [], False, frozenset([])
+                    return RunImportOutcome(4, [], False, frozenset())
 
                 cand = candidates[matched_idx]
                 dist = cand.get("distance", 1.0)
@@ -773,7 +847,7 @@ def run_import(path, mb_release_id):
                     print(f"  [REJECT] distance={dist:.4f} > {MAX_DISTANCE}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return 2, [], False, frozenset([])
+                    return RunImportOutcome(2, [], False, frozenset())
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()
@@ -795,10 +869,18 @@ def run_import(path, mb_release_id):
                 beets_lines.append(line.strip())
 
     if proc_rc not in (None, 0):
-        return 2, beets_lines, kept_duplicate, frozenset(sibling_album_ids)
+        return RunImportOutcome(
+            2, beets_lines, kept_duplicate, frozenset(sibling_album_ids),
+            beets_owned_replacement=beets_owned_replacement,
+        )
 
-    return ((0 if applied else 2), beets_lines, kept_duplicate,
-            frozenset(sibling_album_ids))
+    return RunImportOutcome(
+        0 if applied else 2,
+        beets_lines,
+        kept_duplicate,
+        frozenset(sibling_album_ids),
+        beets_owned_replacement=beets_owned_replacement,
+    )
 
 
 def _apply_disambiguation(
@@ -1521,19 +1603,35 @@ def main():
 
     # --- Import ---
     _log(f"[IMPORT] {work_path} → beets (mbid={mbid})")
-    rc, beets_lines, kept_duplicate, sibling_album_ids = run_import(
-        work_path, mbid)
+    import_outcome = run_import(work_path, mbid)
+    rc = import_outcome.exit_code
+    beets_lines = import_outcome.beets_lines
+    kept_duplicate = import_outcome.kept_duplicate
+    sibling_album_ids = import_outcome.sibling_album_ids
+    beets_owned_replacement = import_outcome.beets_owned_replacement
     r.beets_log = beets_lines
 
     if rc != 0:
         r.exit_code = rc
-        r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
-        r.error = next((line for line in reversed(beets_lines) if line.strip()),
-                       f"Harness returned rc={rc}")
+        if import_outcome.duplicate_remove_guard is not None:
+            r.decision = "duplicate_remove_guard_failed"
+            r.postflight.duplicate_remove_guard = (
+                import_outcome.duplicate_remove_guard)
+            r.error = import_outcome.duplicate_remove_guard.message
+        else:
+            r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
+            r.error = next((line for line in reversed(beets_lines) if line.strip()),
+                           f"Harness returned rc={rc}")
         _log(f"[ERROR] Import failed (rc={rc})")
         _emit_and_exit(r)
 
-    # --- Post-import cleanup: remove every same-MBID row except the new one ---
+    # --- TEMPORARY ONE-RELEASE FALLBACK: remove stale same-MBID rows ---
+    #
+    # Guarded Beets replacement should leave no stale same-release row here.
+    # This Cratedigger-owned cleanup remains only for legacy/transition paths
+    # and must be removed with the old replacement state machine after one
+    # deployed release validates guarded Beets replacement. See R13/R14 in
+    # docs/plans/2026-04-27-001-refactor-guarded-beets-replacement-plan.md.
     #
     # ``album.id`` is SQLite AUTOINCREMENT, so the row we just imported
     # has the highest id. Everything else matching this MBID is stale
@@ -1555,6 +1653,16 @@ def main():
     new_album_id = max(post_import_ids)  # highest id = freshest row
     stale_to_remove = [aid for aid in post_import_ids
                        if aid != new_album_id]
+    if beets_owned_replacement and stale_to_remove:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Beets-owned duplicate replacement reported success, "
+                   f"but same-release stale beets album ids remain: "
+                   f"{stale_to_remove}. Refusing Cratedigger fallback "
+                   "cleanup on the guarded replacement path.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
     for aid in stale_to_remove:
         failure = _remove_stale_by_id_logged(aid)
         if failure is not None:
@@ -1609,12 +1717,16 @@ def main():
     _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
          f"tracks={pf_info.track_count}, path={album_path}")
 
-    # --- Post-import %aunique disambiguation ---
+    # --- TEMPORARY ONE-RELEASE FALLBACK: post-import %aunique disambiguation ---
+    #
+    # Remove this block with the old Cratedigger replacement state machine after
+    # one deployed release validates guarded Beets replacement. See R13/R14 in
+    # docs/plans/2026-04-27-001-refactor-guarded-beets-replacement-plan.md.
     # When beets kept a different edition during duplicate resolution,
     # %aunique doesn't fully disambiguate at import time (the new album
     # gets no disambiguator if its field value is empty). Running
     # `beet move` re-evaluates all editions and fixes the paths.
-    if kept_duplicate:
+    if kept_duplicate and not beets_owned_replacement:
         _log(f"[DISAMBIGUATE] Running beet move for album id:{pf_info.album_id}")
         album_path = _apply_disambiguation(
             pf_info.album_id, beets, album_path, r)

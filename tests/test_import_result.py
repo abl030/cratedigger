@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
     ImportResult, ConversionInfo, SpectralDetail, PostflightInfo,
-    AudioQualityMeasurement,
+    AudioQualityMeasurement, DuplicateRemoveCandidate,
+    DuplicateRemoveGuardInfo,
     DownloadInfo, SpectralMeasurement,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
@@ -76,6 +77,7 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertIsNone(p.imported_path)
         self.assertFalse(p.disambiguated)
         self.assertIsNone(p.disambiguation_failure)
+        self.assertIsNone(p.duplicate_remove_guard)
 
     def test_postflight_disambiguated_roundtrip(self):
         """disambiguated field survives JSON round-trip."""
@@ -117,6 +119,46 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertEqual(
             r2.postflight.disambiguation_failure.detail,
             "timeout after 120s")
+
+    def test_duplicate_remove_guard_roundtrip(self):
+        r = ImportResult(
+            exit_code=7,
+            decision="duplicate_remove_guard_failed",
+            error="beets reported 2 duplicate albums; expected exactly 1",
+            postflight=PostflightInfo(
+                duplicate_remove_guard=DuplicateRemoveGuardInfo(
+                    reason="duplicate_count_not_one",
+                    target_source="musicbrainz",
+                    target_release_id="aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                    duplicate_count=2,
+                    message="beets reported 2 duplicate albums; expected exactly 1",
+                    candidates=[
+                        DuplicateRemoveCandidate(
+                            beets_album_id=42,
+                            mb_albumid="aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                            album_path="/Beets/Artist/Album",
+                            item_count=10,
+                        ),
+                        DuplicateRemoveCandidate(
+                            beets_album_id=43,
+                            mb_albumid="cccccccc-4444-5555-6666-dddddddddddd",
+                            album_path="/Beets/Artist/Album [2006]",
+                            item_count=11,
+                        ),
+                    ],
+                ),
+            ),
+        )
+
+        r2 = ImportResult.from_json(r.to_json())
+
+        guard = r2.postflight.duplicate_remove_guard
+        assert guard is not None
+        self.assertEqual(guard.reason, "duplicate_count_not_one")
+        self.assertEqual(guard.target_source, "musicbrainz")
+        self.assertEqual(len(guard.candidates), 2)
+        self.assertEqual(guard.candidates[0].beets_album_id, 42)
+        self.assertEqual(guard.candidates[1].item_count, 11)
 
     def test_postflight_legacy_v2_row_without_failure_field(self):
         """Old v2 download_log rows serialized BEFORE issue #127 lack

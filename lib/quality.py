@@ -1446,6 +1446,35 @@ class MovedSibling(msgspec.Struct, frozen=True):
     discogs_albumid: str = ""
 
 
+class DuplicateRemoveCandidate(msgspec.Struct, frozen=True):
+    """One beets album that ``resolve_duplicate`` said Beets would remove."""
+
+    beets_album_id: Optional[int] = None
+    mb_albumid: str = ""
+    discogs_albumid: str = ""
+    album_path: str = ""
+    item_count: int = 0
+    albumartist: str = ""
+    album: str = ""
+
+
+class DuplicateRemoveGuardInfo(msgspec.Struct):
+    """Guard outcome for Beets-owned duplicate replacement.
+
+    Populated when Cratedigger refuses to answer ``remove`` because Beets'
+    duplicate callback exposed an unsafe would-remove set.
+    """
+
+    reason: str = ""
+    target_source: str = ""
+    target_release_id: str = ""
+    duplicate_count: int = 0
+    candidates: list[DuplicateRemoveCandidate] = []
+    message: str = ""
+    quarantine_path: Optional[str] = None
+    quarantine_error: Optional[str] = None
+
+
 class PostflightInfo(msgspec.Struct):
     """Beets post-import verification data.
 
@@ -1471,6 +1500,7 @@ class PostflightInfo(msgspec.Struct):
     # propagates each entry's ``new_path`` to the pipeline DB (the
     # tracked request row, if any, for that sibling's release).
     moved_siblings: list[MovedSibling] = []
+    duplicate_remove_guard: Optional[DuplicateRemoveGuardInfo] = None
 
 
 class ImportResult(msgspec.Struct):
@@ -1607,9 +1637,23 @@ class ImportResult(msgspec.Struct):
             pf = d["postflight"]
             if not isinstance(pf, dict):
                 d = {**d, "postflight": {}}
-            elif ("moved_siblings" in pf
-                  and not isinstance(pf["moved_siblings"], list)):
-                d = {**d, "postflight": {**pf, "moved_siblings": []}}
+            else:
+                if ("moved_siblings" in pf
+                        and not isinstance(pf["moved_siblings"], list)):
+                    pf = {**pf, "moved_siblings": []}
+                guard = pf.get("duplicate_remove_guard")
+                if guard is not None:
+                    if not isinstance(guard, dict):
+                        pf = {**pf, "duplicate_remove_guard": None}
+                    elif not isinstance(guard.get("candidates", []), list):
+                        pf = {
+                            **pf,
+                            "duplicate_remove_guard": {
+                                **guard,
+                                "candidates": [],
+                            },
+                        }
+                d = {**d, "postflight": pf}
         return msgspec.convert(d, type=cls)
 
     @classmethod
@@ -2119,6 +2163,9 @@ def dispatch_action(decision: str) -> DispatchAction:
     elif decision == "transcode_downgrade":
         return DispatchAction(record_rejection=True, denylist=True, requeue=True,
                               cleanup=True)
+    elif decision == "duplicate_remove_guard_failed":
+        return DispatchAction(record_rejection=True, denylist=True, requeue=False,
+                              cleanup=False)
     else:  # import_failed, conversion_failed, mbid_missing, crash, etc.
         return DispatchAction(record_rejection=True)
 

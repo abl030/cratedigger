@@ -16,7 +16,8 @@ from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
-                         AudioQualityMeasurement,
+                         DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
+                         AudioQualityMeasurement, PostflightInfo,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
@@ -415,6 +416,88 @@ class TestDispatchImport(unittest.TestCase):
                                 error="ffmpeg failed")
         r = self._dispatch(ir)
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+
+    def test_duplicate_remove_guard_failure_denylists_and_quarantines(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        staging_root = tempfile.mkdtemp()
+        source = os.path.join(staging_root, "auto-import", "Artist", "Album")
+        os.makedirs(source)
+        with open(os.path.join(source, "track.mp3"), "w", encoding="utf-8") as f:
+            f.write("x")
+
+        guard = DuplicateRemoveGuardInfo(
+            reason="duplicate_count_not_one",
+            target_source="musicbrainz",
+            target_release_id="test-mbid",
+            duplicate_count=2,
+            message="beets reported 2 duplicate albums; expected exactly 1",
+            candidates=[
+                DuplicateRemoveCandidate(
+                    beets_album_id=100,
+                    mb_albumid="test-mbid",
+                    album_path="/Beets/Artist/Album",
+                    item_count=10,
+                ),
+                DuplicateRemoveCandidate(
+                    beets_album_id=101,
+                    mb_albumid="other-mbid",
+                    album_path="/Beets/Artist/Album [2006]",
+                    item_count=11,
+                ),
+            ],
+        )
+        ir = ImportResult(
+            exit_code=7,
+            decision="duplicate_remove_guard_failed",
+            error=guard.message,
+            postflight=PostflightInfo(duplicate_remove_guard=guard),
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            beets_staging_dir=staging_root,
+            pipeline_db_enabled=True,
+        )
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
+                dispatch_import_core(
+                    path=source,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Artist - Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(filetype="mp3", username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[],
+                    cfg=cfg,
+                    requeue_on_failure=True,
+                )
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+        self.assertEqual(db.download_logs[0].outcome, "rejected")
+        self.assertEqual(db.download_logs[0].beets_scenario,
+                         "duplicate_remove_guard_failed")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertNotEqual(db.request(42)["status"], "manual")
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].username, "user1")
+        ext.cleanup.assert_not_called()
+
+        persisted = ImportResult.from_json(db.download_logs[0].import_result)
+        persisted_guard = persisted.postflight.duplicate_remove_guard
+        assert persisted_guard is not None
+        self.assertIsNotNone(persisted_guard.quarantine_path)
+        assert persisted_guard.quarantine_path is not None
+        self.assertIn("duplicate-remove-guard",
+                      persisted_guard.quarantine_path)
+        self.assertFalse(os.path.exists(source))
 
     def test_no_json_result(self):
         r = self._dispatch(None)

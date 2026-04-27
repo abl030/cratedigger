@@ -1,11 +1,10 @@
-"""Tests for post-import %aunique disambiguation in import_one.py.
+"""Tests for guarded beets duplicate replacement in import_one.py.
 
 Covers:
-- run_import() returning kept_duplicate=True when harness sends resolve_duplicate
-  with a different MBID (keep both editions)
-- run_import() returning kept_duplicate=False for same-MBID duplicates (replace)
+- run_import() answering remove only for one same-release duplicate
+- run_import() failing closed when beets reports unsafe duplicate sets
 - run_import() returning kept_duplicate=False on normal imports (no duplicate)
-- beet move invocation after kept_duplicate import
+- temporary beet move invocation after kept_duplicate fallback imports
 - _run_disambiguation_move() helper hardening (issue #127): subprocess
   fragility around the post-import ``beet move`` call. The helper must
   never raise — TimeoutExpired, OSError, and non-zero rc all surface as
@@ -54,13 +53,15 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
-    def test_keep_different_edition_sets_kept_duplicate(self, mock_popen, mock_select):
-        """When resolve_duplicate has a different MBID and we say keep,
-        kept_duplicate should be True."""
+    def test_different_edition_fails_duplicate_remove_guard(self, mock_popen, mock_select):
+        """Different-release duplicate sets fail before beets remove."""
         from harness import import_one
 
         messages = [
-            {"type": "resolve_duplicate", "duplicate_mbids": [OTHER_MBID]},
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": OTHER_MBID,
+                 "album_path": "/Beets/Other", "item_count": 11},
+            ]},
             {"type": "choose_match", "candidates": [
                 {"album_id": TARGET_MBID, "distance": 0.05,
                  "artist": "The National", "album": "High Violet"},
@@ -71,32 +72,31 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         # select.select always says stdout is ready
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
-            "/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
 
-        self.assertEqual(rc, 0)
-        self.assertTrue(kept_duplicate)
+        self.assertEqual(outcome.exit_code,
+                         import_one.DUPLICATE_REMOVE_GUARD_EXIT_CODE)
+        self.assertFalse(outcome.kept_duplicate)
+        self.assertIsNotNone(outcome.duplicate_remove_guard)
+        assert outcome.duplicate_remove_guard is not None
+        self.assertEqual(outcome.duplicate_remove_guard.reason,
+                         "release_identity_mismatch")
+        writes = "".join(
+            call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertIn('"skip"', writes)
+        self.assertNotIn('"remove"', writes)
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
-    def test_same_mbid_still_keeps_never_removes(self, mock_popen, mock_select):
-        """Same-MBID in dup_mbids must NOT trigger a 'remove' response.
-
-        Regression guard for the Palo Santo data-loss bug (this PR): when
-        beets' ``find_duplicates()`` returns both the same-MBID stale
-        entry AND a cross-MBID sibling pressing, answering ``"remove"``
-        causes beets' ``remove_duplicates()`` to wipe every item in
-        every found duplicate — including the cross-MBID sibling's files
-        on disk. The harness must never send ``"remove"``; stale same-
-        MBID removal happens in pre-flight via targeted
-        ``beet remove -d mb_albumid:<mbid>`` before this subprocess
-        starts. ``kept_duplicate`` stays True so post-import
-        disambiguation re-runs ``beet move`` to fix %aunique paths.
-        """
+    def test_same_mbid_single_duplicate_allows_beets_remove(self, mock_popen, mock_select):
+        """One same-release duplicate answers remove and skips fallback move."""
         from harness import import_one
 
         messages = [
-            {"type": "resolve_duplicate", "duplicate_mbids": [TARGET_MBID]},
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": TARGET_MBID,
+                 "album_path": "/Beets/Target", "item_count": 10},
+            ]},
             {"type": "choose_match", "candidates": [
                 {"album_id": TARGET_MBID, "distance": 0.05,
                  "artist": "The National", "album": "High Violet"},
@@ -106,21 +106,14 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, beets_lines, kept_duplicate, sibling_mbids = import_one.run_import(
-            "/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
 
-        self.assertEqual(rc, 0)
-        self.assertTrue(kept_duplicate,
-                        "Any resolve_duplicate firing must set kept_duplicate "
-                        "True so post-import beet move re-runs.")
-        # No stdin payload may carry action:"remove" — the destructive
-        # branch is gone entirely.
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertTrue(outcome.beets_owned_replacement)
+        self.assertFalse(outcome.kept_duplicate)
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
-        self.assertNotIn('"remove"', writes,
-                         "Harness must never answer action:'remove' to "
-                         "resolve_duplicate — beets' remove_duplicates() has "
-                         "cross-MBID blast radius.")
+        self.assertIn('"remove"', writes)
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
@@ -222,33 +215,8 @@ class TestRunImportKeptDuplicate(unittest.TestCase):
         self.assertIn("readonly database", "\n".join(beets_lines))
 
 
-class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
-    """Invariant: ``run_import`` must NEVER answer ``action: "remove"``.
-
-    Beets' ``remove_duplicates()`` (``beets/importer/tasks.py``) deletes
-    every item in every album returned by ``find_duplicates()`` — the
-    call cannot be scoped to one MBID from the harness side.
-
-    In the live 2026-04-20 Palo Santo data-loss event, ``find_duplicates()``
-    returned a cross-MBID sibling because the user's ``duplicate_keys``
-    block was at the TOP level of ``~/.config/beets/config.yaml`` instead
-    of under ``import:``. Beets reads strictly from
-    ``config["import"]["duplicate_keys"]["album"]`` (traced 2026-04-21 via
-    ``beets/importer/tasks.py:385``); the top-level key was silently
-    ignored and beets used the default ``[albumartist, album]``. Sibling
-    pressings matched on title alone. Fixed in ``beets.nix`` + startup
-    assertion in ``harness/beets_harness.py::_assert_duplicate_keys_include_mb_albumid``.
-
-    This invariant remains as defense-in-depth: even if the config
-    regresses, ``resolve_duplicate`` only ever answers ``"keep"`` (sibling
-    preservation). Stale same-MBID removal happens in pre-flight via a
-    targeted ``beet remove -d mb_albumid:<mbid>`` that only matches that
-    one album.
-
-    Every sub-test asserts the same thing — ``"remove"`` never crosses
-    the wire — under different dup_mbids shapes so a future accidental
-    re-introduction of the branch fails here first.
-    """
+class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
+    """Invariant: ``remove`` crosses the wire only for one exact duplicate."""
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
@@ -256,7 +224,9 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
         from harness import import_one
 
         messages = [
-            {"type": "resolve_duplicate", "duplicate_mbids": [TARGET_MBID]},
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": TARGET_MBID},
+            ]},
             {"type": "choose_match", "candidates": [
                 {"album_id": TARGET_MBID, "distance": 0.05,
                  "artist": "X", "album": "Y"}]},
@@ -269,7 +239,7 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
 
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
-        self.assertNotIn('"remove"', writes)
+        self.assertIn('"remove"', writes)
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
@@ -277,7 +247,9 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
         from harness import import_one
 
         messages = [
-            {"type": "resolve_duplicate", "duplicate_mbids": [OTHER_MBID]},
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": OTHER_MBID},
+            ]},
             {"type": "choose_match", "candidates": [
                 {"album_id": TARGET_MBID, "distance": 0.05,
                  "artist": "X", "album": "Y"}]},
@@ -291,27 +263,20 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
         self.assertNotIn('"remove"', writes)
+        self.assertIn('"skip"', writes)
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
     def test_palo_santo_mixed_dup_mbids_preserves_sibling(
             self, mock_popen, mock_select):
-        """Live-log reproduction: dup_mbids contains BOTH the target MBID
-        AND a sibling pressing's MBID. Before the fix this took the
-        ``"remove"`` branch and beets wiped both albums' files on disk.
-        After the fix the harness answers ``"keep"`` so beets imports
-        the new album alongside; targeted pre-flight removal (run
-        separately upstream of ``run_import``) handles the stale
-        same-MBID entry without touching the sibling.
-        """
+        """Palo Santo shape: target plus sibling duplicates fail closed."""
         from harness import import_one
 
         messages = [
-            # The 2026-04-20 live event: both the incoming 19-track
-            # (target) MBID and the 11-track sibling's MBID showed up
-            # as duplicates.
-            {"type": "resolve_duplicate",
-             "duplicate_mbids": [TARGET_MBID, OTHER_MBID]},
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": TARGET_MBID},
+                {"beets_album_id": 11, "mb_albumid": OTHER_MBID},
+            ]},
             {"type": "choose_match", "candidates": [
                 {"album_id": TARGET_MBID, "distance": 0.05,
                  "artist": "X", "album": "Y"}]},
@@ -320,20 +285,18 @@ class TestHarnessNeverSendsRemoveToBeets(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        rc, _, kept_duplicate, _siblings = import_one.run_import(
-            "/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
 
-        self.assertEqual(rc, 0)
-        self.assertTrue(
-            kept_duplicate,
-            "Even in the mixed case, kept_duplicate must be True — "
-            "post-import beet move still needs to re-run %aunique.")
+        self.assertEqual(outcome.exit_code,
+                         import_one.DUPLICATE_REMOVE_GUARD_EXIT_CODE)
+        self.assertFalse(outcome.kept_duplicate)
+        assert outcome.duplicate_remove_guard is not None
+        self.assertEqual(outcome.duplicate_remove_guard.reason,
+                         "duplicate_count_not_one")
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
-        self.assertNotIn(
-            '"remove"', writes,
-            "The Palo Santo bug: mixed dup_mbids must NEVER trigger "
-            "action:'remove' (blast-radius includes the sibling).")
+        self.assertNotIn('"remove"', writes)
+        self.assertIn('"skip"', writes)
 
 
 # ``TestDisambiguateBeetMove`` and ``TestRunDisambiguationMoveHelper``

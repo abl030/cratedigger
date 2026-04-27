@@ -14,6 +14,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from web.classify import (classify_log_entry, quality_label, LogEntry,
                           ClassifiedEntry, _parse_import_result)
+from lib.quality import (
+    DuplicateRemoveCandidate,
+    DuplicateRemoveGuardInfo,
+    ImportResult,
+    PostflightInfo,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +590,37 @@ class TestClassifyVerdict(unittest.TestCase):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="audio_corrupt"))
         self.assertIn("corrupt", result.verdict.lower())
+
+    def test_duplicate_remove_guard_verdict(self):
+        ir = ImportResult(
+            exit_code=7,
+            decision="duplicate_remove_guard_failed",
+            postflight=PostflightInfo(
+                duplicate_remove_guard=DuplicateRemoveGuardInfo(
+                    reason="duplicate_count_not_one",
+                    target_source="musicbrainz",
+                    target_release_id="aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                    duplicate_count=2,
+                    message="beets reported 2 duplicate albums; expected exactly 1",
+                    candidates=[
+                        DuplicateRemoveCandidate(
+                            beets_album_id=42,
+                            mb_albumid="aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                            album_path="/Beets/Artist/Album",
+                            item_count=10,
+                        ),
+                    ],
+                ),
+            ),
+        )
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="duplicate_remove_guard_failed",
+            import_result=ir.to_json(),
+        ))
+
+        self.assertIn("duplicate remove guard failed", result.verdict.lower())
+        self.assertIn("2 duplicates", result.verdict.lower())
 
     def test_no_candidates_verdict(self):
         result = classify_log_entry(_entry(

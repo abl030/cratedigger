@@ -205,8 +205,12 @@ The harness communicates over stdin/stdout using newline-delimited JSON (NDJSON)
 {"type": "choose_match", "task_id": 0, "path": "...", "cur_artist": "...", "cur_album": "...",
  "item_count": 12, "items": [...], "candidates": [...], "recommendation": "strong"}
 
-// Duplicate detected
-{"type": "resolve_duplicate", "path": "...", "duplicate_count": 1, "existing_mbids": ["..."]}
+// Duplicate detected. duplicate_candidates is the exact beets album set that
+// Beets will remove if the controller answers {"action": "remove"}.
+{"type": "resolve_duplicate", "path": "...", "duplicate_count": 1,
+ "duplicate_mbids": ["..."], "duplicate_album_ids": [123],
+ "duplicate_candidates": [{"beets_album_id": 123, "mb_albumid": "...",
+   "discogs_albumid": "", "album_path": "...", "item_count": 10}]}
 
 // Import completed (added 2026-03-24)
 {"type": "album_imported", "album_id": 123, "artist": "...", "album": "...",
@@ -228,9 +232,10 @@ The harness communicates over stdin/stdout using newline-delimited JSON (NDJSON)
 // Import with existing metadata (no MB match)
 {"action": "asis"}
 
-// Duplicate resolution
+// Duplicate resolution. Cratedigger may answer remove only after validating
+// exactly one duplicate candidate whose release identity matches the target.
 {"action": "keep"}     // Keep both editions
-{"action": "remove"}   // Remove old, keep new
+{"action": "remove"}   // Let Beets atomically remove the old copy and import the new copy
 {"action": "merge"}    // Merge into existing album entry
 {"action": "skip"}     // Skip (don't import)
 ```
@@ -257,11 +262,39 @@ The one-shot import script used by Cratedigger for auto-importing `source='reque
 3. Drive harness: --search-id MBID --noincremental
    → Find candidate matching MBID
    → Check distance ≤ 0.5
+   → If Beets reports duplicates, inspect the exact duplicate candidate set
+   → Answer remove only for exactly one same-release duplicate
    → Apply match
 4. Post-flight: verify MBID appeared in beets DB
 5. Cleanup: remove staged files (beets moved them to /Beets)
 6. Update pipeline DB: status → imported
 ```
+
+### Guarded Beets Replacement
+
+Beets owns duplicate replacement again for safe upgrades. The Palo Santo root
+cause was a misplaced Beets `duplicate_keys` config block, not Beets' atomic
+replacement model. Cratedigger now keeps the startup guard that requires
+`import.duplicate_keys.album` to include `mb_albumid`, then validates Beets'
+`found_duplicates` set inside `resolve_duplicate`.
+
+The controller answers `{"action": "remove"}` only when Beets reports exactly
+one duplicate album and that album's exact release identity matches the import
+target. MusicBrainz rows match on `mb_albumid`; Discogs rows match on
+`discogs_albumid`. Missing identity, multiple duplicates, or a mismatched
+identity fails closed with `duplicate_remove_guard_failed` before Beets can
+remove anything.
+
+Guard failures are source failures. Dispatch records the structured
+would-remove set in `download_log.import_result`, denylists the source/user,
+and moves the staged files to `Incoming/duplicate-remove-guard/`. That folder is
+preserved for diagnostics only; it is separate from Wrong Matches and has no v1
+UI.
+
+TEMPORARY: the old Cratedigger stale-row cleanup and sibling canonicalization
+state machine remains for one release only. After one deployed release proves a
+successful guarded upgrade, remove the temporary fallback code called out in
+`docs/plans/2026-04-27-001-refactor-guarded-beets-replacement-plan.md`.
 
 ### Exit Codes
 
@@ -272,6 +305,7 @@ The one-shot import script used by Cratedigger for auto-importing `source='reque
 | 2 | Beets import failed (harness error, high distance, post-flight fail) |
 | 3 | Album path not found |
 | 4 | Target MBID not found in beets candidates |
+| 7 | Duplicate-remove guard failed before Beets removed anything |
 
 ### Constants
 

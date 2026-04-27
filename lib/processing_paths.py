@@ -7,6 +7,7 @@ import re
 
 AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
 POST_VALIDATION_STAGING_SUBDIR = "post-validation"
+DUPLICATE_REMOVE_GUARD_SUBDIR = "duplicate-remove-guard"
 
 
 def sanitize_processing_folder_name(folder_name: str) -> str:
@@ -78,6 +79,33 @@ def stage_to_ai_path(
         stage_to_ai_root(staging_dir=staging_dir, auto_import=auto_import),
         artist_dir,
         album_dir,
+    )
+
+
+def duplicate_remove_guard_root(*, staging_dir: str) -> str:
+    """Return the quarantine root for duplicate-remove guard failures."""
+    return os.path.join(staging_dir, DUPLICATE_REMOVE_GUARD_SUBDIR)
+
+
+def duplicate_remove_guard_path(
+    *,
+    staging_dir: str,
+    source_path: str,
+    request_id: int | None = None,
+    attempt_id: int | None = None,
+) -> str:
+    """Return a diagnosable quarantine path for a guarded duplicate failure."""
+    basename = os.path.basename(normalize_processing_path(source_path))
+    safe_basename = sanitize_processing_folder_name(basename) or "staged-files"
+    parts: list[str] = []
+    if request_id is not None:
+        parts.append(f"request-{request_id}")
+    if attempt_id is not None:
+        parts.append(f"attempt-{attempt_id}")
+    parts.append(safe_basename)
+    return os.path.join(
+        duplicate_remove_guard_root(staging_dir=staging_dir),
+        " - ".join(parts),
     )
 
 

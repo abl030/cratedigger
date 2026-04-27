@@ -669,6 +669,19 @@ def _rejection_verdict(entry: LogEntry) -> str:
     if scenario == "audio_corrupt":
         return "Corrupt audio files detected"
 
+    if scenario == "duplicate_remove_guard_failed":
+        ir = _parse_import_result(entry)
+        guard = ir.postflight.duplicate_remove_guard if ir is not None else None
+        if guard is not None:
+            return (
+                "Duplicate remove guard failed: "
+                f"{guard.message} ({guard.duplicate_count} duplicate"
+                f"{'' if guard.duplicate_count == 1 else 's'})"
+            )
+        if entry.beets_detail:
+            return f"Duplicate remove guard failed: {entry.beets_detail}"
+        return "Duplicate remove guard failed"
+
     if scenario == "no_candidates":
         return "No MusicBrainz match found"
 

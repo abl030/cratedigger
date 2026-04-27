@@ -480,6 +480,61 @@ def _log_postflight_bad_extensions(
     )
 
 
+def _guard_failure_detail(ir: ImportResult) -> str | None:
+    guard = ir.postflight.duplicate_remove_guard
+    if guard is None:
+        return ir.error
+    detail = f"{guard.reason}: {guard.message}"
+    if guard.duplicate_count:
+        detail = f"{detail} (duplicates={guard.duplicate_count})"
+    return detail
+
+
+def _quarantine_duplicate_remove_guard_source(
+    *,
+    ir: ImportResult,
+    path: str,
+    request_id: int,
+    cfg: "CratediggerConfig | None",
+) -> None:
+    guard = ir.postflight.duplicate_remove_guard
+    if guard is None:
+        return
+
+    from lib.duplicate_remove_guard import (
+        quarantine_duplicate_remove_guard_source,
+    )
+
+    staging_dir = (
+        cfg.beets_staging_dir
+        if cfg is not None and cfg.beets_staging_dir
+        else os.path.dirname(os.path.abspath(path))
+    )
+    result = quarantine_duplicate_remove_guard_source(
+        source_path=path,
+        staging_dir=staging_dir,
+        request_id=request_id,
+    )
+    guard.quarantine_path = result.quarantine_path
+    guard.quarantine_error = result.error
+    if result.success:
+        logger.error(
+            "DUPLICATE REMOVE GUARD: quarantined staged source for "
+            "request_id=%s from %s to %s",
+            request_id,
+            result.source_path,
+            result.quarantine_path,
+        )
+    else:
+        logger.error(
+            "DUPLICATE REMOVE GUARD: failed to quarantine staged source for "
+            "request_id=%s path=%s error=%s",
+            request_id,
+            path,
+            result.error,
+        )
+
+
 def _cleanup_staged_dir(dest: str) -> None:
     """Remove a staged directory and its parent if empty."""
     if os.path.isdir(dest):
@@ -916,6 +971,8 @@ def dispatch_import_core(
                 action = dispatch_action(decision)
                 file_list = files or []
                 usernames = extract_usernames(file_list) if action.denylist else set()
+                if action.denylist and dl_info.username:
+                    usernames.add(dl_info.username)
                 narrowed_override = None
                 current_override = None
 
@@ -958,6 +1015,36 @@ def dispatch_import_core(
                                        f"<= existing {prev_br}kbps")
                         logger.warning(f"TRANSCODE REJECTED: {label} "
                                        f"at {new_br}kbps — not an upgrade")
+                    elif decision == "duplicate_remove_guard_failed":
+                        fail_scenario = "duplicate_remove_guard_failed"
+                        fail_detail = _guard_failure_detail(ir)
+                        _quarantine_duplicate_remove_guard_source(
+                            ir=ir,
+                            path=path,
+                            request_id=request_id,
+                            cfg=cfg,
+                        )
+                        dl_info.import_result = ir.to_json()
+                        guard = ir.postflight.duplicate_remove_guard
+                        if guard is not None:
+                            logger.error(
+                                "DUPLICATE REMOVE GUARD: request_id=%s "
+                                "target=%s:%s duplicates=%s candidates=%s",
+                                request_id,
+                                guard.target_source or "unknown",
+                                guard.target_release_id,
+                                guard.duplicate_count,
+                                [
+                                    {
+                                        "beets_album_id": c.beets_album_id,
+                                        "mb_albumid": c.mb_albumid,
+                                        "discogs_albumid": c.discogs_albumid,
+                                        "album_path": c.album_path,
+                                        "item_count": c.item_count,
+                                    }
+                                    for c in guard.candidates
+                                ],
+                            )
                     else:
                         fail_scenario = decision or "import_error"
                         fail_detail = ir.error
@@ -1029,8 +1116,17 @@ def dispatch_import_core(
                         reason = "quality downgrade prevented"
                     elif decision.startswith("transcode"):
                         reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
+                    elif decision == "duplicate_remove_guard_failed":
+                        reason = "duplicate remove guard failed"
                     else:
                         reason = f"rejected: {decision}"
+                    if (decision == "duplicate_remove_guard_failed"
+                            and not usernames):
+                        logger.error(
+                            "DUPLICATE REMOVE GUARD: no source username "
+                            "available to denylist for request %s",
+                            request_id,
+                        )
                     for username in usernames:
                         db.add_denylist(request_id, username, reason)
                         if cooled_down_users is not None:
