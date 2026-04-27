@@ -592,6 +592,7 @@ export function renderSimulatorResults(r) {
          'skipped_vbr_high_avg', 'skipped_flac', 'skipped_auto'].includes(val)) return 'ds-green';
     if (['reject', 'downgrade', 'transcode_downgrade',
          'suspect_lossless_downgrade', 'suspect_lossless_probe_missing',
+         'lossless_source_locked',
          'reject_corrupt', 'reject_nested'].includes(val)) return 'ds-red';
     return 'ds-amber';
   }

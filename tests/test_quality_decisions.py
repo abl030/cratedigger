@@ -44,6 +44,7 @@ from lib.quality import (
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    DECISION_LOSSLESS_SOURCE_LOCKED,
 )
 
 
@@ -421,13 +422,56 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
                 self.assertIsNone(result.decision)
                 self.assertFalse(result.would_import)
 
-    def test_native_lossy_research_probe_is_ignored(self):
-        result = self._decide(avg=320, existing=self._probe(171),
-                              supported=False,
-                              kind="native_lossy_research_v0")
+    def test_lossy_candidate_locks_when_existing_has_lossless_source_probe(self):
+        # Message to Bears EP1 shape: existing on-disk is a transcoded opus
+        # we made from a suspect FLAC, with the original lossless-source V0
+        # probe (240kbps) recorded. A lossy candidate cannot produce a
+        # comparable measurement, so it must be rejected outright.
+        result = self._decide(avg=320, existing=self._probe(240),
+                              supported=False)
+        self.assertEqual(result.decision, DECISION_LOSSLESS_SOURCE_LOCKED)
+        self.assertTrue(result.confident_reject)
+        self.assertTrue(result.cleanup_eligible)
+        self.assertIn("240kbps", result.reason or "")
+
+    def test_lossy_candidate_locks_regardless_of_spectral_grade(self):
+        # The lock is structural — a lossy candidate cannot be ground to V0
+        # to compare against the recorded probe regardless of how clean its
+        # own spectral looks. Grade is informational here, not load-bearing.
+        for grade in ("genuine", "marginal", "suspect", "likely_transcode"):
+            with self.subTest(grade=grade):
+                result = self._decide(avg=320, existing=self._probe(240),
+                                      supported=False, grade=grade)
+                self.assertEqual(result.decision, DECISION_LOSSLESS_SOURCE_LOCKED)
+
+    def test_lossy_candidate_passes_when_no_existing_probe(self):
+        # No recorded lossless-source V0 probe means nothing to lock against —
+        # the regular import_quality_decision path still runs.
+        result = self._decide(avg=320, existing=None, supported=False)
+        self.assertIsNone(result.decision)
+
+    def test_supported_lossless_source_bypasses_lock(self):
+        # The lock fires only on lossy candidates. A FLAC candidate facing
+        # an existing lossless-source V0 probe must still be eligible to
+        # override via the normal V0 grind-up comparison — never short-
+        # circuit to lossless_source_locked. Guards against future refactors
+        # that move the lock above the supported_lossless_source check.
+        result = self._decide(avg=320, supported=True, grade="suspect",
+                              existing=self._probe(240))
+        self.assertNotEqual(result.decision, DECISION_LOSSLESS_SOURCE_LOCKED)
+
+    def test_lossy_candidate_passes_when_existing_probe_is_research_only(self):
+        # Only lossless_source_v0 probes are load-bearing evidence; on-disk
+        # research probes don't lock. is_comparable_lossless_source_probe
+        # is the single source of truth for what counts.
+        result = self._decide(avg=320, supported=False,
+                              existing=self._probe(300,
+                                                   kind="on_disk_research_v0"))
         self.assertIsNone(result.decision)
 
     def test_research_existing_probe_is_not_comparable(self):
+        # FLAC-side: a research-kind existing probe is not comparable, so
+        # we treat existing as absent and import provisionally.
         result = self._decide(
             avg=250,
             existing=self._probe(300, kind="on_disk_research_v0"),
@@ -798,7 +842,8 @@ VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
                 "preflight_existing",
                 DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
                 DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-                DECISION_SUSPECT_LOSSLESS_PROBE_MISSING}
+                DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+                DECISION_LOSSLESS_SOURCE_LOCKED}
 VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_lossless"}
 VALID_FINAL_STATUS = {None, "imported", "wanted"}
 
@@ -1672,6 +1717,53 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertIsNone(r["target_final_format"])
         self.assertIsNone(r["stage3_quality_gate"])
 
+    def test_lossy_candidate_locked_by_existing_lossless_source_probe(self):
+        """Message to Bears EP1 / k1d_pr1mus shape, 2026-04-27 21:16.
+
+        Existing on-disk file is opus 128 (avg ~131kbps) transcoded from a
+        provisional suspect FLAC source whose lossless-source V0 probe was
+        recorded at 240kbps. A subsequent lossy candidate at avg 205kbps with
+        spectral cliff ~128kbps must be rejected by the lossless-source lock
+        before measured_import_decision gets a chance to compare it against
+        the on-disk avg, because there is no V0-comparable evidence the
+        lossy side could produce.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=176,
+            avg_bitrate=205,
+            is_cbr=False,
+            is_vbr=True,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            existing_min_bitrate=116,
+            existing_avg_bitrate=131,
+            existing_format="opus",
+            existing_v0_probe_avg=240,
+            verified_lossless_target="opus 128",
+        )
+        self.assertEqual(r["stage2_import"], DECISION_LOSSLESS_SOURCE_LOCKED)
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_lossy_candidate_passes_when_no_lossless_source_probe(self):
+        """Without a recorded lossless-source V0 probe the lock has nothing
+        to anchor against — the legacy import_quality_decision path runs."""
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=320,
+            avg_bitrate=320,
+            is_cbr=True,
+            existing_min_bitrate=192,
+            existing_avg_bitrate=192,
+            existing_is_cbr=True,
+        )
+        self.assertNotEqual(r["stage2_import"], DECISION_LOSSLESS_SOURCE_LOCKED)
+        self.assertTrue(r["imported"])
+
     def test_target_conversion_mp3_skips(self):
         """MP3 path + verified_lossless_target → no target conversion."""
         r = full_pipeline_decision(
@@ -1827,6 +1919,9 @@ class TestDispatchAction(unittest.TestCase):
          dict(mark_done=False, record_rejection=True, denylist=True,
               requeue=True, cleanup=True)),
         ("suspect_lossless_probe_missing",
+         dict(mark_done=False, record_rejection=True, denylist=True,
+              requeue=True, cleanup=True)),
+        ("lossless_source_locked",
          dict(mark_done=False, record_rejection=True, denylist=True,
               requeue=True, cleanup=True)),
         ("conversion_failed", dict(record_rejection=True, denylist=False)),

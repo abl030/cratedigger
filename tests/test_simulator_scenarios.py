@@ -46,6 +46,12 @@ class AlbumState:
     # diverges from min; the CBR-conditional override in full_pipeline_decision
     # needs this to behave correctly (see test_unter_null_failure_epiphany_vbr_loop).
     avg_bitrate: int | None = None
+    # current_lossless_source_v0_probe_avg_bitrate — when set, this album
+    # was previously imported as a provisional suspect-FLAC source and the
+    # source's V0 grind is the truth-of-source anchor. Lossy candidates
+    # short-circuit to lossless_source_locked instead of comparing against
+    # the on-disk transcode floor (avg_bitrate).
+    existing_v0_probe_avg: int | None = None
 
 
 def _derive_album_format(album: "AlbumState") -> str | None:
@@ -159,6 +165,17 @@ ALBUM_STATES = [
                "genuine", 96, False, None,
                avg_bitrate=128,
                existing_format="MP3"),
+    # Message to Bears - EP1 (req 1446, 2026-04-27 21:16). A previous
+    # provisional FLAC source (k1d_pr1mus, suspect likely_transcode) was
+    # accepted with V0 grind 240kbps, then transcoded to opus 128 on disk.
+    # current_lossless_source_v0_probe_avg_bitrate stays at 240 — the
+    # truth-of-source anchor. Lossy candidates from this point forward must
+    # short-circuit to lossless_source_locked: the on-disk opus 128 avg
+    # (~131kbps) is just our own transcode floor, not a comparable signal.
+    AlbumState("provisional_locked_opus", 116, False,
+               "likely_transcode", None, False, None,
+               avg_bitrate=131, existing_format="opus",
+               existing_v0_probe_avg=240),
 ]
 
 ALBUM_MAP = {a.name: a for a in ALBUM_STATES}
@@ -270,6 +287,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
         verified_lossless=album.verified_lossless,
         verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
+        existing_v0_probe_avg=album.existing_v0_probe_avg,
         **download.dl_params(),
     )
 
@@ -418,11 +436,39 @@ class TestSimulatorInvariants(unittest.TestCase):
                                                 "transcode_first",
                                                 "provisional_lossless_upgrade",
                                                 "suspect_lossless_downgrade",
-                                                "suspect_lossless_probe_missing"),
+                                                "suspect_lossless_probe_missing",
+                                                "lossless_source_locked"),
                             r.stage3_quality_gate == "requeue_upgrade",
                         )
                         self.assertTrue(any(causes),
                                         f"Denylisted without valid cause: {r}")
+
+    def test_provisional_locked_album_rejects_all_lossy_candidates(self):
+        """When existing has a recorded lossless-source V0 probe, every lossy
+        download scenario must short-circuit to lossless_source_locked.
+
+        FLAC candidates are exempt — they hit the regular provisional V0
+        grind-up lane. This invariant locks in the rule that motivated the
+        Message to Bears EP1 fix: lossy candidates have no V0-comparable
+        evidence, so the recorded probe wins by default.
+        """
+        album = ALBUM_MAP["provisional_locked_opus"]
+        for dl in DOWNLOAD_SCENARIOS:
+            with self.subTest(dl=dl.name):
+                r = simulate(album, dl)
+                if dl.is_flac:
+                    self.assertNotEqual(
+                        r.stage2_import, "lossless_source_locked",
+                        "FLAC candidates must not be locked — they can be "
+                        "ground to V0 and compared against the recorded probe.")
+                else:
+                    self.assertEqual(
+                        r.stage2_import, "lossless_source_locked",
+                        f"Lossy {dl.name} must be locked against the "
+                        f"recorded V0 probe; got {r.stage2_import}")
+                    self.assertFalse(r.imported)
+                    self.assertEqual(r.final_status, "wanted")
+                    self.assertTrue(r.keep_searching)
 
     def test_genuine_flac_on_fresh_is_verified_and_done(self):
         """Genuine/marginal FLAC on fresh request: imported, accepted, done."""
