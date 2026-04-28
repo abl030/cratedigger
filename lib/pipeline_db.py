@@ -1391,6 +1391,49 @@ class PipelineDB:
         self.conn.commit()
         return cur.rowcount
 
+    def update_download_log_measurement(
+        self,
+        download_log_id: int,
+        *,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        v0_probe_kind: str | None = None,
+        v0_probe_avg_bitrate: int | None = None,
+    ) -> bool:
+        """Persist measurement evidence onto one download_log row.
+
+        Partial / non-destructive: only columns whose source value is
+        non-None are touched. Used by wrong-match triage to plumb the
+        measurement from ``ImportPreviewResult.import_result`` onto the
+        same row that ``get_wrong_matches`` reads, so the candidate-
+        evidence cells from PR #181 populate without changing the read
+        path. Returns True when at least one column was updated, False
+        when the call was a no-op (all None) or the row didn't exist.
+        """
+        sets: list[str] = []
+        params: list[object] = []
+        if spectral_grade is not None:
+            sets.append("spectral_grade = %s")
+            params.append(spectral_grade)
+        if spectral_bitrate is not None:
+            sets.append("spectral_bitrate = %s")
+            params.append(spectral_bitrate)
+        if v0_probe_kind is not None:
+            sets.append("v0_probe_kind = %s")
+            params.append(v0_probe_kind)
+        if v0_probe_avg_bitrate is not None:
+            sets.append("v0_probe_avg_bitrate = %s")
+            params.append(v0_probe_avg_bitrate)
+        if not sets:
+            return False
+        params.append(download_log_id)
+        cur = self._execute(
+            f"UPDATE download_log SET {', '.join(sets)} WHERE id = %s",
+            tuple(params),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def record_wrong_match_triage(
         self,
         log_id: int,

@@ -1539,6 +1539,40 @@ class FakePipelineDB:
             cleared += 1
         return cleared
 
+    def update_download_log_measurement(
+        self,
+        download_log_id: int,
+        *,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        v0_probe_kind: str | None = None,
+        v0_probe_avg_bitrate: int | None = None,
+    ) -> bool:
+        """Persist measurement evidence onto a fake download_log row.
+
+        Mirrors ``PipelineDB.update_download_log_measurement``: partial /
+        non-destructive write where ``None`` inputs leave existing values
+        untouched. Stores values on ``entry.extra`` so the fake's
+        ``get_wrong_matches`` (which already reads those keys) sees them.
+        """
+        updates: dict[str, object] = {}
+        if spectral_grade is not None:
+            updates["spectral_grade"] = spectral_grade
+        if spectral_bitrate is not None:
+            updates["spectral_bitrate"] = spectral_bitrate
+        if v0_probe_kind is not None:
+            updates["v0_probe_kind"] = v0_probe_kind
+        if v0_probe_avg_bitrate is not None:
+            updates["v0_probe_avg_bitrate"] = v0_probe_avg_bitrate
+        if not updates:
+            return False
+        for entry in self.download_logs:
+            if entry.id != download_log_id:
+                continue
+            entry.extra.update(updates)
+            return True
+        return False
+
     def record_wrong_match_triage(
         self,
         log_id: int,
