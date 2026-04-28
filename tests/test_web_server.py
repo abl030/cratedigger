@@ -39,6 +39,12 @@ _DEFAULT_WRONG_MATCH_ROW = {
     "album_title": "Test Album",
     "mb_release_id": "abc-123",
     "soulseek_username": "testuser",
+    # Per-attempt evidence (denormalized download_log columns surfaced by
+    # get_wrong_matches for the candidate-evidence row payload).
+    "spectral_grade": None,
+    "spectral_bitrate": None,
+    "v0_probe_kind": None,
+    "v0_probe_avg_bitrate": None,
     # album_requests quality snapshot (joined in by get_wrong_matches)
     "request_status": "wanted",
     "request_min_bitrate": None,
@@ -3386,6 +3392,12 @@ class TestWrongMatchesContract(unittest.TestCase):
     ENTRY_REQUIRED_FIELDS = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
         "distance", "scenario", "detail", "candidate", "local_items",
+        # Per-candidate stored evidence (R1+R2 of the spectral-evidence
+        # plan) — surfaced from download_log so the operator can eyeball
+        # candidates by audio quality. Always present in the payload;
+        # values are None when the underlying row lacks evidence.
+        "spectral_grade", "spectral_bitrate",
+        "v0_probe_kind", "v0_probe_avg_bitrate",
     }
 
     GROUP_FIELD_TYPES = {
@@ -3491,6 +3503,52 @@ class TestWrongMatchesContract(unittest.TestCase):
                     self.assertIsInstance(
                         entry[field], expected_type,
                         f"entry.{field}={entry[field]!r} should be {expected_type}")
+
+    def test_entry_surfaces_stored_spectral_and_v0_probe_evidence(self):
+        """Covers AE1 — per-candidate stored evidence reaches the row payload.
+
+        Plumbs the four per-attempt download_log columns
+        (spectral_grade/spectral_bitrate/v0_probe_kind/v0_probe_avg_bitrate)
+        from get_wrong_matches() through to the entry dict so the operator
+        can eyeball candidates by audio quality.
+        """
+        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
+        row["spectral_grade"] = "suspect"
+        row["spectral_bitrate"] = 320
+        row["v0_probe_kind"] = "lossless_source_v0"
+        row["v0_probe_avg_bitrate"] = 265
+        self.mock_db.get_wrong_matches.return_value = [row]
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertEqual(entry["spectral_grade"], "suspect")
+        self.assertEqual(entry["spectral_bitrate"], 320)
+        self.assertEqual(entry["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(entry["v0_probe_avg_bitrate"], 265)
+
+    def test_entry_evidence_keys_present_when_null(self):
+        """Covers AE2 — missing evidence is missing data, not a trigger.
+
+        Legacy rows lacking spectral and V0 probe evidence still produce
+        the four keys with ``None`` values (never absent), and the entry
+        payload exposes no preview action / preview button / async
+        preview hook (R3 — this feature does not introduce a preview
+        workflow).
+        """
+        # _DEFAULT_WRONG_MATCH_ROW already has all four evidence fields
+        # set to None; this test pins that the resulting entry mirrors that.
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        for field in ("spectral_grade", "spectral_bitrate",
+                      "v0_probe_kind", "v0_probe_avg_bitrate"):
+            self.assertIn(field, entry)
+            self.assertIsNone(entry[field])
+        # R3 regression guard: no preview-related keys leak into the
+        # entry dict as part of this feature.
+        for key in entry.keys():
+            self.assertFalse(
+                key.lower().startswith("preview"),
+                f"entry exposed unexpected preview-related key: {key!r}")
 
     def test_multiple_rejections_for_same_request_collapse_to_single_group(self):
         """RED for issue #113: 3 rejections on one request → 1 group with 3 entries."""
