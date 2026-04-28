@@ -378,5 +378,142 @@ console.log('deleteLosslessOpusWrongMatches() posts one bulk delete and removes 
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned lossless-Opus groups locally');
 }
 
+console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells');
+{
+  // Happy path: AE1 — both pieces of evidence present.
+  let cells = __test__.formatEntryEvidence({
+    spectral_grade: 'genuine',
+    spectral_bitrate: 950,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_avg_bitrate: 265,
+  });
+  assert(cells.spectral.includes('genuine'), 'spectral cell shows the grade');
+  assert(cells.spectral.includes('950'), 'spectral cell shows the bitrate floor');
+  assert(cells.v0.includes('265'), 'V0 cell shows the lossless-source probe average');
+
+  // AE2: missing evidence renders as a dash, not as a preview trigger.
+  cells = __test__.formatEntryEvidence({
+    spectral_grade: null,
+    spectral_bitrate: null,
+    v0_probe_kind: null,
+    v0_probe_avg_bitrate: null,
+  });
+  assertEqual(cells.spectral, '—', 'absent spectral evidence renders as a dash');
+  assertEqual(cells.v0, '—', 'absent V0 evidence renders as a dash');
+  assert(!cells.spectral.toLowerCase().includes('preview'), 'no preview trigger in spectral cell');
+  assert(!cells.v0.toLowerCase().includes('preview'), 'no preview trigger in V0 cell');
+
+  // R2 — non-lossless-source V0 evidence is treated as missing for display.
+  cells = __test__.formatEntryEvidence({
+    spectral_grade: 'suspect',
+    spectral_bitrate: 320,
+    v0_probe_kind: 'native_lossy_research_v0',
+    v0_probe_avg_bitrate: 240,
+  });
+  assert(cells.spectral.includes('suspect'), 'spectral cell still renders for suspect grade');
+  assertEqual(cells.v0, '—',
+    'non-lossless-source V0 probe is hidden — R2 scopes V0 display to lossless-source only');
+
+  // Edge: spectral present, V0 absent (rejected pre-conversion).
+  cells = __test__.formatEntryEvidence({
+    spectral_grade: 'marginal',
+    spectral_bitrate: 800,
+    v0_probe_kind: null,
+    v0_probe_avg_bitrate: null,
+  });
+  assert(cells.spectral.includes('marginal'), 'marginal grade renders');
+  assertEqual(cells.v0, '—', 'absent V0 still renders as dash');
+
+  // Edge: missing the four keys entirely (extra defensive — payload should
+  // always include them, but the renderer must not crash if it doesn't).
+  cells = __test__.formatEntryEvidence({});
+  assertEqual(cells.spectral, '—', 'missing keys render as dash');
+  assertEqual(cells.v0, '—', 'missing keys render as dash');
+}
+
+console.log('renderEntry() embeds evidence cells without preview hooks');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  data.groups[0].entries[0].spectral_grade = 'suspect';
+  data.groups[0].entries[0].spectral_bitrate = 320;
+  data.groups[0].entries[0].v0_probe_kind = 'lossless_source_v0';
+  data.groups[0].entries[0].v0_probe_avg_bitrate = 265;
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  const html = dom.wrongMatches.innerHTML;
+  assert(html.includes('suspect'), 'rendered HTML carries the spectral grade');
+  assert(html.includes('265'), 'rendered HTML carries the lossless-source V0 average');
+  // R3 / AE2: no preview button or preview action surfaces in this feature.
+  assert(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
+  assert(!/preview[-_]btn/.test(html), 'no preview button class');
+  assert(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
+}
+
+console.log('formatLosslessOpusToastBody() reports spectral-suspect skips');
+{
+  // Covers R6 surfacing: server reports both deletes and the new
+  // groups_skipped_spectral_suspect counter. The toast must break out
+  // the spectral-suspect count separately from the existing summary.
+  let body = __test__.formatLosslessOpusToastBody({
+    deleted: 1,
+    groups_deleted: 1,
+    eligible_groups: 2,
+    groups_skipped_spectral_suspect: 1,
+    skipped: [
+      { reason: 'spectral_suspect', request_id: 71 },
+      { reason: 'spectral_suspect', request_id: 71 },
+    ],
+  });
+  assert(body.toLowerCase().includes('1') && body.toLowerCase().includes('release'),
+    'reports the deleted-release count');
+  assert(body.toLowerCase().includes('skipped') && body.toLowerCase().includes('spectral'),
+    'reports spectral-suspect skips by name');
+
+  // All-blocked worst case: 0 deleted, every eligible group blocked.
+  body = __test__.formatLosslessOpusToastBody({
+    deleted: 0,
+    groups_deleted: 0,
+    eligible_groups: 3,
+    groups_skipped_spectral_suspect: 3,
+    skipped: [
+      { reason: 'spectral_suspect', request_id: 1 },
+      { reason: 'spectral_suspect', request_id: 2 },
+      { reason: 'spectral_suspect', request_id: 3 },
+      { reason: 'spectral_suspect', request_id: 3 },
+    ],
+  });
+  assert(body.toLowerCase().includes('0'), 'reports the zero-delete case');
+  assert(body.toLowerCase().includes('3') && body.toLowerCase().includes('skipped'),
+    'reports the 3 skipped groups even when nothing was deleted');
+  assert(body.length > 0, 'toast is never blank when all groups are blocked');
+
+  // Forwards-compat fallback: server omits the new sibling field; the
+  // count is derivable from skipped[] by deduplicating request_id.
+  body = __test__.formatLosslessOpusToastBody({
+    deleted: 0,
+    groups_deleted: 0,
+    eligible_groups: 1,
+    skipped: [
+      { reason: 'spectral_suspect', request_id: 5 },
+      { reason: 'spectral_suspect', request_id: 5 },
+    ],
+  });
+  assert(body.toLowerCase().includes('1') && body.toLowerCase().includes('skipped'),
+    'fallback derives one skipped group from deduplicated request_id');
+
+  // Regression: empty skipped[] + zero counter → today's behaviour, no
+  // spectral mention.
+  body = __test__.formatLosslessOpusToastBody({
+    deleted: 3,
+    groups_deleted: 1,
+    eligible_groups: 1,
+    groups_skipped_spectral_suspect: 0,
+    skipped: [],
+  });
+  assert(!body.toLowerCase().includes('spectral'),
+    'no spectral mention when nothing was skipped');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
