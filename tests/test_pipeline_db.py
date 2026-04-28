@@ -2593,5 +2593,122 @@ class TestGetWrongMatches(unittest.TestCase):
                          "/mnt/virtio/Music/Beets/Artist/Album")
 
 
+@requires_postgres
+class TestUpdateDownloadLogMeasurement(unittest.TestCase):
+    """Persist measurement output from wrong-match triage onto download_log.
+
+    Triage runs preview-with-spectral on every wrong-match row and gets
+    back a populated ImportResult with new_measurement.spectral_* and
+    v0_probe.*. This helper writes those four values onto the same row
+    that get_wrong_matches reads, so the candidate-evidence cells from
+    PR #181 actually populate. Partial / non-destructive — None inputs
+    leave existing values untouched.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req = self.db.add_request(
+            mb_release_id="meas-1", artist_name="Artist 1",
+            album_title="Album 1", source="request")
+
+    def tearDown(self):
+        self.db.close()
+
+    def _log(self, **fields):
+        defaults = dict(
+            request_id=self.req,
+            soulseek_username="alice",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/path",
+            }),
+        )
+        defaults.update(fields)
+        return self.db.log_download(**defaults)
+
+    def _row(self, log_id):
+        return self.db.get_download_log_entry(log_id)
+
+    def test_populates_all_four_columns_from_null(self):
+        """Happy path: row with NULL columns gets all four populated."""
+        log_id = self._log()
+        result = self.db.update_download_log_measurement(
+            log_id,
+            spectral_grade="genuine",
+            spectral_bitrate=950,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=265,
+        )
+        self.assertTrue(result)
+        row = self._row(log_id)
+        assert row is not None
+        self.assertEqual(row["spectral_grade"], "genuine")
+        self.assertEqual(row["spectral_bitrate"], 950)
+        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+
+    def test_partial_update_leaves_omitted_columns_alone(self):
+        """Only spectral pair passed → V0 columns remain NULL."""
+        log_id = self._log()
+        self.db.update_download_log_measurement(
+            log_id,
+            spectral_grade="suspect",
+            spectral_bitrate=320,
+        )
+        row = self._row(log_id)
+        assert row is not None
+        self.assertEqual(row["spectral_grade"], "suspect")
+        self.assertEqual(row["spectral_bitrate"], 320)
+        self.assertIsNone(row["v0_probe_kind"])
+        self.assertIsNone(row["v0_probe_avg_bitrate"])
+
+    def test_none_inputs_do_not_wipe_existing_values(self):
+        """Non-destructive: pre-populated columns survive None inputs."""
+        log_id = self._log(
+            spectral_grade="genuine",
+            spectral_bitrate=950,
+        )
+        self.db.update_download_log_measurement(
+            log_id,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=265,
+        )
+        row = self._row(log_id)
+        assert row is not None
+        self.assertEqual(row["spectral_grade"], "genuine")
+        self.assertEqual(row["spectral_bitrate"], 950)
+        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+
+    def test_all_none_is_noop(self):
+        """All-None call leaves the row unchanged and returns False."""
+        log_id = self._log(spectral_grade="genuine", spectral_bitrate=950)
+        result = self.db.update_download_log_measurement(
+            log_id,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            v0_probe_kind=None,
+            v0_probe_avg_bitrate=None,
+        )
+        self.assertFalse(result)
+        row = self._row(log_id)
+        assert row is not None
+        self.assertEqual(row["spectral_grade"], "genuine")
+        self.assertEqual(row["spectral_bitrate"], 950)
+
+    def test_missing_log_id_returns_false(self):
+        """Updating a non-existent download_log row returns False."""
+        result = self.db.update_download_log_measurement(
+            999_999_999,
+            spectral_grade="genuine",
+            spectral_bitrate=950,
+        )
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
