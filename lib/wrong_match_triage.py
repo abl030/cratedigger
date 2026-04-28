@@ -56,7 +56,50 @@ def _persist_triage_audit(
     recorder = getattr(db, "record_wrong_match_triage", None)
     if callable(recorder):
         recorder(result.download_log_id, _triage_audit_payload(result))
+    _persist_triage_measurement(db, result)
     return result
+
+
+def _persist_triage_measurement(
+    db: Any,
+    result: WrongMatchTriageResult,
+) -> None:
+    """Plumb spectral and V0 probe evidence from preview onto download_log.
+
+    The preview pipeline already runs spectral and V0 probe analysis as
+    part of ``preview_import_from_path``; this side-effect lets the
+    Wrong Matches tab read the measurement off the same row that
+    ``get_wrong_matches`` returns. Order matters: this fires *after*
+    ``record_wrong_match_triage`` so an exception here cannot strand
+    the audit JSONB blob — auditability beats display.
+
+    Early-reject preview paths (``nested_layout``, ``path_missing``,
+    preimport_reject) leave ``import_result`` as ``None``; this helper
+    short-circuits in that case so the candidate row legitimately
+    renders as a dash (R5 of the upstream brainstorm).
+    """
+    preview = result.preview
+    if preview is None or preview.import_result is None:
+        return
+    measurement = preview.import_result.new_measurement
+    v0_probe = preview.import_result.v0_probe
+    spectral_grade = measurement.spectral_grade if measurement else None
+    spectral_bitrate = measurement.spectral_bitrate_kbps if measurement else None
+    v0_probe_kind = v0_probe.kind if v0_probe else None
+    v0_probe_avg_bitrate = v0_probe.avg_bitrate_kbps if v0_probe else None
+    if (spectral_grade is None and spectral_bitrate is None
+            and v0_probe_kind is None and v0_probe_avg_bitrate is None):
+        return
+    updater = getattr(db, "update_download_log_measurement", None)
+    if not callable(updater):
+        return
+    updater(
+        result.download_log_id,
+        spectral_grade=spectral_grade,
+        spectral_bitrate=spectral_bitrate,
+        v0_probe_kind=v0_probe_kind,
+        v0_probe_avg_bitrate=v0_probe_avg_bitrate,
+    )
 
 
 _IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
