@@ -17,6 +17,10 @@ from lib.import_queue import (
     manual_import_dedupe_key,
     manual_import_payload,
 )
+from lib.quality import (
+    OPUS_DELETE_SKIP_REASON_SPECTRAL,
+    is_opus_copy_safe_for_lossless_delete,
+)
 from lib.util import resolve_failed_path
 from lib.wrong_matches import dismiss_wrong_match_source
 from lib.wrong_match_triage import triage_wrong_match
@@ -660,34 +664,69 @@ def post_wrong_match_delete_transparent_non_flac(h, body: dict) -> None:
 
 
 def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
-    """Bulk-delete wrong matches once the exact library copy is verified-lossless Opus."""
+    """Bulk-delete wrong matches once the exact library copy is verified-lossless Opus.
+
+    Two-stage gate: the existing ``_is_lossless_opus_group`` predicate
+    (verified_lossless + format='opus') still defines what counts as
+    eligible. On top of that, the on-disk Opus copy's
+    ``current_spectral_grade`` must be safe per
+    ``is_opus_copy_safe_for_lossless_delete`` — ``suspect`` and
+    ``likely_transcode`` block deletion (R4-R6 of the wrong-matches
+    spectral evidence plan), so a candidate folder isn't wiped just
+    because *some* Opus copy is on disk when that copy itself is
+    spectrally suspect.
+    """
     del body  # unused; endpoint intentionally operates on the current visible set
-    request_ids = [
-        request_id
-        for group in _build_wrong_match_groups()
-        for request_id in [group.get("request_id")]
-        if isinstance(request_id, int) and _is_lossless_opus_group(group)
-    ]
-    if not request_ids:
+    safe_request_ids: list[int] = []
+    unsafe_request_ids: set[int] = set()
+    for group in _build_wrong_match_groups():
+        request_id = group.get("request_id")
+        if not (isinstance(request_id, int) and _is_lossless_opus_group(group)):
+            continue
+        grade = group.get("current_spectral_grade")
+        grade_str = grade if isinstance(grade, str) else None
+        if is_opus_copy_safe_for_lossless_delete(grade_str):
+            safe_request_ids.append(request_id)
+        else:
+            unsafe_request_ids.add(request_id)
+
+    eligible_groups = len(safe_request_ids) + len(unsafe_request_ids)
+    skipped: list[dict[str, object]] = []
+    if not safe_request_ids and not unsafe_request_ids:
         h._json({
             "status": "ok",
             "groups_deleted": 0,
             "deleted": 0,
             "deleted_request_ids": [],
             "eligible_groups": 0,
-            "skipped": [],
+            "groups_skipped_spectral_suspect": 0,
+            "skipped": skipped,
         })
         return
 
-    request_id_set = set(request_ids)
     pdb = _server()._db()
+    safe_request_id_set = set(safe_request_ids)
     deleted = 0
     deleted_by_request_id: dict[int, int] = {}
-    skipped: list[dict[str, object]] = []
     for row in pdb.get_wrong_matches():
         request_id = row.get("request_id")
         log_id = row.get("download_log_id")
-        if request_id not in request_id_set or not isinstance(log_id, int):
+        if not isinstance(log_id, int):
+            continue
+        if request_id in unsafe_request_ids:
+            # R4-R6: spectral-suspect on-disk copy blocks the delete;
+            # surface every blocked row in skipped[] with the new reason
+            # so the frontend can break out the count separately from
+            # delete_failed. Carry request_id only on this branch — keep
+            # delete_failed shape stable across delete-lossless-opus and
+            # delete-transparent-non-flac.
+            skipped.append({
+                "download_log_id": log_id,
+                "reason": OPUS_DELETE_SKIP_REASON_SPECTRAL,
+                "request_id": request_id,
+            })
+            continue
+        if request_id not in safe_request_id_set:
             continue
         if _delete_wrong_match_row(pdb, log_id):
             deleted += 1
@@ -702,7 +741,7 @@ def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
             })
 
     deleted_request_ids = [
-        request_id for request_id in request_ids
+        request_id for request_id in safe_request_ids
         if deleted_by_request_id.get(request_id)
     ]
     h._json({
@@ -710,7 +749,8 @@ def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
         "groups_deleted": len(deleted_request_ids),
         "deleted": deleted,
         "deleted_request_ids": deleted_request_ids,
-        "eligible_groups": len(request_ids),
+        "eligible_groups": eligible_groups,
+        "groups_skipped_spectral_suspect": len(unsafe_request_ids),
         "skipped": skipped,
     })
 
