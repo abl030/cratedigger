@@ -2228,5 +2228,138 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         )
 
 
+class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
+    """End-to-end pin from preview measurement → triage → DB → row read.
+
+    PR #181 wired the four candidate-evidence keys onto the wrong-matches
+    entry payload reading from flat ``download_log`` columns. The plan
+    that ships those columns from triage's preview lives in
+    ``docs/plans/2026-04-28-002``. This slice is the cross-layer proof
+    that would have caught yesterday's drop-on-the-floor bug:
+    ``triage_wrong_match`` runs end-to-end against ``FakePipelineDB``
+    with a stubbed preview, and the row's flat columns must surface in
+    the next ``get_wrong_matches`` read.
+    """
+
+    def _seed_wrong_match(self, source: str) -> tuple[FakePipelineDB, int]:
+        from tests.helpers import make_request_row as _make_req
+        db = FakePipelineDB()
+        db.seed_request(_make_req(
+            id=1, status="manual", mb_release_id="mbid-1"))
+        db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "wrong_match",
+                "failed_path": source,
+            },
+        )
+        return db, db.download_logs[-1].id
+
+    def _measured_preview(self, source: str):
+        from lib.import_preview import ImportPreviewResult
+        from lib.quality import V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence
+        return ImportPreviewResult(
+            mode="download_log",
+            verdict="would_import",
+            would_import=True,
+            decision="import",
+            reason="import",
+            source_path=source,
+            import_result=ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=950,
+                ),
+                v0_probe=V0ProbeEvidence(
+                    kind=V0_PROBE_LOSSLESS_SOURCE,
+                    avg_bitrate_kbps=265,
+                ),
+            ),
+        )
+
+    def test_auto_triage_round_trip_populates_get_wrong_matches(self):
+        """Covers AE1: post-rejection triage path → row read returns the
+        four candidate-evidence keys with values."""
+        from lib.wrong_match_triage import triage_wrong_match
+        source = tempfile.mkdtemp()
+        try:
+            db, log_id = self._seed_wrong_match(source)
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=self._measured_preview(source),
+            ):
+                triage_wrong_match(db, log_id)
+
+            rows = db.get_wrong_matches()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["spectral_grade"], "genuine")
+            self.assertEqual(row["spectral_bitrate"], 950)
+            self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
+            self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_backfill_round_trip_populates_get_wrong_matches(self):
+        """Covers AE2: operator-initiated backfill produces the same
+        outcome as post-rejection auto-triage."""
+        from lib.wrong_match_triage import backfill_wrong_match_previews
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db, _log_id = self._seed_wrong_match(source)
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=self._measured_preview(source),
+            ):
+                summary = backfill_wrong_match_previews(db)
+
+            self.assertEqual(summary["previewed"], 1)
+            row = db.get_wrong_matches()[0]
+            self.assertEqual(row["spectral_grade"], "genuine")
+            self.assertEqual(row["spectral_bitrate"], 950)
+            self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
+            self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_early_reject_keeps_row_dashed(self):
+        """Covers AE3 / R5: a row whose preview legitimately produced no
+        measurement (e.g. nested_layout that isn't cleanup-eligible)
+        keeps NULL flat columns, so the UI renders a dash."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.wrong_match_triage import triage_wrong_match
+        source = tempfile.mkdtemp()
+        try:
+            db, log_id = self._seed_wrong_match(source)
+            with patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                return_value=ImportPreviewResult(
+                    mode="download_log",
+                    verdict="uncertain",
+                    uncertain=True,
+                    decision="conversion_failed",
+                    reason="conversion_failed",
+                    source_path=source,
+                    import_result=None,
+                ),
+            ):
+                triage_wrong_match(db, log_id)
+
+            row = db.get_wrong_matches()[0]
+            for col in ("spectral_grade", "spectral_bitrate",
+                        "v0_probe_kind", "v0_probe_avg_bitrate"):
+                self.assertIsNone(row[col],
+                                  f"{col} must remain None when preview produced no measurement")
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
