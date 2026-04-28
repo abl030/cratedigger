@@ -45,6 +45,8 @@ from lib.quality import (
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     DECISION_LOSSLESS_SOURCE_LOCKED,
+    is_opus_copy_safe_for_lossless_delete,
+    OPUS_DELETE_SKIP_REASON_SPECTRAL,
 )
 
 
@@ -764,6 +766,45 @@ class TestIsVerifiedLossless(unittest.TestCase):
                     ),
                     expected,
                 )
+
+
+class TestIsOpusCopySafeForLosslessDelete(unittest.TestCase):
+    """Spectral-grade gate for the Delete Lossless Opus bulk action.
+
+    NULL / genuine / marginal are safe (the on-disk Opus copy is trustworthy
+    or has no spectral evidence either way); suspect / likely_transcode are
+    blockers per docs/quality-verification.md. Any unrecognised string fails
+    closed (returns False) so a future grade cannot accidentally be treated
+    as safe without an explicit allowlist edit.
+    """
+
+    CASES = [
+        ("null grade is safe", None, True),
+        ("genuine is safe", "genuine", True),
+        ("marginal is safe", "marginal", True),
+        ("suspect blocks delete", "suspect", False),
+        ("likely_transcode blocks delete", "likely_transcode", False),
+        ("empty string fails closed", "", False),
+        ("unknown future grade fails closed", "future_grade_x", False),
+        ("uppercase mismatch fails closed", "GENUINE", False),
+        ("uppercase suspect mismatch fails closed", "SUSPECT", False),
+    ]
+
+    def test_safety_decision(self):
+        for desc, grade, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    is_opus_copy_safe_for_lossless_delete(grade),
+                    expected,
+                )
+
+    def test_skip_reason_constant(self):
+        """The shared skip-reason string is non-empty and disjoint from
+        the existing `delete_failed` reason used by both this endpoint
+        and post_wrong_match_delete_transparent_non_flac."""
+        self.assertIsInstance(OPUS_DELETE_SKIP_REASON_SPECTRAL, str)
+        self.assertTrue(OPUS_DELETE_SKIP_REASON_SPECTRAL)
+        self.assertNotEqual(OPUS_DELETE_SKIP_REASON_SPECTRAL, "delete_failed")
 
 
 # ============================================================================

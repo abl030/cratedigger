@@ -2227,6 +2227,25 @@ def determine_verified_lossless(
     return converted_count > 0 and not is_transcode
 
 
+OPUS_DELETE_SKIP_REASON_SPECTRAL = "spectral_suspect"
+
+
+_OPUS_DELETE_SAFE_GRADES = frozenset({None, "genuine", "marginal"})
+
+
+def is_opus_copy_safe_for_lossless_delete(grade: Optional[str]) -> bool:
+    """Spectral-grade gate for the Delete Lossless Opus bulk action.
+
+    Returns True iff the on-disk Opus copy's ``current_spectral_grade`` is
+    trustworthy enough to delete sibling wrong-match candidates: ``None``,
+    ``"genuine"``, or ``"marginal"`` (see docs/quality-verification.md).
+    ``"suspect"`` and ``"likely_transcode"`` block deletion. Any
+    unrecognised string fails closed — a future grade addition must be
+    explicitly allowlisted here, never silently treated as safe.
+    """
+    return grade in _OPUS_DELETE_SAFE_GRADES
+
+
 def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
                          spectral_grade: Optional[str]) -> bool:
     """Legacy derivation for album_source.py fallback path.
