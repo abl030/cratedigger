@@ -4003,8 +4003,233 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["groups_deleted"], 1)
         self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["deleted_request_ids"], [43])
+        # AE4 baseline: NULL on-disk spectral grade is safe — the
+        # group is deleted as it would have been today, with no
+        # spectral-suspect skip entries.
+        self.assertEqual(data.get("groups_skipped_spectral_suspect", 0), 0)
+        self.assertEqual(
+            [s for s in data.get("skipped", []) if s.get("reason") == "spectral_suspect"],
+            [],
+        )
         called_ids = [c.args[0] for c in self.mock_db.clear_wrong_match_path.call_args_list]
         self.assertEqual(called_ids, [101])
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus-suspect": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_skips_when_on_disk_spectral_is_likely_transcode(
+            self, _mock_beets):
+        """Covers AE3 — likely_transcode on-disk grade blocks deletion."""
+        row = self._row(200, 50, "u1", "/fi/opus-likely",
+                        mb_release_id="mb-opus-suspect")
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 128
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "likely_transcode"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: self._entry(200, 50, "/fi/opus-likely"))
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual(data["groups_deleted"], 0)
+        self.assertEqual(data["deleted_request_ids"], [])
+        self.assertEqual(data["eligible_groups"], 1)
+        self.assertEqual(data["groups_skipped_spectral_suspect"], 1)
+        skipped = data["skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["reason"], "spectral_suspect")
+        self.assertEqual(skipped[0]["download_log_id"], 200)
+        self.assertEqual(skipped[0]["request_id"], 50)
+        # Files on disk untouched.
+        self.assertEqual(self.mock_rmtree.call_count, 0)
+        self.assertEqual(self.mock_db.clear_wrong_match_path.call_count, 0)
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus-suspect2": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_skips_when_on_disk_spectral_is_suspect(
+            self, _mock_beets):
+        """Covers AE3 alt grade — 'suspect' blocks deletion identically."""
+        row = self._row(201, 51, "u1", "/fi/opus-suspect",
+                        mb_release_id="mb-opus-suspect2")
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 128
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "suspect"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: self._entry(201, 51, "/fi/opus-suspect"))
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual(data["groups_skipped_spectral_suspect"], 1)
+        self.assertEqual(data["skipped"][0]["reason"], "spectral_suspect")
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus-genuine": {"beets_format": "Opus", "beets_bitrate": 128},
+        "mb-opus-marginal": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_proceeds_for_safe_grades(self, _mock_beets):
+        """Covers R5 — genuine and marginal grades both delete."""
+        genuine = self._row(210, 60, "u1", "/fi/opus-genuine",
+                            mb_release_id="mb-opus-genuine")
+        genuine["request_status"] = "imported"
+        genuine["request_min_bitrate"] = 128
+        genuine["request_verified_lossless"] = True
+        genuine["request_current_spectral_grade"] = "genuine"
+
+        marginal = self._row(211, 61, "u2", "/fi/opus-marginal",
+                             mb_release_id="mb-opus-marginal")
+        marginal["request_status"] = "imported"
+        marginal["request_min_bitrate"] = 128
+        marginal["request_verified_lossless"] = True
+        marginal["request_current_spectral_grade"] = "marginal"
+
+        self.mock_db.get_wrong_matches.return_value = [genuine, marginal]
+        entries = {
+            210: self._entry(210, 60, "/fi/opus-genuine"),
+            211: self._entry(211, 61, "/fi/opus-marginal"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid]))
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 2)
+        self.assertEqual(data["groups_deleted"], 2)
+        self.assertEqual(sorted(data["deleted_request_ids"]), [60, 61])
+        self.assertEqual(data["groups_skipped_spectral_suspect"], 0)
+        self.assertEqual(
+            [s for s in data["skipped"] if s.get("reason") == "spectral_suspect"],
+            [],
+        )
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus-good": {"beets_format": "Opus", "beets_bitrate": 128},
+        "mb-opus-bad": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_mixed_batch_partitions_safe_and_unsafe(
+            self, _mock_beets):
+        """Covers R4 + R6 — mixed batch deletes safe groups, skips unsafe."""
+        good_row = self._row(300, 70, "u1", "/fi/opus-good",
+                             mb_release_id="mb-opus-good")
+        good_row["request_status"] = "imported"
+        good_row["request_min_bitrate"] = 128
+        good_row["request_verified_lossless"] = True
+        good_row["request_current_spectral_grade"] = "genuine"
+
+        bad_row_a = self._row(301, 71, "u2a", "/fi/opus-bad-a",
+                              mb_release_id="mb-opus-bad")
+        bad_row_a["request_status"] = "imported"
+        bad_row_a["request_min_bitrate"] = 128
+        bad_row_a["request_verified_lossless"] = True
+        bad_row_a["request_current_spectral_grade"] = "likely_transcode"
+
+        bad_row_b = self._row(302, 71, "u2b", "/fi/opus-bad-b",
+                              mb_release_id="mb-opus-bad")
+        bad_row_b["request_status"] = "imported"
+        bad_row_b["request_min_bitrate"] = 128
+        bad_row_b["request_verified_lossless"] = True
+        bad_row_b["request_current_spectral_grade"] = "likely_transcode"
+
+        self.mock_db.get_wrong_matches.return_value = [
+            good_row, bad_row_a, bad_row_b]
+        entries = {
+            300: self._entry(300, 70, "/fi/opus-good"),
+            301: self._entry(301, 71, "/fi/opus-bad-a"),
+            302: self._entry(302, 71, "/fi/opus-bad-b"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid]))
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 1)
+        self.assertEqual(data["groups_deleted"], 1)
+        self.assertEqual(data["deleted_request_ids"], [70])
+        self.assertEqual(data["eligible_groups"], 2)
+        self.assertEqual(data["groups_skipped_spectral_suspect"], 1)
+        suspect_rows = [s for s in data["skipped"]
+                        if s.get("reason") == "spectral_suspect"]
+        self.assertEqual(len(suspect_rows), 2)
+        self.assertEqual({s["request_id"] for s in suspect_rows}, {71})
+        self.assertEqual({s["download_log_id"] for s in suspect_rows},
+                         {301, 302})
+        # Only the safe group was actually deleted.
+        called_ids = [c.args[0] for c in self.mock_db.clear_wrong_match_path.call_args_list]
+        self.assertEqual(called_ids, [300])
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-mp3-bad": {"beets_format": "MP3", "beets_bitrate": 245},
+    })
+    def test_delete_lossless_opus_does_not_apply_safety_to_non_eligible_groups(
+            self, _mock_beets):
+        """Regression A — safety gate must not relax _is_lossless_opus_group.
+
+        verified_lossless=False with format='MP3' is excluded by the
+        existing predicate; the spectral grade never gets evaluated.
+        """
+        row = self._row(400, 80, "u1", "/fi/mp3-not-lossless",
+                        mb_release_id="mb-mp3-bad")
+        row["request_status"] = "imported"
+        row["request_verified_lossless"] = False
+        row["request_current_spectral_grade"] = "likely_transcode"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: self._entry(400, 80, "/fi/mp3-not-lossless"))
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["eligible_groups"], 0)
+        self.assertEqual(data["groups_skipped_spectral_suspect"], 0)
+        self.assertEqual(data["skipped"], [])
+        self.assertEqual(data["deleted"], 0)
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus-fail": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_delete_failed_shape_unchanged(
+            self, _mock_beets):
+        """Regression C — delete_failed skip rows keep their original
+        shape (no request_id), preserving parity with
+        post_wrong_match_delete_transparent_non_flac."""
+        row = self._row(500, 90, "u1", "/fi/opus-fail",
+                        mb_release_id="mb-opus-fail")
+        row["request_status"] = "imported"
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "genuine"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        # Force the delete helper path to fail by returning None for the
+        # log entry — this matches how the route reports delete_failed.
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: None)
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-lossless-opus", {})
+
+        self.assertEqual(status, 200)
+        delete_failed = [s for s in data["skipped"]
+                         if s.get("reason") == "delete_failed"]
+        self.assertEqual(len(delete_failed), 1)
+        self.assertEqual(delete_failed[0]["download_log_id"], 500)
+        self.assertNotIn(
+            "request_id", delete_failed[0],
+            "delete_failed rows must keep their original shape "
+            "(no request_id) so parity with delete-transparent-non-flac "
+            "is preserved.")
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""
