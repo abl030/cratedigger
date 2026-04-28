@@ -160,6 +160,72 @@ function convergeRequestBody(requestId, thresholdMilli, deleteUnmatched) {
 }
 
 /**
+ * Format the per-candidate stored evidence cells for a wrong-match
+ * entry. Pure — input is the entry payload, output is a `{spectral,
+ * v0}` pair of short display strings. Absent or non-lossless-source
+ * V0 evidence renders as a dash; the candidate row never starts a
+ * preview job from the UI (R3) and never exposes a preview button.
+ * @param {any} entry
+ * @returns {{spectral: string, v0: string}}
+ */
+function formatEntryEvidence(entry) {
+  const grade = entry && typeof entry.spectral_grade === 'string'
+    ? entry.spectral_grade : null;
+  const bitrate = entry && Number.isFinite(entry.spectral_bitrate)
+    ? entry.spectral_bitrate : null;
+  let spectral = '—';
+  if (grade && bitrate != null) spectral = `${grade} · ${bitrate} kbps`;
+  else if (grade) spectral = grade;
+  else if (bitrate != null) spectral = `${bitrate} kbps`;
+
+  const kind = entry && typeof entry.v0_probe_kind === 'string'
+    ? entry.v0_probe_kind : null;
+  const avg = entry && Number.isFinite(entry.v0_probe_avg_bitrate)
+    ? entry.v0_probe_avg_bitrate : null;
+  // R2: surface V0 probe evidence only for lossless-source candidates;
+  // native-lossy and on-disk research probes stay invisible at this UI.
+  const v0 = (kind === 'lossless_source_v0' && avg != null)
+    ? `V0 ≈ ${avg} kbps` : '—';
+  return { spectral, v0 };
+}
+
+/**
+ * Build the toast text shown after the Delete Lossless Opus bulk
+ * action. Pure — input is the API response, output is the text.
+ * Surfaces ``groups_skipped_spectral_suspect`` (added by the backend
+ * R4-R6 gate) when present, else derives the count from ``skipped[]``
+ * by deduplicating ``request_id`` on ``spectral_suspect`` rows.
+ * @param {any} data
+ * @returns {string}
+ */
+function formatLosslessOpusToastBody(data) {
+  const deleted = data && Number.isFinite(data.deleted) ? data.deleted : 0;
+  const groupsDeleted = data && Number.isFinite(data.groups_deleted)
+    ? data.groups_deleted : 0;
+  let skippedGroups = 0;
+  if (data && Number.isFinite(data.groups_skipped_spectral_suspect)) {
+    skippedGroups = data.groups_skipped_spectral_suspect;
+  } else if (data && Array.isArray(data.skipped)) {
+    const ids = new Set();
+    for (const s of data.skipped) {
+      if (s && s.reason === 'spectral_suspect' && s.request_id != null) {
+        ids.add(s.request_id);
+      }
+    }
+    skippedGroups = ids.size;
+  }
+  const parts = [
+    `Deleted ${deleted} candidate${deleted === 1 ? '' : 's'}`,
+    `from ${groupsDeleted} release${groupsDeleted === 1 ? '' : 's'}`,
+  ];
+  let body = parts.join(' ');
+  if (skippedGroups > 0) {
+    body += `; ${skippedGroups} group${skippedGroups === 1 ? '' : 's'} skipped (spectral suspect)`;
+  }
+  return body;
+}
+
+/**
  * @param {any} data
  * @returns {string}
  */
@@ -724,6 +790,7 @@ function renderEntry(e, thresholdMilli, requestId) {
   const jobBadge = job ? `<span class="badge" style="background:#222;color:#9bf;margin-left:8px;">${esc(job.status)}</span>` : '';
   const green = isConvergeGreen(e, thresholdMilli);
   const distColor = green ? '#6d6' : '#aaa';
+  const evidence = formatEntryEvidence(e);
 
   const header = `
     <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}')">
@@ -738,6 +805,8 @@ function renderEntry(e, thresholdMilli, requestId) {
       <div class="p-meta">
         <span id="wm-entry-dist-${e.download_log_id}" style="color:${distColor};">dist: ${dist}</span>
         <span>${esc(e.scenario || '')}</span>
+        <span style="color:#888;">spectral: ${esc(evidence.spectral)}</span>
+        <span style="color:#888;">${esc(evidence.v0)}</span>
       </div>
     </div>
     <div class="p-detail" id="${detailId}">
@@ -923,6 +992,8 @@ export const __test__ = {
   deleteLosslessOpusWrongMatches,
   deleteTransparentNonFlacWrongMatches,
   deleteUnmatchedOnConverge,
+  formatEntryEvidence,
+  formatLosslessOpusToastBody,
   greenEntries,
   isConvergeGreen,
   losslessOpusGroups,
@@ -1123,10 +1194,7 @@ export async function deleteLosslessOpusWrongMatches(btn) {
     });
     const data = await r.json();
     if (r.ok && data.status === 'ok') {
-      toast(
-        `Deleted ${data.deleted || 0} candidate${data.deleted === 1 ? '' : 's'} `
-        + `from ${data.groups_deleted || 0} release${data.groups_deleted === 1 ? '' : 's'}`,
-      );
+      toast(formatLosslessOpusToastBody(data));
       invalidateWrongMatches();
       if (Array.isArray(data.deleted_request_ids) && data.deleted_request_ids.length > 0) {
         for (const requestId of data.deleted_request_ids) removeWrongMatchGroup(requestId);
