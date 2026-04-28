@@ -2478,6 +2478,90 @@ class TestGetWrongMatches(unittest.TestCase):
                       "validation_result"):
             self.assertIn(field, row)
 
+    def test_result_exposes_per_attempt_spectral_and_v0_probe_columns(self):
+        """Per-candidate evidence (download_log columns) is projected.
+
+        The Wrong Matches tab needs per-attempt spectral grade/floor and
+        lossless-source V0 probe average to let the operator eyeball
+        candidates by audio quality before destructive actions. These
+        columns already exist on ``download_log`` (migrations 001/007);
+        ``get_wrong_matches`` must surface them.
+        """
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            spectral_grade="suspect",
+            spectral_bitrate=320,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=265,
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "distance": 0.25,
+                "failed_path": "/fi/path_a",
+            }),
+        )
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["spectral_grade"], "suspect")
+        self.assertEqual(row["spectral_bitrate"], 320)
+        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+
+    def test_result_per_attempt_evidence_keys_present_when_null(self):
+        """Legacy rows (pre-migration-007 / pre-spectral) come back with
+        the four keys present and ``None`` — never missing."""
+        self._log_rejected(self.req1, "alice", "/fi/legacy")
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        for field in ("spectral_grade", "spectral_bitrate",
+                      "v0_probe_kind", "v0_probe_avg_bitrate"):
+            self.assertIn(field, row)
+            self.assertIsNone(row[field])
+
+    def test_result_dedup_keeps_newer_evidence(self):
+        """When the same failed_path is retried, the newer attempt wins —
+        including its per-attempt spectral/V0 evidence."""
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice-old",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            spectral_grade="genuine",
+            spectral_bitrate=900,
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/path_dup",
+            }),
+        )
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice-new",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            spectral_grade="suspect",
+            spectral_bitrate=280,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=255,
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/path_dup",
+            }),
+        )
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["soulseek_username"], "alice-new")
+        self.assertEqual(row["spectral_grade"], "suspect")
+        self.assertEqual(row["spectral_bitrate"], 280)
+        self.assertEqual(row["v0_probe_avg_bitrate"], 255)
+
     def test_result_carries_current_request_quality_fields(self):
         """Row must expose the request's on-disk quality state.
 
