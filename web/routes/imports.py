@@ -511,6 +511,14 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
             "candidate": target,
             "local_items": vr.get("items", []),
             "import_job": import_job,
+            # Per-candidate stored evidence (R1+R2) — denormalized from
+            # download_log via PipelineDB.get_wrong_matches. Always
+            # present; values are None when the row pre-dates the
+            # spectral / V0-probe pipelines.
+            "spectral_grade": row.get("spectral_grade"),
+            "spectral_bitrate": row.get("spectral_bitrate"),
+            "v0_probe_kind": row.get("v0_probe_kind"),
+            "v0_probe_avg_bitrate": row.get("v0_probe_avg_bitrate"),
         })
         group["pending_count"] = len(entries_list)
 
