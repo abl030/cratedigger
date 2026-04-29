@@ -247,12 +247,20 @@ def _distinctive_token_pool(track_titles: list[str]) -> list[str]:
 
 
 def _year_is_known(year: str | None) -> bool:
-    """Year is unknown when None or starts with the MB-fallback "0000"."""
-    if year is None:
-        return False
-    if year.startswith("0000"):
-        return False
-    return True
+    """Year is known iff the first 4 chars are all digits and not "0000".
+
+    MB sometimes returns a fallback "0000" year, an empty string, whitespace,
+    or non-numeric placeholders ("unknown"). Treat all of those as unknown
+    so the V1 cycle does not append a meaningless year token to the slskd
+    query (degrading match recall). Also rejects shorter-than-4-char numeric
+    prefixes ("199") because they are clearly malformed.
+    """
+    return (
+        year is not None
+        and len(year) >= 4
+        and year[:4].isdigit()
+        and year[:4] != "0000"
+    )
 
 
 def select_variant(
