@@ -2966,7 +2966,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "757", include_sublabels=False)
+            "757", include_sublabels=False, page=1, per_page=100)
 
     def test_label_detail_auto_flips_include_sublabels_for_big_labels(self):
         """Big label (release_count > BIG_LABEL_THRESHOLD) without an
@@ -2988,7 +2988,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "1", include_sublabels=False)
+            "1", include_sublabels=False, page=1, per_page=100)
 
     def test_label_detail_respects_explicit_include_sublabels_on_big_labels(self):
         """If the caller explicitly opts in via `?include_sublabels=true`,
@@ -3010,7 +3010,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "1", include_sublabels=True)
+            "1", include_sublabels=True, page=1, per_page=100)
 
     def test_label_detail_does_not_auto_flip_small_labels(self):
         """Boutique labels (release_count <= threshold) keep the
@@ -3031,7 +3031,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "757", include_sublabels=True)
+            "757", include_sublabels=True, page=1, per_page=100)
 
     def test_label_detail_rejects_malformed_include_sublabels(self):
         """`?include_sublabels=` must be one of true/false/1/0 (case-
@@ -3062,7 +3062,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "757", include_sublabels=False)
+            "757", include_sublabels=False, page=1, per_page=100)
 
     def test_label_detail_releases_404_propagates(self):
         """If `get_label` succeeds but `get_label_releases` raises 404
@@ -3084,6 +3084,93 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 404)
         self.assertIn("error", data)
+
+    def test_label_detail_forwards_pagination_params(self):
+        """`?page=2&per_page=50` flows through to the adapter — Plan 003 U1."""
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 2, "per_page": 50, "pages": 3, "items": 120},
+                "include_sublabels": True,
+            }
+            status, data = self._get(
+                "/api/discogs/label/757?page=2&per_page=50")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "757", include_sublabels=True, page=2, per_page=50)
+        self.assertEqual(data["pagination"]["page"], 2)
+        self.assertEqual(data["pagination"]["per_page"], 50)
+
+    def test_label_detail_clamps_per_page(self):
+        """`?per_page=500` clamps to the 200 max so a malicious or misbehaving
+        client can't exfiltrate the whole catalogue in one shot."""
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 200, "pages": 1, "items": 0},
+                "include_sublabels": True,
+            }
+            status, _data = self._get(
+                "/api/discogs/label/757?per_page=500")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "757", include_sublabels=True, page=1, per_page=200)
+
+    def test_label_detail_rejects_non_integer_page(self):
+        """`?page=foo` returns 400 — silently coercing to 1 would mask
+        frontend pagination bugs."""
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            status, data = self._get(
+                "/api/discogs/label/757?page=foo")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertFalse(mock_dg.get_label_releases.called)
+
+    def test_label_detail_rejects_zero_page(self):
+        """`?page=0` returns 400 — pages are 1-indexed."""
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            status, data = self._get(
+                "/api/discogs/label/757?page=0")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertFalse(mock_dg.get_label_releases.called)
+
+    def test_label_detail_rejects_non_integer_per_page(self):
+        """`?per_page=foo` returns 400."""
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            status, data = self._get(
+                "/api/discogs/label/757?per_page=foo")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertFalse(mock_dg.get_label_releases.called)
+
+    def test_label_detail_rejects_zero_per_page(self):
+        """`?per_page=0` returns 400 — would otherwise cause divide-by-zero
+        on the pages calculation."""
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            status, data = self._get(
+                "/api/discogs/label/757?per_page=0")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertFalse(mock_dg.get_label_releases.called)
 
 
 class TestBeetsRouteContracts(_WebServerCase):

@@ -4,7 +4,7 @@
  */
 
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
-import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, parseYear, renderLabelLinks, distinctFormats } from '../web/js/labels.js';
+import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls } from '../web/js/labels.js';
 
 let passed = 0;
 let failed = 0;
@@ -160,6 +160,46 @@ assertEqual(buildLabelSearchUrl('hymen'), '/api/discogs/label/search?q=hymen', '
 assertEqual(buildLabelSearchUrl('warp records'), '/api/discogs/label/search?q=warp%20records', 'spaces encoded');
 assertEqual(buildLabelSearchUrl('a&b'), '/api/discogs/label/search?q=a%26b', 'special chars encoded');
 assertEqual(buildLabelSearchUrl('björk'), '/api/discogs/label/search?q=bj%C3%B6rk', 'unicode encoded');
+
+// --- buildLabelDetailUrl tests ---
+console.log('buildLabelDetailUrl()');
+assertEqual(buildLabelDetailUrl('757'), '/api/discogs/label/757', 'no opts: no query string');
+assertEqual(
+  buildLabelDetailUrl('757', { include_sublabels: true }),
+  '/api/discogs/label/757?include_sublabels=true',
+  'include_sublabels=true emitted');
+assertEqual(
+  buildLabelDetailUrl('757', { include_sublabels: false }),
+  '/api/discogs/label/757?include_sublabels=false',
+  'include_sublabels=false emitted');
+assertEqual(
+  buildLabelDetailUrl('757', { include_sublabels: true, page: 2, per_page: 50 }),
+  '/api/discogs/label/757?include_sublabels=true&page=2&per_page=50',
+  'pagination params emitted in order');
+assertEqual(
+  buildLabelDetailUrl(757, { page: 3 }),
+  '/api/discogs/label/757?page=3',
+  'numeric labelId coerced to string');
+assertEqual(
+  buildLabelDetailUrl('757', { include_sublabels: undefined, page: undefined, per_page: undefined }),
+  '/api/discogs/label/757',
+  'undefined opts produce no params');
+
+// --- renderPaginationControls tests ---
+console.log('renderPaginationControls()');
+assertEqual(renderPaginationControls(1, 1), '', 'pages=1 → empty');
+assertEqual(renderPaginationControls(1, 0), '', 'pages=0 → empty');
+const ctrl_p1_of_5 = renderPaginationControls(1, 5);
+assert(ctrl_p1_of_5.includes('Page 1 of 5'), 'p1/5: position label rendered');
+assert(ctrl_p1_of_5.includes('disabled'), 'p1/5: prev button is disabled');
+assert(ctrl_p1_of_5.includes('window.goToLabelPage(2)'), 'p1/5: next button targets page 2');
+const ctrl_p5_of_5 = renderPaginationControls(5, 5);
+assert(ctrl_p5_of_5.includes('window.goToLabelPage(4)'), 'p5/5: prev button targets page 4');
+assert(ctrl_p5_of_5.match(/disabled/g).length === 1, 'p5/5: only next button is disabled');
+const ctrl_p3_of_5 = renderPaginationControls(3, 5);
+assert(!ctrl_p3_of_5.includes('disabled'), 'p3/5: neither button disabled');
+assert(ctrl_p3_of_5.includes('window.goToLabelPage(2)'), 'p3/5: prev → page 2');
+assert(ctrl_p3_of_5.includes('window.goToLabelPage(4)'), 'p3/5: next → page 4');
 
 // --- applyLabelFilters tests ---
 console.log('applyLabelFilters()');

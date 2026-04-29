@@ -43,6 +43,32 @@ _INCLUDE_SUBLABELS_TRUE = {"true", "1"}
 _INCLUDE_SUBLABELS_FALSE = {"false", "0"}
 _INCLUDE_SUBLABELS_VALID = _INCLUDE_SUBLABELS_TRUE | _INCLUDE_SUBLABELS_FALSE
 
+# Pagination defaults + per_page upper bound. The discogs-api mirror clamps
+# per_page to 100 internally, but we accept up to 200 here so the bound is
+# governed by our policy, not happenstance of upstream behavior.
+_DEFAULT_PAGE = 1
+_DEFAULT_PER_PAGE = 100
+_MAX_PER_PAGE = 200
+
+
+def _parse_positive_int(
+    raw: str, *, max_value: int | None = None
+) -> int | None:
+    """Parse a positive int with an optional upper clamp.
+
+    Returns the clamped int on valid input, ``None`` on parse failure
+    or non-positive values. Caller turns ``None`` into a 400.
+    """
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if v < 1:
+        return None
+    if max_value is not None and v > max_value:
+        return max_value
+    return v
+
 
 def _label_entity_payload(entity) -> dict:
     """Convert a `LabelEntity` Struct to a JSON-safe dict.
@@ -106,6 +132,27 @@ def get_discogs_label_detail(
         # Default; possibly auto-flipped below once we know release_count.
         include_sublabels = True
 
+    # Pagination — always parsed and forwarded so the adapter call shape is
+    # explicit at every site. 400 on invalid input rather than silent default
+    # coercion: a frontend pagination bug should fail loudly, not show page 1.
+    if "page" in params:
+        page = _parse_positive_int(params["page"][0])
+        if page is None:
+            h._error(  # type: ignore[attr-defined]
+                "Invalid page — expected a positive integer", 400)
+            return
+    else:
+        page = _DEFAULT_PAGE
+    if "per_page" in params:
+        per_page = _parse_positive_int(
+            params["per_page"][0], max_value=_MAX_PER_PAGE)
+        if per_page is None:
+            h._error(  # type: ignore[attr-defined]
+                "Invalid per_page — expected a positive integer", 400)
+            return
+    else:
+        per_page = _DEFAULT_PER_PAGE
+
     try:
         entity = discogs_api.get_label(label_id)
     except urllib.error.HTTPError as e:
@@ -120,7 +167,8 @@ def get_discogs_label_detail(
 
     try:
         releases_resp = discogs_api.get_label_releases(
-            label_id, include_sublabels=include_sublabels)
+            label_id, include_sublabels=include_sublabels,
+            page=page, per_page=per_page)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             h._error("Label not found", 404)  # type: ignore[attr-defined]
