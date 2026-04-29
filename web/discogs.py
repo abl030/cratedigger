@@ -13,6 +13,7 @@ into Redis (issue #101).
 
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Literal
@@ -569,6 +570,10 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
                 "items": decoded.pagination.items,
             },
             "include_sublabels": decoded.include_sublabels,
+            # Always present so the contract is stable. The 503-fallback
+            # branch below overrides this to True; the wire payload itself
+            # never carries a stale True (the upstream doesn't know).
+            "sub_labels_dropped": False,
         }
 
     sub_flag = "true" if include_sublabels else "false"
@@ -576,4 +581,22 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
         f"discogs:label:{label_id}:releases"
         f":sub={sub_flag}:p={page}:pp={per_page}"
     )
-    return _cache.memoize_meta(cache_key, _fetch)
+    try:
+        return _cache.memoize_meta(cache_key, _fetch)
+    except urllib.error.HTTPError as e:
+        # Plan 003 U4. The discogs-api mirror returns 503 when the
+        # recursive sub-label CTE exceeds its statement_timeout (P0 plan).
+        # Retry once with sub-labels disabled so the user sees the direct
+        # catalogue rather than a hard error. The fallback uses its own
+        # cache key (`sub=false`), so a successful retry is memoized
+        # independently — repeat hits skip the failing call entirely.
+        if e.code == 503 and include_sublabels:
+            fallback = get_label_releases(
+                label_id, include_sublabels=False,
+                page=page, per_page=per_page)
+            # Don't mutate the fallback dict in place — it is the cached
+            # value for a different cache key, and direct callers of
+            # `include_sublabels=False` would see a false-positive
+            # `sub_labels_dropped` if we wrote through.
+            return {**fallback, "sub_labels_dropped": True}
+        raise
