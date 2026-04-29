@@ -118,9 +118,38 @@ WHERE id = <id>;
 
 ## `search_log`
 
-Every search attempt is logged to `search_log` with: `request_id`, `query` (normalized search term), `result_count`, `elapsed_s`, `outcome`, `created_at`. Failed searches also increment `search_attempts` on `album_requests` and trigger exponential backoff.
+Every search attempt is logged to `search_log` with: `request_id`, `query` (normalized search term), `result_count`, `elapsed_s`, `outcome`, `variant`, `final_state`, `candidates` (JSONB), `created_at`. Failed searches also increment `search_attempts` on `album_requests` and trigger exponential backoff.
 
-Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable download), `no_results` (0 results from slskd), `timeout`, `error`, `empty_query` (can't build query).
+Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable download), `no_results` (0 results from slskd), `timeout`, `error`, `empty_query` (can't build query), `exhausted` (variant ladder ran out — see below).
+
+### Variant ladder
+
+`search_log.variant` records which query variant produced this attempt. The pure-function ladder in `lib/search.py:select_variant` selects per cycle based on `search_attempts` (gated by `search_escalation_threshold`, default `5`):
+
+- `default` — base query (`<artist> <album>`), used for `search_attempts < threshold`.
+- `v1_year` — base query plus the 4-digit year token (skipped when year is unknown — `None`, `"0000"`, non-numeric, or shorter than 4 chars).
+- `v4_tracks_<idx>` — rotating 3-token slices of distinctive track titles, sorted length-descending. No artist, no wildcard.
+- `exhausted` — the V4 token pool ran out. **No slskd call is made.** `search_attempts` is reset to `0` so the ladder wraps back to `default` on the next cycle; the request stays `wanted`. The `search_log` row records the exhaustion event for forensic purposes.
+
+### `candidates` JSONB
+
+Top 20 peer scores per search, sorted by `(matched_tracks DESC, avg_ratio DESC)`. Each entry is a `lib.quality.CandidateScore` (`msgspec.Struct`):
+
+```json
+{"username": "peer", "dir": "...", "filetype": "lossless",
+ "matched_tracks": 24, "total_tracks": 26, "avg_ratio": 0.91,
+ "missing_titles": ["..."], "file_count": 26}
+```
+
+Empty array `[]` for `no_results` / `no_match` outcomes; `NULL` for `error`, `timeout`, `exhausted`, `empty_query`. Decoded at exactly one site per consumer (`web/routes/pipeline.py:get_pipeline_detail` and `scripts/pipeline_cli.py:cmd_show`) via `msgspec.convert(blob, type=list[CandidateScore])`.
+
+### `final_state`
+
+The slskd terminal state for the search (`Completed`, `ResponseLimitReached`, `TimedOut`, `Errored`, etc.). `NULL` on the `exhausted` outcome (no slskd round-trip).
+
+## `album_requests.manual_reason`
+
+A free-form `TEXT` column populated by system flips that move a request to `status='manual'`. Currently unused — the variant ladder's `exhausted` case resets `search_attempts` instead of flipping to manual. The column stays for future operator-hold workflows that need a structured reason without overloading the human-authored `reasoning` field. Cleared (`NULL`) on every `reset_to_wanted` so re-queue starts with a clean slate.
 
 ## Wrong Matches and Force-Import
 
