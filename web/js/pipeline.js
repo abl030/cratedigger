@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, awstDate, awstDateTime, qualityLabel, externalReleaseUrl, sourceLabel } from './util.js';
+import { esc, awstDate, awstDateTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton } from './release_actions.js';
 
@@ -170,6 +170,13 @@ export async function toggleDetail(elId, requestId) {
     const history = data.history || [];
 
     let html = '';
+    // Manual-reason chip (e.g. search_exhausted) — surfaces the reason a
+    // request landed in `manual` so the operator does not have to query
+    // JSONB. Hidden when null (manually-set or pre-U7 rows).
+    const reasonLabel = manualReasonLabel(data.manual_reason);
+    if (reasonLabel) {
+      html += `<div class="p-detail-row"><span class="p-detail-label">Manual reason</span><span class="p-detail-value"><span class="p-manual-chip">${esc(reasonLabel)}</span></span></div>`;
+    }
     // External link (MB or Discogs)
     if (req.mb_release_id) {
       const label = sourceLabel(req.mb_release_id);
@@ -244,6 +251,10 @@ export async function toggleDetail(elId, requestId) {
       html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     }
+
+    // Search forensics (last_search) — variant tag + top-3 candidates from
+    // the most recent search_log row. Collapsed by default; click expands.
+    html += renderForensicBlock(/** @type {any} */ (data.last_search));
 
     // Status change buttons
     html += `<div class="p-actions">
