@@ -4,7 +4,7 @@
  */
 
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
-import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, parseYear } from '../web/js/labels.js';
+import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, parseYear, renderLabelLinks } from '../web/js/labels.js';
 
 let passed = 0;
 let failed = 0;
@@ -231,6 +231,72 @@ assertEqual(STABLE.map(r => r.id).join(','), 'a,b,c', 'equal years preserve inpu
 const ORIG = [{ id: '1', date: '2000' }, { id: '2', date: '2010' }];
 sortByYearDesc(ORIG);
 assertEqual(ORIG[0].id, '1', 'sortByYearDesc does not mutate input');
+
+// --- renderLabelLinks tests (U7) ---
+console.log('renderLabelLinks()');
+
+// Single Discogs-style label (id + name) → clickable link.
+const hymen = renderLabelLinks([{ id: 757, name: 'Hymen Records' }]);
+assert(hymen.includes('Hymen Records'), 'renders the label name');
+assert(hymen.includes('data-label-id="757"'), 'tags the link with data-label-id="757"');
+assert(hymen.includes('window.openLabelDetail'), 'wires window.openLabelDetail call');
+assert(hymen.includes('class="label-link"'), 'tags the anchor with the label-link class');
+assert(/<a\b/i.test(hymen), 'renders an anchor element');
+
+// Empty input → empty string.
+assertEqual(renderLabelLinks([]), '', 'empty array → empty string');
+assertEqual(renderLabelLinks(null), '', 'null → empty string');
+assertEqual(renderLabelLinks(undefined), '', 'undefined → empty string');
+
+// MB-style label (no id) → plain text, no anchor.
+const mbOnly = renderLabelLinks([{ name: 'Some MB Label' }]);
+assertEqual(mbOnly, 'Some MB Label', 'MB-style (no id) renders plain text');
+assert(!/<a\b/i.test(mbOnly), 'MB-style renders no anchor element');
+
+// id explicitly null → plain text (Phase B placeholder).
+const mbExplicitNull = renderLabelLinks([{ id: null, name: 'MB Label' }]);
+assertEqual(mbExplicitNull, 'MB Label', 'explicit id=null renders plain text');
+
+// Multiple labels with usable IDs → comma-separated links.
+const warpDual = renderLabelLinks([
+  { id: 757, name: 'Warp Records' },
+  { id: 758, name: 'Warp Singles' },
+]);
+assert(warpDual.includes('Warp Records'), 'first label name rendered');
+assert(warpDual.includes('Warp Singles'), 'second label name rendered');
+assert(warpDual.includes('data-label-id="757"'), 'first link has correct id attr');
+assert(warpDual.includes('data-label-id="758"'), 'second link has correct id attr');
+assertEqual((warpDual.match(/<a\b/gi) || []).length, 2, 'two anchor elements rendered');
+assert(warpDual.includes('</a>, <a'), 'anchors are separated by ", "');
+
+// Mixed: one with id (link), one without (text).
+const mixed = renderLabelLinks([
+  { id: 757, name: 'Hymen Records' },
+  { name: 'Plaintext Co.' },
+]);
+assert(mixed.includes('Hymen Records'), 'mixed: linked name present');
+assert(mixed.includes('Plaintext Co.'), 'mixed: plain name present');
+assertEqual((mixed.match(/<a\b/gi) || []).length, 1, 'mixed: only the id-bearing entry becomes a link');
+
+// XSS guard — name with <script> is escaped, no raw tag in output.
+const xss = renderLabelLinks([{ id: 1, name: '<script>alert(1)</script>' }]);
+assert(!xss.includes('<script>'), 'XSS guard: raw <script> tag not present in output');
+assert(xss.includes('&lt;script&gt;'), 'XSS guard: angle brackets entity-escaped');
+
+// XSS guard via name with quotes — should not break out of jsArg().
+const xssQuote = renderLabelLinks([{ id: 1, name: 'Bad", alert(1), "X' }]);
+assert(!xssQuote.includes('", alert'), 'XSS guard: quote escapes prevent attribute break-out');
+assert(xssQuote.includes('&quot;'), 'XSS guard: double quotes are entity-escaped');
+
+// Empty / falsy entries skipped.
+assertEqual(renderLabelLinks([null, undefined, { id: 1, name: '' }, { id: 2, name: 'OK' }]),
+  '<a href="#" class="label-link" data-label-id="2" onclick="event.stopPropagation(); event.preventDefault(); window.openLabelDetail(&quot;2&quot;, &quot;OK&quot;)">OK</a>',
+  'null/undefined/empty-name entries are skipped');
+
+// Numeric-string id is honored.
+const stringId = renderLabelLinks([{ id: '12345', name: 'String ID Label' }]);
+assert(stringId.includes('data-label-id="12345"'), 'string id is preserved');
+assert(stringId.includes('<a'), 'string id renders as link');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

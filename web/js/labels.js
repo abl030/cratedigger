@@ -15,7 +15,7 @@
  */
 
 import { state, API, toast } from './state.js';
-import { esc } from './util.js';
+import { esc, jsArg } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
 import { loadReleaseGroup } from './discography.js';
@@ -151,6 +151,65 @@ export function distinctFormats(releases) {
     }
   }
   return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * @typedef {Object} LabelRef
+ * @property {number|string} [id] - Discogs label ID (numeric/string). Absent
+ *   or falsy → render as plain text (no drill-in available).
+ * @property {string} [name] - Display name. Required to render anything.
+ */
+
+/**
+ * Render a release's `labels[]` array as inline HTML for the
+ * release-detail panel (U7 / AE1 drill-in).
+ *
+ * Per the label-viewer Phase A plan:
+ *   - Discogs source labels carry `{id, name}` → render as a clickable
+ *     `<a>` that calls `window.openLabelDetail(id, name)` (already wired
+ *     by U5/U6).
+ *   - MusicBrainz source labels arrive without an MB label ID surfaced
+ *     through the route layer in v1, so they render as plain text. They
+ *     become links in Phase B (separate plan). No half-link / fake
+ *     fallback.
+ *   - Mixed arrays (some entries with `id`, some without) render each
+ *     entry per its own rule, separated by ", ".
+ *
+ * Names are HTML-escaped via `esc()`; IDs are coerced to strings and
+ * passed through `jsArg()` for safe interpolation inside the inline
+ * `onclick` attribute (mirrors the established `release_actions.js` /
+ * `library.js` pattern). XSS regression test in
+ * `tests/test_js_util.mjs` covers a `<script>`-tagged label name.
+ *
+ * Empty / missing input → empty string. Callers decide whether to wrap
+ * the result in a row label.
+ *
+ * @param {Array<LabelRef>|null|undefined} labels
+ * @returns {string} HTML
+ */
+export function renderLabelLinks(labels) {
+  if (!Array.isArray(labels) || labels.length === 0) return '';
+  /** @type {string[]} */
+  const parts = [];
+  for (const lbl of labels) {
+    if (!lbl) continue;
+    const name = lbl.name == null ? '' : String(lbl.name);
+    if (!name) continue;
+    const idRaw = lbl.id;
+    const idStr = (idRaw === null || idRaw === undefined) ? '' : String(idRaw).trim();
+    if (idStr) {
+      // Discogs-style: clickable link → openLabelDetail.
+      parts.push(
+        `<a href="#" class="label-link" data-label-id="${esc(idStr)}"`
+        + ` onclick="event.stopPropagation(); event.preventDefault();`
+        + ` window.openLabelDetail(${jsArg(idStr)}, ${jsArg(name)})">${esc(name)}</a>`
+      );
+    } else {
+      // MB-style or untyped: plain text, Phase B will fill in.
+      parts.push(esc(name));
+    }
+  }
+  return parts.join(', ');
 }
 
 // ─────────────────────────────────────────────────────────────────────
