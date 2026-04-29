@@ -15,6 +15,9 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from typing import Literal, Optional
+
+import msgspec
 
 from web import cache as _cache
 
@@ -294,3 +297,296 @@ def get_artist_name(artist_id: int) -> str:
         return data.get("name", "")
 
     return _cache.memoize_meta(f"discogs:artist:{artist_id}:name", _fetch)
+
+
+# ── Label adapter (U3) ──────────────────────────────────────────────────
+#
+# Wire-boundary types. The Rust mirror at `discogs.ablz.au` returns label
+# search/detail/release JSON shaped exactly per these Structs (see the
+# reference definitions in `discogs-api/src/types.rs`). They are decoded at
+# the `_get` boundary via `msgspec.convert(...)` — any int-vs-str drift,
+# missing required field, or wrong nested shape raises
+# `msgspec.ValidationError` immediately. Per
+# `.claude/rules/code-quality.md` § "Wire-boundary types": these are
+# `msgspec.Struct`, not `@dataclass`. Strict ≠ coerce — declare the field
+# as the type the wire actually carries.
+#
+# These are private to this module (leading underscore) — the public
+# contract is `LabelEntity`, defined below, which is the source-agnostic
+# shape consumed by the route layer (U4) and frontend.
+
+
+class _DiscogsLabelHit(msgspec.Struct):
+    """One hit from `GET /api/labels?name=...`."""
+    id: int
+    name: str
+    profile: str
+    parent_label_id: Optional[int]
+    parent_label_name: Optional[str]
+    release_count: int
+    score: float
+
+
+class _DiscogsLabelSearchResponse(msgspec.Struct):
+    results: list[_DiscogsLabelHit]
+    total: int
+    page: int
+    per_page: int
+
+
+class _DiscogsSubLabel(msgspec.Struct):
+    id: int
+    name: str
+    release_count: int
+
+
+class _DiscogsLabelDetail(msgspec.Struct):
+    """Response of `GET /api/labels/{id}`. Discogs labels have NO country
+    column upstream — the `LabelEntity.country` field is `None` for the
+    Discogs adapter; the future MB adapter will populate it."""
+    id: int
+    name: str
+    profile: str
+    contactinfo: str
+    data_quality: str
+    parent_label_id: Optional[int]
+    parent_label_name: Optional[str]
+    total_releases: int
+    sub_labels: list[_DiscogsSubLabel]
+
+
+class _DiscogsApiArtistCredit(msgspec.Struct):
+    id: int
+    name: str
+    role: str
+    anv: str
+
+
+class _DiscogsApiLabel(msgspec.Struct):
+    id: int
+    name: str
+    catno: str
+
+
+class _DiscogsApiFormat(msgspec.Struct):
+    name: str
+    qty: int
+    descriptions: str
+    free_text: str
+
+
+class _DiscogsLabelReleaseEntry(msgspec.Struct):
+    """One release row from `/api/labels/{id}/releases`."""
+    id: int
+    title: str
+    country: str
+    released: str
+    master_id: Optional[int]
+    primary_type: str
+    via_label_id: int
+    artists: list[_DiscogsApiArtistCredit]
+    labels: list[_DiscogsApiLabel]
+    formats: list[_DiscogsApiFormat]
+    # Optional fields (skipped on the Rust side when None) — declared
+    # Optional[...] with a default so msgspec accepts payloads where the
+    # key is omitted entirely.
+    master_title: Optional[str] = None
+    master_first_released: Optional[str] = None
+    sub_label_name: Optional[str] = None
+
+
+class _DiscogsLabelPagination(msgspec.Struct):
+    page: int
+    per_page: int
+    pages: int
+    items: int
+
+
+class _DiscogsLabelReleasesResponse(msgspec.Struct):
+    results: list[_DiscogsLabelReleaseEntry]
+    pagination: _DiscogsLabelPagination
+    include_sublabels: bool
+
+
+# ── Source-agnostic public contract ─────────────────────────────────────
+
+
+class LabelEntity(msgspec.Struct):
+    """Cross-source label representation. Populated by the Discogs adapter
+    today, and by the planned MusicBrainz adapter in Phase B.
+
+    Field design notes:
+    - `source` distinguishes downstream routing (e.g. "view label" links).
+    - `id` is stringified at the adapter boundary so route/JSON callers
+      see one consistent shape regardless of upstream id type
+      (Discogs int, MB UUID).
+    - `country` is `Optional` because the Discogs label table has no
+      country column; MB labels do, so the field stays in the contract.
+    - `parent_label_id` / `parent_label_name` are `Optional` to handle
+      both top-level labels (no parent) and sub-labels.
+    - `release_count` is the rolled-up count the upstream provided —
+      Discogs reports `total_releases` on detail and `release_count` on
+      search hits; both map here.
+    """
+    source: Literal["discogs", "musicbrainz"]
+    id: str
+    name: str
+    country: Optional[str]
+    profile: Optional[str]
+    parent_label_id: Optional[str]
+    parent_label_name: Optional[str]
+    release_count: int
+
+
+def _label_entity_from_hit(hit: _DiscogsLabelHit) -> LabelEntity:
+    return LabelEntity(
+        source="discogs",
+        id=str(hit.id),
+        name=hit.name,
+        country=None,  # Discogs label table has no country column
+        profile=hit.profile or None,
+        parent_label_id=str(hit.parent_label_id) if hit.parent_label_id is not None else None,
+        parent_label_name=hit.parent_label_name,
+        release_count=hit.release_count,
+    )
+
+
+def _label_entity_from_detail(detail: _DiscogsLabelDetail) -> LabelEntity:
+    return LabelEntity(
+        source="discogs",
+        id=str(detail.id),
+        name=detail.name,
+        country=None,
+        profile=detail.profile or None,
+        parent_label_id=str(detail.parent_label_id) if detail.parent_label_id is not None else None,
+        parent_label_name=detail.parent_label_name,
+        release_count=detail.total_releases,
+    )
+
+
+def _label_entity_to_dict(entity: LabelEntity) -> dict:
+    """Round-trip helper for Redis cache (`memoize_meta` uses json.dumps)."""
+    return {
+        "source": entity.source,
+        "id": entity.id,
+        "name": entity.name,
+        "country": entity.country,
+        "profile": entity.profile,
+        "parent_label_id": entity.parent_label_id,
+        "parent_label_name": entity.parent_label_name,
+        "release_count": entity.release_count,
+    }
+
+
+def _label_entity_from_dict(d: dict) -> LabelEntity:
+    return msgspec.convert(d, type=LabelEntity)
+
+
+def search_labels(query: str) -> list[LabelEntity]:
+    """Search labels by name via `/api/labels?name=`.
+
+    Decodes the response at the wire boundary into a typed
+    `_DiscogsLabelSearchResponse`; any drift (e.g. `release_count`
+    arriving as a string instead of int) raises
+    `msgspec.ValidationError` from inside `_fetch`.
+
+    Returns a list of `LabelEntity` (typed), with the cache layer
+    storing the dict form so Redis JSON-serialization stays lossless.
+    """
+    def _fetch() -> list[dict]:
+        q = urllib.parse.quote(query)
+        raw = _get(f"{DISCOGS_API_BASE}/api/labels?name={q}&per_page=25")
+        decoded = msgspec.convert(raw, type=_DiscogsLabelSearchResponse)
+        return [_label_entity_to_dict(_label_entity_from_hit(h))
+                for h in decoded.results]
+
+    cached = _cache.memoize_meta(f"discogs:search:labels:{query}", _fetch)
+    return [_label_entity_from_dict(d) for d in cached]
+
+
+def get_label(label_id: int | str) -> LabelEntity:
+    """Fetch a single label by Discogs ID via `/api/labels/{id}`.
+
+    Mirrors `get_release` / `get_artist_name`: relies on `_get` raising
+    HTTPError on 404 (the caller surfaces the 404 as needed). Returns
+    a typed `LabelEntity` on success.
+    """
+    def _fetch() -> dict:
+        raw = _get(f"{DISCOGS_API_BASE}/api/labels/{label_id}")
+        decoded = msgspec.convert(raw, type=_DiscogsLabelDetail)
+        return _label_entity_to_dict(_label_entity_from_detail(decoded))
+
+    cached = _cache.memoize_meta(f"discogs:label:{label_id}", _fetch)
+    return _label_entity_from_dict(cached)
+
+
+def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
+                       page: int = 1, per_page: int = 100) -> dict:
+    """Fetch a label's releases via `/api/labels/{id}/releases`.
+
+    Returns a dict shaped to match the existing release-row contract
+    used elsewhere in this module (`get_master_releases`,
+    `get_artist_releases`) so the U4 route layer can overlay
+    library/pipeline state with the same field names — `id` (str),
+    `title`, `country`, `date` (released), `year` (parsed from date),
+    `primary_type`, `release_group_id` (str | None), `artist_name`,
+    `artist_id` (str | None), `format` (joined names) — plus
+    label-specific fields `via_label_id` (str), `sub_label_name`
+    (str | None), `master_title`, `master_first_released`, `labels`,
+    `formats`.
+    """
+    def _fetch() -> dict:
+        sub_flag = "true" if include_sublabels else "false"
+        raw = _get(
+            f"{DISCOGS_API_BASE}/api/labels/{label_id}/releases"
+            f"?include_sublabels={sub_flag}&page={page}&per_page={per_page}"
+        )
+        decoded = msgspec.convert(raw, type=_DiscogsLabelReleasesResponse)
+        rows: list[dict] = []
+        for r in decoded.results:
+            artist_name = r.artists[0].name if r.artists else "Unknown"
+            artist_id = r.artists[0].id if r.artists else None
+            format_names = [f.name for f in r.formats]
+            rows.append({
+                "id": str(r.id),
+                "title": r.title,
+                "country": r.country,
+                "date": r.released,
+                "year": _parse_year(r.released),
+                "primary_type": r.primary_type,
+                "release_group_id": str(r.master_id) if r.master_id else None,
+                "master_title": r.master_title,
+                "master_first_released": r.master_first_released,
+                "artist_name": artist_name,
+                "artist_id": str(artist_id) if artist_id is not None else None,
+                "via_label_id": str(r.via_label_id),
+                "sub_label_name": r.sub_label_name,
+                "format": ", ".join(format_names) if format_names else "?",
+                "media_count": len(r.formats),
+                "labels": [
+                    {"id": lab.id, "name": lab.name, "catno": lab.catno}
+                    for lab in r.labels
+                ],
+                "formats": [
+                    {"name": f.name, "qty": f.qty,
+                     "descriptions": f.descriptions, "free_text": f.free_text}
+                    for f in r.formats
+                ],
+            })
+        return {
+            "results": rows,
+            "pagination": {
+                "page": decoded.pagination.page,
+                "per_page": decoded.pagination.per_page,
+                "pages": decoded.pagination.pages,
+                "items": decoded.pagination.items,
+            },
+            "include_sublabels": decoded.include_sublabels,
+        }
+
+    sub_flag = "true" if include_sublabels else "false"
+    cache_key = (
+        f"discogs:label:{label_id}:releases"
+        f":sub={sub_flag}:p={page}:pp={per_page}"
+    )
+    return _cache.memoize_meta(cache_key, _fetch)
