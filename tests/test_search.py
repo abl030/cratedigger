@@ -398,7 +398,7 @@ class TestSelectVariant(unittest.TestCase):
         self.assertEqual(v.slice_index, 0)
 
     def test_year_0000_dash_treated_as_unknown(self):
-        # "0000-00-00" → also unknown via startswith("0000")
+        # "0000-00-00" → also unknown
         v = select_variant(
             search_attempts=5,
             threshold=5,
@@ -409,6 +409,34 @@ class TestSelectVariant(unittest.TestCase):
         self.assertEqual(v.kind, "v4_tracks")
         self.assertEqual(v.tag, "v4_tracks_0")
         self.assertEqual(v.slice_index, 0)
+
+    def test_malformed_year_strings_treated_as_unknown(self):
+        """Year strings that aren't a 4-char numeric prefix → V4, not V1.
+
+        Adversarial review A2: the original ``_year_is_known`` only checked
+        ``startswith("0000")`` so "0", "", whitespace, "unknown", and short
+        numeric prefixes like "199" all leaked through and produced a V1
+        query that appended a meaningless year token.
+        """
+        bad_years = [
+            ("single_digit", "0"),
+            ("empty_string", ""),
+            ("whitespace_only", "   "),
+            ("non_numeric", "unknown"),
+            ("three_digit_prefix", "199"),
+        ]
+        for desc, year in bad_years:
+            with self.subTest(desc=desc, year=repr(year)):
+                v = select_variant(
+                    search_attempts=5,
+                    threshold=5,
+                    base_query="base",
+                    year=year,
+                    track_titles=self.POOL_BIG,
+                )
+                self.assertEqual(v.kind, "v4_tracks")
+                self.assertEqual(v.tag, "v4_tracks_0")
+                self.assertEqual(v.slice_index, 0)
 
     def test_empty_tracks_with_year_v1_then_exhausted(self):
         # cycle 5: year present → v1_year (still works without tracks)
