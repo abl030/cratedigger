@@ -52,19 +52,6 @@ class FindDownloadResult:
     candidates: tuple[CandidateScore, ...] = ()
 
 
-@dataclass(frozen=True)
-class _FiletypeAttemptResult:
-    """Internal return shape of `_try_filetype`.
-
-    Carries the same outcome as `FindDownloadResult` plus the per-dir
-    `CandidateScore` accumulated across every release/dir/user touched while
-    trying this filetype.
-    """
-
-    outcome: Literal["found", "no_match", "enqueue_failed"]
-    candidates: tuple[CandidateScore, ...] = ()
-
-
 def release_trackcount_mode(releases: list[Any]) -> Any:
     """Return the most common track count among candidate releases."""
     track_count: dict[Any, int] = {}
@@ -407,7 +394,7 @@ def _try_filetype(
     allowed_filetype: str,
     grab_list: dict[int, GrabListEntry],
     ctx: CratediggerContext,
-) -> _FiletypeAttemptResult:
+) -> FindDownloadResult:
     """Try to match and enqueue an album at a specific filetype quality."""
     album_id = album.id
     artist_name = album.artist_name
@@ -452,7 +439,7 @@ def _try_filetype(
                 db_search_filetype_override=album.db_search_filetype_override,
                 db_target_format=album.db_target_format,
             )
-            return _FiletypeAttemptResult(
+            return FindDownloadResult(
                 outcome="found", candidates=tuple(accumulated),
             )
 
@@ -469,7 +456,7 @@ def _try_filetype(
         if has_monitored and not release.monitored:
             break
 
-    return _FiletypeAttemptResult(
+    return FindDownloadResult(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
     )
