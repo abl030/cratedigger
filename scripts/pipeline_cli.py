@@ -547,6 +547,73 @@ def _render_import_result(ir_raw):
     return lines
 
 
+def _render_search_forensics_summary(
+    request_row: dict, latest_search: dict,
+) -> list[str]:
+    """Build the U7 forensic summary block printed above search history.
+
+    Inputs:
+    - ``request_row``: the row dict from ``PipelineDB.get_request``. Used
+      for ``manual_reason`` (None when not exhausted / pre-U7).
+    - ``latest_search``: the most recent ``search_log`` row dict (already
+      ordered newest-first by ``get_search_history``). The candidates
+      JSONB blob is decoded here via ``msgspec.convert(blob,
+      type=list[CandidateScore])`` — single decode site for the CLI side
+      per ``.claude/rules/code-quality.md`` § Wire-boundary types.
+
+    Empty lists / NULL JSONB blobs render gracefully (no
+    ``msgspec.ValidationError``); rows without forensic fields (e.g.
+    pre-U1 search_log entries) print "no forensic data yet".
+    """
+    from lib.quality import CandidateScore
+
+    lines: list[str] = ["", "  Search Forensics:"]
+    variant = latest_search.get("variant")
+    final_state = latest_search.get("final_state")
+    manual_reason = request_row.get("manual_reason")
+
+    if variant:
+        lines.append(f"    variant:        {variant}")
+    if final_state:
+        lines.append(f"    final_state:    {final_state}")
+    if manual_reason:
+        lines.append(f"    manual_reason:  {manual_reason}")
+
+    raw_candidates = latest_search.get("candidates")
+    if raw_candidates is None:
+        if not (variant or final_state or manual_reason):
+            lines.append("    (no forensic data yet)")
+        else:
+            lines.append("    candidates:     (none captured)")
+        return lines
+
+    try:
+        candidates = msgspec.convert(raw_candidates, type=list[CandidateScore])
+    except msgspec.ValidationError as e:
+        # Defensive — production writes via the same Struct so this should
+        # never trip in practice, but a corrupted historical row should
+        # not crash `pipeline-cli show`.
+        lines.append(f"    candidates:     <decode error: {e}>")
+        return lines
+
+    if not candidates:
+        lines.append("    candidates:     (empty list)")
+        return lines
+
+    # Top-3 by (matched_tracks DESC, avg_ratio DESC) — same ordering as the
+    # web UI route, so CLI and web surfaces show the same scoring.
+    candidates.sort(key=lambda c: (c.matched_tracks, c.avg_ratio), reverse=True)
+    top = candidates[:3]
+    lines.append(f"    top candidates ({len(top)} of {len(candidates)}):")
+    for c in top:
+        lines.append(
+            f"      {c.username} | {c.dir} | "
+            f"{c.matched_tracks}/{c.total_tracks} | "
+            f"avg={c.avg_ratio:.2f} | {c.filetype}"
+        )
+    return lines
+
+
 def cmd_show(db, args):
     req = db.get_request(args.id)
     if not req:
@@ -626,6 +693,14 @@ def cmd_show(db, args):
 
     searches = db.get_search_history(req['id'])
     if searches:
+        # U7: print a forensic summary above the row table — the most
+        # recent variant + final_state, the request's manual_reason if
+        # populated, and the top-3 candidates from the latest search_log
+        # row's JSONB blob. The blob is decoded once via msgspec.convert
+        # per single-decode-site discipline (code-quality.md § Wire-
+        # boundary types). Older rows / NULL blobs render gracefully.
+        for line in _render_search_forensics_summary(req, searches[0]):
+            print(line)
         print(f"\n  Search History ({len(searches)}):")
         for s in searches:
             q = s['query'] or "(no query)"
@@ -633,7 +708,8 @@ def cmd_show(db, args):
             rc_str = f"{rc} results" if rc is not None else "n/a"
             el = s['elapsed_s']
             el_str = f"{el:.1f}s" if el is not None else ""
-            print(f"    [{s['created_at']}] {s['outcome']:12s} {rc_str:>12s} {el_str:>6s}  {q}")
+            variant = s.get('variant') or "-"
+            print(f"    [{s['created_at']}] {s['outcome']:12s} {variant:14s} {rc_str:>12s} {el_str:>6s}  {q}")
 
     history = db.get_download_history(req['id'])
     if history:
