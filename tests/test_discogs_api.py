@@ -6,6 +6,8 @@ import sys
 import unittest
 from unittest.mock import patch, MagicMock
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from web.discogs import (
@@ -19,6 +21,10 @@ from web.discogs import (
     search_releases,
     search_artists,
     get_artist_name,
+    search_labels,
+    get_label,
+    get_label_releases,
+    LabelEntity,
 )
 
 
@@ -353,6 +359,257 @@ class TestGetArtistName(unittest.TestCase):
     def test_returns_name(self):
         with _mock_urlopen({"id": 3840, "name": "Radiohead"}):
             self.assertEqual(get_artist_name(3840), "Radiohead")
+
+
+# ── Label adapter tests (U3) ────────────────────────────────────────────
+
+
+class TestSearchLabels(unittest.TestCase):
+    """search_labels() hits /api/labels?name= and returns LabelEntity list."""
+
+    LABEL_SEARCH_DATA = {
+        "results": [
+            {
+                "id": 2294,
+                "name": "Parlophone",
+                "profile": "British record label founded in 1896.",
+                "parent_label_id": None,
+                "parent_label_name": None,
+                "release_count": 18452,
+                "score": 0.087,
+            },
+            {
+                "id": 25693,
+                "name": "Parlophone Records Ltd.",
+                "profile": "Subsidiary trading name.",
+                "parent_label_id": 2294,
+                "parent_label_name": "Parlophone",
+                "release_count": 412,
+                "score": 0.072,
+            },
+        ],
+        "total": 2,
+        "page": 1,
+        "per_page": 25,
+    }
+
+    def test_returns_label_entities(self):
+        with _mock_urlopen(self.LABEL_SEARCH_DATA) as mock:
+            results = search_labels("Parlophone")
+
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("/api/labels?name=", called_url)
+
+        self.assertEqual(len(results), 2)
+        first = results[0]
+        self.assertIsInstance(first, LabelEntity)
+        self.assertEqual(first.source, "discogs")
+        self.assertEqual(first.id, "2294")  # int → str coercion
+        self.assertEqual(first.name, "Parlophone")
+        self.assertIsNone(first.country)  # discogs has no country column
+        self.assertEqual(first.profile, "British record label founded in 1896.")
+        self.assertIsNone(first.parent_label_id)
+        self.assertIsNone(first.parent_label_name)
+        self.assertEqual(first.release_count, 18452)
+
+        sub = results[1]
+        self.assertEqual(sub.id, "25693")
+        self.assertEqual(sub.parent_label_id, "2294")  # int → str coercion
+        self.assertEqual(sub.parent_label_name, "Parlophone")
+
+    def test_empty_results_returns_empty_list(self):
+        with _mock_urlopen({"results": [], "total": 0, "page": 1, "per_page": 25}):
+            results = search_labels("zzzzznosuchlabel")
+        self.assertEqual(results, [])
+
+    def test_wire_boundary_validates_release_count_int(self):
+        """RED-first regression guard: a release_count arriving as a STRING
+        instead of int must raise msgspec.ValidationError at the boundary.
+        Per .claude/rules/code-quality.md, every wire-boundary type owes
+        at least one test that proves it actually catches drift."""
+        bad = {
+            "results": [
+                {
+                    "id": 2294,
+                    "name": "Parlophone",
+                    "profile": "x",
+                    "parent_label_id": None,
+                    "parent_label_name": None,
+                    "release_count": "18452",  # WRONG: string, not int
+                    "score": 0.087,
+                },
+            ],
+            "total": 1,
+            "page": 1,
+            "per_page": 25,
+        }
+        with _mock_urlopen(bad):
+            with self.assertRaises(msgspec.ValidationError):
+                search_labels("Parlophone")
+
+
+class TestGetLabel(unittest.TestCase):
+    """get_label() hits /api/labels/{id} and returns a LabelEntity."""
+
+    TOP_LEVEL_DATA = {
+        "id": 2294,
+        "name": "Parlophone",
+        "profile": "British record label.",
+        "contactinfo": "",
+        "data_quality": "Correct",
+        "parent_label_id": None,
+        "parent_label_name": None,
+        "total_releases": 18452,
+        "sub_labels": [
+            {"id": 25693, "name": "Parlophone Records Ltd.", "release_count": 412},
+        ],
+    }
+
+    SUB_LABEL_DATA = {
+        "id": 25693,
+        "name": "Parlophone Records Ltd.",
+        "profile": "",
+        "contactinfo": "",
+        "data_quality": "Needs Vote",
+        "parent_label_id": 2294,
+        "parent_label_name": "Parlophone",
+        "total_releases": 412,
+        "sub_labels": [],
+    }
+
+    def test_top_level_label(self):
+        with _mock_urlopen(self.TOP_LEVEL_DATA) as mock:
+            entity = get_label(2294)
+
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("/api/labels/2294", called_url)
+
+        self.assertIsInstance(entity, LabelEntity)
+        self.assertEqual(entity.source, "discogs")
+        self.assertEqual(entity.id, "2294")
+        self.assertEqual(entity.name, "Parlophone")
+        self.assertIsNone(entity.country)
+        self.assertEqual(entity.profile, "British record label.")
+        self.assertIsNone(entity.parent_label_id)
+        self.assertIsNone(entity.parent_label_name)
+        self.assertEqual(entity.release_count, 18452)  # comes from total_releases
+
+    def test_sub_label_has_parent(self):
+        with _mock_urlopen(self.SUB_LABEL_DATA):
+            entity = get_label(25693)
+
+        self.assertEqual(entity.parent_label_id, "2294")
+        self.assertEqual(entity.parent_label_name, "Parlophone")
+        self.assertEqual(entity.release_count, 412)
+
+
+class TestGetLabelReleases(unittest.TestCase):
+    """get_label_releases() hits /api/labels/{id}/releases."""
+
+    RELEASES_DATA = {
+        "results": [
+            {
+                "id": 83182,
+                "title": "OK Computer",
+                "country": "Europe",
+                "released": "1997-06-16",
+                "master_id": 21491,
+                "master_title": "OK Computer",
+                "master_first_released": "1997",
+                "primary_type": "Album",
+                "via_label_id": 2294,
+                "sub_label_name": None,
+                "artists": [{"id": 3840, "name": "Radiohead", "role": "", "anv": ""}],
+                "labels": [{"id": 2294, "name": "Parlophone", "catno": "NODATA 02"}],
+                "formats": [
+                    {"name": "CD", "qty": 1, "descriptions": "Album", "free_text": ""}
+                ],
+            },
+            {
+                "id": 999111,
+                "title": "Some Sub-label Release",
+                "country": "UK",
+                "released": "2001",
+                "master_id": None,
+                "primary_type": "Single",
+                "via_label_id": 25693,
+                "sub_label_name": "Parlophone Records Ltd.",
+                "artists": [{"id": 1, "name": "Various", "role": "", "anv": ""}],
+                "labels": [
+                    {"id": 25693, "name": "Parlophone Records Ltd.", "catno": "PRL 1"}
+                ],
+                "formats": [
+                    {"name": "Vinyl", "qty": 1, "descriptions": "7\"", "free_text": ""}
+                ],
+            },
+        ],
+        "pagination": {"page": 1, "per_page": 100, "pages": 1, "items": 2},
+        "include_sublabels": True,
+    }
+
+    def test_returns_release_rows(self):
+        with _mock_urlopen(self.RELEASES_DATA) as mock:
+            payload = get_label_releases(2294, include_sublabels=True, page=1, per_page=100)
+
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("/api/labels/2294/releases", called_url)
+        self.assertIn("include_sublabels=true", called_url)
+        self.assertIn("page=1", called_url)
+        self.assertIn("per_page=100", called_url)
+
+        self.assertIn("results", payload)
+        self.assertIn("pagination", payload)
+        self.assertIn("include_sublabels", payload)
+        self.assertTrue(payload["include_sublabels"])
+        self.assertEqual(payload["pagination"]["items"], 2)
+
+        rows = payload["results"]
+        self.assertEqual(len(rows), 2)
+
+        direct = rows[0]
+        # Match shape used by web/discogs.py::get_master_releases / get_release
+        # so the U4 route layer can overlay library/pipeline state without
+        # renaming fields. ID is stringified, year derived from `released`,
+        # primary_artist_id surfaces for cross-source overlay.
+        self.assertEqual(direct["id"], "83182")
+        self.assertEqual(direct["title"], "OK Computer")
+        self.assertEqual(direct["primary_type"], "Album")
+        self.assertEqual(direct["country"], "Europe")
+        self.assertEqual(direct["date"], "1997-06-16")
+        self.assertEqual(direct["year"], 1997)
+        self.assertEqual(direct["release_group_id"], "21491")
+        self.assertEqual(direct["master_title"], "OK Computer")
+        self.assertEqual(direct["master_first_released"], "1997")
+        self.assertEqual(direct["artist_name"], "Radiohead")
+        self.assertEqual(direct["artist_id"], "3840")
+        self.assertEqual(direct["via_label_id"], "2294")
+        self.assertIsNone(direct["sub_label_name"])  # direct-parent release
+        self.assertEqual(direct["format"], "CD")
+
+        sub = rows[1]
+        self.assertEqual(sub["id"], "999111")
+        self.assertEqual(sub["sub_label_name"], "Parlophone Records Ltd.")
+        self.assertEqual(sub["via_label_id"], "25693")
+        self.assertIsNone(sub["release_group_id"])  # masterless
+        self.assertEqual(sub["primary_type"], "Single")
+        self.assertEqual(sub["format"], "Vinyl")
+
+    def test_default_pagination_kwargs(self):
+        with _mock_urlopen(self.RELEASES_DATA) as mock:
+            get_label_releases(2294)
+
+        called_url = mock.call_args[0][0].full_url
+        # Defaults per signature: include_sublabels=True, page=1, per_page=100
+        self.assertIn("include_sublabels=true", called_url)
+        self.assertIn("page=1", called_url)
+        self.assertIn("per_page=100", called_url)
+
+    def test_include_sublabels_false_passes_through(self):
+        with _mock_urlopen({**self.RELEASES_DATA, "include_sublabels": False}) as mock:
+            payload = get_label_releases(2294, include_sublabels=False)
+        called_url = mock.call_args[0][0].full_url
+        self.assertIn("include_sublabels=false", called_url)
+        self.assertFalse(payload["include_sublabels"])
 
 
 if __name__ == "__main__":
