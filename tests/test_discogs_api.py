@@ -252,6 +252,16 @@ class TestSearchReleases(unittest.TestCase):
         self.assertFalse(masterless["is_master"])
         self.assertEqual(masterless["first_release_date"], "1996")  # falls back to released
 
+    def test_long_query_uses_bounded_cache_key(self):
+        long_query = "r" * 250
+        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+            search_releases(long_query)
+
+        cache_key = memo.call_args[0][0]
+        self.assertTrue(cache_key.startswith("discogs:search:releases:"))
+        self.assertIn(f":#{len(long_query)}:", cache_key)
+        self.assertLess(len(cache_key), len(f"discogs:search:releases:{long_query}"))
+
 
 class TestSearchArtists(unittest.TestCase):
     """search_artists() now hits /api/artists?name= (real artist-name index)."""
@@ -291,6 +301,16 @@ class TestSearchArtists(unittest.TestCase):
         self.assertEqual(results[0]["disambiguation"], "")  # left empty intentionally
         self.assertEqual(results[0]["score"], 6)  # int(0.06 * 100)
         self.assertEqual(results[1]["name"], "Radioheads")
+
+    def test_long_query_uses_bounded_cache_key(self):
+        long_query = "a" * 250
+        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+            search_artists(long_query)
+
+        cache_key = memo.call_args[0][0]
+        self.assertTrue(cache_key.startswith("discogs:search:artists:"))
+        self.assertIn(f":#{len(long_query)}:", cache_key)
+        self.assertLess(len(cache_key), len(f"discogs:search:artists:{long_query}"))
 
 
 class TestGetArtistReleases(unittest.TestCase):
@@ -447,6 +467,21 @@ class TestSearchLabels(unittest.TestCase):
             with self.assertRaises(msgspec.ValidationError):
                 search_labels("Parlophone")
 
+    def test_long_query_uses_bounded_distinct_cache_key(self):
+        q1 = "x" * 250
+        q2 = ("x" * 200) + ("y" * 50)
+
+        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+            search_labels(q1)
+            search_labels(q2)
+
+        key1 = memo.call_args_list[0].args[0]
+        key2 = memo.call_args_list[1].args[0]
+        self.assertNotEqual(key1, key2)
+        self.assertIn(f":#{len(q1)}:", key1)
+        self.assertIn(f":#{len(q2)}:", key2)
+        self.assertLess(len(key1), len(f"discogs:search:labels:{q1}:p=1:pp=25"))
+
 
 class TestGetLabel(unittest.TestCase):
     """get_label() hits /api/labels/{id} and returns a LabelEntity."""
@@ -493,6 +528,9 @@ class TestGetLabel(unittest.TestCase):
         self.assertIsNone(entity.parent_label_id)
         self.assertIsNone(entity.parent_label_name)
         self.assertEqual(entity.release_count, 18452)  # comes from total_releases
+        self.assertEqual(entity.sub_labels, [
+            {"id": 25693, "name": "Parlophone Records Ltd.", "release_count": 412},
+        ])
 
     def test_sub_label_has_parent(self):
         with _mock_urlopen(self.SUB_LABEL_DATA):
@@ -501,6 +539,14 @@ class TestGetLabel(unittest.TestCase):
         self.assertEqual(entity.parent_label_id, "2294")
         self.assertEqual(entity.parent_label_name, "Parlophone")
         self.assertEqual(entity.release_count, 412)
+        self.assertEqual(entity.sub_labels, [])
+
+    def test_rejects_non_numeric_label_id(self):
+        with self.assertRaises(AssertionError):
+            get_label("../etc/passwd")
+
+        with self.assertRaises(AssertionError):
+            get_label("123 OR 1=1")
 
 
 class TestGetLabelReleases(unittest.TestCase):
@@ -517,7 +563,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 "master_title": "OK Computer",
                 "master_first_released": "1997",
                 "primary_type": "Album",
-                "via_label_id": 2294,
+                "label_id": 2294,
                 "sub_label_name": None,
                 "artists": [{"id": 3840, "name": "Radiohead", "role": "", "anv": ""}],
                 "labels": [{"id": 2294, "name": "Parlophone", "catno": "NODATA 02"}],
@@ -532,7 +578,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 "released": "2001",
                 "master_id": None,
                 "primary_type": "Single",
-                "via_label_id": 25693,
+                "label_id": 25693,
                 "sub_label_name": "Parlophone Records Ltd.",
                 "artists": [{"id": 1, "name": "Various", "role": "", "anv": ""}],
                 "labels": [
@@ -582,6 +628,7 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertEqual(direct["master_first_released"], "1997")
         self.assertEqual(direct["artist_name"], "Radiohead")
         self.assertEqual(direct["artist_id"], "3840")
+        self.assertEqual(direct["label_id"], "2294")
         self.assertEqual(direct["via_label_id"], "2294")
         self.assertIsNone(direct["sub_label_name"])  # direct-parent release
         self.assertEqual(direct["format"], "CD")
@@ -589,10 +636,22 @@ class TestGetLabelReleases(unittest.TestCase):
         sub = rows[1]
         self.assertEqual(sub["id"], "999111")
         self.assertEqual(sub["sub_label_name"], "Parlophone Records Ltd.")
+        self.assertEqual(sub["label_id"], "25693")
         self.assertEqual(sub["via_label_id"], "25693")
         self.assertIsNone(sub["release_group_id"])  # masterless
         self.assertEqual(sub["primary_type"], "Single")
         self.assertEqual(sub["format"], "Vinyl")
+
+    def test_accepts_legacy_via_label_id_payload(self):
+        legacy = json.loads(json.dumps(self.RELEASES_DATA))
+        for row in legacy["results"]:
+            row["via_label_id"] = row.pop("label_id")
+
+        with _mock_urlopen(legacy):
+            payload = get_label_releases(112294, include_sublabels=True)
+
+        self.assertEqual(payload["results"][0]["label_id"], "2294")
+        self.assertEqual(payload["results"][0]["via_label_id"], "2294")
 
     def test_default_pagination_kwargs(self):
         with _mock_urlopen(self.RELEASES_DATA) as mock:
@@ -604,6 +663,13 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertIn("page=1", called_url)
         self.assertIn("per_page=100", called_url)
 
+    def test_rejects_non_numeric_label_id(self):
+        with self.assertRaises(AssertionError):
+            get_label_releases("../etc/passwd")
+
+        with self.assertRaises(AssertionError):
+            get_label_releases("123 OR 1=1")
+
     def test_include_sublabels_false_passes_through(self):
         with _mock_urlopen({**self.RELEASES_DATA, "include_sublabels": False}) as mock:
             payload = get_label_releases(2294, include_sublabels=False)
@@ -612,7 +678,7 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertFalse(payload["include_sublabels"])
 
     def test_sub_labels_dropped_default_false(self):
-        """Plan 003 U4: every successful response carries
+        """Plan 002 U3: every successful response carries
         `sub_labels_dropped` so the contract is stable. Default False."""
         with _mock_urlopen(self.RELEASES_DATA):
             payload = get_label_releases(2294, include_sublabels=True)
@@ -620,7 +686,7 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertFalse(payload["sub_labels_dropped"])
 
     def test_503_falls_back_to_no_sublabels(self):
-        """Plan 003 U4: when the upstream returns 503 (timeout) and the
+        """Plan 002 U3: when the upstream returns 503 (timeout) and the
         caller asked for sub-labels, the adapter retries once with
         include_sublabels=False and flags the response."""
         from urllib.error import HTTPError
@@ -633,7 +699,10 @@ class TestGetLabelReleases(unittest.TestCase):
         success_resp.__enter__ = lambda s: s
         success_resp.__exit__ = MagicMock(return_value=False)
 
+        seen_urls = []
+
         def _urlopen(req, *_args, **_kwargs):
+            seen_urls.append(req.full_url)
             if "include_sublabels=true" in req.full_url:
                 raise HTTPError(
                     req.full_url, 503, "Service Unavailable",
@@ -642,15 +711,59 @@ class TestGetLabelReleases(unittest.TestCase):
             return success_resp
 
         with patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
-            payload = get_label_releases(99887766, include_sublabels=True)
+            payload = get_label_releases(
+                99887766, include_sublabels=True, page=3, per_page=50)
 
         self.assertTrue(payload["sub_labels_dropped"])
         # Fallback fetch ran and surfaced its successful payload
         self.assertFalse(payload["include_sublabels"])
         self.assertEqual(len(payload["results"]), 2)
+        self.assertIn("include_sublabels=true", seen_urls[0])
+        self.assertIn("page=3", seen_urls[0])
+        self.assertIn("per_page=50", seen_urls[0])
+        self.assertIn("include_sublabels=false", seen_urls[1])
+        self.assertIn("page=3", seen_urls[1])
+        self.assertIn("per_page=50", seen_urls[1])
+
+    def test_timeout_falls_back_to_no_sublabels(self):
+        success_resp = MagicMock()
+        success_resp.read.return_value = json.dumps(
+            {**self.RELEASES_DATA, "include_sublabels": False}).encode()
+        success_resp.__enter__ = lambda s: s
+        success_resp.__exit__ = MagicMock(return_value=False)
+
+        def _urlopen(req, *_args, **_kwargs):
+            if "include_sublabels=true" in req.full_url:
+                raise TimeoutError("timed out")
+            return success_resp
+
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+            payload = get_label_releases(99887762, include_sublabels=True)
+
+        self.assertTrue(payload["sub_labels_dropped"])
+        self.assertFalse(payload["include_sublabels"])
+
+    def test_include_sublabels_uses_bounded_timeout(self):
+        seen_timeouts = []
+
+        def _urlopen(req, *_args, **kwargs):
+            seen_timeouts.append(kwargs.get("timeout"))
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(self.RELEASES_DATA).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            return mock_resp
+
+        with patch("web.discogs._cache.memoize_meta",
+                   side_effect=lambda _key, fn: fn()), \
+                patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+            get_label_releases(99887761, include_sublabels=True)
+            get_label_releases(99887760, include_sublabels=False)
+
+        self.assertEqual(seen_timeouts, [20, 60])
 
     def test_503_then_503_reraises(self):
-        """Plan 003 U4: if the fallback also 503s, the original HTTPError
+        """Plan 002 U3: if the fallback also 503s, the original HTTPError
         re-raises. No infinite retry."""
         from urllib.error import HTTPError
         from io import BytesIO
@@ -666,7 +779,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 get_label_releases(99887765, include_sublabels=True)
 
     def test_503_when_sub_labels_already_false_reraises(self):
-        """Plan 003 U4: 503 with include_sublabels=False has nothing to fall
+        """Plan 002 U3: 503 with include_sublabels=False has nothing to fall
         back to — re-raise."""
         from urllib.error import HTTPError
         from io import BytesIO
@@ -682,7 +795,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 get_label_releases(99887764, include_sublabels=False)
 
     def test_404_propagates_unchanged(self):
-        """Plan 003 U4: 404 surfaces as 404 (existing route maps it). The
+        """Plan 002 U3: 404 surfaces as 404 (existing route maps it). The
         503 retry must not swallow other HTTP errors."""
         from urllib.error import HTTPError
         from io import BytesIO

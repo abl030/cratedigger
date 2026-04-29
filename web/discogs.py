@@ -11,8 +11,10 @@ so that per-user pipeline / library overlay state is never baked
 into Redis (issue #101).
 """
 
+import hashlib
 import json
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,9 +26,12 @@ from web import cache as _cache
 
 DISCOGS_API_BASE = "https://discogs.ablz.au"
 USER_AGENT = "cratedigger-web/1.0"
+SEARCH_CACHE_QUERY_PREFIX_CHARS = 200
+DEFAULT_HTTP_TIMEOUT_SECONDS = 60
+LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
 
 
-def _get(url: str) -> dict:
+def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> dict:
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Connection", "close")
@@ -34,8 +39,34 @@ def _get(url: str) -> dict:
     # mirror; the request always succeeds eventually. Generous timeout so the
     # web UI doesn't 500 on broad queries (use the in-flight Redis cache to
     # short-circuit repeats).
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return True
+        reason_text = str(reason).lower()
+        return "timed out" in reason_text or "timeout" in reason_text
+    return False
+
+
+def _search_cache_query_part(query: str) -> str:
+    """Bound user-controlled search text before embedding it in cache keys."""
+    if len(query) <= SEARCH_CACHE_QUERY_PREFIX_CHARS:
+        return query
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
+    return f"{query[:SEARCH_CACHE_QUERY_PREFIX_CHARS]}:#{len(query)}:{digest}"
+
+
+def _assert_discogs_label_id(label_id: int | str) -> str:
+    label_id_str = str(label_id)
+    assert label_id_str.isdigit()
+    return label_id_str
 
 
 def _parse_duration(duration_str: str) -> float | None:
@@ -134,7 +165,8 @@ def search_releases(query: str) -> list[dict]:
             })
         return results
 
-    return _cache.memoize_meta(f"discogs:search:releases:{query}", _fetch)
+    cache_query = _search_cache_query_part(query)
+    return _cache.memoize_meta(f"discogs:search:releases:{cache_query}", _fetch)
 
 
 def search_artists(query: str) -> list[dict]:
@@ -156,7 +188,8 @@ def search_artists(query: str) -> list[dict]:
             for r in data.get("results", [])
         ]
 
-    return _cache.memoize_meta(f"discogs:search:artists:{query}", _fetch)
+    cache_query = _search_cache_query_part(query)
+    return _cache.memoize_meta(f"discogs:search:artists:{cache_query}", _fetch)
 
 
 def get_artist_releases(artist_id: int) -> list[dict]:
@@ -321,7 +354,7 @@ class _DiscogsLabelHit(msgspec.Struct):
     """One hit from `GET /api/labels?name=...`."""
     id: int
     name: str
-    profile: str
+    profile: str | None
     parent_label_id: int | None
     parent_label_name: str | None
     release_count: int
@@ -347,9 +380,9 @@ class _DiscogsLabelDetail(msgspec.Struct):
     Discogs adapter; the future MB adapter will populate it."""
     id: int
     name: str
-    profile: str
-    contactinfo: str
-    data_quality: str
+    profile: str | None
+    contactinfo: str | None
+    data_quality: str | None
     parent_label_id: int | None
     parent_label_name: str | None
     total_releases: int
@@ -384,10 +417,14 @@ class _DiscogsLabelReleaseEntry(msgspec.Struct):
     released: str
     master_id: int | None
     primary_type: str
-    via_label_id: int
     artists: list[_DiscogsApiArtistCredit]
     labels: list[_DiscogsApiLabel]
     formats: list[_DiscogsApiFormat]
+    # Rollout compatibility: Plan 004 renamed the wire field to `label_id`,
+    # but older mirror deployments emit `via_label_id`. Accept both while
+    # cratedigger and discogs-api can be deployed independently.
+    label_id: int | None = None
+    via_label_id: int | None = None
     # Optional fields (skipped on the Rust side when None) — declared with
     # a default so msgspec accepts payloads where the key is omitted entirely.
     master_title: str | None = None
@@ -406,6 +443,14 @@ class _DiscogsLabelReleasesResponse(msgspec.Struct):
     results: list[_DiscogsLabelReleaseEntry]
     pagination: _DiscogsLabelPagination
     include_sublabels: bool
+
+
+def _label_release_label_id(row: _DiscogsLabelReleaseEntry) -> int:
+    if row.label_id is not None:
+        return row.label_id
+    if row.via_label_id is not None:
+        return row.via_label_id
+    raise msgspec.ValidationError("label release row missing label_id/via_label_id")
 
 
 # ── Source-agnostic public contract ─────────────────────────────────────
@@ -436,6 +481,7 @@ class LabelEntity(msgspec.Struct):
     parent_label_id: str | None
     parent_label_name: str | None
     release_count: int
+    sub_labels: list[dict] = msgspec.field(default_factory=list)
 
 
 def _label_entity_from_hit(hit: _DiscogsLabelHit) -> LabelEntity:
@@ -448,6 +494,7 @@ def _label_entity_from_hit(hit: _DiscogsLabelHit) -> LabelEntity:
         parent_label_id=str(hit.parent_label_id) if hit.parent_label_id is not None else None,
         parent_label_name=hit.parent_label_name,
         release_count=hit.release_count,
+        sub_labels=[],
     )
 
 
@@ -461,6 +508,7 @@ def _label_entity_from_detail(detail: _DiscogsLabelDetail) -> LabelEntity:
         parent_label_id=str(detail.parent_label_id) if detail.parent_label_id is not None else None,
         parent_label_name=detail.parent_label_name,
         release_count=detail.total_releases,
+        sub_labels=[msgspec.to_builtins(s) for s in detail.sub_labels],
     )
 
 
@@ -487,7 +535,8 @@ def search_labels(query: str, *, page: int = 1, per_page: int = 25) -> list[Labe
         return [msgspec.to_builtins(_label_entity_from_hit(h))
                 for h in decoded.results]
 
-    cache_key = f"discogs:search:labels:{query}:p={page}:pp={per_page}"
+    cache_query = _search_cache_query_part(query)
+    cache_key = f"discogs:search:labels:{cache_query}:p={page}:pp={per_page}"
     cached = _cache.memoize_meta(cache_key, _fetch)
     return [msgspec.convert(d, type=LabelEntity) for d in cached]
 
@@ -499,12 +548,14 @@ def get_label(label_id: int | str) -> LabelEntity:
     HTTPError on 404 (the caller surfaces the 404 as needed). Returns
     a typed `LabelEntity` on success.
     """
+    label_id_str = _assert_discogs_label_id(label_id)
+
     def _fetch() -> dict:
-        raw = _get(f"{DISCOGS_API_BASE}/api/labels/{label_id}")
+        raw = _get(f"{DISCOGS_API_BASE}/api/labels/{label_id_str}")
         decoded = msgspec.convert(raw, type=_DiscogsLabelDetail)
         return msgspec.to_builtins(_label_entity_from_detail(decoded))
 
-    cached = _cache.memoize_meta(f"discogs:label:{label_id}", _fetch)
+    cached = _cache.memoize_meta(f"discogs:label:v2:{label_id_str}", _fetch)
     return msgspec.convert(cached, type=LabelEntity)
 
 
@@ -519,15 +570,21 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
     `title`, `country`, `date` (released), `year` (parsed from date),
     `primary_type`, `release_group_id` (str | None), `artist_name`,
     `artist_id` (str | None), `format` (joined names) — plus
-    label-specific fields `via_label_id` (str), `sub_label_name`
+    label-specific fields `label_id` (str), `sub_label_name`
     (str | None), `master_title`, `master_first_released`, `labels`,
     `formats`.
     """
+    label_id_str = _assert_discogs_label_id(label_id)
+
     def _fetch() -> dict:
         sub_flag = "true" if include_sublabels else "false"
         raw = _get(
-            f"{DISCOGS_API_BASE}/api/labels/{label_id}/releases"
-            f"?include_sublabels={sub_flag}&page={page}&per_page={per_page}"
+            f"{DISCOGS_API_BASE}/api/labels/{label_id_str}/releases"
+            f"?include_sublabels={sub_flag}&page={page}&per_page={per_page}",
+            timeout=(
+                LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS
+                if include_sublabels else DEFAULT_HTTP_TIMEOUT_SECONDS
+            ),
         )
         decoded = msgspec.convert(raw, type=_DiscogsLabelReleasesResponse)
         rows: list[dict] = []
@@ -535,6 +592,7 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
             artist_name = r.artists[0].name if r.artists else "Unknown"
             artist_id = r.artists[0].id if r.artists else None
             format_names = [f.name for f in r.formats]
+            label_id_for_row = str(_label_release_label_id(r))
             rows.append({
                 "id": str(r.id),
                 "title": r.title,
@@ -547,7 +605,8 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
                 "master_first_released": r.master_first_released,
                 "artist_name": artist_name,
                 "artist_id": str(artist_id) if artist_id is not None else None,
-                "via_label_id": str(r.via_label_id),
+                "label_id": label_id_for_row,
+                "via_label_id": label_id_for_row,
                 "sub_label_name": r.sub_label_name,
                 "format": ", ".join(format_names) if format_names else "?",
                 "media_count": len(r.formats),
@@ -578,25 +637,33 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
 
     sub_flag = "true" if include_sublabels else "false"
     cache_key = (
-        f"discogs:label:{label_id}:releases"
+        f"discogs:label:v2:{label_id_str}:releases"
         f":sub={sub_flag}:p={page}:pp={per_page}"
     )
+
+    def _fallback_without_sublabels() -> dict:
+        fallback = get_label_releases(
+            label_id, include_sublabels=False,
+            page=page, per_page=per_page)
+        # Don't mutate the fallback dict in place — it is the cached
+        # value for a different cache key, and direct callers of
+        # `include_sublabels=False` would see a false-positive
+        # `sub_labels_dropped` if we wrote through.
+        return {**fallback, "sub_labels_dropped": True}
+
     try:
         return _cache.memoize_meta(cache_key, _fetch)
     except urllib.error.HTTPError as e:
-        # Plan 003 U4. The discogs-api mirror returns 503 when the
+        # Plan 002 U3. The discogs-api mirror returns 503 when the
         # recursive sub-label CTE exceeds its statement_timeout (P0 plan).
         # Retry once with sub-labels disabled so the user sees the direct
         # catalogue rather than a hard error. The fallback uses its own
-        # cache key (`sub=false`), so a successful retry is memoized
-        # independently — repeat hits skip the failing call entirely.
+        # cache key (`sub=false`), so the direct-label fallback can be
+        # reused while future full-rollup attempts still probe upstream.
         if e.code == 503 and include_sublabels:
-            fallback = get_label_releases(
-                label_id, include_sublabels=False,
-                page=page, per_page=per_page)
-            # Don't mutate the fallback dict in place — it is the cached
-            # value for a different cache key, and direct callers of
-            # `include_sublabels=False` would see a false-positive
-            # `sub_labels_dropped` if we wrote through.
-            return {**fallback, "sub_labels_dropped": True}
+            return _fallback_without_sublabels()
+        raise
+    except (TimeoutError, socket.timeout, urllib.error.URLError) as e:
+        if include_sublabels and _is_timeout_error(e):
+            return _fallback_without_sublabels()
         raise

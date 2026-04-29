@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Iterable
 
 
-def overlay_release_rows(rows: list[dict], release_ids: Iterable[str]) -> None:
+def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) -> None:
     """Annotate each release row with library + pipeline state in place.
 
     Parameters

@@ -18,7 +18,7 @@ from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
 from web.library_artist_service import list_library_artist_rows
-from web.routes._overlay import overlay_release_rows
+from web.routes._overlay import overlay_release_rows_in_place
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -227,7 +227,7 @@ def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], r
     # Standard toolbar (Remove from beets) and badge renderer (in library
     # + codec-aware rank) read these overlay fields per row, so route
     # them through the shared helper.
-    overlay_release_rows(data["releases"], [r["id"] for r in data["releases"]])
+    overlay_release_rows_in_place(data["releases"], [r["id"] for r in data["releases"]])
     h._json(data)  # type: ignore[attr-defined]
 
 
@@ -304,7 +304,7 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
 
 def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], master_id: str) -> None:
     data = discogs_api.get_master_releases(int(master_id))
-    overlay_release_rows(data["releases"], [r["id"] for r in data["releases"]])
+    overlay_release_rows_in_place(data["releases"], [r["id"] for r in data["releases"]])
     h._json(data)  # type: ignore[attr-defined]
 
 

@@ -34,6 +34,10 @@ export const BIG_LABEL_THRESHOLD = 1000;
  */
 export const MAX_RENDERED = 100;
 
+const LABEL_YEAR_FILTER_DEBOUNCE_MS = 300;
+let labelYearFilterTimer = 0;
+let labelDetailRequestToken = 0;
+
 /**
  * Build the URL for `/api/discogs/label/search`.
  * Pure for testability.
@@ -331,6 +335,7 @@ export function openLabelDetailFromList(rowEl, index) {
  * @param {string} labelName
  */
 export async function openLabelDetail(labelId, labelName) {
+  const requestToken = ++labelDetailRequestToken;
   state.browseLabel = { id: labelId, name: labelName };
   state.browseSubView = 'label';
   state.labelPage = 1;
@@ -350,12 +355,13 @@ export async function openLabelDetail(labelId, labelName) {
   body.innerHTML = '<div class="loading">Loading label catalogue...</div>';
 
   // Single fetch; the route auto-flips include_sublabels=false on big
-  // labels, and the adapter's 503 fallback (Plan 003 U4) handles the
+  // labels, and the adapter's 503 fallback (Plan 002 U3) handles the
   // genuinely-degraded case via `payload.sub_labels_dropped`. The old
   // empty-results retry was dead code once those two landed — removed
-  // in Plan 003 U5.
+  // in the follow-up label pagination work.
   try {
-    const payload = await loadLabelReleases(labelId, { include_sublabels: true, page: 1 });
+    const payload = await loadLabelReleases(labelId, { page: 1 });
+    if (requestToken !== labelDetailRequestToken) return;
     const totalCount = (payload && payload.label && payload.label.release_count) || 0;
     if (totalCount > BIG_LABEL_THRESHOLD) {
       // Flag the label as big so any future affordance that wants to
@@ -366,6 +372,7 @@ export async function openLabelDetail(labelId, labelName) {
     }
     renderLabelDetail(body, payload);
   } catch (e) {
+    if (requestToken !== labelDetailRequestToken) return;
     body.innerHTML = '<div class="loading">Failed to load label</div>';
   }
 }
@@ -377,13 +384,15 @@ export async function openLabelDetail(labelId, labelName) {
  */
 export async function goToLabelPage(page) {
   if (!state.browseLabel) return;
+  const requestToken = ++labelDetailRequestToken;
   const labelId = state.browseLabel.id;
-  const includeSub = !!(state.labelFilters && /** @type {any} */ (state.labelFilters).includeSubFromUI);
   // Read the current toggle state if present — bigLabel labels show an
   // explicit checkbox; default otherwise comes from the original load.
   const toggle = /** @type {HTMLInputElement|null} */ (
     document.getElementById('label-include-sublabels'));
-  const useSub = toggle ? toggle.checked : includeSub;
+  const currentBody = /** @type {any} */ (
+    document.getElementById('browse-label-body'));
+  const useSub = toggle ? toggle.checked : currentBody?._includeSub !== false;
 
   state.labelPage = page;
   const body = document.getElementById('browse-label-body');
@@ -394,8 +403,10 @@ export async function goToLabelPage(page) {
       include_sublabels: useSub,
       page,
     });
+    if (requestToken !== labelDetailRequestToken) return;
     renderLabelDetail(body, payload);
   } catch (_e) {
+    if (requestToken !== labelDetailRequestToken) return;
     body.innerHTML = '<div class="loading">Failed to load page ' + page + '</div>';
   }
 }
@@ -404,6 +415,7 @@ export async function goToLabelPage(page) {
  * Close the label detail view; show search results.
  */
 export function closeLabelDetail() {
+  labelDetailRequestToken++;
   state.browseLabel = null;
   state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
   const browseLabel = document.getElementById('browse-label');
@@ -419,12 +431,7 @@ export function closeLabelDetail() {
  * @returns {Promise<Object>}
  */
 export async function loadLabelReleases(labelId, opts = {}) {
-  const includeSub = opts.include_sublabels !== false;
-  const url = `${API}${buildLabelDetailUrl(labelId, {
-    include_sublabels: includeSub,
-    page: opts.page,
-    per_page: opts.per_page,
-  })}`;
+  const url = `${API}${buildLabelDetailUrl(labelId, opts)}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return await r.json();
@@ -489,12 +496,12 @@ export function renderLabelDetail(containerEl, payload) {
   const renderedNote = (pages > 1)
     ? `<div class="loading" style="text-align:left;padding:6px 0;color:#888;">Page ${currentPage} of ${pages} — ${totalCount} release${totalCount === 1 ? '' : 's'} total</div>`
     : '';
-  // Plan 003 U4 banner: the upstream returned 503 on the recursive
+  // Plan 002 U3 banner: the upstream returned 503 on the recursive
   // sub-label CTE; the adapter retried with sub-labels off. Surface
   // that to the user so they understand why the catalogue looks thinner
   // than the entity's release_count would suggest.
   const subLabelsDroppedBanner = subLabelsDropped
-    ? '<div class="loading" style="text-align:left;padding:6px 10px;margin:6px 0;color:#e0c060;background:#2a2410;border:1px solid #44391a;border-radius:4px;font-size:0.85em;">Sub-labels temporarily unavailable for this label — showing direct releases only.</div>'
+    ? '<div class="loading" style="text-align:left;padding:6px 10px;margin:6px 0;color:#e0c060;background:#2a2410;border:1px solid #44391a;border-radius:4px;font-size:0.85em;">Sub-labels unavailable for this label — showing direct releases only.</div>'
     : '';
   const bigLabelToggle = (totalCount > BIG_LABEL_THRESHOLD)
     ? `<label style="margin-left:10px;font-size:0.85em;color:#aaa;">
@@ -526,11 +533,11 @@ export function renderLabelDetail(containerEl, payload) {
       <span style="font-size:0.8em;color:#888;">Year</span>
       <input type="number" id="label-year-min" placeholder="min" value="${yMinVal}"
              style="width:80px;padding:4px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:13px;"
-             oninput="window.onLabelFilterChange()">
+             oninput="window.onLabelYearFilterInput()">
       <span style="color:#666;">–</span>
       <input type="number" id="label-year-max" placeholder="max" value="${yMaxVal}"
              style="width:80px;padding:4px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:13px;"
-             oninput="window.onLabelFilterChange()">
+             oninput="window.onLabelYearFilterInput()">
       <span style="font-size:0.8em;color:#888;margin-left:8px;">Format</span>
       <select id="label-format" onchange="window.onLabelFilterChange()"
               style="padding:4px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:13px;">
@@ -610,7 +617,7 @@ export function renderLabelRows(containerEl) {
     const fmt = rel.format ? `<span class="rg-meta"> — ${esc(rel.format)}</span>` : '';
     const artist = rel.artist_name ? `<span class="rg-meta" style="color:#999;"> — ${esc(rel.artist_name)}</span>` : '';
     return `
-      <div class="rg" onclick="event.stopPropagation(); window.loadReleaseGroup('${esc(String(rel.id))}', this)">
+      <div class="rg" onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(String(rel.id))}, this)">
         <div>
           <span class="rg-year">${yearStr}</span>
           <span class="rg-title">${esc(rel.title || '')}</span>
@@ -670,6 +677,16 @@ export function onLabelFilterChange() {
   renderLabelRows(containerEl);
 }
 
+export function onLabelYearFilterInput() {
+  if (labelYearFilterTimer) {
+    window.clearTimeout(labelYearFilterTimer);
+  }
+  labelYearFilterTimer = window.setTimeout(() => {
+    labelYearFilterTimer = 0;
+    onLabelFilterChange();
+  }, LABEL_YEAR_FILTER_DEBOUNCE_MS);
+}
+
 /**
  * Toggle the include-sublabels opt-in (only shown for big labels).
  * Triggers a refetch.
@@ -677,13 +694,16 @@ export function onLabelFilterChange() {
  */
 export async function toggleLabelIncludeSublabels(include) {
   if (!state.browseLabel) return;
+  const requestToken = ++labelDetailRequestToken;
   const body = document.getElementById('browse-label-body');
   if (!body) return;
   body.innerHTML = '<div class="loading">Reloading...</div>';
   try {
     const payload = await loadLabelReleases(state.browseLabel.id, { include_sublabels: include });
+    if (requestToken !== labelDetailRequestToken) return;
     renderLabelDetail(body, payload);
   } catch (_e) {
+    if (requestToken !== labelDetailRequestToken) return;
     body.innerHTML = '<div class="loading">Failed to reload label</div>';
     toast('Failed to reload label', true);
   }

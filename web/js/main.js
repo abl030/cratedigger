@@ -6,7 +6,7 @@
  */
 
 import { state } from './state.js';
-import { searchArtists, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow } from './browse.js';
+import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow } from './browse.js';
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
@@ -15,7 +15,7 @@ import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
 import { loadManualImport, runManualImport } from './manual.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
-import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
+import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toast } from './state.js';
 
 // --- Tab management ---
@@ -53,6 +53,7 @@ if (qInput) {
     clearTimeout(state.searchTimer ?? undefined);
     const q = qInput.value.trim();
     if (q.length < 2) {
+      cancelBrowseSearch();
       const results = document.getElementById('results');
       if (results) results.innerHTML = '';
       return;
@@ -118,6 +119,7 @@ Object.assign(window, {
   openLabelDetailFromList,
   closeLabelDetail,
   onLabelFilterChange,
+  onLabelYearFilterInput,
   toggleLabelIncludeSublabels,
   goToLabelPage,
   toast,

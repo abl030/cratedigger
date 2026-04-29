@@ -12,5 +12,6 @@ paths:
 - MusicBrainz queries through local mirror at `http://192.168.1.35:5200` via `web/mb.py`
 - Redis cache: MB data 24h TTL, beets/pipeline 5min TTL, explicit invalidation on POST mutations
 - Static JS served at `/js/*.js` — `node --check` validates syntax in CI
+- Fetch-on-input UI must stamp requests with a module-scoped in-flight token and discard stale responses before rendering
 - The web UI reads download_log JSONB columns (import_result, validation_result) — use the typed field names from the dataclasses, not arbitrary strings
 - After changes: `ssh doc2 'sudo systemctl restart cratedigger-web'`

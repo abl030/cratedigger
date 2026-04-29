@@ -1,7 +1,7 @@
 ---
 title: "fix: discogs-api connection pool + safe statement_timeout (P0 redo)"
 type: fix
-status: active
+status: implemented
 date: 2026-04-29
 origin: docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md
 ---
@@ -13,6 +13,12 @@ origin: docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md
 ## Overview
 
 Replace the multiplexed `tokio_postgres::Client` shared across Axum handlers with a connection pool (`deadpool-postgres`), then re-introduce a transaction-scoped `statement_timeout` on the recursive sub-label CTE so a UMG-class label cannot hang the cratedigger HTTP server. Deploy the cratedigger-side 503-aware fallback (graceful retry without sub-labels) alongside the new behavior.
+
+**Implementation note:** the final shipped timeout is 15 seconds, not the 5
+seconds drafted below. Live doc2 measurement showed UMG completes in about 12
+seconds, and the user accepted a 15s budget. The pool also ships with bounded
+wait/create/recycle timeouts so saturation returns a typed 503 instead of
+waiting indefinitely.
 
 This redoes the work that landed in `cf22645` (broken: serialized all requests through one connection, corrupted session state on timeout) and was reverted in `6053896`. The architectural prerequisite is the connection pool — without it, transaction-scoped `SET LOCAL` is unsafe on a multiplexed client.
 
@@ -43,10 +49,10 @@ Origin: post-merge follow-up section of `docs/plans/2026-04-29-001-feat-label-vi
 ## Requirements Trace
 
 - R1. Multiplex client replaced with a per-request connection pool. → U1
-- R2. `query_label_releases` (recursive branch) wraps its query in `BEGIN; SET LOCAL statement_timeout='5s'; ... COMMIT;` on a pool-acquired connection. → U2
+- R2. `query_label_releases` (recursive branch) wraps its query in `BEGIN; SET LOCAL statement_timeout='15s'; ... COMMIT;` on a pool-acquired connection. → U2
 - R3. Timeout maps to HTTP 503 (`SERVICE_UNAVAILABLE`) with a typed error body the client can branch on. → U2
 - R4. Cratedigger handles 503 from `get_label_releases` by retrying once with `include_sublabels=false` and surfacing a banner. → U3
-- R5. `nix flake check` (or equivalent) and a smoke test against a real label confirm: small labels OK, UMG-class label returns 503 fast (<6s) instead of hanging, single 503 does not impact subsequent requests. → U4
+- R5. `nix flake check` (or equivalent) and a smoke test against a real label confirm: small labels OK, UMG-class labels complete or degrade within the accepted 15s recursive budget, and one timeout does not impact subsequent requests. → U4
 
 **Non-requirements:** Replacing `UNION ALL` with `UNION` (cycle guard) and the nullable `String → Option<String>` field corrections live in the P1 plan (`docs/plans/2026-04-29-003-fix-label-viewer-p1-p2-plan.md`). They are independent and can land before, during, or after this plan.
 
