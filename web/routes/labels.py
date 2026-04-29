@@ -27,6 +27,23 @@ def _server():
     return server
 
 
+# Auto-flip threshold: if the label's `release_count` exceeds this AND the
+# caller did not pass `?include_sublabels=` explicitly, default to False.
+# Mirrors `BIG_LABEL_THRESHOLD` in `web/js/labels.js`; keep in sync. The
+# recursive sub-label CTE on UMG-class labels takes 30+s upstream and the
+# single-threaded HTTPServer here would freeze the whole UI for any other
+# in-flight request. Direct API consumers can still opt in by passing
+# `?include_sublabels=true` explicitly.
+BIG_LABEL_THRESHOLD = 1000
+
+# Accepted spellings for the `?include_sublabels=` query parameter. Anything
+# outside this set returns 400 — silently coercing typos masks frontend bugs
+# and lets bots scribble cache entries with garbage payload-flag combos.
+_INCLUDE_SUBLABELS_TRUE = {"true", "1"}
+_INCLUDE_SUBLABELS_FALSE = {"false", "0"}
+_INCLUDE_SUBLABELS_VALID = _INCLUDE_SUBLABELS_TRUE | _INCLUDE_SUBLABELS_FALSE
+
+
 def _label_entity_payload(entity) -> dict:
     """Convert a `LabelEntity` Struct to a JSON-safe dict.
 
@@ -62,13 +79,32 @@ def get_discogs_label_detail(
     """`GET /api/discogs/label/{id}` — label entity + overlaid catalogue.
 
     Defaults `include_sublabels=true` per Key Decisions; opt-out via
-    `?include_sublabels=false`. The Discogs adapter raises
-    `urllib.error.HTTPError` on a 404 from the mirror; we surface that
-    as a JSON 404 so the frontend can render a "label not found" state
-    rather than a 5xx.
+    `?include_sublabels=false`. Big labels (release_count >
+    BIG_LABEL_THRESHOLD) auto-flip to `include_sublabels=False` unless
+    the caller explicitly opted in — protects the single-threaded web
+    server from the upstream UMG-class recursive CTE (30+s).
+
+    The Discogs adapter raises `urllib.error.HTTPError` on a 404 from
+    the mirror; we surface that as a JSON 404 so the frontend can
+    render a "label not found" state rather than a 5xx. Both
+    `get_label` and `get_label_releases` are wrapped — the label can
+    vanish between the two calls.
     """
-    raw_flag = params.get("include_sublabels", ["true"])[0].strip().lower()
-    include_sublabels = raw_flag != "false"
+    # Distinguish "user passed nothing" (apply auto-flip) from "user passed
+    # something" (respect their choice). `params` only contains keys actually
+    # present in the query string.
+    explicit = "include_sublabels" in params
+    if explicit:
+        raw_flag = params["include_sublabels"][0].strip().lower()
+        if raw_flag not in _INCLUDE_SUBLABELS_VALID:
+            h._error(  # type: ignore[attr-defined]
+                "Invalid include_sublabels — expected one of "
+                "true/false/1/0", 400)
+            return
+        include_sublabels = raw_flag in _INCLUDE_SUBLABELS_TRUE
+    else:
+        # Default; possibly auto-flipped below once we know release_count.
+        include_sublabels = True
 
     try:
         entity = discogs_api.get_label(label_id)
@@ -78,8 +114,18 @@ def get_discogs_label_detail(
             return
         raise
 
-    releases_resp = discogs_api.get_label_releases(
-        label_id, include_sublabels=include_sublabels)
+    # Auto-flip for big labels — only when the caller did not opt in or out.
+    if not explicit and entity.release_count > BIG_LABEL_THRESHOLD:
+        include_sublabels = False
+
+    try:
+        releases_resp = discogs_api.get_label_releases(
+            label_id, include_sublabels=include_sublabels)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            h._error("Label not found", 404)  # type: ignore[attr-defined]
+            return
+        raise
     releases = releases_resp["results"]
 
     overlay_release_rows(releases, [r["id"] for r in releases])
