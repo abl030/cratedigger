@@ -70,24 +70,15 @@ class MatchResult:
     sub-count gate failures and cross-check rejections — used by U5 to persist
     a `search_log.candidates` JSONB blob for post-hoc forensics.
 
-    Iterable as `(matched, directory, file_dir)` for backwards compatibility
-    with the historical 3-tuple return shape — pre-U2 callers in
-    `tests/test_integration.py` still unpack the result that way. New callers
-    should prefer attribute access.
+    Callers must use attribute access (`.matched`, `.directory`, `.file_dir`,
+    `.candidates`). Tuple-unpacking is intentionally not supported — the old
+    3-tuple shim silently dropped the `candidates` field.
     """
 
     matched: bool
     directory: Any
     file_dir: str
     candidates: list[CandidateScore] = field(default_factory=list)
-
-    def __iter__(self) -> Any:
-        # Preserve historical unpacking: (matched, directory, file_dir).
-        # `candidates` is intentionally NOT yielded — old callers unpack three
-        # values; yielding four would silently break them.
-        yield self.matched
-        yield self.directory
-        yield self.file_dir
 
 
 def get_album_by_id(album_id: int, ctx: CratediggerContext) -> Any:
