@@ -180,15 +180,6 @@ def album_match(
     total_tracks = len(expected_tracks)
     avg_ratio = (total_match / matched_tracks) if matched_tracks else 0.0
 
-    if matched_tracks == total_tracks and username not in match_cfg.ignored_users:
-        logger.info(
-            f"Found match from user: {username} for {matched_tracks} tracks! "
-            f"Track attributes: {filetype}"
-        )
-        logger.info(f"Average sequence match ratio: {avg_ratio}")
-        logger.info("SUCCESSFUL MATCH")
-        logger.info("-------------------")
-
     return AlbumMatchScore(
         matched_tracks=matched_tracks,
         total_tracks=total_tracks,
@@ -380,6 +371,19 @@ def check_for_match(
         )
         if strict_accept:
             if _track_titles_cross_check(tracks, directory["files"]):
+                # Log SUCCESSFUL MATCH at the one place enqueue is going to
+                # happen — the previous log site in album_match fired before
+                # the cross-check / ignored_users gate at the caller, which
+                # was misleading for ignored users and for cross-check
+                # failures.
+                logger.info(
+                    f"Found match from user: {username} for "
+                    f"{score.matched_tracks} tracks! "
+                    f"Track attributes: {allowed_filetype}"
+                )
+                logger.info(f"Average sequence match ratio: {score.avg_ratio}")
+                logger.info("SUCCESSFUL MATCH")
+                logger.info("-------------------")
                 return MatchResult(
                     matched=True,
                     directory=directory,
