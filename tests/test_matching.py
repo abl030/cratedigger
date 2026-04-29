@@ -11,6 +11,7 @@ is preserved — these tests are the regression guard.
 
 from __future__ import annotations
 
+import configparser
 import unittest
 from dataclasses import replace
 from typing import Any, cast
@@ -32,13 +33,22 @@ from lib.quality import CandidateScore
 # ---------------------------------------------------------------------------
 
 def _make_cfg(**overrides: Any) -> CratediggerConfig:
-    """Build a CratediggerConfig with only the fields matching needs."""
-    cfg = CratediggerConfig(
-        minimum_match_ratio=0.5,
-        ignored_users=(),
-        allowed_filetypes=("flac", "mp3"),
-        browse_parallelism=4,
-    )
+    """Build a CratediggerConfig via from_ini, then apply overrides.
+
+    CLAUDE.md / code-quality.md forbids partial-kwarg construction —
+    "Always use CratediggerConfig.from_ini() with the runtime config file.
+    Partial configs silently diverge when new config fields are added."
+    Per-test field tweaks are applied via dataclasses.replace AFTER from_ini,
+    so we still benefit from the loader's defaults.
+    """
+    ini = configparser.ConfigParser()
+    ini["Search Settings"] = {
+        "minimum_filename_match_ratio": "0.5",
+        "ignored_users": "",
+        "allowed_filetypes": "flac, mp3",
+        "browse_parallelism": "4",
+    }
+    cfg = CratediggerConfig.from_ini(ini)
     if overrides:
         cfg = replace(cfg, **overrides)
     return cfg

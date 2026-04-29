@@ -2494,18 +2494,30 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self._cratedigger._module_ctx = self._orig_module_ctx
 
     def _make_cfg(self, **overrides):
+        """Build CratediggerConfig via from_ini, then apply overrides.
+
+        CLAUDE.md / code-quality.md forbids partial-kwarg construction —
+        partial configs silently diverge when new fields are added. INI
+        key names match lib/config.py:from_ini (e.g. minimum_match_ratio
+        is loaded from the INI key 'minimum_filename_match_ratio').
+        """
+        import configparser
+        from dataclasses import replace as _replace
         from lib.config import CratediggerConfig
-        defaults: dict[str, Any] = dict(
-            allowed_filetypes=("flac",),
-            search_response_limit=1000,
-            search_escalation_threshold=5,
-            search_timeout=30000,
-            delete_searches=False,
-            album_prepend_artist=False,
-            minimum_match_ratio=0.5,
-        )
-        defaults.update(overrides)
-        return CratediggerConfig(**defaults)
+        ini = configparser.ConfigParser()
+        ini["Slskd"] = {"delete_searches": "False"}
+        ini["Search Settings"] = {
+            "allowed_filetypes": "flac",
+            "search_response_limit": "1000",
+            "search_escalation_threshold": "5",
+            "search_timeout": "30000",
+            "album_prepend_artist": "False",
+            "minimum_filename_match_ratio": "0.5",
+        }
+        cfg = CratediggerConfig.from_ini(ini)
+        if overrides:
+            cfg = _replace(cfg, **overrides)
+        return cfg
 
     def _make_album(self, *, request_id=1843, source="request",
                     discogs_release_id=None, mb_release_id="mbid-test"):
