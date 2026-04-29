@@ -194,6 +194,10 @@ def get_discogs_label_detail(
         "pagination": releases_resp.get("pagination", {}),
         "include_sublabels": releases_resp.get(
             "include_sublabels", include_sublabels),
+        # Plan 003 U4. Adapter sets True when an upstream 503 forced a
+        # fallback to include_sublabels=False; the UI surfaces a banner.
+        # Default False on every successful response.
+        "sub_labels_dropped": releases_resp.get("sub_labels_dropped", False),
     })
 
 

@@ -458,6 +458,7 @@ export function renderLabelDetail(containerEl, payload) {
   const currentPage = (pagination && typeof pagination.page === 'number')
     ? pagination.page : 1;
   const includeSub = payload.include_sublabels !== false;
+  const subLabelsDropped = payload.sub_labels_dropped === true;
 
   // Stash full release list on the container for filter re-renders.
   /** @type {any} */ (containerEl)._releases = allReleases;
@@ -489,6 +490,13 @@ export function renderLabelDetail(containerEl, payload) {
   // line just situates the user inside the dataset.
   const renderedNote = (pages > 1)
     ? `<div class="loading" style="text-align:left;padding:6px 0;color:#888;">Page ${currentPage} of ${pages} — ${totalCount} release${totalCount === 1 ? '' : 's'} total</div>`
+    : '';
+  // Plan 003 U4 banner: the upstream returned 503 on the recursive
+  // sub-label CTE; the adapter retried with sub-labels off. Surface
+  // that to the user so they understand why the catalogue looks thinner
+  // than the entity's release_count would suggest.
+  const subLabelsDroppedBanner = subLabelsDropped
+    ? '<div class="loading" style="text-align:left;padding:6px 10px;margin:6px 0;color:#e0c060;background:#2a2410;border:1px solid #44391a;border-radius:4px;font-size:0.85em;">Sub-labels temporarily unavailable for this label — showing direct releases only.</div>'
     : '';
   const bigLabelToggle = (totalCount > BIG_LABEL_THRESHOLD)
     ? `<label style="margin-left:10px;font-size:0.85em;color:#aaa;">
@@ -536,6 +544,7 @@ export function renderLabelDetail(containerEl, payload) {
       </label>
       ${bigLabelToggle}
     </div>
+    ${subLabelsDroppedBanner}
     ${renderedNote}
     <div id="browse-label-rows"></div>
     ${renderPaginationControls(currentPage, pages)}

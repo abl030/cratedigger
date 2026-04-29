@@ -2783,6 +2783,7 @@ class TestLabelRouteContracts(_WebServerCase):
     }
     LABEL_DETAIL_RESPONSE_REQUIRED_FIELDS = {
         "label", "releases", "sub_labels", "pagination", "include_sublabels",
+        "sub_labels_dropped",
     }
 
     def _make_label_entity(self, **overrides):
@@ -3171,6 +3172,45 @@ class TestLabelRouteContracts(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
         self.assertFalse(mock_dg.get_label_releases.called)
+
+    def test_label_detail_forwards_sub_labels_dropped(self):
+        """Plan 003 U4: when the adapter signals a 503 fallback, the route
+        forwards `sub_labels_dropped=True` so the UI can surface a banner."""
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 1, "items": 0},
+                "include_sublabels": False,
+                "sub_labels_dropped": True,
+            }
+            status, data = self._get("/api/discogs/label/757")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["sub_labels_dropped"])
+
+    def test_label_detail_default_sub_labels_dropped_false(self):
+        """Plan 003 U4: every label-detail response carries the field with
+        default False so the contract is stable."""
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": True,
+                "sub_labels_dropped": False,
+            }
+            status, data = self._get("/api/discogs/label/757")
+
+        self.assertEqual(status, 200)
+        self.assertIn("sub_labels_dropped", data)
+        self.assertFalse(data["sub_labels_dropped"])
 
 
 class TestBeetsRouteContracts(_WebServerCase):

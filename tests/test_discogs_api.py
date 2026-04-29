@@ -611,6 +611,92 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertIn("include_sublabels=false", called_url)
         self.assertFalse(payload["include_sublabels"])
 
+    def test_sub_labels_dropped_default_false(self):
+        """Plan 003 U4: every successful response carries
+        `sub_labels_dropped` so the contract is stable. Default False."""
+        with _mock_urlopen(self.RELEASES_DATA):
+            payload = get_label_releases(2294, include_sublabels=True)
+        self.assertIn("sub_labels_dropped", payload)
+        self.assertFalse(payload["sub_labels_dropped"])
+
+    def test_503_falls_back_to_no_sublabels(self):
+        """Plan 003 U4: when the upstream returns 503 (timeout) and the
+        caller asked for sub-labels, the adapter retries once with
+        include_sublabels=False and flags the response."""
+        from urllib.error import HTTPError
+        from io import BytesIO
+
+        # First call (sub=true) raises 503; second call (sub=false) succeeds.
+        success_resp = MagicMock()
+        success_resp.read.return_value = json.dumps(
+            {**self.RELEASES_DATA, "include_sublabels": False}).encode()
+        success_resp.__enter__ = lambda s: s
+        success_resp.__exit__ = MagicMock(return_value=False)
+
+        def _urlopen(req, *_args, **_kwargs):
+            if "include_sublabels=true" in req.full_url:
+                raise HTTPError(
+                    req.full_url, 503, "Service Unavailable",
+                    hdrs=None,  # type: ignore[arg-type]
+                    fp=BytesIO(b'{"error":"timeout"}'))
+            return success_resp
+
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+            payload = get_label_releases(99887766, include_sublabels=True)
+
+        self.assertTrue(payload["sub_labels_dropped"])
+        # Fallback fetch ran and surfaced its successful payload
+        self.assertFalse(payload["include_sublabels"])
+        self.assertEqual(len(payload["results"]), 2)
+
+    def test_503_then_503_reraises(self):
+        """Plan 003 U4: if the fallback also 503s, the original HTTPError
+        re-raises. No infinite retry."""
+        from urllib.error import HTTPError
+        from io import BytesIO
+
+        def _always_503(req, *_args, **_kwargs):
+            raise HTTPError(
+                req.full_url, 503, "Service Unavailable",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=BytesIO(b'{"error":"timeout"}'))
+
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_always_503):
+            with self.assertRaises(HTTPError):
+                get_label_releases(99887765, include_sublabels=True)
+
+    def test_503_when_sub_labels_already_false_reraises(self):
+        """Plan 003 U4: 503 with include_sublabels=False has nothing to fall
+        back to — re-raise."""
+        from urllib.error import HTTPError
+        from io import BytesIO
+
+        def _503(req, *_args, **_kwargs):
+            raise HTTPError(
+                req.full_url, 503, "Service Unavailable",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=BytesIO(b'{"error":"timeout"}'))
+
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_503):
+            with self.assertRaises(HTTPError):
+                get_label_releases(99887764, include_sublabels=False)
+
+    def test_404_propagates_unchanged(self):
+        """Plan 003 U4: 404 surfaces as 404 (existing route maps it). The
+        503 retry must not swallow other HTTP errors."""
+        from urllib.error import HTTPError
+        from io import BytesIO
+
+        def _404(req, *_args, **_kwargs):
+            raise HTTPError(
+                req.full_url, 404, "Not Found",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=BytesIO(b'{"error":"not found"}'))
+
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_404):
+            with self.assertRaises(HTTPError):
+                get_label_releases(99887763, include_sublabels=True)
+
 
 if __name__ == "__main__":
     unittest.main()
