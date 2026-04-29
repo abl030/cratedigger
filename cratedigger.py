@@ -343,46 +343,38 @@ def search_for_album(album, ctx):
     return result
 
 
-def _submit_search(album, search_cfg, slskd_client, ctx):
+def _submit_search(album, variant, search_cfg, slskd_client):
     """Submit a search to slskd and return the search ID (no waiting).
 
     slskd has a SemaphoreSlim(1,1) on POST /searches — only one submission
     at a time. The semaphore releases after the search is queued (~100ms),
     so we submit sequentially but wait for results in parallel.
 
-    Returns (search_id, query, album_id, variant_tag) or:
-        ("__exhausted__", base_query, album_id, "exhausted") for the
-        variant-exhaustion sentinel — caller emits a SearchResult and skips
-        the slskd round-trip.
-        None on submission failure.
+    The caller is responsible for:
+      - selecting the variant (so the variant tag is known regardless of
+        outcome — see findings #9 and #18 in ce-code-review run
+        20260430-051904-682683b5)
+      - short-circuiting variant.kind == "exhausted" without calling here
+      - guarding against an empty `variant.query` if it ever happens
+
+    Returns (search_id, query, album_id, variant_tag) on success.
+    Returns None on submission failure — the caller still has `variant.tag`
+    available to record the failure with the right metadata.
 
     Variant-selection currency invariant:
-        We read `search_attempts` here (submit time) but `record_attempt`
-        increments at log time. Within a single album's lifecycle the
-        sequence submit→collect→log is strictly ordered, so the variant
-        selected here is what `_log_search_result` will persist. **If a
-        future refactor allows the same album to be submitted twice in
-        the same batch, both submissions will silently choose the same
-        variant — this comment is the regression fence.**
+        Variant selection happens at the caller (submit-time). The
+        sequence submit→collect→log is strictly ordered for a single
+        album, so the variant chosen by the caller is what
+        `_log_search_result` will persist.
     """
     import requests
 
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
-
-    db = ctx.pipeline_db_source._get_db()
-    variant, base_query = _select_variant_for_album(album, search_cfg, db)
     query = variant.query
-
-    if variant.kind == "exhausted":
-        logger.info(
-            f"Variant ladder exhausted for '{artist_name} - {album_title}'; "
-            f"will record exhaustion without searching"
-        )
-        return ("__exhausted__", base_query or "", album_id, variant.tag)
-
     if not query:
+        # Defensive: caller should have caught this, but never submit empty.
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
         return None
 
@@ -643,36 +635,65 @@ def _search_and_queue_parallel(albums, ctx):
     wall_start = time.time()
 
     def _submit_next() -> tuple[Any, Any] | None:
-        """Submit the next album from the queue. Returns (future, album) or None."""
+        """Submit the next album from the queue. Returns (future, album) or None.
+
+        Variant selection happens HERE, not inside ``_submit_search``. This
+        ensures every code path — exhausted, empty_query, slskd error — has
+        access to the chosen ``variant.tag`` so the persisted forensic row
+        always records which variant was attempted (findings #9 and #18 in
+        ce-code-review run 20260430-051904-682683b5).
+        """
+        from lib.search import SearchResult
+
         while album_queue:
             album = album_queue.pop(0)
-            submit_result = _submit_search(album, cfg, slskd, ctx)
-            if submit_result is None:
-                # Log the submission failure — reconstruct query for the log
-                from lib.search import build_query, SearchResult
-                query = build_query(album.artist_name, album.title,
-                                    prepend_artist=cfg.album_prepend_artist)
-                sr = SearchResult(
-                    album_id=album.id, success=False,
-                    query=query or "",
-                    outcome="empty_query" if not query else "error",
-                )
-                _log_search_result(album, sr, ctx)
-                failed_search.append(album)
-                continue
-            search_id, query, album_id, variant_tag = submit_result
-            if search_id == "__exhausted__":
+            db = ctx.pipeline_db_source._get_db()
+            variant, base_query = _select_variant_for_album(album, cfg, db)
+
+            if variant.kind == "exhausted":
                 # Variant ladder exhausted — emit a SearchResult inline, no
                 # slskd round-trip. U6 will flip the request to manual.
-                from lib.search import SearchResult
+                logger.info(
+                    f"Variant ladder exhausted for '{album.artist_name} - {album.title}'; "
+                    f"will record exhaustion without searching"
+                )
                 sr = SearchResult(
-                    album_id=album_id, success=False,
-                    query=query or "", elapsed_s=0.0, outcome="exhausted",
-                    variant_tag=variant_tag,
+                    album_id=album.id, success=False,
+                    query=base_query or "", elapsed_s=0.0, outcome="exhausted",
+                    variant_tag=variant.tag,
                 )
                 _log_search_result(album, sr, ctx)
                 failed_search.append(album)
                 continue
+
+            if not variant.query:
+                # No buildable query at all (no artist/title) — record
+                # empty_query with the chosen variant tag so forensics can
+                # still tell which variant was attempted.
+                sr = SearchResult(
+                    album_id=album.id, success=False,
+                    query=base_query or "",
+                    outcome="empty_query",
+                    variant_tag=variant.tag,
+                )
+                _log_search_result(album, sr, ctx)
+                failed_search.append(album)
+                continue
+
+            submit_result = _submit_search(album, variant, cfg, slskd)
+            if submit_result is None:
+                # slskd round-trip failed — preserve variant_tag in the log.
+                sr = SearchResult(
+                    album_id=album.id, success=False,
+                    query=variant.query,
+                    outcome="error",
+                    variant_tag=variant.tag,
+                )
+                _log_search_result(album, sr, ctx)
+                failed_search.append(album)
+                continue
+
+            search_id, query, album_id, variant_tag = submit_result
             future = pool.submit(
                 _collect_search_results, search_id, query, album_id, cfg, slskd,
                 variant_tag,

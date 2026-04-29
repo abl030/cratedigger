@@ -2876,6 +2876,10 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         slskd call. The parallel path is a separate function and was missing
         the same coverage; if a future refactor regressed the kwarg only on
         the parallel path, the existing test would not catch it.
+
+        Post-#9/#18 refactor: variant selection is hoisted to the caller, so
+        this test selects the variant via the same helper the parallel loop
+        uses, then passes it into ``_submit_search``.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -2891,9 +2895,12 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         )
         db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-p")
-        ctx = self._wire(cfg, slskd, db, album)
+        self._wire(cfg, slskd, db, album)
 
-        submit = self._cratedigger._submit_search(album, cfg, slskd, ctx)
+        variant, _base_query = self._cratedigger._select_variant_for_album(
+            album, cfg, db,
+        )
+        submit = self._cratedigger._submit_search(album, variant, cfg, slskd)
         self.assertIsNotNone(submit)
         # responseLimit was forwarded to slskd at the wire boundary on the
         # parallel path (no _collect_search_results call needed for this
