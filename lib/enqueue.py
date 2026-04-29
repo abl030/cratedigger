@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence, cast
 from lib.browse import download_filter
 from lib.download import cancel_and_delete, slskd_do_enqueue
 from lib.grab_list import GrabListEntry
-from lib.matching import CandidateScore, check_for_match, get_album_by_id
+from lib.matching import check_for_match, get_album_by_id
+from lib.quality import CandidateScore
 
 if TYPE_CHECKING:
     from cratedigger import SlskdDirectory, TrackRecord
@@ -38,9 +39,17 @@ class EnqueueAttempt:
 
 @dataclass(frozen=True)
 class FindDownloadResult:
-    """Final outcome of matching + enqueue for one album."""
+    """Final outcome of matching + enqueue for one album.
+
+    ``candidates`` is the per-dir forensic score list aggregated across every
+    filetype attempt that ran for this album. The same dir under different
+    filetypes shows up as two distinct entries — that is intentional
+    diagnostic information. U5 plumbs this onto ``SearchResult.candidates``
+    and persists the top-20 to ``search_log.candidates`` JSONB.
+    """
 
     outcome: Literal["found", "no_match", "enqueue_failed"]
+    candidates: tuple[CandidateScore, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,8 +58,7 @@ class _FiletypeAttemptResult:
 
     Carries the same outcome as `FindDownloadResult` plus the per-dir
     `CandidateScore` accumulated across every release/dir/user touched while
-    trying this filetype. U5 will plumb `candidates` through `find_download`
-    into `search_log.candidates`; in U2 it stops here.
+    trying this filetype.
     """
 
     outcome: Literal["found", "no_match", "enqueue_failed"]
@@ -493,11 +501,15 @@ def find_download(
         )
 
     had_enqueue_failure = False
+    accumulated: list[CandidateScore] = []
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
         result = _try_filetype(album, results, allowed_filetype, grab_list, ctx)
+        accumulated.extend(result.candidates)
         if result.outcome == "found":
-            return FindDownloadResult(outcome="found")
+            return FindDownloadResult(
+                outcome="found", candidates=tuple(accumulated),
+            )
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 
@@ -510,11 +522,15 @@ def find_download(
             f"trying catch-all (any audio format)"
         )
         result = _try_filetype(album, results, "*", grab_list, ctx)
+        accumulated.extend(result.candidates)
         if result.outcome == "found":
-            return FindDownloadResult(outcome="found")
+            return FindDownloadResult(
+                outcome="found", candidates=tuple(accumulated),
+            )
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 
     return FindDownloadResult(
-        outcome="enqueue_failed" if had_enqueue_failure else "no_match"
+        outcome="enqueue_failed" if had_enqueue_failure else "no_match",
+        candidates=tuple(accumulated),
     )
