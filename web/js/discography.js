@@ -6,6 +6,7 @@ import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
+import { renderLabelLinks } from './labels.js';
 
 /**
  * Render the artist discography into a target element.
@@ -259,6 +260,14 @@ export async function toggleReleaseDetail(mbid) {
           </div>`;
         }
       }).join('');
+    }
+
+    // Label links (U7) — Discogs releases carry `labels: [{id, name}]`;
+    // MB releases don't surface labels through the route layer in v1.
+    const labelLinksHtml = renderLabelLinks(data.labels);
+    if (labelLinksHtml) {
+      html += `<div class="release-labels" style="margin:4px 0;font-size:0.85em;color:#aaa;">`
+        + `<span style="color:#666;margin-right:6px;">Label:</span>${labelLinksHtml}</div>`;
     }
 
     // Links and actions
