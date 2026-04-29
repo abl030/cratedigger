@@ -82,6 +82,7 @@ from lib.matching import (
     check_ratio,
     get_album_by_id,
 )
+from lib.quality import top_candidates
 
 
 def filter_list(albums: Sequence[Any], filter_cfg: CratediggerConfig) -> list[Any] | None:
@@ -514,23 +515,6 @@ def _merge_search_result(result, ctx):
             ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
 
 
-def _top_candidates(candidates, limit=20):
-    """Return the top-N candidates sorted by (matched_tracks, avg_ratio) DESC.
-
-    Pure helper — no DB, no I/O. The forensic blob in `search_log.candidates`
-    must be capped so we don't write 1000+ rows of JSONB per cycle. Sorting
-    by matched_tracks first surfaces the closest peers; avg_ratio is the
-    secondary tiebreak so a 24/26 dir with high ratio beats a 24/26 dir with
-    low ratio.
-    """
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: (c.matched_tracks, c.avg_ratio),
-        reverse=True,
-    )
-    return list(sorted_candidates[:limit])
-
-
 def _log_search_result(album, result, ctx) -> None:
     """Persist search outcome to search_log and record_attempt on failure."""
     request_id = getattr(album, "db_request_id", None)
@@ -545,7 +529,7 @@ def _log_search_result(album, result, ctx) -> None:
     outcome = result.outcome or "error"
     OUTCOMES_WITH_CANDIDATE_CONCEPT = ("no_results", "no_match", "found")
     if result.candidates:
-        top: list | None = _top_candidates(result.candidates)
+        top: list | None = top_candidates(result.candidates)
     elif outcome in OUTCOMES_WITH_CANDIDATE_CONCEPT:
         top = []
     else:
