@@ -27,13 +27,11 @@ logger = logging.getLogger("cratedigger")
 #
 # `CandidateScore` is the wire-boundary type written into
 # ``search_log.candidates`` JSONB. It lives in ``lib/quality.py`` alongside
-# other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``)
-# and is re-exported here only so existing ``from lib.matching import
-# CandidateScore`` callers keep working. Construct via keyword arguments only.
+# other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``).
+# Import it from ``lib.quality`` directly — no re-export here.
 
 __all__ = [
     "AlbumMatchScore",
-    "CandidateScore",
     "MatchResult",
     "album_match",
     "album_track_num",
@@ -181,15 +179,6 @@ def album_match(
     matched_tracks = len(matched_titles)
     total_tracks = len(expected_tracks)
     avg_ratio = (total_match / matched_tracks) if matched_tracks else 0.0
-
-    if matched_tracks == total_tracks and username not in match_cfg.ignored_users:
-        logger.info(
-            f"Found match from user: {username} for {matched_tracks} tracks! "
-            f"Track attributes: {filetype}"
-        )
-        logger.info(f"Average sequence match ratio: {avg_ratio}")
-        logger.info("SUCCESSFUL MATCH")
-        logger.info("-------------------")
 
     return AlbumMatchScore(
         matched_tracks=matched_tracks,
@@ -382,6 +371,19 @@ def check_for_match(
         )
         if strict_accept:
             if _track_titles_cross_check(tracks, directory["files"]):
+                # Log SUCCESSFUL MATCH at the one place enqueue is going to
+                # happen — the previous log site in album_match fired before
+                # the cross-check / ignored_users gate at the caller, which
+                # was misleading for ignored users and for cross-check
+                # failures.
+                logger.info(
+                    f"Found match from user: {username} for "
+                    f"{score.matched_tracks} tracks! "
+                    f"Track attributes: {allowed_filetype}"
+                )
+                logger.info(f"Average sequence match ratio: {score.avg_ratio}")
+                logger.info("SUCCESSFUL MATCH")
+                logger.info("-------------------")
                 return MatchResult(
                     matched=True,
                     directory=directory,

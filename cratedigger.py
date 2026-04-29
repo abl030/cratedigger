@@ -82,6 +82,7 @@ from lib.matching import (
     check_ratio,
     get_album_by_id,
 )
+from lib.quality import top_candidates
 
 
 def filter_list(albums: Sequence[Any], filter_cfg: CratediggerConfig) -> list[Any] | None:
@@ -231,7 +232,11 @@ def search_for_album(album, ctx):
     t0 = time.time()
 
     db = ctx.pipeline_db_source._get_db()
-    variant, base_query = _select_variant_for_album(album, cfg, db)
+    # Use ctx.cfg (typed CratediggerContext) instead of the module-global
+    # `cfg`. The parallel path (`_submit_search`) takes its config as the
+    # `search_cfg` param wired from `ctx.cfg` at the call site, and this
+    # serial path matches that convention now.
+    variant, base_query = _select_variant_for_album(album, ctx.cfg, db)
     query = variant.query
 
     if variant.kind == "exhausted":
@@ -514,36 +519,31 @@ def _merge_search_result(result, ctx):
             ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
 
 
-def _top_candidates(candidates, limit=20):
-    """Return the top-N candidates sorted by (matched_tracks, avg_ratio) DESC.
-
-    Pure helper — no DB, no I/O. The forensic blob in `search_log.candidates`
-    must be capped so we don't write 1000+ rows of JSONB per cycle. Sorting
-    by matched_tracks first surfaces the closest peers; avg_ratio is the
-    secondary tiebreak so a 24/26 dir with high ratio beats a 24/26 dir with
-    low ratio.
-    """
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: (c.matched_tracks, c.avg_ratio),
-        reverse=True,
-    )
-    return list(sorted_candidates[:limit])
-
-
 def _log_search_result(album, result, ctx) -> None:
     """Persist search outcome to search_log and record_attempt on failure."""
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
         return
     db = ctx.pipeline_db_source._get_db()
-    top = _top_candidates(result.candidates) if result.candidates else None
+    # Plan U5 contract: outcomes where slskd actually ran but produced 0 hits
+    # ("no_results", "no_match") write candidates=[] (empty list, not NULL) so
+    # downstream readers can distinguish "search ran, found nothing" from
+    # "search never produced a candidate concept" (error, timeout, exhausted,
+    # empty_query — those write NULL).
+    outcome = result.outcome or "error"
+    OUTCOMES_WITH_CANDIDATE_CONCEPT = ("no_results", "no_match", "found")
+    if result.candidates:
+        top: list | None = top_candidates(result.candidates)
+    elif outcome in OUTCOMES_WITH_CANDIDATE_CONCEPT:
+        top = []
+    else:
+        top = None
     db.log_search(
         request_id=request_id,
         query=result.query or None,
         result_count=result.result_count,
         elapsed_s=result.elapsed_s or None,
-        outcome=result.outcome or "error",
+        outcome=outcome,
         candidates=top,
         variant=result.variant_tag,
         final_state=result.final_state,

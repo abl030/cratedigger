@@ -16,7 +16,10 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    from lib.quality import CandidateScore
 
 import psycopg2
 import psycopg2.extras
@@ -1528,7 +1531,7 @@ class PipelineDB:
                    result_count: int | None = None,
                    elapsed_s: float | None = None,
                    outcome: str = "error",
-                   candidates: "list[Any] | None" = None,
+                   candidates: "list[CandidateScore] | None" = None,
                    variant: str | None = None,
                    final_state: str | None = None) -> None:
         """Record one search attempt for an album request.

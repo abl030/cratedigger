@@ -9,7 +9,7 @@ import enum
 import json
 from dataclasses import dataclass, field, asdict
 from enum import IntEnum, StrEnum
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 
 import msgspec
 
@@ -448,6 +448,32 @@ class CandidateScore(msgspec.Struct):
     avg_ratio: float
     missing_titles: list[str]
     file_count: int
+
+
+def top_candidates(
+    candidates: Sequence[CandidateScore], limit: int = 20,
+) -> list[CandidateScore]:
+    """Return the top-N candidates sorted by (matched_tracks, avg_ratio) DESC.
+
+    Pure helper — no DB, no I/O. Single source of truth for the candidate
+    ranking used by:
+
+    - ``cratedigger._log_search_result`` (top-20 written to
+      ``search_log.candidates`` JSONB)
+    - ``web/routes/pipeline.py:_build_last_search_payload`` (top-3 surfaced
+      on ``/api/pipeline/<id>``)
+    - ``scripts/pipeline_cli.py:_render_search_forensics_summary`` (top-3 in
+      ``pipeline-cli show <id>``)
+
+    Sorting by matched_tracks first surfaces the closest peers; avg_ratio is
+    the secondary tiebreak so a 24/26 dir with high ratio beats a 24/26 dir
+    with low ratio.
+    """
+    return sorted(
+        candidates,
+        key=lambda c: (c.matched_tracks, c.avg_ratio),
+        reverse=True,
+    )[:limit]
 
 
 @dataclass

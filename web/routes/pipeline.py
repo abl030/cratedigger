@@ -1,9 +1,12 @@
 """Pipeline API route handlers, extracted from server.py."""
 
 import json
+import logging
 import re
 from pathlib import Path
 import msgspec
+
+logger = logging.getLogger(__name__)
 
 from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
@@ -22,6 +25,7 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          CandidateScore,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
+                         top_candidates,
                          get_decision_tree)
 from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
@@ -321,15 +325,25 @@ def _build_last_search_payload(
     if raw_candidates is None:
         candidates = []
     else:
-        candidates = msgspec.convert(raw_candidates, type=list[CandidateScore])
+        try:
+            candidates = msgspec.convert(
+                raw_candidates, type=list[CandidateScore]
+            )
+        except msgspec.ValidationError as exc:
+            # Mirrors the CLI's defensive guard in
+            # scripts/pipeline_cli.py:_render_search_forensics_summary —
+            # production writes via the same Struct so this should never trip,
+            # but a corrupted historical row must not 500 the detail route.
+            logger.warning(
+                "search_log.candidates JSONB failed msgspec validation "
+                "(request_id=%s, search_log_id=%s): %s",
+                latest.get("request_id"), latest.get("id"), exc,
+            )
+            candidates = []
     # Top-3 by (matched_tracks DESC, avg_ratio DESC) for compact list view;
     # full forensic blob still reachable via the search history for
-    # operators who want it.
-    candidates.sort(
-        key=lambda c: (c.matched_tracks, c.avg_ratio),
-        reverse=True,
-    )
-    top = candidates[:3]
+    # operators who want it. Shared ranking lives in lib/quality.py.
+    top = top_candidates(candidates, limit=3)
     return {
         "variant": latest.get("variant"),
         "final_state": latest.get("final_state"),
