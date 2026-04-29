@@ -565,7 +565,7 @@ def _render_search_forensics_summary(
     ``msgspec.ValidationError``); rows without forensic fields (e.g.
     pre-U1 search_log entries) print "no forensic data yet".
     """
-    from lib.quality import CandidateScore
+    from lib.quality import CandidateScore, top_candidates
 
     lines: list[str] = ["", "  Search Forensics:"]
     variant = latest_search.get("variant")
@@ -601,9 +601,9 @@ def _render_search_forensics_summary(
         return lines
 
     # Top-3 by (matched_tracks DESC, avg_ratio DESC) — same ordering as the
-    # web UI route, so CLI and web surfaces show the same scoring.
-    candidates.sort(key=lambda c: (c.matched_tracks, c.avg_ratio), reverse=True)
-    top = candidates[:3]
+    # web UI route, so CLI and web surfaces show the same scoring. Shared
+    # ranking lives in lib/quality.py.
+    top = top_candidates(candidates, limit=3)
     lines.append(f"    top candidates ({len(top)} of {len(candidates)}):")
     for c in top:
         lines.append(

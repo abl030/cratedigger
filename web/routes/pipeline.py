@@ -25,6 +25,7 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          CandidateScore,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
+                         top_candidates,
                          get_decision_tree)
 from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
@@ -341,12 +342,8 @@ def _build_last_search_payload(
             candidates = []
     # Top-3 by (matched_tracks DESC, avg_ratio DESC) for compact list view;
     # full forensic blob still reachable via the search history for
-    # operators who want it.
-    candidates.sort(
-        key=lambda c: (c.matched_tracks, c.avg_ratio),
-        reverse=True,
-    )
-    top = candidates[:3]
+    # operators who want it. Shared ranking lives in lib/quality.py.
+    top = top_candidates(candidates, limit=3)
     return {
         "variant": latest.get("variant"),
         "final_state": latest.get("final_state"),
