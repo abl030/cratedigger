@@ -11,6 +11,7 @@ __pycache__/
 # Claude Code — only ignore machine-specific files
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 tests/.slskd-creds.json
 tests/fixtures/albums/
 tests/fixtures/analysis_cache.json
