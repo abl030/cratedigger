@@ -1851,6 +1851,17 @@ class FakePipelineDB:
 
     @staticmethod
     def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
+        # Match production JSONB read behaviour: psycopg2 deserializes
+        # ``search_log.candidates`` (JSONB) into a Python list/dict on
+        # ``SELECT *``. The fake stores the encoded JSON string, so decode
+        # here so consumers (e.g. the U7 web route + CLI) see the same
+        # parsed-list shape they get from the real DB.
+        candidates: object | None
+        if entry.candidates is None:
+            candidates = None
+        else:
+            import json as _json
+            candidates = _json.loads(entry.candidates)
         return {
             "id": entry.id,
             "request_id": entry.request_id,
@@ -1859,7 +1870,7 @@ class FakePipelineDB:
             "elapsed_s": entry.elapsed_s,
             "outcome": entry.outcome,
             "created_at": entry.created_at,
-            "candidates": entry.candidates,
+            "candidates": candidates,
             "variant": entry.variant,
             "final_state": entry.final_state,
         }
