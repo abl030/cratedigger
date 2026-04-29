@@ -537,13 +537,25 @@ def _log_search_result(album, result, ctx) -> None:
     if not request_id:
         return
     db = ctx.pipeline_db_source._get_db()
-    top = _top_candidates(result.candidates) if result.candidates else None
+    # Plan U5 contract: outcomes where slskd actually ran but produced 0 hits
+    # ("no_results", "no_match") write candidates=[] (empty list, not NULL) so
+    # downstream readers can distinguish "search ran, found nothing" from
+    # "search never produced a candidate concept" (error, timeout, exhausted,
+    # empty_query — those write NULL).
+    outcome = result.outcome or "error"
+    OUTCOMES_WITH_CANDIDATE_CONCEPT = ("no_results", "no_match", "found")
+    if result.candidates:
+        top: list | None = _top_candidates(result.candidates)
+    elif outcome in OUTCOMES_WITH_CANDIDATE_CONCEPT:
+        top = []
+    else:
+        top = None
     db.log_search(
         request_id=request_id,
         query=result.query or None,
         result_count=result.result_count,
         elapsed_s=result.elapsed_s or None,
-        outcome=result.outcome or "error",
+        outcome=outcome,
         candidates=top,
         variant=result.variant_tag,
         final_state=result.final_state,

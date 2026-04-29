@@ -2729,7 +2729,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(db.recorded_attempts, [])
 
     def test_no_results_writes_empty_candidates_and_final_state(self):
-        """A search that returns 0 hits still writes a row, candidates NULL."""
+        """no_results writes candidates=[] (empty JSONB array, not NULL).
+
+        Plan U5 contract: a search that ran successfully but returned 0 hits
+        still wrote a search_log row, and the candidates blob distinguishes
+        "search ran, no peers" (``[]``) from "search never produced a
+        candidate concept" (``None`` — error, timeout, exhausted,
+        empty_query). FakePipelineDB serialises ``[]`` to the JSON literal
+        ``"[]"``.
+        """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
@@ -2755,8 +2763,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         row = db.search_logs[0]
         self.assertEqual(row.outcome, "no_results")
         self.assertEqual(row.final_state, "ResponseLimitReached")
-        # No candidates collected — find_download didn't run.
-        self.assertIsNone(row.candidates)
+        # search ran but no peers responded → candidates=[] (empty array).
+        self.assertEqual(row.candidates, "[]")
 
     def test_top_20_truncation_when_many_candidates(self):
         """JSONB blob caps at top-20 by (matched_tracks, avg_ratio) DESC."""
