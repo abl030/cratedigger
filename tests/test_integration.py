@@ -775,12 +775,13 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             }],
         )
 
+        from lib.matching import MatchResult
         with patch.object(
             enqueue_module,
             "check_for_match",
             side_effect=[
-                (True, dir1, "Music\\Disc1"),
-                (True, dir2, "Music\\Disc2"),
+                MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
+                MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
             ],
         ), patch("time.sleep"):
             cratedigger.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
@@ -821,12 +822,13 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             }],
         )
 
+        from lib.matching import MatchResult
         with patch.object(
             enqueue_module,
             "check_for_match",
             side_effect=[
-                (True, dir1, "Music\\Disc1"),
-                (True, dir2, "Music\\Disc2"),
+                MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
+                MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
             ],
         ), patch("time.sleep"):
             attempt = cratedigger.try_multi_enqueue(
@@ -1002,10 +1004,13 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
             }]}],
         }])
 
+        from lib.matching import MatchResult
         with patch.object(
             enqueue_module,
             "check_for_match",
-            return_value=(True, directory, "Music\\Album"),
+            return_value=MatchResult(
+                matched=True, directory=directory, file_dir="Music\\Album",
+            ),
         ), patch("time.sleep"):
             attempt = cratedigger.try_enqueue(
                 make_tracks((1, "Track One", 1)),
@@ -1148,10 +1153,13 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         ])
         results = {"user1": {"flac": ["Music\\Album"]}}
 
+        from lib.matching import MatchResult
         with patch.object(
             enqueue_module,
             "check_for_match",
-            return_value=(True, directory, "Music\\Album"),
+            return_value=MatchResult(
+                matched=True, directory=directory, file_dir="Music\\Album",
+            ),
         ):
             attempt = cratedigger.try_enqueue(
                 make_tracks((1, "Track One", 1)),
