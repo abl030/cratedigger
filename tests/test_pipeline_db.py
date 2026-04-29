@@ -1350,6 +1350,71 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["min_bitrate"], 320)
         self.assertEqual(req["prev_min_bitrate"], 192)
 
+    def test_clears_manual_reason(self):
+        """U6: re-queue clears ``manual_reason`` alongside attempt counters.
+
+        Single-seam reset: every re-queue path funnels through
+        ``reset_to_wanted``, so this one assertion covers web UI button,
+        ``pipeline-cli`` requeue, and importer requeue transparently.
+        """
+        req_id = self._make_request("clear-mr")
+        # Bump search_attempts and populate manual_reason as if the
+        # variant ladder had exhausted earlier.
+        self.db._execute(
+            "UPDATE album_requests SET search_attempts = 7, manual_reason = %s "
+            "WHERE id = %s",
+            ("search_exhausted", req_id),
+        )
+        self.db.conn.commit()
+        self.db.reset_to_wanted(req_id)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["search_attempts"], 0)
+        self.assertIsNone(req["manual_reason"])
+
+
+@requires_postgres
+class TestSetManual(unittest.TestCase):
+    """U6: ``set_manual`` flip sites for system-driven manual transitions."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="set-manual-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_writes_manual_reason_when_provided(self):
+        self.db.set_manual(self.req_id, manual_reason="search_exhausted")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "manual")
+        self.assertEqual(req["manual_reason"], "search_exhausted")
+
+    def test_does_not_overwrite_existing_manual_reason_when_none(self):
+        """Defensive: a None reason must NOT clobber a populated reason.
+
+        Generic flip paths that don't carry a system reason should leave
+        any existing populated reason in place.
+        """
+        # Pre-populate manual_reason directly (simulates an operator hold or
+        # a previous system flip).
+        self.db._execute(
+            "UPDATE album_requests SET manual_reason = %s WHERE id = %s",
+            ("operator_hold", self.req_id),
+        )
+        self.db.conn.commit()
+        self.db.set_manual(self.req_id)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "manual")
+        self.assertEqual(req["manual_reason"], "operator_hold")
+
 
 @requires_postgres
 class TestClearOnDiskQualityFields(unittest.TestCase):
