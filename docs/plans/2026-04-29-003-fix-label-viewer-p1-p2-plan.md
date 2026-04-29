@@ -1,7 +1,7 @@
 ---
 title: "fix: label viewer P1 + P2 ship-fast cluster"
 type: fix
-status: active
+status: implemented
 date: 2026-04-29
 origin: docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md
 ---

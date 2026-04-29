@@ -1,7 +1,7 @@
 ---
 title: "fix: label viewer P3 cleanup consolidation"
 type: fix
-status: active
+status: implemented
 date: 2026-04-29
 origin: docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md
 ---
@@ -13,6 +13,13 @@ origin: docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md
 ## Overview
 
 Consolidation PR for the P3 cluster from the Phase A code review (`docs/plans/2026-04-29-001-feat-label-viewer-phase-a-plan.md` lines 530-541) plus the two pre-existing items called out at lines 539-541. Each item is small; landing them as a single consolidation PR keeps the review surface coherent and avoids the per-item ceremony tax.
+
+**Implementation note:** after final review, this PR also folded in the P1/P2
+fixes and the remaining P3 review items. The `via_label_id` rename shipped as
+an additive compatibility window (`label_id` and `via_label_id` both emitted and
+accepted), release search cache keys are bounded like artist/label search keys,
+label `per_page` is aligned to the mirror's 100-row cap, and clearing the
+browse search box cancels stale in-flight search responses.
 
 Eight items, grouped into two natural commits:
 

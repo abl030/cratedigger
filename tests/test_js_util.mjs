@@ -4,7 +4,7 @@
  */
 
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
-import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls } from '../web/js/labels.js';
+import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls } from '../web/js/labels.js';
 
 let passed = 0;
 let failed = 0;
@@ -184,6 +184,34 @@ assertEqual(
   buildLabelDetailUrl('757', { include_sublabels: undefined, page: undefined, per_page: undefined }),
   '/api/discogs/label/757',
   'undefined opts produce no params');
+
+async function captureLoadLabelUrl(opts) {
+  const originalFetch = globalThis.fetch;
+  let seenUrl = '';
+  globalThis.fetch = async (url) => {
+    seenUrl = String(url);
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  try {
+    await loadLabelReleases('757', opts);
+    return seenUrl;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+assertEqual(
+  await captureLoadLabelUrl({ page: 1 }),
+  '/api/discogs/label/757?page=1',
+  'default label load omits include_sublabels so route auto-flip can run');
+assertEqual(
+  await captureLoadLabelUrl({ include_sublabels: true, page: 2 }),
+  '/api/discogs/label/757?include_sublabels=true&page=2',
+  'explicit include_sublabels=true is preserved');
+assertEqual(
+  await captureLoadLabelUrl({ include_sublabels: false, page: 2 }),
+  '/api/discogs/label/757?include_sublabels=false&page=2',
+  'explicit include_sublabels=false is preserved');
 
 // --- renderPaginationControls tests ---
 console.log('renderPaginationControls()');

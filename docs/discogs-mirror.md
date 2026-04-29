@@ -33,6 +33,22 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
 | GET | `/api/artists/{id}/releases?page=1&per_page=100` | Paginated releases for an artist (includes masterless) |
+| GET | `/api/labels?name=X&page=1&per_page=25` | Label search with release counts and parent-label context |
+| GET | `/api/labels/{id}` | Label profile, direct release count, parent, and direct sub-labels |
+| GET | `/api/labels/{id}/releases?page=1&per_page=100&include_sublabels=true` | Paginated releases for a label, optionally including recursive sub-label releases |
+
+Label release pagination is capped at `per_page=100` in both cratedigger and
+discogs-api. Release rows currently include both `label_id` and the legacy
+`via_label_id` key during the cross-repo rollout; new code should read
+`label_id`.
+
+The label releases endpoint can return `503 Service Unavailable` with
+`{"error":"timeout","label_id":<id>}` when `include_sublabels=true` exceeds
+the mirror's 15 second recursive CTE statement timeout. Cratedigger's
+`web.discogs.get_label_releases()` retries once with `include_sublabels=false`
+on HTTP 503 or timeout-class upstream failures and returns
+`sub_labels_dropped=true` so the UI can show direct releases instead of failing
+the label page.
 
 ### API Examples
 
@@ -89,7 +105,11 @@ data.discogs.com (monthly XML dumps, ~12 GB compressed)
 
 Two binaries from one crate:
 - **`discogs-import`**: discovers latest dump, downloads to `.partial` (atomic rename), streams XML through `flate2::GzDecoder`, parses with `quick-xml`, sends 10K batches through an `mpsc` channel to async binary COPY. Full import ~18 minutes for 19M releases.
-- **`discogs-api`**: axum server with `tokio-postgres`. Single connection, no pool (low-traffic internal API).
+- **`discogs-api`**: axum server with `tokio-postgres` through a
+  `deadpool-postgres` connection pool. Each HTTP query helper acquires one
+  connection for the request; the importer remains a separate single-client
+  COPY pipeline. The pool has bounded wait/create/recycle timeouts so saturated
+  label-release requests shed as 503 instead of waiting indefinitely.
 
 ## Source Repo Structure
 

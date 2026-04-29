@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc } from './util.js';
+import { esc, jsArg } from './util.js';
 import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
 import { renderTypedSections, classify as groupingClassify } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
@@ -40,6 +40,7 @@ async function findArtistOnSource(name, src) {
  */
 export async function setBrowseSource(src) {
   if (state.browseSource === src) return;
+  searchArtistsRequestToken++;
   state.browseSource = src;
   const mbBtn = document.getElementById('source-mb');
   const dgBtn = document.getElementById('source-discogs');
@@ -71,6 +72,7 @@ export async function setBrowseSource(src) {
  * @param {string} type - 'artist' | 'release' | 'label'
  */
 export function setSearchType(type) {
+  searchArtistsRequestToken++;
   state.browseSearchType = type;
   const btnIds = { artist: 'search-type-artist', release: 'search-type-release', label: 'search-type-label' };
   for (const [t, id] of Object.entries(btnIds)) {
@@ -96,6 +98,11 @@ export function setSearchType(type) {
  * @param {string} name - Artist name
  */
 const VA_MBID = '89ad4ac3-39f7-470e-963a-56509c546377';
+let searchArtistsRequestToken = 0;
+
+export function cancelBrowseSearch() {
+  searchArtistsRequestToken++;
+}
 
 export function openBrowseArtist(id, name) {
   if (id === VA_MBID) {
@@ -284,8 +291,8 @@ function compareRow(mb, discogs) {
   // Show only the badges for sources that have this row. No muted
   // placeholders — single-source rows just show one badge.
   const badges = [];
-  if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${mb.primary_artist_id}', '${esc(mb.artist_credit || '')}', 'mb')">MB</span>`);
-  if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare('${discogs.primary_artist_id}', '${esc(discogs.artist_credit || '')}', 'discogs')">Discogs</span>`);
+  if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare(${jsArg(mb.primary_artist_id)}, ${jsArg(mb.artist_credit || '')}, ${jsArg('mb')})">MB</span>`);
+  if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare(${jsArg(discogs.primary_artist_id)}, ${jsArg(discogs.artist_credit || '')}, ${jsArg('discogs')})">Discogs</span>`);
   // Row-level in-library badge via the unified renderer. Pull quality
   // fields off whichever side is in library (prefer MB when both — MB
   // rows are the canonical match key).
@@ -301,8 +308,8 @@ function compareRow(mb, discogs) {
   return `
     <div class="rg">
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;"
-           onclick="window.toggleCompareRow('${slot}', '${mbId}', '${dgId}')">
-        <span style="color:#888;font-size:0.8em;width:10px;display:inline-block;" id="cmp-chev-${slot}">▶</span>
+           onclick="window.toggleCompareRow(${jsArg(slot)}, ${jsArg(mbId)}, ${jsArg(dgId)})">
+        <span style="color:#888;font-size:0.8em;width:10px;display:inline-block;" id="cmp-chev-${esc(slot)}">▶</span>
         <span class="rg-year">${year}</span>
         <span class="rg-title">${esc(title)}</span>
         ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
@@ -429,6 +436,9 @@ export function openBrowseArtistFromCompare(id, name, src) {
  * @param {string} q - Search query
  */
 export async function searchArtists(q) {
+  const requestToken = ++searchArtistsRequestToken;
+  const searchType = state.browseSearchType;
+  const browseSource = state.browseSource;
   const el = document.getElementById('results');
   el.style.display = 'block';
   document.getElementById('browse-artist').style.display = 'none';
@@ -436,53 +446,61 @@ export async function searchArtists(q) {
   if (browseLabel) browseLabel.style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
   // Label search is Discogs-only in Phase A — independent of browseSource.
-  if (state.browseSearchType === 'label') {
+  if (searchType === 'label') {
     try {
       const hits = await searchLabels(q);
+      if (requestToken !== searchArtistsRequestToken) return;
       renderLabelSearchResults(el, hits, openLabelDetail);
     } catch (_e) {
+      if (requestToken !== searchArtistsRequestToken) return;
       el.innerHTML = '<div class="loading">Label search failed</div>';
     }
     return;
   }
-  const isDiscogs = state.browseSource === 'discogs';
+  const isDiscogs = browseSource === 'discogs';
   const searchBase = isDiscogs ? `${API}/api/discogs/search` : `${API}/api/search`;
   try {
-    if (state.browseSearchType === 'release') {
+    if (searchType === 'release') {
       const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}&type=release`);
       const data = await r.json();
+      if (requestToken !== searchArtistsRequestToken) return;
       const rgs = data.release_groups || [];
       if (!rgs.length) { el.innerHTML = '<div class="loading">No results</div>'; return; }
       el.innerHTML = rgs.map(rg => {
         const isVA = rg.artist_id === VA_MBID;
         // Discogs releases without a master: show pressings inline instead of dead-end artist page
         const isMasterless = isDiscogs && rg.is_master === false;
+        const releaseId = isMasterless ? rg.discogs_release_id || rg.id : rg.id;
         const onclick = (isVA || isMasterless)
-          ? `window.loadReleaseGroup('${isMasterless ? rg.discogs_release_id || rg.id : rg.id}', this)`
-          : `window.openBrowseArtist('${rg.artist_id}', '${esc(rg.artist_name)}')`;
+          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this)`
+          : `window.openBrowseArtist(${jsArg(rg.artist_id)}, ${jsArg(rg.artist_name)})`;
         return `
         <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="${onclick}">
           <span class="artist-name">${esc(rg.artist_name)}</span>
           <span class="artist-dis"> — ${esc(rg.title)}</span>
           ${rg.primary_type ? `<span class="artist-dis" style="color:#888;"> (${esc(rg.primary_type)})</span>` : ''}
         </div>
-        <div id="rel-${rg.id}"></div>`;
+        <div id="rel-${esc(String(rg.id))}"></div>`;
       }).join('');
     } else {
       const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}`);
       const data = await r.json();
+      if (requestToken !== searchArtistsRequestToken) return;
       if (!data.artists || !data.artists.length) {
         el.innerHTML = '<div class="loading">No results</div>';
         return;
       }
       el.innerHTML = data.artists.map(a => `
         <div class="artist">
-          <div class="artist-header" onclick="window.openBrowseArtist('${a.id}', '${esc(a.name)}')">
+          <div class="artist-header" onclick="window.openBrowseArtist(${jsArg(a.id)}, ${jsArg(a.name)})">
             <span class="artist-name">${esc(a.name)}</span>
             ${a.disambiguation ? `<span class="artist-dis"> - ${esc(a.disambiguation)}</span>` : ''}
           </div>
         </div>
       `).join('');
     }
-  } catch (e) { el.innerHTML = '<div class="loading">Search failed</div>'; }
+  } catch (e) {
+    if (requestToken !== searchArtistsRequestToken) return;
+    el.innerHTML = '<div class="loading">Search failed</div>';
+  }
 }

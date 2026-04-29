@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import msgspec
 
 from web import discogs as discogs_api
-from web.routes._overlay import overlay_release_rows
+from web.routes._overlay import overlay_release_rows_in_place
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -43,12 +43,12 @@ _INCLUDE_SUBLABELS_TRUE = {"true", "1"}
 _INCLUDE_SUBLABELS_FALSE = {"false", "0"}
 _INCLUDE_SUBLABELS_VALID = _INCLUDE_SUBLABELS_TRUE | _INCLUDE_SUBLABELS_FALSE
 
-# Pagination defaults + per_page upper bound. The discogs-api mirror clamps
-# per_page to 100 internally, but we accept up to 200 here so the bound is
-# governed by our policy, not happenstance of upstream behavior.
+# Pagination defaults + per_page upper bound. Match the discogs-api mirror's
+# label-release clamp so route tests and live upstream behavior share one
+# contract.
 _DEFAULT_PAGE = 1
 _DEFAULT_PER_PAGE = 100
-_MAX_PER_PAGE = 200
+_MAX_PER_PAGE = 100
 
 
 def _parse_positive_int(
@@ -176,25 +176,16 @@ def get_discogs_label_detail(
         raise
     releases = releases_resp["results"]
 
-    overlay_release_rows(releases, [r["id"] for r in releases])
-
-    # Sub-labels come through the entity's parent — we don't have a
-    # `sub_labels` list on the public LabelEntity by design (it's source-
-    # agnostic and MB will not return that shape). Phase A surfaces an
-    # empty list here; the discogs-api detail endpoint carries
-    # `sub_labels`, but the cratedigger adapter elides them on the
-    # entity. Frontend (U6) reads `sub_label_name` per release row for
-    # the rollup badge, which is what actually matters for rendering.
-    sub_labels: list[dict] = []
+    overlay_release_rows_in_place(releases, [r["id"] for r in releases])
 
     h._json({  # type: ignore[attr-defined]
         "label": _label_entity_payload(entity),
         "releases": releases,
-        "sub_labels": sub_labels,
+        "sub_labels": entity.sub_labels,
         "pagination": releases_resp.get("pagination", {}),
         "include_sublabels": releases_resp.get(
             "include_sublabels", include_sublabels),
-        # Plan 003 U4. Adapter sets True when an upstream 503 forced a
+        # Plan 002 U3. Adapter sets True when an upstream 503 forced a
         # fallback to include_sublabels=False; the UI surfaces a banner.
         # Default False on every successful response.
         "sub_labels_dropped": releases_resp.get("sub_labels_dropped", False),

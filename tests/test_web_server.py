@@ -2816,7 +2816,7 @@ class TestLabelRouteContracts(_WebServerCase):
             "master_first_released": None,
             "artist_name": "Gridlock",
             "artist_id": "1234",
-            "via_label_id": "757",
+            "label_id": "757",
             "sub_label_name": None,
             "format": "CD",
             "media_count": 1,
@@ -2875,6 +2875,28 @@ class TestLabelRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["releases"][0],
                                 self.LABEL_RELEASE_REQUIRED_FIELDS,
                                 "label release row")
+
+    def test_label_detail_forwards_sub_labels(self):
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity(
+                sub_labels=[
+                    {"id": 25693, "name": "Hymen Substream", "release_count": 7},
+                ]
+            )
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": True,
+            }
+            status, data = self._get("/api/discogs/label/757")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["sub_labels"], [
+            {"id": 25693, "name": "Hymen Substream", "release_count": 7},
+        ])
 
     def test_label_detail_overlay_integration(self):
         """End-to-end overlay: with one release in library AND one in
@@ -3108,8 +3130,7 @@ class TestLabelRouteContracts(_WebServerCase):
         self.assertEqual(data["pagination"]["per_page"], 50)
 
     def test_label_detail_clamps_per_page(self):
-        """`?per_page=500` clamps to the 200 max so a malicious or misbehaving
-        client can't exfiltrate the whole catalogue in one shot."""
+        """`?per_page=500` clamps to the mirror's 100-row label-release max."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value=set()), \
                 patch("web.server.check_pipeline", return_value={}), \
@@ -3117,7 +3138,7 @@ class TestLabelRouteContracts(_WebServerCase):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
-                "pagination": {"page": 1, "per_page": 200, "pages": 1, "items": 0},
+                "pagination": {"page": 1, "per_page": 100, "pages": 1, "items": 0},
                 "include_sublabels": True,
             }
             status, _data = self._get(
@@ -3125,7 +3146,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_dg.get_label_releases.assert_called_once_with(
-            "757", include_sublabels=True, page=1, per_page=200)
+            "757", include_sublabels=True, page=1, per_page=100)
 
     def test_label_detail_rejects_non_integer_page(self):
         """`?page=foo` returns 400 — silently coercing to 1 would mask
@@ -3174,7 +3195,7 @@ class TestLabelRouteContracts(_WebServerCase):
         self.assertFalse(mock_dg.get_label_releases.called)
 
     def test_label_detail_forwards_sub_labels_dropped(self):
-        """Plan 003 U4: when the adapter signals a 503 fallback, the route
+        """Plan 002 U3: when the adapter signals a 503 fallback, the route
         forwards `sub_labels_dropped=True` so the UI can surface a banner."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value=set()), \
@@ -3193,7 +3214,7 @@ class TestLabelRouteContracts(_WebServerCase):
         self.assertTrue(data["sub_labels_dropped"])
 
     def test_label_detail_default_sub_labels_dropped_false(self):
-        """Plan 003 U4: every label-detail response carries the field with
+        """Plan 002 U3: every label-detail response carries the field with
         default False so the contract is stable."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value=set()), \
