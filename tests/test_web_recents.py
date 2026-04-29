@@ -566,6 +566,22 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Force imported")
         self.assertEqual(result.badge_class, "badge-force")
 
+    def test_curator_ban_with_username(self):
+        """#188 follow-up: bad-rip click surfaces as a download_log event."""
+        result = classify_log_entry(_entry(
+            outcome="curator_ban", soulseek_username="H@rco"))
+        self.assertEqual(result.badge, "Bad rip")
+        self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertIn("H@rco", result.verdict)
+        self.assertIn("Marked bad rip", result.verdict)
+
+    def test_curator_ban_without_username(self):
+        """E1.1 — no uploader resolved → still surfaces, terser verdict."""
+        result = classify_log_entry(_entry(
+            outcome="curator_ban", soulseek_username=None))
+        self.assertEqual(result.badge, "Bad rip")
+        self.assertEqual(result.verdict, "Marked bad rip")
+
     def test_failed(self):
         result = classify_log_entry(_entry(outcome="failed", beets_scenario="exception"))
         self.assertEqual(result.badge, "Failed")

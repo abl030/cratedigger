@@ -2027,6 +2027,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.mock_db.add_bad_audio_hashes.reset_mock()
         self.mock_db.add_bad_audio_hashes.return_value = 0
         self.mock_db.add_denylist.reset_mock()
+        self.mock_db.log_download.reset_mock()
         self.mock_db.get_request.return_value = make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
@@ -2079,6 +2080,17 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.mock_db.add_denylist.assert_called_once_with(
             1704, "Hxrco", "manually banned via web UI"
         )
+        # #188 follow-up: a download_log row records the ban event.
+        self.mock_db.log_download.assert_called_once()
+        log_kwargs = self.mock_db.log_download.call_args.kwargs
+        self.assertEqual(log_kwargs["request_id"], 1704)
+        self.assertEqual(log_kwargs["soulseek_username"], "Hxrco")
+        self.assertEqual(log_kwargs["outcome"], "curator_ban")
+        self.assertIn("Marked bad rip", log_kwargs["beets_detail"])
+        ban_meta = json.loads(log_kwargs["validation_result"])
+        self.assertEqual(ban_meta["scenario"], "curator_ban")
+        self.assertEqual(ban_meta["hashes_recorded"], 2)
+        self.assertEqual(ban_meta["denylisted_username"], "Hxrco")
 
     # AE4 — partial hash failure does not block the ban.
     @patch("web.routes.pipeline.hash_audio_content")
@@ -2148,6 +2160,11 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertIsNone(data["username"])
         self.assertEqual(data["hashes_recorded"], 1)
         self.assertNotIn("partial_failures", data)
+        # #188 follow-up: ban event still logged with NULL username.
+        self.mock_db.log_download.assert_called_once()
+        log_kwargs = self.mock_db.log_download.call_args.kwargs
+        self.assertEqual(log_kwargs["outcome"], "curator_ban")
+        self.assertIsNone(log_kwargs["soulseek_username"])
         # Hashes recorded with username=None.
         call_args = self.mock_db.add_bad_audio_hashes.call_args
         self.assertIsNone(call_args.args[1])
