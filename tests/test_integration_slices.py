@@ -2857,6 +2857,130 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0]["username"], "discog_peer")
         self.assertEqual(decoded[0]["matched_tracks"], 1)
 
+    def test_parallel_submit_search_forwards_response_limit(self):
+        """Parallel path (_submit_search) wires search_response_limit too.
+
+        The serial path test above asserts the responseLimit kwarg on the
+        slskd call. The parallel path is a separate function and was missing
+        the same coverage; if a future refactor regressed the kwarg only on
+        the parallel path, the existing test would not catch it.
+        """
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(search_response_limit=2500)
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [501]
+        slskd.searches.add_search(search_id=501, state="Completed", responses=[])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-p", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-p")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        submit = self._cratedigger._submit_search(album, cfg, slskd, ctx)
+        self.assertIsNotNone(submit)
+        # responseLimit was forwarded to slskd at the wire boundary on the
+        # parallel path (no _collect_search_results call needed for this
+        # assertion).
+        self.assertEqual(len(slskd.searches.search_text_calls), 1)
+        call = slskd.searches.search_text_calls[0]
+        self.assertEqual(call.kwargs.get("responseLimit"),
+                         cfg.search_response_limit)
+
+    def test_v4_tracks_variant_used_when_search_attempts_past_v1(self):
+        """Cycle 6 (threshold+1) with year + tracks → variant=v4_tracks_0.
+
+        Mirrors test_v1_year_variant_used_when_search_attempts_at_threshold
+        but for the V4 token-slice escalation. Asserts:
+        - SearchResult.variant_tag == "v4_tracks_0"
+        - The slskd query carries the first 3 distinctive title tokens (no
+          artist tokens — V4 strips the artist prefix to bypass any name ban
+          plus the existing year/title combos that already failed).
+        - search_log persists variant='v4_tracks_0'.
+        """
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(search_escalation_threshold=5)
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [777]
+        slskd.searches.add_search(search_id=777, state="Completed", responses=[])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-v4", year=1991,
+        )
+        # search_attempts=6 → cycle past V1 → V4 slice 0.
+        db.update_request_fields(rid, search_attempts=6)
+        # Distinctive titles (>3 chars, varied) so the pool has at least 3.
+        db.set_tracks(rid, [
+            {"track_number": 1, "title": "Tallahassee"},
+            {"track_number": 2, "title": "Idylls"},
+            {"track_number": 3, "title": "Frontier"},
+            {"track_number": 4, "title": "Treasure"},
+        ])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-v4")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.variant_tag, "v4_tracks_0")
+        self.assertEqual(len(slskd.searches.search_text_calls), 1)
+        call = slskd.searches.search_text_calls[0]
+        # V4 query is 3 distinctive title tokens — no wildcarded artist.
+        self.assertNotIn("*iggles", call.search_text)
+        # The pool sorts by length DESC then alpha; first 3 of
+        # [Tallahassee(11), Frontier(8), Treasure(8), Idylls(6)] is
+        # Tallahassee, Frontier, Treasure.
+        for tok in ("Tallahassee", "Frontier", "Treasure"):
+            self.assertIn(tok, call.search_text)
+        # search_log persisted the variant.
+        self.assertEqual(db.search_logs[0].variant, "v4_tracks_0")
+
+    def test_slskd_error_writes_default_variant_and_null_candidates(self):
+        """slskd raises during search → outcome=error, candidates=NULL.
+
+        Per FIX-3 of the search-escalation-and-forensics review queue,
+        outcomes that lack a candidate concept (error, timeout, exhausted,
+        empty_query) keep candidates=NULL — distinct from no_results /
+        no_match which write []. Drive the serial search loop with a
+        pre-seeded slskd error and assert the persisted forensic state.
+        """
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        # Cause search_text() to raise — search_for_album catches it and
+        # emits outcome="error".
+        slskd.searches.search_text_error = RuntimeError("offline")
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-err", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-err")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.outcome, "error")
+        row = db.search_logs[0]
+        self.assertEqual(row.outcome, "error")
+        # Default variant — escalation never had a chance to advance.
+        self.assertEqual(row.variant, "default")
+        # No candidate concept — JSONB stays NULL (FakePipelineDB writes
+        # None as the JSON serialisation, distinct from "[]" used by
+        # no_results / no_match).
+        self.assertIsNone(row.candidates)
+
 
 class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
     """U6 integration slice: variant=exhausted → manual flip + re-queue reset.
