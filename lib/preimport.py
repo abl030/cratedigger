@@ -21,8 +21,10 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement,
                          spectral_import_decision)
@@ -60,12 +62,17 @@ class PreImportGateResult:
     (regardless of pass/reject) so callers can persist them to download_log.
     """
     valid: bool = True
-    scenario: str | None = None      # "audio_corrupt" | "spectral_reject"
+    scenario: str | None = None      # "audio_corrupt" | "spectral_reject" | "bad_audio_hash"
     detail: str | None = None
     corrupt_files: list[str] = field(default_factory=list)
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
+    # Bad-audio-hash gate fields (plan 2026-04-29-005 / U5). Populated only
+    # when ``scenario == "bad_audio_hash"``. Callers fold these into the
+    # ``ValidationResult`` written to ``download_log.validation_result``.
+    matched_bad_hash_id: int | None = None
+    matched_bad_track_path: str | None = None
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -279,6 +286,66 @@ def _persist_spectral_state(
     return to_write
 
 
+@dataclass(frozen=True)
+class _BadHashMatch:
+    """Result of ``_check_bad_audio_hashes`` on a positive match."""
+    bad_hash_id: int
+    track_path: str
+
+
+def _iter_audio_files(path: str) -> list[Path]:
+    """List audio files at ``path`` (recursive) suitable for bad-hash hashing.
+
+    Mirrors ``inspect_local_files`` directory walk so the gate sees the same
+    set of tracks downstream gates do, including nested multi-disc layouts.
+    Files with unsupported extensions are skipped.
+    """
+    out: list[Path] = []
+    if not os.path.isdir(path):
+        return out
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            if "." not in name:
+                continue
+            ext = name.rsplit(".", 1)[-1].lower()
+            if ext not in AUDIO_EXTS:
+                continue
+            out.append(Path(root) / name)
+    return out
+
+
+def _check_bad_audio_hashes(
+    paths: list[Path],
+    db: "PipelineDB",
+) -> _BadHashMatch | None:
+    """Return the first matched bad-hash row, or None.
+
+    Hashing or DB-lookup failures on a single track are non-fatal: the bad-hash
+    gate is a *defense*, not a *requirement*, so a hashing error on one file
+    must not block the entire validation pipeline. Each failure is logged at
+    WARNING and skipped; the loop continues to the next track.
+    """
+    for p in paths:
+        ext = p.suffix.lstrip(".").lower()
+        if not ext:
+            continue
+        try:
+            digest = hash_audio_content(p, ext)
+        except AudioHashError:
+            logger.warning(
+                "bad-hash gate: failed to hash %s, skipping", p, exc_info=True)
+            continue
+        try:
+            row = db.lookup_bad_audio_hash(digest, ext)
+        except Exception:
+            logger.warning(
+                "bad-hash gate: lookup failed for %s, skipping", p, exc_info=True)
+            continue
+        if row is not None:
+            return _BadHashMatch(bad_hash_id=row.id, track_path=str(p))
+    return None
+
+
 def run_preimport_gates(
     *,
     path: str,
@@ -355,6 +422,56 @@ def run_preimport_gates(
                 f"AUDIO CORRUPT: {label} "
                 f"({len(result.corrupt_files)} files failed ffmpeg decode)")
             return result
+
+    # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
+    # Hash candidate tracks and compare against the curator-reported
+    # ``bad_audio_hashes`` table. Sits AFTER MP3 header repair (so post-repair
+    # bytes match what the F1 ban-source flow stored) and AFTER audio-integrity
+    # (so we don't waste cycles hashing undecodable files), BEFORE spectral
+    # (cheaper to reject early on a known match than run sox).
+    #
+    # Empty-table fast-path: ``has_any_bad_audio_hashes`` is a ``LIMIT 1`` probe
+    # with a primary-key index — sub-millisecond on the empty path. Per the plan
+    # we can cache it with a 60s TTL on ``CratediggerContext``, but ``ctx`` is
+    # not currently plumbed into ``run_preimport_gates`` and adding it would
+    # cascade through every caller (auto, force, manual). The DB call is cheap
+    # enough that the direct call wins on simplicity. Revisit if profiling
+    # shows pressure.
+    if db is not None:
+        try:
+            any_bad = db.has_any_bad_audio_hashes()
+        except Exception:
+            logger.warning(
+                "bad-hash gate: has_any_bad_audio_hashes probe failed, skipping",
+                exc_info=True)
+            any_bad = False
+        if any_bad:
+            audio_files = _iter_audio_files(path)
+            match = _check_bad_audio_hashes(audio_files, db)
+            if match is not None:
+                result.valid = False
+                result.scenario = "bad_audio_hash"
+                result.detail = (
+                    f"matched bad audio hash {match.bad_hash_id} on "
+                    f"track {match.track_path}")
+                result.matched_bad_hash_id = match.bad_hash_id
+                result.matched_bad_track_path = match.track_path
+                logger.warning(
+                    f"BAD HASH MATCH: {label} "
+                    f"hash_id={match.bad_hash_id} track={match.track_path}")
+                if request_id is not None and usernames:
+                    for username in usernames:
+                        try:
+                            db.add_denylist(
+                                request_id, username,
+                                f"matched bad hash {match.bad_hash_id}")
+                        except Exception:
+                            logger.exception(
+                                "Failed to denylist %s for request %s "
+                                "(bad-hash match)", username, request_id)
+                    logger.info(
+                        f"  Denylisted {usernames} for request {request_id}")
+                return result
 
     # --- Resolve VBR status and avg bitrate via filesystem inspection ---
     # Callers supply VBR/min_bitrate from different sources:

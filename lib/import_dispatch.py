@@ -1469,6 +1469,8 @@ def _dispatch_import_from_db_locked(
                 detail=preimport.detail,
                 failed_path=failed_path,
                 corrupt_files=list(preimport.corrupt_files),
+                matched_bad_hash_id=preimport.matched_bad_hash_id,
+                matched_bad_track_path=preimport.matched_bad_track_path,
             ).to_json(),
             staged_path=failed_path,
         )
