@@ -509,6 +509,10 @@ Captured from `/ce-code-review` Tier 2 pass on PR #185. Run artifacts: `/tmp/com
 
 **Priority order: tackle P1 + P2 #6 first; the P3 cleanup cluster can land in one consolidation PR.**
 
+### P0 — REVERTED, needs proper redo
+
+- **DoS via UMG-class recursive CTE — fix as committed in `cf22645` was broken; reverted in `6053896`.** The original fix wrapped the recursive CTE in `BEGIN; SET LOCAL statement_timeout='5s'; ... COMMIT;`. This breaks the multiplexed `tokio_postgres::Client` shared by Axum: opening an explicit transaction on a multiplexed client serializes ALL concurrent requests through that one connection, and corrupts session state if a request times out mid-transaction. Live deploy verification (2026-04-29) caught this — the `discogs.ablz.au` mirror was hanging on every request after deploy. Cratedigger-side route auto-flip (`bf2d929`) is still in place and works for the happy path. Proper fix: introduce a connection pool (deadpool-postgres or bb8) so each request gets its own connection, then the transaction-based statement_timeout is safe. Until that lands, the DoS vector is theoretical (single-user service) but real.
+
 ### P1 — fix soon
 
 - **Pagination plumbed but not consumed.** `web/discogs.py::get_label_releases` accepts `page`/`per_page`; route doesn't forward; UI shows "Showing first 100 of N". Plan U6 explicitly accepted this for v1, but it leaves R5 ("paginated for hundreds/thousands") unsatisfied. Forward query params from the route, add page controls in `web/js/labels.js`.
