@@ -154,6 +154,7 @@
     number_of_albums_to_grab = ${toString cfg.searchSettings.numberOfAlbumsToGrab}
     title_blacklist = ${concatStringsSep "," cfg.searchSettings.titleBlacklist}
     search_blacklist = ${concatStringsSep "," cfg.searchSettings.searchBlacklist}
+    search_response_limit = ${toString cfg.searchSettings.searchResponseLimit}
 
     [Download Settings]
     download_filtering = ${if cfg.downloadSettings.downloadFiltering then "True" else "False"}
@@ -576,6 +577,15 @@ in {
       };
       parallelSearches = mkOption { type = types.int; default = 8; };
       numberOfAlbumsToGrab = mkOption { type = types.int; default = 16; };
+      searchResponseLimit = mkOption {
+        type = types.int;
+        default = 1000;
+        description = ''
+          Caps how many peer responses slskd collects per search. Maps to
+          slskd's `responseLimit` ceiling — raising this lets the matcher
+          consider more peers per query at the cost of a longer search window.
+        '';
+      };
       titleBlacklist = mkOption {
         type = types.listOf types.str;
         default = [];
