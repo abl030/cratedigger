@@ -1111,6 +1111,9 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             result_count=None,
             elapsed_s=None,
             outcome="error",
+            candidates=None,
+            variant=None,
+            final_state=None,
         )
         db.record_attempt.assert_called_once_with(42, "search")
 

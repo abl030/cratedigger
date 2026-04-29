@@ -153,22 +153,108 @@ def _build_search_cache(
     return cache_entries, upload_speeds, dir_audio_counts
 
 
+def _select_variant_for_album(album, search_cfg, db):
+    """Choose which query variant to issue for `album` this cycle.
+
+    Pure-ish helper: reads `album_requests` + `album_tracks` (no slskd), feeds
+    the typed inputs into `lib.search.select_variant`. Returns the
+    ``SearchVariant`` and the deterministic base query so callers can
+    surface it in logs / SearchResult metadata.
+    """
+    from lib.search import build_query, select_variant, SearchVariant
+
+    base_query = build_query(
+        album.artist_name, album.title,
+        prepend_artist=search_cfg.album_prepend_artist,
+    )
+
+    request_id = getattr(album, "db_request_id", None)
+    search_attempts = 0
+    year: str | None = None
+    track_titles: list[str] = []
+    if request_id:
+        try:
+            row = db.get_request(request_id)
+            if row is not None:
+                attempts_val = row.get("search_attempts")
+                if isinstance(attempts_val, int):
+                    search_attempts = attempts_val
+                year_val = row.get("year")
+                # PostgreSQL returns int for INTEGER columns; coerce to str.
+                if year_val is not None:
+                    year = str(year_val)
+            tracks = db.get_tracks(request_id)
+            track_titles = [
+                str(t["title"]) for t in tracks if t.get("title")
+            ]
+        except Exception:
+            logger.exception(
+                f"Failed to load variant inputs for request {request_id}; "
+                "falling back to default variant"
+            )
+            return SearchVariant(
+                kind="default", query=base_query or "",
+                tag="default", slice_index=None,
+            ), base_query
+
+    # AlbumRecord falls back to year="0000" — select_variant treats that as
+    # unknown so V1 will be skipped.
+    if year is None:
+        rd = getattr(album, "release_date", None)
+        if isinstance(rd, str) and rd:
+            year = rd[:4]
+
+    if not base_query:
+        # Caller still needs a SearchVariant so the code path stays uniform.
+        return SearchVariant(
+            kind="default", query=None,
+            tag="default", slice_index=None,
+        ), base_query
+
+    variant = select_variant(
+        search_attempts=search_attempts,
+        threshold=search_cfg.search_escalation_threshold,
+        base_query=base_query,
+        year=year,
+        track_titles=track_titles,
+    )
+    return variant, base_query
+
+
 def search_for_album(album, ctx):
     """Search slskd for an album. Returns SearchResult (always non-None)."""
-    from lib.search import build_query, SearchResult
+    from lib.search import SearchResult
 
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
     t0 = time.time()
-    query = build_query(artist_name, album_title, prepend_artist=cfg.album_prepend_artist)
+
+    db = ctx.pipeline_db_source._get_db()
+    variant, base_query = _select_variant_for_album(album, cfg, db)
+    query = variant.query
+
+    if variant.kind == "exhausted":
+        # No slskd round-trip — this is the cycle that flips to manual in U6.
+        logger.info(
+            f"Variant ladder exhausted for '{artist_name} - {album_title}'; "
+            f"recording exhaustion without searching"
+        )
+        return SearchResult(
+            album_id=album_id, success=False, query=base_query or "",
+            elapsed_s=0.0, outcome="exhausted",
+            variant_tag=variant.tag,
+        )
 
     if not query:
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
-        return SearchResult(album_id=album_id, success=False, outcome="empty_query")
+        return SearchResult(
+            album_id=album_id, success=False, outcome="empty_query",
+            variant_tag=variant.tag,
+        )
 
     logger.info(f"Searching for album: {query} "
-                f"(from '{artist_name} - {album_title}')")
+                f"(from '{artist_name} - {album_title}', variant={variant.tag})")
     try:
         search = slskd.searches.search_text(
             searchText=query,
@@ -176,11 +262,15 @@ def search_for_album(album, ctx):
             filterResponses=True,
             maximumPeerQueueLength=cfg.maximum_peer_queue,
             minimumPeerUploadSpeed=cfg.minimum_peer_upload_speed,
+            responseLimit=cfg.search_response_limit,
         )
     except Exception:
         logger.exception(f"Failed to perform search via SLSKD: {query}")
-        return SearchResult(album_id=album_id, success=False, query=query,
-                            elapsed_s=time.time() - t0, outcome="error")
+        return SearchResult(
+            album_id=album_id, success=False, query=query,
+            elapsed_s=time.time() - t0, outcome="error",
+            variant_tag=variant.tag,
+        )
 
     # Wait for slskd to process the search. Searches go through:
     #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
@@ -190,15 +280,21 @@ def search_for_album(album, ctx):
     slskd_timeout_s = cfg.search_timeout / 1000 if cfg.search_timeout > 1000 else cfg.search_timeout
     poll_timeout_s = slskd_timeout_s * 2 + 15
     start_time = time.time()
+    final_state: str | None = None
     while True:
-        state = slskd.searches.state(search["id"], False)["state"]
+        state_resp = slskd.searches.state(search["id"], False)
+        state = state_resp["state"]
+        final_state = state
         if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
             break
         time.sleep(1)
         if (time.time() - start_time) > poll_timeout_s:
             logger.error("Failed to perform search via SLSKD due to timeout on search results.")
-            return SearchResult(album_id=album_id, success=False, query=query,
-                                elapsed_s=time.time() - t0, outcome="timeout")
+            return SearchResult(
+                album_id=album_id, success=False, query=query,
+                elapsed_s=time.time() - t0, outcome="timeout",
+                variant_tag=variant.tag, final_state=final_state,
+            )
 
     search_results = slskd.searches.search_responses(search["id"])
     elapsed = time.time() - t0
@@ -207,8 +303,11 @@ def search_for_album(album, ctx):
         slskd.searches.delete(search["id"])
 
     if not len(search_results) > 0:
-        return SearchResult(album_id=album_id, success=False, query=query,
-                            result_count=0, elapsed_s=elapsed, outcome="no_results")
+        return SearchResult(
+            album_id=album_id, success=False, query=query,
+            result_count=0, elapsed_s=elapsed, outcome="no_results",
+            variant_tag=variant.tag, final_state=final_state,
+        )
 
     filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
     cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
@@ -225,35 +324,59 @@ def search_for_album(album, ctx):
         query=query,
         result_count=len(search_results),
         elapsed_s=elapsed,
+        variant_tag=variant.tag,
+        final_state=final_state,
     )
     # Reuse the same merge path as the parallel pipeline
     _merge_search_result(result, ctx)
     return result
 
 
-def _submit_search(album, search_cfg, slskd_client):
+def _submit_search(album, search_cfg, slskd_client, ctx):
     """Submit a search to slskd and return the search ID (no waiting).
 
     slskd has a SemaphoreSlim(1,1) on POST /searches — only one submission
     at a time. The semaphore releases after the search is queued (~100ms),
     so we submit sequentially but wait for results in parallel.
 
-    Returns (search_id, query, album_id) or None on failure.
+    Returns (search_id, query, album_id, variant_tag) or:
+        ("__exhausted__", base_query, album_id, "exhausted") for the
+        variant-exhaustion sentinel — caller emits a SearchResult and skips
+        the slskd round-trip.
+        None on submission failure.
+
+    Variant-selection currency invariant:
+        We read `search_attempts` here (submit time) but `record_attempt`
+        increments at log time. Within a single album's lifecycle the
+        sequence submit→collect→log is strictly ordered, so the variant
+        selected here is what `_log_search_result` will persist. **If a
+        future refactor allows the same album to be submitted twice in
+        the same batch, both submissions will silently choose the same
+        variant — this comment is the regression fence.**
     """
-    from lib.search import build_query
     import requests
 
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
-    query = build_query(artist_name, album_title, prepend_artist=search_cfg.album_prepend_artist)
+
+    db = ctx.pipeline_db_source._get_db()
+    variant, base_query = _select_variant_for_album(album, search_cfg, db)
+    query = variant.query
+
+    if variant.kind == "exhausted":
+        logger.info(
+            f"Variant ladder exhausted for '{artist_name} - {album_title}'; "
+            f"will record exhaustion without searching"
+        )
+        return ("__exhausted__", base_query or "", album_id, variant.tag)
 
     if not query:
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
         return None
 
     logger.info(f"Submitting search: {query} "
-                f"(from '{artist_name} - {album_title}')")
+                f"(from '{artist_name} - {album_title}', variant={variant.tag})")
 
     # Retry on 429 (rate limit) or 409 (semaphore busy) with backoff.
     # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
@@ -265,8 +388,9 @@ def _submit_search(album, search_cfg, slskd_client):
                 filterResponses=True,
                 maximumPeerQueueLength=search_cfg.maximum_peer_queue,
                 minimumPeerUploadSpeed=search_cfg.minimum_peer_upload_speed,
+                responseLimit=search_cfg.search_response_limit,
             )
-            return (search["id"], query, album_id)
+            return (search["id"], query, album_id, variant.tag)
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status in (429, 409) and attempt < 5:
@@ -283,10 +407,14 @@ def _submit_search(album, search_cfg, slskd_client):
     return None
 
 
-def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client):
+def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client,
+                            variant_tag=None):
     """Wait for a submitted search to complete and collect results.
 
     This is the part that can run in parallel — it's just polling + reading.
+    `variant_tag` is the persisted tag chosen by `_submit_search` and is
+    plumbed onto the returned ``SearchResult`` so `_log_search_result` can
+    persist it without re-running variant selection.
     """
     from lib.search import SearchResult
 
@@ -301,10 +429,12 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
     slskd_timeout_s = search_cfg.search_timeout / 1000 if search_cfg.search_timeout > 1000 else search_cfg.search_timeout
     timeout_s = slskd_timeout_s + slskd_timeout_s + 15  # worst case: responses arrive at T=timeout, then wait another timeout
     start_time = time.time()
+    final_state: str | None = None
     while True:
         try:
             state_resp = slskd_client.searches.state(search_id, False)
             state = state_resp["state"]
+            final_state = state
             if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
                 break
         except Exception:
@@ -313,8 +443,11 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         time.sleep(1)
         if (time.time() - start_time) > timeout_s:
             logger.error(f"Search timed out for {query}")
-            return SearchResult(album_id=album_id, success=False, query=query,
-                                elapsed_s=time.time() - t0, outcome="timeout")
+            return SearchResult(
+                album_id=album_id, success=False, query=query,
+                elapsed_s=time.time() - t0, outcome="timeout",
+                variant_tag=variant_tag, final_state=final_state,
+            )
 
     search_results = slskd_client.searches.search_responses(search_id)
     elapsed = time.time() - t0
@@ -323,8 +456,11 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         slskd_client.searches.delete(search_id)
 
     if not len(search_results) > 0:
-        return SearchResult(album_id=album_id, success=False, query=query,
-                            result_count=0, elapsed_s=elapsed, outcome="no_results")
+        return SearchResult(
+            album_id=album_id, success=False, query=query,
+            result_count=0, elapsed_s=elapsed, outcome="no_results",
+            variant_tag=variant_tag, final_state=final_state,
+        )
 
     filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
     cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
@@ -340,6 +476,8 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         query=query,
         result_count=len(search_results),
         elapsed_s=elapsed,
+        variant_tag=variant_tag,
+        final_state=final_state,
     )
 
 
@@ -376,26 +514,53 @@ def _merge_search_result(result, ctx):
             ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
 
 
+def _top_candidates(candidates, limit=20):
+    """Return the top-N candidates sorted by (matched_tracks, avg_ratio) DESC.
+
+    Pure helper — no DB, no I/O. The forensic blob in `search_log.candidates`
+    must be capped so we don't write 1000+ rows of JSONB per cycle. Sorting
+    by matched_tracks first surfaces the closest peers; avg_ratio is the
+    secondary tiebreak so a 24/26 dir with high ratio beats a 24/26 dir with
+    low ratio.
+    """
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: (c.matched_tracks, c.avg_ratio),
+        reverse=True,
+    )
+    return list(sorted_candidates[:limit])
+
+
 def _log_search_result(album, result, ctx) -> None:
     """Persist search outcome to search_log and record_attempt on failure."""
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
         return
     db = ctx.pipeline_db_source._get_db()
+    top = _top_candidates(result.candidates) if result.candidates else None
     db.log_search(
         request_id=request_id,
         query=result.query or None,
         result_count=result.result_count,
         elapsed_s=result.elapsed_s or None,
         outcome=result.outcome or "error",
+        candidates=top,
+        variant=result.variant_tag,
+        final_state=result.final_state,
     )
-    # Increment search_attempts + backoff for any non-found outcome
-    if result.outcome != "found":
+    # Increment search_attempts + backoff for any non-found outcome.
+    # Exhausted variants do not increment — the request will be flipped to
+    # manual by U6 and the attempt counter is the variant-ladder index.
+    if result.outcome not in ("found", "exhausted"):
         db.record_attempt(request_id, "search")
 
 
 def _apply_find_download_result(album, result, find_result, failed_grab) -> None:
     """Translate matching/enqueue outcome into search_log telemetry."""
+    # Forensic capture: copy the per-(user, dir, filetype) score list off the
+    # find_download result onto the SearchResult so `_log_search_result` can
+    # persist the top-20 to `search_log.candidates`.
+    result.candidates = tuple(find_result.candidates)
     if find_result.outcome == "found":
         result.outcome = "found"
         return
@@ -456,7 +621,7 @@ def _search_and_queue_parallel(albums, ctx):
         """Submit the next album from the queue. Returns (future, album) or None."""
         while album_queue:
             album = album_queue.pop(0)
-            submit_result = _submit_search(album, cfg, slskd)
+            submit_result = _submit_search(album, cfg, slskd, ctx)
             if submit_result is None:
                 # Log the submission failure — reconstruct query for the log
                 from lib.search import build_query, SearchResult
@@ -470,9 +635,22 @@ def _search_and_queue_parallel(albums, ctx):
                 _log_search_result(album, sr, ctx)
                 failed_search.append(album)
                 continue
-            search_id, query, album_id = submit_result
+            search_id, query, album_id, variant_tag = submit_result
+            if search_id == "__exhausted__":
+                # Variant ladder exhausted — emit a SearchResult inline, no
+                # slskd round-trip. U6 will flip the request to manual.
+                from lib.search import SearchResult
+                sr = SearchResult(
+                    album_id=album_id, success=False,
+                    query=query or "", elapsed_s=0.0, outcome="exhausted",
+                    variant_tag=variant_tag,
+                )
+                _log_search_result(album, sr, ctx)
+                failed_search.append(album)
+                continue
             future = pool.submit(
-                _collect_search_results, search_id, query, album_id, cfg, slskd
+                _collect_search_results, search_id, query, album_id, cfg, slskd,
+                variant_tag,
             )
             return (future, album)
         return None
