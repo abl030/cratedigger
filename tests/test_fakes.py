@@ -1018,6 +1018,249 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(rows[0]["reason"], "y")
 
 
+class TestFakeBadAudioHashes(unittest.TestCase):
+    """Self-tests for the bad_audio_hashes fake methods (plan U2)."""
+
+    def _hash(self, n: int) -> bytes:
+        return bytes([n]) * 32
+
+    def test_add_bad_audio_hashes_returns_count_for_fresh_inserts(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="mp3"),
+            BadAudioHashInput(hash_value=self._hash(3), audio_format="m4a"),
+        ]
+        n = db.add_bad_audio_hashes(42, "H@rco", "bad rip", inputs)
+        self.assertEqual(n, 3)
+        self.assertEqual(len(db.bad_audio_hashes), 3)
+        self.assertEqual(db.bad_audio_hashes[0].request_id, 42)
+        self.assertEqual(db.bad_audio_hashes[0].reported_username, "H@rco")
+        self.assertEqual(db.bad_audio_hashes[0].reason, "bad rip")
+        # Auto-incrementing ids
+        ids = [r.id for r in db.bad_audio_hashes]
+        self.assertEqual(ids, [1, 2, 3])
+
+    def test_add_bad_audio_hashes_returns_zero_on_full_duplicate(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="mp3"),
+        ]
+        first = db.add_bad_audio_hashes(42, "H@rco", "bad rip", inputs)
+        second = db.add_bad_audio_hashes(99, "OtherUser", "duplicate", inputs)
+        self.assertEqual(first, 2)
+        self.assertEqual(second, 0)
+        self.assertEqual(len(db.bad_audio_hashes), 2)
+        # First-writer-wins on attribution
+        self.assertEqual(db.bad_audio_hashes[0].request_id, 42)
+        self.assertEqual(db.bad_audio_hashes[0].reported_username, "H@rco")
+
+    def test_add_bad_audio_hashes_partial_overlap(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        first_batch = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="flac"),
+        ]
+        db.add_bad_audio_hashes(42, "H@rco", "bad rip", first_batch)
+        second_batch = [
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(3), audio_format="flac"),
+        ]
+        n = db.add_bad_audio_hashes(43, "OtherUser", "bad rip", second_batch)
+        # Only the genuinely-new (3, flac) row inserted
+        self.assertEqual(n, 1)
+        self.assertEqual(len(db.bad_audio_hashes), 3)
+
+    def test_add_bad_audio_hashes_empty_list_is_zero(self):
+        db = FakePipelineDB()
+        n = db.add_bad_audio_hashes(42, "u", "r", [])
+        self.assertEqual(n, 0)
+
+    def test_add_bad_audio_hashes_same_hash_different_format_both_inserted(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="mp3"),
+        ]
+        n = db.add_bad_audio_hashes(42, "u", "r", inputs)
+        self.assertEqual(n, 2)
+
+    def test_lookup_bad_audio_hash_hits_when_present(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        db.add_bad_audio_hashes(
+            42, "u", "r",
+            [BadAudioHashInput(hash_value=self._hash(7), audio_format="flac")],
+        )
+        row = db.lookup_bad_audio_hash(self._hash(7), "flac")
+        assert row is not None
+        self.assertEqual(row.hash_value, self._hash(7))
+        self.assertEqual(row.audio_format, "flac")
+        self.assertEqual(row.request_id, 42)
+        self.assertEqual(row.reported_username, "u")
+
+    def test_lookup_bad_audio_hash_miss_returns_none(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.lookup_bad_audio_hash(self._hash(9), "flac"))
+
+    def test_lookup_bad_audio_hash_format_must_match(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        db.add_bad_audio_hashes(
+            42, "u", "r",
+            [BadAudioHashInput(hash_value=self._hash(7), audio_format="flac")],
+        )
+        # Same hash, different format → miss
+        self.assertIsNone(db.lookup_bad_audio_hash(self._hash(7), "mp3"))
+        # Same format, different hash → miss
+        self.assertIsNone(db.lookup_bad_audio_hash(self._hash(8), "flac"))
+
+    def test_has_any_bad_audio_hashes_false_on_fresh_fake(self):
+        db = FakePipelineDB()
+        self.assertFalse(db.has_any_bad_audio_hashes())
+
+    def test_has_any_bad_audio_hashes_true_after_one_insert(self):
+        from lib.pipeline_db import BadAudioHashInput
+        db = FakePipelineDB()
+        db.add_bad_audio_hashes(
+            42, None, None,
+            [BadAudioHashInput(hash_value=self._hash(1), audio_format="flac")],
+        )
+        self.assertTrue(db.has_any_bad_audio_hashes())
+
+
+class TestFakeRecentSuccessfulUploader(unittest.TestCase):
+    """Self-tests for FakePipelineDB.get_recent_successful_uploader (plan U2)."""
+
+    def test_returns_none_on_empty_logs(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.get_recent_successful_uploader(42))
+
+    def test_returns_none_when_no_successful_log(self):
+        db = FakePipelineDB()
+        db.log_download(42, soulseek_username="bob", outcome="rejected")
+        db.log_download(42, soulseek_username="alice", outcome="error")
+        self.assertIsNone(db.get_recent_successful_uploader(42))
+
+    def test_returns_most_recent_success(self):
+        db = FakePipelineDB()
+        db.log_download(42, soulseek_username="alice", outcome="success")
+        db.log_download(42, soulseek_username="bob", outcome="success")
+        self.assertEqual(db.get_recent_successful_uploader(42), "bob")
+
+    def test_returns_most_recent_force_import(self):
+        db = FakePipelineDB()
+        db.log_download(42, soulseek_username="alice", outcome="success")
+        db.log_download(42, soulseek_username="harco", outcome="force_import")
+        self.assertEqual(db.get_recent_successful_uploader(42), "harco")
+
+    def test_ignores_other_request_ids(self):
+        db = FakePipelineDB()
+        db.log_download(42, soulseek_username="alice", outcome="success")
+        db.log_download(99, soulseek_username="bob", outcome="success")
+        self.assertEqual(db.get_recent_successful_uploader(42), "alice")
+        self.assertEqual(db.get_recent_successful_uploader(99), "bob")
+
+    def test_skips_null_uploader_rows(self):
+        db = FakePipelineDB()
+        db.log_download(42, soulseek_username="alice", outcome="success")
+        db.log_download(42, soulseek_username=None, outcome="success")
+        self.assertEqual(db.get_recent_successful_uploader(42), "alice")
+
+
+class TestFakeActiveImportJobForRequest(unittest.TestCase):
+    """Self-tests for FakePipelineDB.get_active_import_job_for_request (plan U2)."""
+
+    def _enqueue(self, db: FakePipelineDB, *, request_id: int, dedupe_key: str):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        return db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=manual_import_payload(failed_path="/tmp/x"),
+            preview_enabled=False,
+        )
+
+    def test_returns_none_when_no_jobs(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.get_active_import_job_for_request(42))
+
+    def test_returns_queued_job_for_request(self):
+        db = FakePipelineDB()
+        job = self._enqueue(db, request_id=42, dedupe_key="manual:42")
+        result = db.get_active_import_job_for_request(42)
+        assert result is not None
+        self.assertEqual(result["id"], job.id)
+        self.assertEqual(result["status"], "queued")
+
+    def test_returns_running_job_for_request(self):
+        db = FakePipelineDB()
+        self._enqueue(db, request_id=42, dedupe_key="manual:42")
+        # Move it to "would_import" then claim → status='running'.
+        db.mark_import_job_preview_importable(
+            db._import_jobs[0]["id"],
+            preview_result={"verdict": "would_import"},
+            message="ok",
+        )
+        claimed = db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        result = db.get_active_import_job_for_request(42)
+        assert result is not None
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["id"], claimed.id)
+
+    def test_returns_none_for_completed_job(self):
+        db = FakePipelineDB()
+        job = self._enqueue(db, request_id=42, dedupe_key="manual:42")
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ok",
+        )
+        claimed = db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        db.mark_import_job_completed(claimed.id, result={"ok": True})
+        self.assertIsNone(db.get_active_import_job_for_request(42))
+
+    def test_returns_none_for_failed_job(self):
+        db = FakePipelineDB()
+        job = self._enqueue(db, request_id=42, dedupe_key="manual:42")
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ok",
+        )
+        claimed = db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        db.mark_import_job_failed(claimed.id, error="boom")
+        self.assertIsNone(db.get_active_import_job_for_request(42))
+
+    def test_returns_only_jobs_for_the_requested_request_id(self):
+        db = FakePipelineDB()
+        self._enqueue(db, request_id=42, dedupe_key="manual:42")
+        self._enqueue(db, request_id=99, dedupe_key="manual:99")
+        r42 = db.get_active_import_job_for_request(42)
+        r99 = db.get_active_import_job_for_request(99)
+        assert r42 is not None and r99 is not None
+        self.assertEqual(r42["request_id"], 42)
+        self.assertEqual(r99["request_id"], 99)
+
+    def test_returns_most_recent_job_when_multiple_active(self):
+        db = FakePipelineDB()
+        # First job with one dedupe_key
+        first = self._enqueue(db, request_id=42, dedupe_key="manual:42:a")
+        second = self._enqueue(db, request_id=42, dedupe_key="manual:42:b")
+        result = db.get_active_import_job_for_request(42)
+        assert result is not None
+        # Most recent by id
+        self.assertEqual(result["id"], max(first.id, second.id))
+
+
 def _public_methods(cls: type) -> set[str]:
     """Return the set of non-underscore method names defined on ``cls``."""
     return {

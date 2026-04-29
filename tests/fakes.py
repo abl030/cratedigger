@@ -26,6 +26,7 @@ from lib.import_queue import (
     validate_status,
 )
 from lib.pipeline_db import (BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES,
+                             BadAudioHashInput, BadAudioHashRow,
                              RequestSpectralStateUpdate,
                              RequestV0ProbeStateUpdate)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
@@ -316,6 +317,8 @@ class FakePipelineDB:
         self.search_logs: list[SearchLogRow] = []
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
+        self.bad_audio_hashes: list[BadAudioHashRow] = []
+        self._next_bad_audio_hash_id = 0
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
         self.status_history: list[tuple[int, str]] = []
@@ -1087,6 +1090,81 @@ class FakePipelineDB:
             {"username": e.username, "reason": e.reason, "created_at": None}
             for e in self.denylist if e.request_id == request_id
         ]
+
+    # --- bad_audio_hashes ---
+
+    def add_bad_audio_hashes(
+        self,
+        request_id: int,
+        reported_username: str | None,
+        reason: str | None,
+        hashes: list[BadAudioHashInput],
+    ) -> int:
+        """Insert bad-rip hashes; dedupe on (hash_value, audio_format)."""
+        existing = {
+            (row.hash_value, row.audio_format) for row in self.bad_audio_hashes
+        }
+        inserted = 0
+        for h in hashes:
+            key = (h.hash_value, h.audio_format)
+            if key in existing:
+                continue
+            existing.add(key)
+            self._next_bad_audio_hash_id += 1
+            self.bad_audio_hashes.append(BadAudioHashRow(
+                id=self._next_bad_audio_hash_id,
+                hash_value=h.hash_value,
+                audio_format=h.audio_format,
+                request_id=request_id,
+                reported_username=reported_username,
+                reason=reason,
+                reported_at=_utcnow(),
+            ))
+            inserted += 1
+        return inserted
+
+    def lookup_bad_audio_hash(
+        self,
+        hash_value: bytes,
+        audio_format: str,
+    ) -> BadAudioHashRow | None:
+        for row in self.bad_audio_hashes:
+            if row.hash_value == hash_value and row.audio_format == audio_format:
+                return row
+        return None
+
+    def has_any_bad_audio_hashes(self) -> bool:
+        return bool(self.bad_audio_hashes)
+
+    def get_recent_successful_uploader(
+        self,
+        request_id: int,
+    ) -> str | None:
+        """Most recent successful uploader for this request, or None."""
+        for entry in reversed(self.download_logs):
+            if entry.request_id != request_id:
+                continue
+            if entry.outcome not in ("success", "force_import"):
+                continue
+            if entry.soulseek_username is None:
+                continue
+            return entry.soulseek_username
+        return None
+
+    def get_active_import_job_for_request(
+        self,
+        request_id: int,
+    ) -> dict[str, Any] | None:
+        """Most recent queued/running import job for this request, or None."""
+        rows = [
+            row for row in self._import_jobs
+            if row.get("request_id") == request_id
+            and row.get("status") in ("queued", "running")
+        ]
+        if not rows:
+            return None
+        rows.sort(key=lambda row: row["id"], reverse=True)
+        return copy.deepcopy(rows[0])
 
     def check_and_apply_cooldown(self, username: str,
                                   config: Any = None) -> bool:  # noqa: ARG002
