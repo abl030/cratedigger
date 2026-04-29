@@ -1186,5 +1186,136 @@ class TestCmdQuality(unittest.TestCase):
         self.assertNotIn("(rank=EXCELLENT)", output)
 
 
+class TestCmdShowSearchForensics(unittest.TestCase):
+    """Unit cover for U7 forensic surfacing in `pipeline-cli show`.
+
+    No TEST_DB_DSN required — stubs the DB and verifies the printed text
+    contains variant + final_state + manual_reason + the top-3 candidate
+    table from the JSONB blob, and degrades gracefully on NULL/empty
+    candidates.
+    """
+
+    def _row(self, **overrides):
+        row = make_request_row(**overrides)
+        return row
+
+    def _capture(self, db, request_id):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_show(db, SimpleNamespace(id=request_id))
+        return stdout.getvalue()
+
+    def test_show_renders_variant_final_state_and_top_3(self):
+        db = MagicMock()
+        db.get_request.return_value = self._row(
+            id=1843, manual_reason=None, status="wanted",
+        )
+        db.get_tracks.return_value = []
+        # JSONB candidates blob — psycopg2 returns parsed Python list.
+        candidates_blob = [
+            {"username": "alice", "dir": "A\\Album", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.95,
+             "missing_titles": [], "file_count": 26},
+            {"username": "bob", "dir": "B\\Album", "filetype": "mp3",
+             "matched_tracks": 22, "total_tracks": 26, "avg_ratio": 0.80,
+             "missing_titles": ["x"], "file_count": 22},
+            {"username": "carol", "dir": "C\\Album", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.85,
+             "missing_titles": [], "file_count": 26},
+            {"username": "dave", "dir": "D\\Album", "filetype": "flac",
+             "matched_tracks": 20, "total_tracks": 26, "avg_ratio": 0.99,
+             "missing_titles": ["a", "b"], "file_count": 20},
+        ]
+        db.get_search_history.return_value = [{
+            "id": 99, "request_id": 1843, "query": "*lice Album",
+            "result_count": 100, "elapsed_s": 1.2, "outcome": "no_match",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": candidates_blob,
+            "variant": "v3_artist_only", "final_state": "Completed",
+        }]
+        db.get_download_history.return_value = []
+        db.get_denylisted_users.return_value = []
+
+        out = self._capture(db, 1843)
+
+        self.assertIn("Search Forensics:", out)
+        self.assertIn("variant:        v3_artist_only", out)
+        self.assertIn("final_state:    Completed", out)
+        # Per-row variant column appears in Search History.
+        self.assertIn("v3_artist_only", out)
+        # Top-3 ordering: alice (26, 0.95) > carol (26, 0.85) > bob (22, 0.80).
+        # dave (20, 0.99) is excluded because matched_tracks dominates avg_ratio.
+        alice_idx = out.find("alice")
+        carol_idx = out.find("carol")
+        bob_idx = out.find("bob")
+        dave_idx = out.find("dave")
+        self.assertGreater(alice_idx, 0)
+        self.assertGreater(carol_idx, alice_idx)
+        self.assertGreater(bob_idx, carol_idx)
+        self.assertEqual(dave_idx, -1, "4th candidate must be truncated")
+
+    def test_show_renders_manual_reason_chip(self):
+        db = MagicMock()
+        db.get_request.return_value = self._row(
+            id=2, manual_reason="search_exhausted", status="manual",
+        )
+        db.get_tracks.return_value = []
+        db.get_search_history.return_value = [{
+            "id": 1, "request_id": 2, "query": "q",
+            "result_count": 0, "elapsed_s": 0.1, "outcome": "exhausted",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": None,
+            "variant": "exhausted", "final_state": None,
+        }]
+        db.get_download_history.return_value = []
+        db.get_denylisted_users.return_value = []
+
+        out = self._capture(db, 2)
+
+        self.assertIn("manual_reason:  search_exhausted", out)
+        self.assertIn("variant:        exhausted", out)
+
+    def test_show_handles_null_candidates_gracefully(self):
+        """Historical row with NULL candidates → no crash, no top list."""
+        db = MagicMock()
+        db.get_request.return_value = self._row(id=3, manual_reason=None)
+        db.get_tracks.return_value = []
+        db.get_search_history.return_value = [{
+            "id": 1, "request_id": 3, "query": "q",
+            "result_count": None, "elapsed_s": None, "outcome": "timeout",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": None, "variant": None, "final_state": None,
+        }]
+        db.get_download_history.return_value = []
+        db.get_denylisted_users.return_value = []
+
+        out = self._capture(db, 3)
+
+        # Pre-U1 / NULL row prints the "no forensic data" sentinel because
+        # variant + final_state + manual_reason are all NULL.
+        self.assertIn("(no forensic data yet)", out)
+        # And the per-row table renders the variant column as a dash.
+        self.assertIn("-", out)
+
+    def test_show_handles_empty_candidates_list(self):
+        db = MagicMock()
+        db.get_request.return_value = self._row(id=4, manual_reason=None)
+        db.get_tracks.return_value = []
+        db.get_search_history.return_value = [{
+            "id": 1, "request_id": 4, "query": "q",
+            "result_count": 0, "elapsed_s": 0.1, "outcome": "no_results",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": [], "variant": "v2_artist_album_no_year",
+            "final_state": "Completed",
+        }]
+        db.get_download_history.return_value = []
+        db.get_denylisted_users.return_value = []
+
+        out = self._capture(db, 4)
+
+        self.assertIn("variant:        v2_artist_album_no_year", out)
+        self.assertIn("(empty list)", out)
+
+
 if __name__ == "__main__":
     unittest.main()
