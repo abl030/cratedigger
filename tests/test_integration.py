@@ -403,7 +403,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
         }
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        found, _, _ = cratedigger.check_for_match(
+        result = cratedigger.check_for_match(
             make_tracks((1, "Track One", 1)),
             "flac",
             ["Music\\Album"],
@@ -411,7 +411,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
             ctx,
         )
 
-        self.assertTrue(found)
+        self.assertTrue(result.matched)
 
     def test_get_denied_users_uses_ctx_pipeline_db_source(self):
         """Denylist lookups should use ctx.pipeline_db_source."""
@@ -897,13 +897,13 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
 
         # First call: match with 1 track, 1 audio file
         tracks = make_tracks((1, "Track One", 1))
-        found, directory, file_dir = cratedigger.check_for_match(
+        result = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
-        self.assertTrue(found)
+        self.assertTrue(result.matched)
 
         # Mutate the returned directory via download_filter (as try_enqueue does)
-        cratedigger.download_filter("flac", directory, self.ctx.cfg)
+        cratedigger.download_filter("flac", result.directory, self.ctx.cfg)
 
         # folder_cache should still have ALL 3 files (including .nfo)
         cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
@@ -925,21 +925,21 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         tracks = make_tracks((1, "Track One", 1))
 
         # First match
-        found1, dir1, _ = cratedigger.check_for_match(
+        result1 = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
-        self.assertTrue(found1)
+        self.assertTrue(result1.matched)
 
         # Mutate it
-        cratedigger.download_filter("flac", dir1, self.ctx.cfg)
+        cratedigger.download_filter("flac", result1.directory, self.ctx.cfg)
 
         # Second match on the same cached dir should still succeed
-        found2, dir2, _ = cratedigger.check_for_match(
+        result2 = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
-        self.assertTrue(found2)
+        self.assertTrue(result2.matched)
         # And should have both files (not the filtered version)
-        self.assertEqual(len(dir2["files"]), 2)
+        self.assertEqual(len(result2.directory["files"]), 2)
 
     def test_successful_match_does_not_call_deepcopy(self):
         """check_for_match should return the cached directory directly on success."""
@@ -955,7 +955,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
             "deepcopy",
             side_effect=AssertionError("deepcopy should not be used"),
         ):
-            found, directory, file_dir = cratedigger.check_for_match(
+            result = cratedigger.check_for_match(
                 make_tracks((1, "Track One", 1)),
                 "flac",
                 ["Music\\Album"],
@@ -963,9 +963,9 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
                 self.ctx,
             )
 
-        self.assertTrue(found)
-        self.assertEqual(file_dir, "Music\\Album")
-        self.assertIs(directory, self.ctx.folder_cache["testuser"]["Music\\Album"])
+        self.assertTrue(result.matched)
+        self.assertEqual(result.file_dir, "Music\\Album")
+        self.assertIs(result.directory, self.ctx.folder_cache["testuser"]["Music\\Album"])
 
 
 class TestSingleEnqueuePathPrefixing(unittest.TestCase):
@@ -1220,16 +1220,16 @@ class TestNegativeMatchCache(unittest.TestCase):
         )
 
         # First call — misses (1 file vs 3 tracks)
-        found1, _, _ = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
-        self.assertFalse(found1)
+        result1 = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        self.assertFalse(result1.matched)
 
         # Negative cache should contain (user1, Music\Album, 3, flac)
         self.assertIn(("user1", "Music\\Album", 3, "flac"), self.ctx.negative_matches)
 
         # Second call with same track count — should skip (no album_track_num re-eval)
         # We verify by checking that the negative cache hit prevents redundant work
-        found2, _, _ = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
-        self.assertFalse(found2)
+        result2 = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        self.assertFalse(result2.matched)
 
     def test_same_dir_different_filetype_not_skipped(self):
         """A dir cached as negative for 'flac' should still be tried for '*'."""
@@ -1267,8 +1267,8 @@ class TestNegativeMatchCache(unittest.TestCase):
 
         # Now try with 1 track — should NOT be skipped (different track count)
         tracks_1 = make_tracks((1, "Track One", 1))
-        found, _, _ = cratedigger.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
-        self.assertTrue(found)  # 1 file matches 1 track
+        result = cratedigger.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
+        self.assertTrue(result.matched)  # 1 file matches 1 track
 
 
 class TestSearchResultPreFiltering(unittest.TestCase):
@@ -1494,10 +1494,10 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = make_tracks((1, "Track One", 1))
 
-        found, _, _ = cratedigger.check_for_match(
+        result = cratedigger.check_for_match(
             tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1", self.ctx
         )
-        self.assertFalse(found)
+        self.assertFalse(result.matched)
         self.assertIn("user1", self.ctx.broken_user)
 
 
