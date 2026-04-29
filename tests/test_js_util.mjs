@@ -4,7 +4,8 @@
  */
 
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
-import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls } from '../web/js/labels.js';
+import { state } from '../web/js/state.js';
+import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 
 let passed = 0;
 let failed = 0;
@@ -228,6 +229,36 @@ const ctrl_p3_of_5 = renderPaginationControls(3, 5);
 assert(!ctrl_p3_of_5.includes('disabled'), 'p3/5: neither button disabled');
 assert(ctrl_p3_of_5.includes('window.goToLabelPage(2)'), 'p3/5: prev → page 2');
 assert(ctrl_p3_of_5.includes('window.goToLabelPage(4)'), 'p3/5: next → page 4');
+
+// --- renderLabelRows tests ---
+console.log('renderLabelRows()');
+{
+  state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
+  const body = { innerHTML: '' };
+  const container = {
+    _releases: [
+      {
+        id: '12856590',
+        title: 'Greetings From Birmingham',
+        artist_name: 'Scorn',
+        date: '2000',
+        format: 'Vinyl',
+        primary_type: 'Other',
+        in_library: false,
+      },
+    ],
+    _hasAnySubLabel: false,
+    querySelector: (selector) => selector === '#browse-label-rows' ? body : null,
+  };
+  renderLabelRows(container);
+  assert(body.innerHTML.includes('Greetings From Birmingham'), 'label row renders release title');
+  assert(body.innerHTML.includes('window.toggleReleaseDetail(&quot;12856590&quot;)'),
+    'label row opens exact Discogs release details');
+  assert(body.innerHTML.includes('id="reldet-12856590"'),
+    'label row renders matching release-detail container');
+  assert(!body.innerHTML.includes('window.loadReleaseGroup(&quot;12856590&quot;'),
+    'label row does not route Discogs release id through release-group loader');
+}
 
 // --- applyLabelFilters tests ---
 console.log('applyLabelFilters()');
