@@ -6,6 +6,7 @@ import { renderTypedSections, classify as groupingClassify } from './grouping.js
 import { renderStatusBadges } from './badges.js';
 import { renderDisambiguateInto } from './analysis.js';
 import { renderLibraryResultsInto } from './library.js';
+import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
 /**
  * Look up an artist on the requested source by name. Returns the best match
@@ -66,14 +67,24 @@ export async function setBrowseSource(src) {
 }
 
 /**
- * Set the browse search type (artist or release).
- * @param {string} type - 'artist' or 'release'
+ * Set the browse search type (artist, release, or label).
+ * @param {string} type - 'artist' | 'release' | 'label'
  */
 export function setSearchType(type) {
   state.browseSearchType = type;
-  document.getElementById('search-type-artist').className = 'p-btn' + (type === 'artist' ? ' active-status' : '');
-  document.getElementById('search-type-release').className = 'p-btn' + (type === 'release' ? ' active-status' : '');
-  document.getElementById('q').placeholder = type === 'artist' ? 'Search artists or albums...' : 'Search album titles...';
+  const btnIds = { artist: 'search-type-artist', release: 'search-type-release', label: 'search-type-label' };
+  for (const [t, id] of Object.entries(btnIds)) {
+    const el = document.getElementById(id);
+    if (el) el.className = 'p-btn' + (type === t ? ' active-status' : '');
+  }
+  const placeholder = type === 'artist'
+    ? 'Search artists or albums...'
+    : type === 'release'
+      ? 'Search album titles...'
+      : 'Search record labels...';
+  /** @type {HTMLInputElement} */ (document.getElementById('q')).placeholder = placeholder;
+  // Hide label-detail view when switching modes (search results take focus).
+  if (state.browseLabel) closeLabelDetail();
   // Re-trigger search if there's a query
   const q = /** @type {HTMLInputElement} */ (document.getElementById('q')).value.trim();
   if (q.length >= 2) searchArtists(q);
@@ -421,7 +432,19 @@ export async function searchArtists(q) {
   const el = document.getElementById('results');
   el.style.display = 'block';
   document.getElementById('browse-artist').style.display = 'none';
+  const browseLabel = document.getElementById('browse-label');
+  if (browseLabel) browseLabel.style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
+  // Label search is Discogs-only in Phase A — independent of browseSource.
+  if (state.browseSearchType === 'label') {
+    try {
+      const hits = await searchLabels(q);
+      renderLabelSearchResults(el, hits, openLabelDetail);
+    } catch (_e) {
+      el.innerHTML = '<div class="loading">Label search failed</div>';
+    }
+    return;
+  }
   const isDiscogs = state.browseSource === 'discogs';
   const searchBase = isDiscogs ? `${API}/api/discogs/search` : `${API}/api/search`;
   try {
