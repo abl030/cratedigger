@@ -992,6 +992,21 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    def reset_search_attempts(self, request_id: int) -> None:
+        """Reset ``search_attempts`` to 0; leave status/backoff/other counters alone.
+
+        Used by the variant-ladder exhaustion path: when the V4 token pool
+        runs out, the request stays ``wanted`` and the ladder wraps back to
+        the default query. The standard ``next_retry_after`` cooldown still
+        governs when the next cycle picks it up.
+        """
+        now = datetime.now(timezone.utc)
+        self._execute(
+            "UPDATE album_requests SET search_attempts = 0, updated_at = %s WHERE id = %s",
+            (now, request_id),
+        )
+        self.conn.commit()
+
     def update_imported_path_by_release_id(
         self,
         *,

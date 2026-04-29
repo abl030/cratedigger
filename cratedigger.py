@@ -547,29 +547,24 @@ def _log_search_result(album, result, ctx) -> None:
         final_state=result.final_state,
     )
     # Increment search_attempts + backoff for any non-found outcome.
-    # Exhausted variants do not increment — the request will be flipped to
-    # manual below and the attempt counter is the variant-ladder index.
+    # Exhausted variants do not increment — the counter is reset below so
+    # the variant ladder wraps back to default on the next cycle.
     if result.outcome not in ("found", "exhausted"):
         db.record_attempt(request_id, "search")
 
-    # U6: variant ladder exhausted → flip request to status='manual' with
-    # manual_reason='search_exhausted'. The search_log row above is the
-    # audit trail; this status flip is a side effect after.
-    #
-    # Defensive: skip if status is already 'manual' to avoid clobbering an
-    # operator-set hold (a request flipped to 'manual' for an unrelated
-    # reason). `set_manual` itself will not overwrite an existing
-    # `manual_reason` with NULL, but re-flipping idempotently still
-    # rewrites the row's `updated_at` and broadcasts another status_history
-    # entry — neither is appropriate for an operator-held row.
+    # Variant ladder exhausted → reset ``search_attempts`` so the ladder
+    # wraps back to default on the next cycle. The request stays
+    # ``wanted``; the standard ``next_retry_after`` cooldown still governs
+    # when the next search runs. Soulseek peers come and go, so cycling
+    # the variants again is more useful than parking the request for
+    # operator triage. The ``search_log`` row above (with
+    # ``outcome='exhausted'``, ``variant='exhausted'``) is the audit trail.
     if result.outcome == "exhausted":
-        row = db.get_request(request_id)
-        if row is not None and row.get("status") != "manual":
-            logger.info(
-                f"Flipping request {request_id} to manual "
-                f"(reason='search_exhausted')"
-            )
-            db.set_manual(request_id, manual_reason="search_exhausted")
+        logger.info(
+            f"Variant ladder exhausted for request {request_id}; "
+            f"resetting search_attempts to wrap"
+        )
+        db.reset_search_attempts(request_id)
 
 
 def _apply_find_download_result(album, result, find_result, failed_grab) -> None:

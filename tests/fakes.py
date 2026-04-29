@@ -1052,6 +1052,16 @@ class FakePipelineDB:
             row["manual_reason"] = manual_reason
         self.status_history.append((request_id, "manual"))
 
+    def reset_search_attempts(self, request_id: int) -> None:
+        """Mirror ``PipelineDB.reset_search_attempts``: clear search counter,
+        leave status/backoff/other counters alone.
+        """
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        row["search_attempts"] = 0
+        row["updated_at"] = _utcnow()
+
     def set_downloading(self, request_id: int, state_json: str) -> bool:
         row = self._requests.get(request_id)
         if row is None or row["status"] != "wanted":

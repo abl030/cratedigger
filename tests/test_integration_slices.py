@@ -3062,14 +3062,17 @@ class TestVariantSelectFallbackObservability(unittest.TestCase):
         self.assertIn("RuntimeError", joined)
 
 
-class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
-    """U6 integration slice: variant=exhausted → manual flip + re-queue reset.
+class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
+    """Integration slice: variant=exhausted → reset search_attempts, stay wanted.
 
     Drives ``_log_search_result`` end-to-end with FakePipelineDB and asserts:
-    - happy path: status flips to ``manual``, manual_reason='search_exhausted'
-    - re-queue via ``apply_transition`` clears manual_reason + search_attempts
-    - defensive: status='manual' with no reason is not retroactively flipped
-    - defensive: status='manual' with operator_hold reason is not clobbered
+    - happy path: search_log row written with outcome='exhausted'; the
+      request stays ``wanted`` and ``search_attempts`` is reset to 0 so
+      the variant ladder wraps back to default on the next cycle.
+    - re-queue via ``apply_transition`` (operator-driven manual→wanted)
+      clears ``manual_reason`` and ``search_attempts`` — this seam is
+      independent of the exhaustion path but worth covering since
+      ``manual_reason`` exists for future operator-hold workflows.
     """
 
     def setUp(self):
@@ -3117,23 +3120,23 @@ class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
             elapsed_s=0.0, outcome="exhausted", variant_tag="exhausted",
         )
 
-    def test_exhausted_flips_to_manual_with_reason_and_skips_get_wanted(self):
-        """Happy path: search_log row + status='manual' + reason populated.
+    def test_exhausted_resets_search_attempts_and_stays_wanted(self):
+        """Happy path: search_log row recorded; counter reset; stays wanted.
 
-        Asserts the next get_wanted does NOT return the flipped request —
-        proving the flip actually re-routes the request out of the
-        search/download loop.
+        After exhaustion the variant ladder wraps — ``search_attempts``
+        goes back to 0, status stays ``wanted``, ``manual_reason`` is
+        never set, and the request remains in ``get_wanted()`` for the
+        next cycle.
         """
         from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
-        # Start the request as 'downloading' (the realistic state — the
-        # search loop only runs against rows that are wanted/downloading).
         rid = db.add_request(
             artist_name="A", album_title="B", source="request",
-            mb_release_id="mb-exh", status="downloading",
+            mb_release_id="mb-exh", status="wanted",
         )
-        # Bump search_attempts so this isn't a fresh request.
+        # Bump search_attempts to a value past the threshold so the
+        # request is at the end of the variant ladder.
         db.update_request_fields(rid, search_attempts=7)
 
         album = self._make_album(rid)
@@ -3142,18 +3145,19 @@ class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
 
         self._cratedigger._log_search_result(album, result, ctx)
 
-        # search_log row persists with outcome='exhausted'.
+        # search_log row persists with outcome='exhausted' — the audit trail.
         self.assertEqual(len(db.search_logs), 1)
         self.assertEqual(db.search_logs[0].outcome, "exhausted")
 
-        # Request flipped to manual with the reason.
+        # search_attempts wraps back to 0; status stays 'wanted'.
         row = db.request(rid)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["manual_reason"], "search_exhausted")
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_attempts"], 0)
+        self.assertIsNone(row["manual_reason"])
 
-        # get_wanted does NOT return this request anymore.
+        # Request is still in the wanted pool for the next cycle.
         wanted_ids = [r["id"] for r in db.get_wanted()]
-        self.assertNotIn(rid, wanted_ids)
+        self.assertIn(rid, wanted_ids)
 
     def test_requeue_via_apply_transition_clears_state(self):
         """Operator re-queue via the single-seam transition resets state."""
@@ -3185,70 +3189,6 @@ class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
         # Re-queued request is back in the wanted pool.
         wanted_ids = [r["id"] for r in db.get_wanted()]
         self.assertIn(rid, wanted_ids)
-
-    def test_already_manual_request_is_not_reflipped(self):
-        """Defensive: status already 'manual' → no flip, no log_history pollution.
-
-        A request that's already in manual (operator-set hold or prior flip)
-        must not have its manual_reason rewritten and must not generate a
-        spurious status_history entry. The search_log row IS still written —
-        that's the audit trail.
-        """
-        from tests.fakes import FakePipelineDB
-
-        db = FakePipelineDB()
-        rid = db.add_request(
-            artist_name="A", album_title="B", source="request",
-            mb_release_id="mb-am", status="manual",
-        )
-        # Pre-existing operator hold with no reason populated (a manually
-        # created request, never flipped by the system).
-        # Snapshot history so we can assert no new entry was added.
-        prior_history = list(db.status_history)
-
-        album = self._make_album(rid)
-        ctx = self._ctx_with_db(db)
-        result = self._make_exhausted_result(album_id=-rid)
-
-        self._cratedigger._log_search_result(album, result, ctx)
-
-        # search_log row was still written — the audit trail is preserved.
-        self.assertEqual(len(db.search_logs), 1)
-
-        row = db.request(rid)
-        self.assertEqual(row["status"], "manual")
-        # manual_reason was NOT populated by the flip (it was None and
-        # stays None — set_manual was never called).
-        self.assertIsNone(row["manual_reason"])
-        # No new status_history entry from a redundant flip.
-        self.assertEqual(db.status_history, prior_history)
-
-    def test_already_manual_with_other_reason_is_not_clobbered(self):
-        """Defensive: an unrelated reason on a manual row is preserved.
-
-        If a request is in manual for a different reason (e.g. operator
-        hold), the exhaustion flip path must not overwrite that reason.
-        """
-        from tests.fakes import FakePipelineDB
-
-        db = FakePipelineDB()
-        rid = db.add_request(
-            artist_name="A", album_title="B", source="request",
-            mb_release_id="mb-oh", status="manual",
-        )
-        # Inject an operator-hold reason directly (no production code path
-        # writes this today — that's the point of the defensive check).
-        db.update_request_fields(rid, manual_reason="operator_hold")
-
-        album = self._make_album(rid)
-        ctx = self._ctx_with_db(db)
-        result = self._make_exhausted_result(album_id=-rid)
-
-        self._cratedigger._log_search_result(album, result, ctx)
-
-        row = db.request(rid)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["manual_reason"], "operator_hold")
 
 
 if __name__ == "__main__":
