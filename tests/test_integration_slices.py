@@ -2850,5 +2850,194 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0]["matched_tracks"], 1)
 
 
+class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
+    """U6 integration slice: variant=exhausted → manual flip + re-queue reset.
+
+    Drives ``_log_search_result`` end-to-end with FakePipelineDB and asserts:
+    - happy path: status flips to ``manual``, manual_reason='search_exhausted'
+    - re-queue via ``apply_transition`` clears manual_reason + search_attempts
+    - defensive: status='manual' with no reason is not retroactively flipped
+    - defensive: status='manual' with operator_hold reason is not clobbered
+    """
+
+    def setUp(self):
+        import cratedigger
+        self._cratedigger = cratedigger
+        self._orig_pdb = cratedigger.pipeline_db_source
+        self._orig_module_ctx = cratedigger._module_ctx
+
+    def tearDown(self):
+        self._cratedigger.pipeline_db_source = self._orig_pdb
+        self._cratedigger._module_ctx = self._orig_module_ctx
+
+    def _ctx_with_db(self, db):
+        from lib.context import CratediggerContext
+        source = MagicMock()
+        source._get_db.return_value = db
+        self._cratedigger.pipeline_db_source = source
+        ctx = CratediggerContext(
+            cfg=self._cratedigger.cfg, slskd=MagicMock(),
+            pipeline_db_source=source,
+        )
+        self._cratedigger._module_ctx = ctx
+        return ctx
+
+    def _make_album(self, request_id):
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=0)]
+        release = ReleaseRecord(
+            id=-request_id, foreign_release_id="mbid", title="T",
+            track_count=0, medium_count=1, format="CD", media=media,
+            monitored=True, country=["US"], status="Official",
+        )
+        return AlbumRecord(
+            id=-request_id, title="T", release_date="0000-01-01T00:00:00Z",
+            artist_id=0, artist_name="A", foreign_artist_id="",
+            releases=[release], db_request_id=request_id, db_source="request",
+            db_mb_release_id="mbid",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+
+    def _make_exhausted_result(self, *, album_id):
+        from lib.search import SearchResult
+        return SearchResult(
+            album_id=album_id, success=False, query="",
+            elapsed_s=0.0, outcome="exhausted", variant_tag="exhausted",
+        )
+
+    def test_exhausted_flips_to_manual_with_reason_and_skips_get_wanted(self):
+        """Happy path: search_log row + status='manual' + reason populated.
+
+        Asserts the next get_wanted does NOT return the flipped request —
+        proving the flip actually re-routes the request out of the
+        search/download loop.
+        """
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        # Start the request as 'downloading' (the realistic state — the
+        # search loop only runs against rows that are wanted/downloading).
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="mb-exh", status="downloading",
+        )
+        # Bump search_attempts so this isn't a fresh request.
+        db.update_request_fields(rid, search_attempts=7)
+
+        album = self._make_album(rid)
+        ctx = self._ctx_with_db(db)
+        result = self._make_exhausted_result(album_id=-rid)
+
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # search_log row persists with outcome='exhausted'.
+        self.assertEqual(len(db.search_logs), 1)
+        self.assertEqual(db.search_logs[0].outcome, "exhausted")
+
+        # Request flipped to manual with the reason.
+        row = db.request(rid)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "search_exhausted")
+
+        # get_wanted does NOT return this request anymore.
+        wanted_ids = [r["id"] for r in db.get_wanted()]
+        self.assertNotIn(rid, wanted_ids)
+
+    def test_requeue_via_apply_transition_clears_state(self):
+        """Operator re-queue via the single-seam transition resets state."""
+        from typing import cast
+        from lib.pipeline_db import PipelineDB
+        from lib.transitions import apply_transition
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="mb-req", status="manual",
+        )
+        # Simulate prior state: search_attempts=7, manual_reason populated.
+        db.update_request_fields(
+            rid, search_attempts=7, manual_reason="search_exhausted")
+
+        # The web UI button / pipeline-cli requeue / importer requeue all
+        # funnel through apply_transition('manual' -> 'wanted'). Cast to
+        # the concrete type — FakePipelineDB is duck-typed for the
+        # methods apply_transition uses (get_request, reset_to_wanted).
+        apply_transition(
+            cast(PipelineDB, db), rid, "wanted", from_status="manual")
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_attempts"], 0)
+        self.assertIsNone(row["manual_reason"])
+        # Re-queued request is back in the wanted pool.
+        wanted_ids = [r["id"] for r in db.get_wanted()]
+        self.assertIn(rid, wanted_ids)
+
+    def test_already_manual_request_is_not_reflipped(self):
+        """Defensive: status already 'manual' → no flip, no log_history pollution.
+
+        A request that's already in manual (operator-set hold or prior flip)
+        must not have its manual_reason rewritten and must not generate a
+        spurious status_history entry. The search_log row IS still written —
+        that's the audit trail.
+        """
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="mb-am", status="manual",
+        )
+        # Pre-existing operator hold with no reason populated (a manually
+        # created request, never flipped by the system).
+        # Snapshot history so we can assert no new entry was added.
+        prior_history = list(db.status_history)
+
+        album = self._make_album(rid)
+        ctx = self._ctx_with_db(db)
+        result = self._make_exhausted_result(album_id=-rid)
+
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # search_log row was still written — the audit trail is preserved.
+        self.assertEqual(len(db.search_logs), 1)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "manual")
+        # manual_reason was NOT populated by the flip (it was None and
+        # stays None — set_manual was never called).
+        self.assertIsNone(row["manual_reason"])
+        # No new status_history entry from a redundant flip.
+        self.assertEqual(db.status_history, prior_history)
+
+    def test_already_manual_with_other_reason_is_not_clobbered(self):
+        """Defensive: an unrelated reason on a manual row is preserved.
+
+        If a request is in manual for a different reason (e.g. operator
+        hold), the exhaustion flip path must not overwrite that reason.
+        """
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="mb-oh", status="manual",
+        )
+        # Inject an operator-hold reason directly (no production code path
+        # writes this today — that's the point of the defensive check).
+        db.update_request_fields(rid, manual_reason="operator_hold")
+
+        album = self._make_album(rid)
+        ctx = self._ctx_with_db(db)
+        result = self._make_exhausted_result(album_id=-rid)
+
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "operator_hold")
+
+
 if __name__ == "__main__":
     unittest.main()
