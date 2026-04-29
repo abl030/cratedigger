@@ -3,7 +3,7 @@ import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, normalizeReleaseId, sourceLabel } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { buildReleaseActionState } from './release_action_state.js';
-import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton } from './release_actions.js';
+import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderBadRipButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
 
@@ -292,42 +292,59 @@ export async function toggleLibDetail(id) {
       label: 'Delete from beets',
       stopPropagation: true,
     });
+    html += renderBadRipButton(actionState, {
+      className: 'p-btn delete-beets',
+      stopPropagation: true,
+    });
     html += '</div>';
     el.innerHTML = html;
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
 }
 
 /**
- * Ban a Soulseek source for an album.
+ * Mark an imported album as a bad rip (issue #188).
+ * The route resolves the supplying user from download_log, hashes the
+ * imported tracks (tag-stripped), persists known-bad hashes, denylists
+ * the user, removes from beets, and requeues. The frontend does not
+ * need to know the username.
+ *
  * @param {number} requestId
- * @param {string} username
  * @param {string} mbid
  */
-export async function banSource(requestId, username, mbid) {
-  if (!confirm(`Ban ${username} for this album?\nThis will remove files from beets and requeue for re-download.`)) return;
+export async function banSource(requestId, mbid) {
+  if (!confirm('Mark this album as a bad rip?\nThe most recent uploader will be denylisted, the album removed from beets, and the request requeued.')) return;
   try {
     const r = await fetch(`${API}/api/pipeline/ban-source`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({request_id: requestId, username, mb_release_id: mbid}),
+      body: JSON.stringify({request_id: requestId, mb_release_id: mbid}),
     });
+    if (r.status === 409) {
+      toast('Importer is busy with this album — try again in a moment.', true);
+      return;
+    }
     const data = await r.json();
-    if (data.status === 'ok') {
-      // Issue #123 PR B: distinguish three outcomes. `cleanup_errors`
-      // non-empty means at least one beet-remove selector timed out /
-      // exited non-zero / raised — the denylist committed, but the
-      // album may still be on disk under one of the selectors. Show
-      // a warning toast so the user knows to investigate rather than
-      // reporting a clean "not in beets".
-      const errs = data.cleanup_errors || [];
-      if (errs.length > 0) {
-        const reasons = errs.map(e => e.reason).join(', ');
-        toast(`Banned ${username}, but beet remove had ${errs.length} failure(s) (${reasons}). Album may still be on disk; check journalctl.`, true);
-      } else {
-        toast(`Banned ${username}, ${data.beets_removed ? 'removed from beets' : 'not in beets'}, requeued`);
-      }
-    } else {
+    if (data.status !== 'ok') {
       toast(data.error || 'Ban failed', true);
+      return;
+    }
+    const partial = data.partial_failures || {};
+    const cleanupErrs = partial.cleanup_errors || [];
+    const hashErrs = partial.hash_capture_errors || [];
+    const removed = data.beets_removed ? 'removed from beets' : 'not in beets';
+    const hashCount = data.hashes_recorded ?? 0;
+    const hashes = `${hashCount} hash${hashCount === 1 ? '' : 'es'} recorded`;
+    const head = data.username
+      ? `Banned ${data.username}: ${removed}, ${hashes}, requeued.`
+      : `Album ${removed} (no Soulseek user on record), ${hashes}, requeued.`;
+    if (cleanupErrs.length > 0 || hashErrs.length > 0) {
+      const warnings = [];
+      if (cleanupErrs.length) warnings.push(`${cleanupErrs.length} beet remove failure(s)`);
+      if (hashErrs.length) warnings.push(`${hashErrs.length} hash capture failure(s)`);
+      console.warn('ban-source partial failures:', partial);
+      toast(`${head} Warnings: ${warnings.join(', ')} — see console.`, true);
+    } else {
+      toast(head);
     }
   } catch (e) { toast('Ban failed', true); }
 }
