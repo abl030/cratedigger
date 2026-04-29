@@ -17,7 +17,10 @@ Pure functions — no I/O, no external dependencies.
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib.quality import CandidateScore
 
 
 @dataclass
@@ -38,7 +41,20 @@ class SearchResult:
     query: str = ""
     result_count: int | None = None
     elapsed_s: float = 0.0
-    outcome: str = ""  # found, no_match, no_results, timeout, error, empty_query
+    # found, no_match, no_results, timeout, error, empty_query, exhausted
+    outcome: str = ""
+    # U5 forensic capture (search-escalation-and-forensics):
+    # - candidates: per-(user, dir, filetype) match scores collected from
+    #   `find_download` → `_apply_find_download_result`. Persisted to
+    #   `search_log.candidates` JSONB after top-20 truncation.
+    # - variant_tag: "default" | "v1_year" | "v4_tracks_<idx>" | "exhausted",
+    #   produced by `select_variant`. Persisted to `search_log.variant`.
+    # - final_state: slskd's terminal state string ("Completed",
+    #   "TimedOut", "ResponseLimitReached", "Errored"...). Persisted to
+    #   `search_log.final_state`.
+    candidates: tuple["CandidateScore", ...] = ()
+    variant_tag: str | None = None
+    final_state: str | None = None
 
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.
