@@ -211,6 +211,12 @@ def _make_server():
     mock_db.list_import_job_timeline.return_value = [mock_job]
     mock_db.list_active_import_jobs.return_value = []
     mock_db.count_import_jobs_by_status.return_value = {"queued": 1}
+    # Default to "no active job" / "no successful uploader" so the
+    # bad-rip route's race-check + username-resolution paths take
+    # the happy fall-through unless individual tests override.
+    mock_db.get_active_import_job_for_request.return_value = None
+    mock_db.get_recent_successful_uploader.return_value = None
+    mock_db.add_bad_audio_hashes.return_value = 0
 
     def _get_request_by_release_id(release_id):
         normalized = normalize_release_id(release_id)
@@ -1276,7 +1282,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         "status", "id", "intent", "target_format", "requeued",
     }
     BAN_SOURCE_REQUIRED_FIELDS = {
-        "status", "username", "beets_removed", "cleanup_errors",
+        "status", "username", "beets_removed", "hashes_recorded",
     }
     FORCE_IMPORT_REQUIRED_FIELDS = {
         "status", "request_id", "artist", "album", "message",
@@ -1616,6 +1622,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self._beets = MagicMock()
         self._beets.album_exists.return_value = True
         self._beets.get_min_bitrate.return_value = 320
+        # Ban-source now also calls ``get_item_paths`` for the bad-rip
+        # hash-capture step (plan 2026-04-29-005, U4). Default to "no
+        # tracks" so legacy ban-source tests don't trip over the new
+        # gate; tests that exercise hash capture override this.
+        self._beets.get_item_paths.return_value = []
         # Ban-source now routes through ``BeetsDB.locate`` (issue #121).
         # Default the mock to 'album present before and removed after'
         # so the legacy `album_exists.side_effect = [True, False]`
@@ -1868,11 +1879,13 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
         self.assertEqual(status, 200)
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
-        # #123 PR B: the non-zero rc surfaces as a cleanup error so the
-        # UI can distinguish "banned cleanly" from "banned but album
-        # still on disk".
-        self.assertEqual(len(data["cleanup_errors"]), 1)
-        self.assertEqual(data["cleanup_errors"][0]["reason"], "nonzero_rc")
+        # #123 PR B + plan 2026-04-29-005 U4: the non-zero rc now
+        # surfaces under ``partial_failures.cleanup_errors`` (the
+        # unified shape). Distinguishes "banned cleanly" from
+        # "banned but album still on disk".
+        cleanup_errors = data["partial_failures"]["cleanup_errors"]
+        self.assertEqual(len(cleanup_errors), 1)
+        self.assertEqual(cleanup_errors[0]["reason"], "nonzero_rc")
         self.assertFalse(data["beets_removed"])
 
     @patch("lib.beets_album_op.sp.run")
@@ -1955,11 +1968,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         mock_subprocess.assert_not_called()
 
     @patch("lib.transitions.finalize_request")
-    def test_ban_source_skips_clear_when_mbid_missing(self, _mock_transition):
-        """Without ``mb_release_id`` we never query beets and never run
-        ``beet remove``, so there's no positive evidence the album is gone.
-        Clearing the on-disk quality fields anyway would erase state for
-        albums that are still in the library.
+    def test_ban_source_rejects_missing_mb_release_id(self, _mock_transition):
+        """Plan 2026-04-29-005 U4: ``mb_release_id`` is now required so
+        the bad-rip flow can locate the audio files to hash before
+        ``remove_and_reset_release`` deletes them. Without it, there is
+        no album to ban — return 400 rather than silently skip.
         """
         self.mock_db.clear_on_disk_quality_fields.reset_mock()
         self.mock_db.get_request.return_value = make_request_row(
@@ -1969,13 +1982,259 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             verified_lossless=True,
         )
 
-        status, _data = self._post("/api/pipeline/ban-source", {
+        status, data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
             # No mb_release_id.
         })
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 400)
+        self.assertIn("mb_release_id", data.get("error", ""))
         self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+
+
+class TestBanSourceBadRipExtensions(_WebServerCase):
+    """Plan 2026-04-29-005 U4: bad-rip hash capture + server-side
+    username resolution + importer-race 409 + unified
+    ``partial_failures`` response shape on ``POST /api/pipeline/ban-source``.
+    """
+
+    RELEASE_ID = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+    # Two distinct fake hashes (32 bytes each) — content doesn't matter
+    # for the route, only that ``hash_audio_content`` returned something.
+    HASH_A = b"\x01" * 32
+    HASH_B = b"\x02" * 32
+
+    def setUp(self) -> None:
+        import web.server as srv
+        self._srv = srv
+        self._orig_beets = srv._beets
+        self._beets = MagicMock()
+        # Default: no tracks — individual tests override.
+        self._beets.get_item_paths.return_value = []
+        # locate seam returns "absent" so ``remove_and_reset_release``
+        # is a no-op unless overridden per-test.
+        from types import SimpleNamespace
+        self._beets.locate.return_value = SimpleNamespace(
+            kind="absent", album_id=None, selectors=()
+        )
+        srv._beets = self._beets
+
+        # Reset bad-rip-related mocks so cross-test state doesn't leak.
+        self.mock_db.get_active_import_job_for_request.reset_mock()
+        self.mock_db.get_active_import_job_for_request.return_value = None
+        self.mock_db.get_recent_successful_uploader.reset_mock()
+        self.mock_db.get_recent_successful_uploader.return_value = None
+        self.mock_db.add_bad_audio_hashes.reset_mock()
+        self.mock_db.add_bad_audio_hashes.return_value = 0
+        self.mock_db.add_denylist.reset_mock()
+        self.mock_db.get_request.return_value = make_request_row(
+            id=1704, status="imported", mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+        )
+
+    def tearDown(self) -> None:
+        self._srv._beets = self._orig_beets
+
+    # AE1, AE2 — body-without-username, server resolves uploader, hashes recorded.
+    @patch("web.routes.pipeline.hash_audio_content")
+    @patch("lib.transitions.finalize_request")
+    def test_resolves_username_and_records_hashes(
+            self, _mock_transition, mock_hash):
+        """POST {request_id, mb_release_id} only — server resolves
+        ``reported_username`` from the most recent successful
+        download_log, hashes every track via ``hash_audio_content``,
+        and persists them with the resolved username (R3, R5, R7).
+        """
+        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self._beets.get_item_paths.return_value = [
+            (1, "/mnt/Music/Beets/A/track-01.flac"),
+            (2, "/mnt/Music/Beets/A/track-02.flac"),
+        ]
+        # Distinct digests per call so the route inserts both rows.
+        mock_hash.side_effect = [self.HASH_A, self.HASH_B]
+        self.mock_db.add_bad_audio_hashes.return_value = 2
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["username"], "Hxrco")
+        self.assertEqual(data["hashes_recorded"], 2)
+        # Happy path: no partial_failures on the response.
+        self.assertNotIn("partial_failures", data)
+        # add_bad_audio_hashes called with the resolved username + reason.
+        self.mock_db.add_bad_audio_hashes.assert_called_once()
+        call_args = self.mock_db.add_bad_audio_hashes.call_args
+        self.assertEqual(call_args.args[0], 1704)
+        self.assertEqual(call_args.args[1], "Hxrco")
+        self.assertEqual(call_args.args[2], "manually banned via web UI")
+        hashes_arg = call_args.args[3]
+        self.assertEqual(len(hashes_arg), 2)
+        self.assertEqual(hashes_arg[0].hash_value, self.HASH_A)
+        self.assertEqual(hashes_arg[0].audio_format, "flac")
+        self.assertEqual(hashes_arg[1].hash_value, self.HASH_B)
+        # Denylist written for the resolved user.
+        self.mock_db.add_denylist.assert_called_once_with(
+            1704, "Hxrco", "manually banned via web UI"
+        )
+
+    # AE4 — partial hash failure does not block the ban.
+    @patch("web.routes.pipeline.hash_audio_content")
+    @patch("lib.transitions.finalize_request")
+    def test_hash_failure_partial_does_not_block_ban(
+            self, _mock_transition, mock_hash):
+        """One unreadable track → ``hashes_recorded`` reflects the
+        succeeded count, ``partial_failures.hash_capture_errors``
+        names the failed path, denylist + remove + requeue still run.
+        """
+        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self._beets.get_item_paths.return_value = [
+            (1, "/mnt/Music/Beets/A/track-01.flac"),
+            (2, "/mnt/Music/Beets/A/track-02.flac"),
+            (3, "/mnt/Music/Beets/A/track-03.flac"),
+        ]
+        # Track 2 raises; tracks 1 and 3 succeed.
+        from lib.audio_hash import AudioHashError
+        mock_hash.side_effect = [
+            self.HASH_A,
+            AudioHashError("ffmpeg failed (rc=1): truncated mp3"),
+            self.HASH_B,
+        ]
+        self.mock_db.add_bad_audio_hashes.return_value = 2
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["hashes_recorded"], 2)
+        self.assertIn("partial_failures", data)
+        errors = data["partial_failures"]["hash_capture_errors"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["track_path"],
+                         "/mnt/Music/Beets/A/track-02.flac")
+        self.assertIn("truncated", errors[0]["reason"])
+        # Denylist still runs for the resolved user.
+        self.mock_db.add_denylist.assert_called_once()
+        # ``add_bad_audio_hashes`` called with the two SUCCESSFUL hashes only.
+        hashes_arg = self.mock_db.add_bad_audio_hashes.call_args.args[3]
+        self.assertEqual(len(hashes_arg), 2)
+
+    # E1.1 — no successful uploader on record.
+    @patch("web.routes.pipeline.hash_audio_content")
+    @patch("lib.transitions.finalize_request")
+    def test_no_uploader_records_hashes_with_null_username(
+            self, _mock_transition, mock_hash):
+        """No successful download_log → ``username: null`` returned,
+        ``add_denylist`` not called, but hashes ARE recorded with
+        ``reported_username=None`` (the bytes are still protected).
+        """
+        self.mock_db.get_recent_successful_uploader.return_value = None
+        self._beets.get_item_paths.return_value = [
+            (1, "/mnt/Music/Beets/A/track-01.mp3"),
+        ]
+        mock_hash.return_value = self.HASH_A
+        self.mock_db.add_bad_audio_hashes.return_value = 1
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["username"])
+        self.assertEqual(data["hashes_recorded"], 1)
+        self.assertNotIn("partial_failures", data)
+        # Hashes recorded with username=None.
+        call_args = self.mock_db.add_bad_audio_hashes.call_args
+        self.assertIsNone(call_args.args[1])
+        # No denylist call when no user resolved.
+        self.mock_db.add_denylist.assert_not_called()
+
+    # E1.2 — album not in beets / no track paths.
+    @patch("lib.transitions.finalize_request")
+    def test_no_tracks_in_beets_records_capture_error(
+            self, _mock_transition):
+        """``get_item_paths`` empty → response includes
+        ``partial_failures.hash_capture_errors`` with one
+        ``no_tracks_in_beets`` entry; denylist still runs if
+        username resolved; no hashes recorded.
+        """
+        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self._beets.get_item_paths.return_value = []
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["hashes_recorded"], 0)
+        self.assertIn("partial_failures", data)
+        errors = data["partial_failures"]["hash_capture_errors"]
+        self.assertEqual(len(errors), 1)
+        self.assertIsNone(errors[0]["track_path"])
+        self.assertEqual(errors[0]["reason"], "no_tracks_in_beets")
+        # Denylist still written.
+        self.mock_db.add_denylist.assert_called_once_with(
+            1704, "Hxrco", "manually banned via web UI"
+        )
+        # No add_bad_audio_hashes call (empty list short-circuit).
+        self.mock_db.add_bad_audio_hashes.assert_not_called()
+
+    # E1.3 — importer race: 409 before any work.
+    def test_importer_busy_returns_409_no_writes(self):
+        """``import_jobs`` row exists with status running → 409, body
+        ``{error: "importer_busy", retry_after_seconds: 30}``. No
+        denylist, no hashes, no beets_db calls.
+        """
+        self.mock_db.get_active_import_job_for_request.return_value = {
+            "id": 99, "request_id": 1704, "status": "running",
+        }
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID,
+             "username": "anyone"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "importer_busy")
+        self.assertEqual(data["retry_after_seconds"], 30)
+        # No mutation of any kind.
+        self.mock_db.add_denylist.assert_not_called()
+        self.mock_db.add_bad_audio_hashes.assert_not_called()
+        self._beets.get_item_paths.assert_not_called()
+        self._beets.locate.assert_not_called()
+
+    # E1.6 — idempotency: second click is a no-op insert.
+    @patch("web.routes.pipeline.hash_audio_content")
+    @patch("lib.transitions.finalize_request")
+    def test_idempotent_second_click_records_zero_new_hashes(
+            self, _mock_transition, mock_hash):
+        """Second call inserts 0 new rows (ON CONFLICT DO NOTHING in
+        the DB layer; ``add_bad_audio_hashes`` returns 0). Response
+        is 200 with ``hashes_recorded: 0`` and no ``partial_failures``.
+        """
+        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self._beets.get_item_paths.return_value = [
+            (1, "/mnt/Music/Beets/A/track-01.flac"),
+        ]
+        mock_hash.return_value = self.HASH_A
+        # DB layer returns 0 — every (hash, format) already present.
+        self.mock_db.add_bad_audio_hashes.return_value = 0
+
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["hashes_recorded"], 0)
+        self.assertNotIn("partial_failures", data)
 
 
 class TestManualImportRouteContracts(_WebServerCase):
