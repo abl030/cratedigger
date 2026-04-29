@@ -2968,6 +2968,123 @@ class TestLabelRouteContracts(_WebServerCase):
         mock_dg.get_label_releases.assert_called_once_with(
             "757", include_sublabels=False)
 
+    def test_label_detail_auto_flips_include_sublabels_for_big_labels(self):
+        """Big label (release_count > BIG_LABEL_THRESHOLD) without an
+        explicit `include_sublabels=` query param auto-flips to False so
+        the recursive sub-label CTE never hits the upstream timeout."""
+        big_entity = self._make_label_entity(
+            id="1", name="Universal Music Group", release_count=5000)
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = big_entity
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": False,
+            }
+            status, _data = self._get("/api/discogs/label/1")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "1", include_sublabels=False)
+
+    def test_label_detail_respects_explicit_include_sublabels_on_big_labels(self):
+        """If the caller explicitly opts in via `?include_sublabels=true`,
+        the auto-flip MUST NOT override their choice — even for big
+        labels. This is the API consumer's escape hatch."""
+        big_entity = self._make_label_entity(
+            id="1", name="Universal Music Group", release_count=5000)
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = big_entity
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": True,
+            }
+            status, _data = self._get("/api/discogs/label/1?include_sublabels=true")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "1", include_sublabels=True)
+
+    def test_label_detail_does_not_auto_flip_small_labels(self):
+        """Boutique labels (release_count <= threshold) keep the
+        default `include_sublabels=True` even with no explicit param."""
+        small_entity = self._make_label_entity(
+            id="757", name="Hymen Records", release_count=42)
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = small_entity
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": True,
+            }
+            status, _data = self._get("/api/discogs/label/757")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "757", include_sublabels=True)
+
+    def test_label_detail_rejects_malformed_include_sublabels(self):
+        """`?include_sublabels=` must be one of true/false/1/0 (case-
+        insensitive). Anything else → 400. Silently coercing typos
+        masks frontend bugs and lets bots pollute caches."""
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            status, data = self._get("/api/discogs/label/757?include_sublabels=yes")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        # And get_label_releases should NEVER be called when the param is bad.
+        self.assertFalse(mock_dg.get_label_releases.called)
+
+    def test_label_detail_accepts_truthy_synonyms(self):
+        """`include_sublabels=1` and `=0` are valid spellings."""
+        with patch("web.routes.labels.discogs_api") as mock_dg, \
+                patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={}), \
+                patch("web.server._beets_db", return_value=None):
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.return_value = {
+                "results": [],
+                "pagination": {"page": 1, "per_page": 100, "pages": 0, "items": 0},
+                "include_sublabels": False,
+            }
+            status, _data = self._get("/api/discogs/label/757?include_sublabels=0")
+
+        self.assertEqual(status, 200)
+        mock_dg.get_label_releases.assert_called_once_with(
+            "757", include_sublabels=False)
+
+    def test_label_detail_releases_404_propagates(self):
+        """If `get_label` succeeds but `get_label_releases` raises 404
+        (label vanished mid-flight), surface 404 to the client — not a
+        generic 500."""
+        from urllib.error import HTTPError
+        from io import BytesIO
+
+        def _raise_404(_label_id, **_kwargs):
+            raise HTTPError(
+                "https://discogs.ablz.au/api/labels/757/releases",
+                404, "Not Found", hdrs=None, fp=BytesIO(b""),  # type: ignore[arg-type]
+            )
+
+        with patch("web.routes.labels.discogs_api") as mock_dg:
+            mock_dg.get_label.return_value = self._make_label_entity()
+            mock_dg.get_label_releases.side_effect = _raise_404
+            status, data = self._get("/api/discogs/label/757")
+
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
 
 class TestBeetsRouteContracts(_WebServerCase):
     """Contract tests for frontend-consumed beets library routes."""
