@@ -1485,12 +1485,31 @@ class PipelineDB:
     def log_search(self, request_id: int, query: str | None = None,
                    result_count: int | None = None,
                    elapsed_s: float | None = None,
-                   outcome: str = "error") -> None:
-        """Record one search attempt for an album request."""
+                   outcome: str = "error",
+                   candidates: "list[Any] | None" = None,
+                   variant: str | None = None,
+                   final_state: str | None = None) -> None:
+        """Record one search attempt for an album request.
+
+        ``candidates`` is the top-N forensic ``CandidateScore`` list (already
+        truncated by the caller). It is encoded via ``msgspec.json.encode``
+        and written to ``search_log.candidates`` JSONB. ``None`` writes SQL
+        NULL — error / submission-failure rows have no scoring data to
+        report. See ``.claude/rules/code-quality.md`` § Wire-boundary types
+        for the symmetric encode/decode contract.
+        """
+        candidates_json: str | None = None
+        if candidates is not None:
+            import msgspec  # local import keeps top-of-module deps narrow
+            candidates_json = msgspec.json.encode(candidates).decode()
         self._execute("""
-            INSERT INTO search_log (request_id, query, result_count, elapsed_s, outcome)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (request_id, query, result_count, elapsed_s, outcome))
+            INSERT INTO search_log (
+                request_id, query, result_count, elapsed_s, outcome,
+                candidates, variant, final_state
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (request_id, query, result_count, elapsed_s, outcome,
+              candidates_json, variant, final_state))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
