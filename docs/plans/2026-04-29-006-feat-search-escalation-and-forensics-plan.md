@@ -1,7 +1,7 @@
 ---
 title: Search Escalation and Forensics for Stuck Releases
 type: feat
-status: active
+status: completed
 date: 2026-04-29
 origin: docs/brainstorms/search-escalation-and-forensics-requirements.md
 ---
