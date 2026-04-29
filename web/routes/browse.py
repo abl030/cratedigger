@@ -18,6 +18,7 @@ from web import cache as _cache
 from web import discogs as discogs_api
 from lib.artist_compare import annotate_in_library, merge_discographies
 from web.library_artist_service import list_library_artist_rows
+from web.routes._overlay import overlay_release_rows
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -223,29 +224,10 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
 def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], rg_id: str) -> None:
     srv = _server()
     data = srv.mb_api.get_release_group_releases(rg_id)
-    # Check which releases are in pipeline/library
-    mbids = [r["id"] for r in data["releases"]]
-    in_library = srv.check_beets_library(mbids)
-    in_pipeline = srv.check_pipeline(mbids)
-    # Map mbid -> beets album id + on-disk quality so the standard
-    # toolbar (Remove from beets) and badge renderer (in library +
-    # codec-aware rank) can render without extra round-trips.
-    b = srv._beets_db()
-    beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
-    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
-    for r in data["releases"]:
-        rid = r["id"]
-        r["in_library"] = rid in in_library
-        r["beets_album_id"] = beets_ids.get(rid)
-        q = quality.get(rid)
-        if q:
-            r["library_format"] = q.get("beets_format") or ""
-            r["library_min_bitrate"] = q.get("beets_bitrate") or 0
-            r["library_rank"] = srv.compute_library_rank(
-                r["library_format"], r["library_min_bitrate"])
-        pi = in_pipeline.get(rid)
-        r["pipeline_status"] = pi["status"] if pi else None
-        r["pipeline_id"] = pi["id"] if pi else None
+    # Standard toolbar (Remove from beets) and badge renderer (in library
+    # + codec-aware rank) read these overlay fields per row, so route
+    # them through the shared helper.
+    overlay_release_rows(data["releases"], [r["id"] for r in data["releases"]])
     h._json(data)  # type: ignore[attr-defined]
 
 
@@ -321,28 +303,8 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
 
 
 def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], master_id: str) -> None:
-    srv = _server()
     data = discogs_api.get_master_releases(int(master_id))
-    # Enrich releases with pipeline/library status
-    release_ids = [r["id"] for r in data["releases"]]
-    in_library = srv.check_beets_library(release_ids)
-    in_pipeline = srv.check_pipeline(release_ids)
-    b = srv._beets_db()
-    beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
-    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
-    for r in data["releases"]:
-        rid = r["id"]
-        r["in_library"] = rid in in_library
-        r["beets_album_id"] = beets_ids.get(rid)
-        q = quality.get(rid)
-        if q:
-            r["library_format"] = q.get("beets_format") or ""
-            r["library_min_bitrate"] = q.get("beets_bitrate") or 0
-            r["library_rank"] = srv.compute_library_rank(
-                r["library_format"], r["library_min_bitrate"])
-        pi = in_pipeline.get(rid)
-        r["pipeline_status"] = pi["status"] if pi else None
-        r["pipeline_id"] = pi["id"] if pi else None
+    overlay_release_rows(data["releases"], [r["id"] for r in data["releases"]])
     h._json(data)  # type: ignore[attr-defined]
 
 

@@ -39,6 +39,7 @@ from web import mb as mb_api
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
 from web.routes import browse as _browse_routes
+from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
 from web.routes import pipeline as _pipeline_routes
@@ -215,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
     # Route modules export their own dicts; we merge them here.
     _FUNC_GET_ROUTES: dict[str, object] = {
         **_browse_routes.GET_ROUTES,
+        **_labels_routes.GET_ROUTES,
         **_pipeline_routes.GET_ROUTES,
         **_library_routes.GET_ROUTES,
         **_imports_routes.GET_ROUTES,
@@ -222,6 +224,7 @@ class Handler(BaseHTTPRequestHandler):
 
     _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
         *_browse_routes.GET_PATTERNS,
+        *_labels_routes.GET_PATTERNS,
         *_pipeline_routes.GET_PATTERNS,
         *_library_routes.GET_PATTERNS,
     ]
