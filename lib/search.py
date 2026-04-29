@@ -15,6 +15,8 @@ banned word list.
 Pure functions — no I/O, no external dependencies.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from typing import Literal, TYPE_CHECKING
@@ -52,7 +54,7 @@ class SearchResult:
     # - final_state: slskd's terminal state string ("Completed",
     #   "TimedOut", "ResponseLimitReached", "Errored"...). Persisted to
     #   `search_log.final_state`.
-    candidates: tuple["CandidateScore", ...] = ()
+    candidates: tuple[CandidateScore, ...] = ()
     variant_tag: str | None = None
     final_state: str | None = None
 
