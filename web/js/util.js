@@ -170,3 +170,82 @@ export function sourceLabel(id) {
   if (source === 'discogs') return 'Discogs';
   return '';
 }
+
+/**
+ * Map a `manual_reason` enum value to a short, human-friendly label for the
+ * inline chip on the request-detail view. Returns the empty string for
+ * NULL / unknown reasons so the caller can branch on truthiness.
+ * @param {string|null|undefined} reason
+ * @returns {string}
+ */
+export function manualReasonLabel(reason) {
+  if (!reason) return '';
+  if (reason === 'search_exhausted') return 'search exhausted';
+  return reason;
+}
+
+/**
+ * @typedef {Object} CandidateScore
+ * @property {string} username
+ * @property {string} dir
+ * @property {string} filetype
+ * @property {number} matched_tracks
+ * @property {number} total_tracks
+ * @property {number} avg_ratio
+ * @property {string[]} missing_titles
+ * @property {number} file_count
+ */
+
+/**
+ * @typedef {Object} LastSearchPayload
+ * @property {string|null} variant
+ * @property {string|null} final_state
+ * @property {string|null} outcome
+ * @property {CandidateScore[]} top_candidates
+ */
+
+/**
+ * Render the "search forensics" block for the request-detail view.
+ *
+ * UX: collapsed-by-default summary that shows the variant tag + final_state
+ * tag and a top-3 candidates table (`username · dir · matched/total ·
+ * avg_ratio · filetype`). When `last` is null (no search rows yet), returns
+ * a small "no forensic data yet" line. Pure HTML producer — testable
+ * without a DOM.
+ *
+ * @param {LastSearchPayload|null|undefined} last
+ * @returns {string} HTML string
+ */
+export function renderForensicBlock(last) {
+  if (!last) {
+    return `<div class="p-forensic"><div class="p-forensic-summary">No search forensic data yet</div></div>`;
+  }
+  const variant = last.variant || '?';
+  const finalState = last.final_state || '?';
+  const outcome = last.outcome || '?';
+  const cands = Array.isArray(last.top_candidates) ? last.top_candidates : [];
+  const summary = `Last search: ${esc(variant)} → ${esc(outcome)} <span style="color:#666;">(${esc(finalState)}, top ${cands.length})</span>`;
+  let body = `<div class="p-forensic-meta">variant: ${esc(variant)} · final_state: ${esc(finalState)} · outcome: ${esc(outcome)}</div>`;
+  if (cands.length === 0) {
+    body += `<div style="color:#666;">No candidates captured for this search.</div>`;
+  } else {
+    body += '<table class="p-forensic-table"><thead><tr>'
+      + '<th>user</th><th>dir</th><th>match</th><th>avg</th><th>type</th>'
+      + '</tr></thead><tbody>'
+      + cands.map((c) => {
+        const ratio = (typeof c.avg_ratio === 'number') ? c.avg_ratio.toFixed(2) : '?';
+        return `<tr>
+          <td>${esc(c.username || '?')}</td>
+          <td style="color:#777;">${esc(c.dir || '?')}</td>
+          <td>${c.matched_tracks ?? '?'}/${c.total_tracks ?? '?'}</td>
+          <td>${ratio}</td>
+          <td>${esc(c.filetype || '?')}</td>
+        </tr>`;
+      }).join('')
+      + '</tbody></table>';
+  }
+  return `<div class="p-forensic" id="p-forensic-block">
+    <div class="p-forensic-summary" onclick="event.stopPropagation(); this.parentElement.classList.toggle('open');">${summary}</div>
+    <div class="p-forensic-body">${body}</div>
+  </div>`;
+}
