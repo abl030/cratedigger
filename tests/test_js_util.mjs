@@ -4,7 +4,7 @@
  */
 
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
-import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, parseYear, renderLabelLinks } from '../web/js/labels.js';
+import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, parseYear, renderLabelLinks, distinctFormats } from '../web/js/labels.js';
 
 let passed = 0;
 let failed = 0;
@@ -297,6 +297,77 @@ assertEqual(renderLabelLinks([null, undefined, { id: 1, name: '' }, { id: 2, nam
 const stringId = renderLabelLinks([{ id: '12345', name: 'String ID Label' }]);
 assert(stringId.includes('data-label-id="12345"'), 'string id is preserved');
 assert(stringId.includes('<a'), 'string id renders as link');
+
+// --- distinctFormats tests (review-fix #9) ---
+console.log('distinctFormats()');
+
+// Empty input → empty array.
+const emptyFmts = distinctFormats([]);
+assertEqual(Array.isArray(emptyFmts), true, 'empty input returns an array');
+assertEqual(emptyFmts.length, 0, 'empty input → empty array');
+
+// Single row, single format.
+assertEqual(distinctFormats([{ format: 'CD' }]).join(','), 'CD',
+  'single row single format');
+
+// Duplicates dedup'd; sorted alphabetically.
+const dups = distinctFormats([
+  { format: 'CD' }, { format: 'CD' }, { format: 'LP' }, { format: 'CD' },
+]);
+assertEqual(dups.join(','), 'CD,LP', 'duplicates collapse, sort applied');
+
+// Multi-value formats (joined Discogs string) split on commas.
+const multi = distinctFormats([
+  { format: 'LP, Album' },
+  { format: 'CD, EP' },
+  { format: 'Vinyl, LP' }, // LP appears in two rows, dedup'd
+]);
+assertEqual(multi.join(','), 'Album,CD,EP,LP,Vinyl',
+  'comma-joined formats split, dedup, alphabetized');
+
+// Whitespace trimmed; empty tokens dropped.
+const ws = distinctFormats([
+  { format: '  CD  ,  LP ,, ' },
+  { format: '' },
+]);
+assertEqual(ws.join(','), 'CD,LP', 'whitespace trimmed, empty tokens dropped');
+
+// Missing/null format field on a row — row skipped, no crash.
+const nullFmt = distinctFormats([
+  { format: null },
+  { format: undefined },
+  { /* no format key */ },
+  { format: 'CD' },
+]);
+assertEqual(nullFmt.join(','), 'CD', 'null/undefined/missing format fields skipped');
+
+// All missing → empty.
+assertEqual(distinctFormats([{}, { format: '' }]).join(','), '',
+  'no usable formats → empty array');
+
+// --- applyLabelFilters NaN year guard tests (review-fix #10) ---
+console.log('applyLabelFilters() NaN year guard');
+
+const NAN_ROWS = [
+  { id: '1', date: '2000-01-01', format: 'CD', in_library: false },
+  { id: '2', date: '2010-01-01', format: 'CD', in_library: false },
+  { id: '3', date: '',           format: 'CD', in_library: false },
+];
+
+// Explicit NaN bounds must behave as "no bound", not "drop everything".
+const nanMin = applyLabelFilters(NAN_ROWS, { yearMin: NaN });
+assertEqual(nanMin.length, 3, 'NaN yearMin treated as no lower bound');
+
+const nanMax = applyLabelFilters(NAN_ROWS, { yearMax: NaN });
+assertEqual(nanMax.length, 3, 'NaN yearMax treated as no upper bound');
+
+const nanBoth = applyLabelFilters(NAN_ROWS, { yearMin: NaN, yearMax: NaN });
+assertEqual(nanBoth.length, 3, 'both NaN bounds → no filter');
+
+// NaN min + valid max → max still applies, undated still drops.
+const mixedNan = applyLabelFilters(NAN_ROWS, { yearMin: NaN, yearMax: 2005 });
+assertEqual(mixedNan.map(r => r.id).join(','), '1',
+  'valid yearMax with NaN yearMin still filters correctly');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
