@@ -275,9 +275,9 @@ class TestDistinctiveTokenPool(unittest.TestCase):
 
     def test_sort_is_stable_deterministic(self):
         # Same-length tokens should be ordered deterministically (alpha lowercase)
-        pool = _distinctive_token_pool(["Beta Alpha Gamma"])
+        pool = _distinctive_token_pool(["Delta Alpha Gamma"])
         # All length 5, secondary sort alphabetical lowercase
-        self.assertEqual(pool, ["Alpha", "Beta", "Gamma"])
+        self.assertEqual(pool, ["Alpha", "Delta", "Gamma"])
 
 
 class TestSelectVariant(unittest.TestCase):
