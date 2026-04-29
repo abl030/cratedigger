@@ -616,8 +616,9 @@ export function renderLabelRows(containerEl) {
     const badges = renderStatusBadges(rel);
     const fmt = rel.format ? `<span class="rg-meta"> — ${esc(rel.format)}</span>` : '';
     const artist = rel.artist_name ? `<span class="rg-meta" style="color:#999;"> — ${esc(rel.artist_name)}</span>` : '';
+    const releaseId = String(rel.id);
     return `
-      <div class="rg" onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(String(rel.id))}, this)">
+      <div class="rg" onclick="event.stopPropagation(); window.toggleReleaseDetail(${jsArg(releaseId)})">
         <div>
           <span class="rg-year">${yearStr}</span>
           <span class="rg-title">${esc(rel.title || '')}</span>
@@ -626,8 +627,8 @@ export function renderLabelRows(containerEl) {
           ${subBadge}
           ${badges}
         </div>
-        <div class="releases" id="rel-${esc(String(rel.id))}"></div>
       </div>
+      <div class="release-detail" id="reldet-${esc(releaseId)}"></div>
     `;
   };
 
