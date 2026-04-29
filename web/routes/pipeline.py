@@ -1,9 +1,12 @@
 """Pipeline API route handlers, extracted from server.py."""
 
 import json
+import logging
 import re
 from pathlib import Path
 import msgspec
+
+logger = logging.getLogger(__name__)
 
 from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
@@ -321,7 +324,21 @@ def _build_last_search_payload(
     if raw_candidates is None:
         candidates = []
     else:
-        candidates = msgspec.convert(raw_candidates, type=list[CandidateScore])
+        try:
+            candidates = msgspec.convert(
+                raw_candidates, type=list[CandidateScore]
+            )
+        except msgspec.ValidationError as exc:
+            # Mirrors the CLI's defensive guard in
+            # scripts/pipeline_cli.py:_render_search_forensics_summary —
+            # production writes via the same Struct so this should never trip,
+            # but a corrupted historical row must not 500 the detail route.
+            logger.warning(
+                "search_log.candidates JSONB failed msgspec validation "
+                "(request_id=%s, search_log_id=%s): %s",
+                latest.get("request_id"), latest.get("id"), exc,
+            )
+            candidates = []
     # Top-3 by (matched_tracks DESC, avg_ratio DESC) for compact list view;
     # full forensic blob still reachable via the search history for
     # operators who want it.

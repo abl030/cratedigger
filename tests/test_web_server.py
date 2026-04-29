@@ -933,6 +933,33 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(data["last_search"]["top_candidates"], [])
         self.assertEqual(data["last_search"]["variant"], "v2_artist_album_no_year")
 
+    def test_pipeline_detail_handles_malformed_candidates_blob(self):
+        """Corrupted search_log.candidates JSONB → 200 with top_candidates=[].
+
+        Guard the route against historical rows whose JSONB shape no longer
+        matches CandidateScore. The CLI already wraps msgspec.convert in
+        try/except msgspec.ValidationError; the web route must do the same so
+        a corrupt row does not 500 the detail page.
+        """
+        self.mock_db.get_search_history.return_value = [{
+            "id": 7, "request_id": 100, "query": "q",
+            "result_count": 5, "elapsed_s": 0.5, "outcome": "no_match",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            # Wrong shape — missing every required CandidateScore field.
+            "candidates": [{"foo": "bar"}],
+            "variant": "v2_artist_album_no_year", "final_state": "Completed",
+        }]
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(data["last_search"])
+        self.assertEqual(data["last_search"]["top_candidates"], [])
+        self.assertEqual(data["last_search"]["variant"],
+                         "v2_artist_album_no_year")
+
     def test_pipeline_detail_surfaces_manual_reason(self):
         """manual_reason='search_exhausted' is exposed on the detail response."""
         row = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
