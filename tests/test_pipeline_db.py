@@ -37,7 +37,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -2708,6 +2708,288 @@ class TestUpdateDownloadLogMeasurement(unittest.TestCase):
             spectral_bitrate=950,
         )
         self.assertFalse(result)
+
+
+@requires_postgres
+class TestBadAudioHashes(unittest.TestCase):
+    """Real-DB coverage for the bad_audio_hashes helpers (plan U2)."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="bad-hash-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _hash(self, n: int) -> bytes:
+        return bytes([n]) * 32
+
+    def test_add_returns_count_for_fresh_inserts(self):
+        from lib.pipeline_db import BadAudioHashInput
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="mp3"),
+            BadAudioHashInput(hash_value=self._hash(3), audio_format="m4a"),
+        ]
+        n = self.db.add_bad_audio_hashes(self.req_id, "H@rco", "bad rip", inputs)
+        self.assertEqual(n, 3)
+
+    def test_add_empty_list_returns_zero(self):
+        n = self.db.add_bad_audio_hashes(self.req_id, "u", "r", [])
+        self.assertEqual(n, 0)
+
+    def test_add_full_duplicate_returns_zero(self):
+        from lib.pipeline_db import BadAudioHashInput
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="mp3"),
+        ]
+        first = self.db.add_bad_audio_hashes(self.req_id, "H@rco", "x", inputs)
+        second = self.db.add_bad_audio_hashes(
+            self.req_id, "OtherUser", "y", inputs)
+        self.assertEqual(first, 2)
+        self.assertEqual(second, 0)
+
+    def test_add_partial_overlap_returns_partial_count(self):
+        from lib.pipeline_db import BadAudioHashInput
+        first_batch = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="flac"),
+        ]
+        self.db.add_bad_audio_hashes(self.req_id, "H@rco", "x", first_batch)
+        second_batch = [
+            BadAudioHashInput(hash_value=self._hash(2), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(3), audio_format="flac"),
+        ]
+        n = self.db.add_bad_audio_hashes(
+            self.req_id, "Other", "y", second_batch)
+        self.assertEqual(n, 1)
+
+    def test_add_same_hash_different_format_both_inserted(self):
+        from lib.pipeline_db import BadAudioHashInput
+        inputs = [
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="flac"),
+            BadAudioHashInput(hash_value=self._hash(1), audio_format="mp3"),
+        ]
+        n = self.db.add_bad_audio_hashes(self.req_id, "u", "r", inputs)
+        self.assertEqual(n, 2)
+
+    def test_lookup_hits_when_present(self):
+        from lib.pipeline_db import BadAudioHashInput
+        self.db.add_bad_audio_hashes(
+            self.req_id, "H@rco", "x",
+            [BadAudioHashInput(hash_value=self._hash(7), audio_format="flac")],
+        )
+        row = self.db.lookup_bad_audio_hash(self._hash(7), "flac")
+        assert row is not None
+        self.assertEqual(row.hash_value, self._hash(7))
+        self.assertEqual(row.audio_format, "flac")
+        self.assertEqual(row.request_id, self.req_id)
+        self.assertEqual(row.reported_username, "H@rco")
+        self.assertEqual(row.reason, "x")
+        self.assertIsNotNone(row.reported_at)
+
+    def test_lookup_miss_returns_none(self):
+        self.assertIsNone(
+            self.db.lookup_bad_audio_hash(self._hash(99), "flac"))
+
+    def test_lookup_format_must_match(self):
+        from lib.pipeline_db import BadAudioHashInput
+        self.db.add_bad_audio_hashes(
+            self.req_id, "u", "r",
+            [BadAudioHashInput(hash_value=self._hash(7), audio_format="flac")],
+        )
+        # Same hash, different format → miss
+        self.assertIsNone(
+            self.db.lookup_bad_audio_hash(self._hash(7), "mp3"))
+        # Same format, different hash → miss
+        self.assertIsNone(
+            self.db.lookup_bad_audio_hash(self._hash(8), "flac"))
+
+    def test_has_any_false_on_fresh_table(self):
+        self.assertFalse(self.db.has_any_bad_audio_hashes())
+
+    def test_has_any_true_after_one_insert(self):
+        from lib.pipeline_db import BadAudioHashInput
+        self.db.add_bad_audio_hashes(
+            self.req_id, None, None,
+            [BadAudioHashInput(hash_value=self._hash(1), audio_format="flac")],
+        )
+        self.assertTrue(self.db.has_any_bad_audio_hashes())
+
+
+@requires_postgres
+class TestRecentSuccessfulUploader(unittest.TestCase):
+    """Real-DB coverage for get_recent_successful_uploader (plan U2)."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="rsu-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_returns_none_when_no_logs(self):
+        self.assertIsNone(
+            self.db.get_recent_successful_uploader(self.req_id))
+
+    def test_returns_none_when_only_rejected_logs(self):
+        self.db.log_download(
+            self.req_id, soulseek_username="bob", outcome="rejected")
+        self.db.log_download(
+            self.req_id, soulseek_username="alice", outcome="failed")
+        self.assertIsNone(
+            self.db.get_recent_successful_uploader(self.req_id))
+
+    def test_returns_most_recent_success_when_multiple_present(self):
+        self.db.log_download(
+            self.req_id, soulseek_username="alice", outcome="success")
+        self.db.log_download(
+            self.req_id, soulseek_username="bob", outcome="success")
+        self.assertEqual(
+            self.db.get_recent_successful_uploader(self.req_id), "bob")
+
+    def test_returns_force_import_uploader(self):
+        self.db.log_download(
+            self.req_id, soulseek_username="alice", outcome="success")
+        self.db.log_download(
+            self.req_id, soulseek_username="harco", outcome="force_import")
+        self.assertEqual(
+            self.db.get_recent_successful_uploader(self.req_id), "harco")
+
+    def test_isolated_per_request(self):
+        other = self.db.add_request(
+            mb_release_id="rsu-other",
+            artist_name="A",
+            album_title="C",
+            source="request",
+        )
+        self.db.log_download(
+            self.req_id, soulseek_username="alice", outcome="success")
+        self.db.log_download(
+            other, soulseek_username="bob", outcome="success")
+        self.assertEqual(
+            self.db.get_recent_successful_uploader(self.req_id), "alice")
+        self.assertEqual(
+            self.db.get_recent_successful_uploader(other), "bob")
+
+
+@requires_postgres
+class TestActiveImportJobForRequest(unittest.TestCase):
+    """Real-DB coverage for get_active_import_job_for_request (plan U2)."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="aij-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _enqueue(self, *, request_id: int, dedupe_key: str):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        return self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=manual_import_payload(failed_path="/tmp/x"),
+            preview_enabled=False,
+        )
+
+    def test_returns_none_when_no_jobs(self):
+        self.assertIsNone(
+            self.db.get_active_import_job_for_request(self.req_id))
+
+    def test_returns_queued_job(self):
+        job = self._enqueue(
+            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+        result = self.db.get_active_import_job_for_request(self.req_id)
+        assert result is not None
+        self.assertEqual(result["id"], job.id)
+        self.assertEqual(result["status"], "queued")
+
+    def test_returns_running_job(self):
+        self._enqueue(
+            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+        # Mark would_import → claim → running
+        self.db._execute("""
+            UPDATE import_jobs
+            SET preview_status = 'would_import',
+                importable_at = NOW()
+            WHERE request_id = %s
+        """, (self.req_id,))
+        claimed = self.db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        result = self.db.get_active_import_job_for_request(self.req_id)
+        assert result is not None
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["id"], claimed.id)
+
+    def test_returns_none_for_completed_job(self):
+        job = self._enqueue(
+            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+        self.db._execute("""
+            UPDATE import_jobs
+            SET preview_status = 'would_import',
+                importable_at = NOW()
+            WHERE id = %s
+        """, (job.id,))
+        claimed = self.db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        self.db.mark_import_job_completed(claimed.id, result={"ok": True})
+        self.assertIsNone(
+            self.db.get_active_import_job_for_request(self.req_id))
+
+    def test_returns_none_for_failed_job(self):
+        job = self._enqueue(
+            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+        self.db._execute("""
+            UPDATE import_jobs
+            SET preview_status = 'would_import',
+                importable_at = NOW()
+            WHERE id = %s
+        """, (job.id,))
+        claimed = self.db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        self.db.mark_import_job_failed(claimed.id, error="boom")
+        self.assertIsNone(
+            self.db.get_active_import_job_for_request(self.req_id))
+
+    def test_filters_by_request_id(self):
+        other = self.db.add_request(
+            mb_release_id="aij-other",
+            artist_name="A",
+            album_title="C",
+            source="request",
+        )
+        self._enqueue(request_id=self.req_id, dedupe_key="manual:a")
+        self._enqueue(request_id=other, dedupe_key="manual:b")
+        r1 = self.db.get_active_import_job_for_request(self.req_id)
+        r2 = self.db.get_active_import_job_for_request(other)
+        assert r1 is not None and r2 is not None
+        self.assertEqual(r1["request_id"], self.req_id)
+        self.assertEqual(r2["request_id"], other)
+
+    def test_returns_most_recent_when_multiple_active(self):
+        first = self._enqueue(request_id=self.req_id, dedupe_key="manual:a")
+        second = self._enqueue(request_id=self.req_id, dedupe_key="manual:b")
+        result = self.db.get_active_import_job_for_request(self.req_id)
+        assert result is not None
+        self.assertEqual(result["id"], max(first.id, second.id))
 
 
 if __name__ == "__main__":

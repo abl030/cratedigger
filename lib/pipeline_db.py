@@ -124,6 +124,29 @@ class RequestSpectralStateUpdate:
         return fields
 
 
+# BadAudioHashRow / BadAudioHashInput are @dataclass — not msgspec.Struct —
+# because they never cross JSON. They round-trip between Python and PostgreSQL
+# only (`bad_audio_hashes` table). Per `.claude/rules/code-quality.md`
+# "Wire-boundary types", `@dataclass` is correct here.
+@dataclass(frozen=True)
+class BadAudioHashInput:
+    """One row to insert into `bad_audio_hashes`."""
+    hash_value: bytes  # raw 32-byte SHA-256
+    audio_format: str  # 'flac' | 'mp3' | 'm4a' | 'ogg' | ...
+
+
+@dataclass(frozen=True)
+class BadAudioHashRow:
+    """One row read back from `bad_audio_hashes`."""
+    id: int
+    hash_value: bytes
+    audio_format: str
+    request_id: int | None
+    reported_username: str | None
+    reason: str | None
+    reported_at: datetime  # tz-aware
+
+
 @dataclass(frozen=True)
 class RequestV0ProbeStateUpdate:
     """Typed update for current comparable lossless-source V0 probe state."""
@@ -1634,3 +1657,121 @@ class PipelineDB:
             SET next_retry_after = %s
             WHERE id = %s
         """, (next_retry, request_id))
+
+    # --- bad_audio_hashes (curator-reported bad-rip audio-content hashes) ---
+
+    def add_bad_audio_hashes(
+        self,
+        request_id: int,
+        reported_username: str | None,
+        reason: str | None,
+        hashes: list[BadAudioHashInput],
+    ) -> int:
+        """Insert curator-reported bad-rip hashes; return count of NEW rows.
+
+        Single multi-row INSERT with ON CONFLICT (hash_value, audio_format)
+        DO NOTHING — re-reporting the same content on a second click is a
+        no-op (returns 0). Per Key Technical Decision in the plan,
+        request_id is intentionally NOT part of the unique key.
+        """
+        if not hashes:
+            return 0
+        values_sql = ",".join(["(%s, %s, %s, %s, %s)"] * len(hashes))
+        params: list[Any] = []
+        for h in hashes:
+            params.extend([
+                psycopg2.Binary(h.hash_value),
+                h.audio_format,
+                request_id,
+                reported_username,
+                reason,
+            ])
+        cur = self._execute(f"""
+            INSERT INTO bad_audio_hashes
+                (hash_value, audio_format, request_id, reported_username, reason)
+            VALUES {values_sql}
+            ON CONFLICT (hash_value, audio_format) DO NOTHING
+            RETURNING id
+        """, tuple(params))
+        inserted = cur.fetchall()
+        return len(inserted)
+
+    def lookup_bad_audio_hash(
+        self,
+        hash_value: bytes,
+        audio_format: str,
+    ) -> BadAudioHashRow | None:
+        """Point-lookup by (hash_value, audio_format). Returns None on miss."""
+        cur = self._execute("""
+            SELECT id, hash_value, audio_format, request_id,
+                   reported_username, reason, reported_at
+            FROM bad_audio_hashes
+            WHERE hash_value = %s AND audio_format = %s
+            LIMIT 1
+        """, (psycopg2.Binary(hash_value), audio_format))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        # psycopg2 returns BYTEA as memoryview; coerce to bytes for the typed row.
+        raw = row["hash_value"]
+        if isinstance(raw, memoryview):
+            raw = bytes(raw)
+        return BadAudioHashRow(
+            id=int(row["id"]),
+            hash_value=raw,
+            audio_format=str(row["audio_format"]),
+            request_id=(int(row["request_id"])
+                        if row["request_id"] is not None else None),
+            reported_username=row["reported_username"],
+            reason=row["reason"],
+            reported_at=row["reported_at"],
+        )
+
+    def has_any_bad_audio_hashes(self) -> bool:
+        """Empty-table fast-path probe; uncached at this layer."""
+        cur = self._execute(
+            "SELECT 1 FROM bad_audio_hashes LIMIT 1"
+        )
+        return cur.fetchone() is not None
+
+    def get_recent_successful_uploader(
+        self,
+        request_id: int,
+    ) -> str | None:
+        """Return the most recent successful uploader for this request.
+
+        Used by the ban-source route to resolve `reported_username`
+        server-side. Considers both `success` and `force_import` outcomes.
+        """
+        cur = self._execute("""
+            SELECT soulseek_username
+            FROM download_log
+            WHERE request_id = %s
+              AND outcome IN ('success', 'force_import')
+              AND soulseek_username IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, (request_id,))
+        row = cur.fetchone()
+        return row["soulseek_username"] if row else None
+
+    def get_active_import_job_for_request(
+        self,
+        request_id: int,
+    ) -> dict[str, Any] | None:
+        """Return the most recent queued/running import job for this request.
+
+        Used by the ban-source route's importer-race check (E1.3 in the
+        plan). Returns the raw row dict (not an `ImportJob`) because the
+        caller only inspects `status` for the 409 decision.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE request_id = %s
+              AND status IN ('queued', 'running')
+            ORDER BY id DESC
+            LIMIT 1
+        """, (request_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
