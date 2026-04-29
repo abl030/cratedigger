@@ -81,6 +81,7 @@
   .badge-downloading { background: #1a3a5a; color: #6cf; }
   .badge-imported { background: #1a4a2a; color: #6d6; }
   .badge-manual { background: #3a3a3a; color: #aaa; }
+  .badge-sublabel { background: #2a2a3a; color: #9ac; font-style: italic; }
   .status-card { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 12px; }
   .status-counts { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
   .count { text-align: center; padding: 8px 16px; background: #222; border-radius: 6px; cursor: pointer; border: 1px solid #333; flex: 1; min-width: 80px; }
@@ -225,6 +226,7 @@
     <div style="display:flex;gap:2px;">
       <button class="p-btn active-status" id="search-type-artist" onclick="setSearchType('artist')">Artist</button>
       <button class="p-btn" id="search-type-release" onclick="setSearchType('release')">Album</button>
+      <button class="p-btn" id="search-type-label" onclick="setSearchType('label')">Label</button>
     </div>
     <div style="display:flex;gap:2px;margin-left:8px;border-left:1px solid #444;padding-left:8px;">
       <button class="p-btn active-status" id="source-mb" onclick="setBrowseSource('mb')">MB</button>
@@ -247,6 +249,13 @@
     <div id="browse-analysis" style="display:none;"></div>
     <div id="browse-library" style="display:none;"></div>
     <div id="browse-compare" style="display:none;"></div>
+  </div>
+  <div id="browse-label" style="display:none;">
+    <div id="browse-label-header" style="margin:12px 0 8px;display:flex;align-items:center;gap:12px;">
+      <span style="cursor:pointer;font-size:18px;" onclick="closeLabelDetail()">←</span>
+      <span id="browse-label-name" style="font-size:18px;font-weight:bold;"></span>
+    </div>
+    <div id="browse-label-body"></div>
   </div>
 </div>
 

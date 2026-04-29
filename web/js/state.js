@@ -7,11 +7,13 @@
 
 import { normalizeReleaseId } from './util.js';
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
   browseArtist: null,
+  browseLabel: null,
+  labelFilters: { yearMin: null, yearMax: null, format: '', hideHeld: false },
   browseSubView: 'discography',
   browseCache: {},
   pipelineData: null,
