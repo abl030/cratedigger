@@ -45,6 +45,31 @@ export function buildLabelSearchUrl(q) {
 }
 
 /**
+ * Build the URL for `/api/discogs/label/{id}` with optional pagination
+ * and sub-label flag. Pure for testability.
+ * @param {string|number} labelId
+ * @param {{include_sublabels?: boolean, page?: number, per_page?: number}} [opts]
+ * @returns {string}
+ */
+export function buildLabelDetailUrl(labelId, opts = {}) {
+  const params = new URLSearchParams();
+  // include_sublabels: only emit when caller specified — the route applies
+  // an auto-flip when the param is absent and explicit ?true/false matters
+  // to the route's "respect the user's choice" branch.
+  if (opts.include_sublabels !== undefined) {
+    params.set('include_sublabels', opts.include_sublabels ? 'true' : 'false');
+  }
+  if (opts.page !== undefined && opts.page !== null) {
+    params.set('page', String(opts.page));
+  }
+  if (opts.per_page !== undefined && opts.per_page !== null) {
+    params.set('per_page', String(opts.per_page));
+  }
+  const qs = params.toString();
+  return `/api/discogs/label/${encodeURIComponent(String(labelId))}${qs ? '?' + qs : ''}`;
+}
+
+/**
  * Parse the `release.date` field (Discogs `released`) into a year.
  * Accepts "2003", "2003-04", "2003-04-15"; returns null for missing
  * or unparseable values.
@@ -308,6 +333,7 @@ export function openLabelDetailFromList(rowEl, index) {
 export async function openLabelDetail(labelId, labelName) {
   state.browseLabel = { id: labelId, name: labelName };
   state.browseSubView = 'label';
+  state.labelPage = 1;
 
   const results = document.getElementById('results');
   if (results) results.style.display = 'none';
@@ -327,13 +353,13 @@ export async function openLabelDetail(labelId, labelName) {
   // the label entity we may decide to retry without sub-labels for
   // very large labels.
   try {
-    let payload = await loadLabelReleases(labelId, { include_sublabels: true });
+    let payload = await loadLabelReleases(labelId, { include_sublabels: true, page: 1 });
     const totalCount = (payload && payload.label && payload.label.release_count) || 0;
     if (totalCount > BIG_LABEL_THRESHOLD && payload.releases && payload.releases.length === 0) {
       // Defensive: if the big-label query timed out and returned empty,
       // refetch without sub-labels. (Cheap insurance — happy path on
       // boutique labels never enters this branch.)
-      payload = await loadLabelReleases(labelId, { include_sublabels: false });
+      payload = await loadLabelReleases(labelId, { include_sublabels: false, page: 1 });
     } else if (totalCount > BIG_LABEL_THRESHOLD) {
       // Surface the sub-label opt-in toggle even when the first fetch
       // succeeded — UX hint that this label has a long tail.
@@ -343,6 +369,36 @@ export async function openLabelDetail(labelId, labelName) {
     renderLabelDetail(body, payload);
   } catch (e) {
     body.innerHTML = '<div class="loading">Failed to load label</div>';
+  }
+}
+
+/**
+ * Navigate to a different page of the current label's releases.
+ * Wired via inline onclick on prev/next controls.
+ * @param {number} page
+ */
+export async function goToLabelPage(page) {
+  if (!state.browseLabel) return;
+  const labelId = state.browseLabel.id;
+  const includeSub = !!(state.labelFilters && /** @type {any} */ (state.labelFilters).includeSubFromUI);
+  // Read the current toggle state if present — bigLabel labels show an
+  // explicit checkbox; default otherwise comes from the original load.
+  const toggle = /** @type {HTMLInputElement|null} */ (
+    document.getElementById('label-include-sublabels'));
+  const useSub = toggle ? toggle.checked : includeSub;
+
+  state.labelPage = page;
+  const body = document.getElementById('browse-label-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">Loading page ' + page + '...</div>';
+  try {
+    const payload = await loadLabelReleases(labelId, {
+      include_sublabels: useSub,
+      page,
+    });
+    renderLabelDetail(body, payload);
+  } catch (_e) {
+    body.innerHTML = '<div class="loading">Failed to load page ' + page + '</div>';
   }
 }
 
@@ -361,12 +417,16 @@ export function closeLabelDetail() {
 /**
  * Fetch label detail + releases.
  * @param {string} labelId
- * @param {{include_sublabels?: boolean}} [opts]
+ * @param {{include_sublabels?: boolean, page?: number, per_page?: number}} [opts]
  * @returns {Promise<Object>}
  */
 export async function loadLabelReleases(labelId, opts = {}) {
   const includeSub = opts.include_sublabels !== false;
-  const url = `${API}/api/discogs/label/${encodeURIComponent(labelId)}?include_sublabels=${includeSub}`;
+  const url = `${API}${buildLabelDetailUrl(labelId, {
+    include_sublabels: includeSub,
+    page: opts.page,
+    per_page: opts.per_page,
+  })}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return await r.json();
@@ -380,8 +440,23 @@ export async function loadLabelReleases(labelId, opts = {}) {
 export function renderLabelDetail(containerEl, payload) {
   const label = payload.label || {};
   const allReleases = Array.isArray(payload.releases) ? payload.releases : [];
-  const totalCount = (typeof label.release_count === 'number')
-    ? label.release_count : allReleases.length;
+  // Header count: prefer payload.pagination.items (the rolled-up CTE total
+  // when include_sublabels=true; the direct count otherwise). Fixes the
+  // P2 #2 mismatch where the header advertised the entity's release_count
+  // but the list rendered the rolled-up rows. Falls back to the entity
+  // value if pagination is missing (defensive — older payloads, tests).
+  const pagination = (payload && typeof payload.pagination === 'object' && payload.pagination)
+    ? payload.pagination : null;
+  const paginationItems = (pagination && typeof pagination.items === 'number')
+    ? pagination.items : null;
+  const totalCount = (paginationItems != null)
+    ? paginationItems
+    : ((typeof label.release_count === 'number')
+        ? label.release_count : allReleases.length);
+  const pages = (pagination && typeof pagination.pages === 'number')
+    ? pagination.pages : 1;
+  const currentPage = (pagination && typeof pagination.page === 'number')
+    ? pagination.page : 1;
   const includeSub = payload.include_sublabels !== false;
 
   // Stash full release list on the container for filter re-renders.
@@ -410,8 +485,10 @@ export function renderLabelDetail(containerEl, payload) {
     ? `<span class="badge badge-sublabel">via ${esc(label.parent_label_name || 'parent')}</span>`
     : '';
   const country = label.country ? ` · ${esc(label.country)}` : '';
-  const renderedNote = (allReleases.length < totalCount)
-    ? `<div class="loading" style="text-align:left;padding:6px 0;color:#888;">Showing first ${allReleases.length} of ${totalCount} — pagination coming.</div>`
+  // Page-position note. The prev/next controls render below the rows; this
+  // line just situates the user inside the dataset.
+  const renderedNote = (pages > 1)
+    ? `<div class="loading" style="text-align:left;padding:6px 0;color:#888;">Page ${currentPage} of ${pages} — ${totalCount} release${totalCount === 1 ? '' : 's'} total</div>`
     : '';
   const bigLabelToggle = (totalCount > BIG_LABEL_THRESHOLD)
     ? `<label style="margin-left:10px;font-size:0.85em;color:#aaa;">
@@ -461,9 +538,39 @@ export function renderLabelDetail(containerEl, payload) {
     </div>
     ${renderedNote}
     <div id="browse-label-rows"></div>
+    ${renderPaginationControls(currentPage, pages)}
   `;
 
   renderLabelRows(containerEl);
+}
+
+/**
+ * Render prev/next page controls. Returns empty string when only one
+ * page exists. Pure for testability — the click handlers are wired
+ * via window.goToLabelPage.
+ * @param {number} currentPage
+ * @param {number} pages
+ * @returns {string} HTML
+ */
+export function renderPaginationControls(currentPage, pages) {
+  if (!pages || pages < 2) return '';
+  const prevDisabled = currentPage <= 1;
+  const nextDisabled = currentPage >= pages;
+  const btn = (label, page, disabled) => {
+    const style = 'padding:6px 12px;background:#222;color:'
+      + (disabled ? '#555' : '#eee')
+      + ';border:1px solid #444;border-radius:4px;font-size:13px;'
+      + (disabled ? 'cursor:not-allowed;' : 'cursor:pointer;');
+    const onclick = disabled ? '' : ` onclick="window.goToLabelPage(${page})"`;
+    return `<button${onclick} style="${style}"${disabled ? ' disabled' : ''}>${label}</button>`;
+  };
+  return `
+    <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px;padding:10px 0;">
+      ${btn('← Prev', currentPage - 1, prevDisabled)}
+      <span style="color:#888;font-size:13px;">Page ${currentPage} of ${pages}</span>
+      ${btn('Next →', currentPage + 1, nextDisabled)}
+    </div>
+  `;
 }
 
 /**
