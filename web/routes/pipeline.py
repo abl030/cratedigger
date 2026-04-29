@@ -19,6 +19,7 @@ from web.download_history_view import (
     classify_download_log_row,
 )
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
+                         CandidateScore,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
                          get_decision_tree)
@@ -299,6 +300,44 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
     h._json(preview.simulation or {})
 
 
+def _build_last_search_payload(
+    search_history: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Build the ``last_search`` slice of the request-detail response.
+
+    Single decode site (per ``.claude/rules/code-quality.md`` § Wire-boundary
+    types) for the ``search_log.candidates`` JSONB blob: ``msgspec.convert``
+    turns it into ``list[CandidateScore]`` here, and the response is
+    re-encoded via ``msgspec.to_builtins`` for symmetric strictness. Older
+    rows with ``candidates=NULL`` (or missing) read as ``[]`` — no
+    ``ValidationError``. Returns ``None`` when the request has no
+    search_log rows yet.
+    """
+    if not search_history:
+        return None
+    latest = search_history[0]  # get_search_history orders newest first
+    raw_candidates = latest.get("candidates")
+    candidates: list[CandidateScore]
+    if raw_candidates is None:
+        candidates = []
+    else:
+        candidates = msgspec.convert(raw_candidates, type=list[CandidateScore])
+    # Top-3 by (matched_tracks DESC, avg_ratio DESC) for compact list view;
+    # full forensic blob still reachable via the search history for
+    # operators who want it.
+    candidates.sort(
+        key=lambda c: (c.matched_tracks, c.avg_ratio),
+        reverse=True,
+    )
+    top = candidates[:3]
+    return {
+        "variant": latest.get("variant"),
+        "final_state": latest.get("final_state"),
+        "outcome": latest.get("outcome"),
+        "top_candidates": [msgspec.to_builtins(c) for c in top],
+    }
+
+
 def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> None:
     s = _server()
     req_id = int(req_id_str)
@@ -309,10 +348,14 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
     tracks = s._db().get_tracks(req_id)
     history = s._db().get_download_history(req_id)
     history_items = [item.to_dict() for item in build_download_history_rows(history)]
+    search_history = s._db().get_search_history(req_id)
+    last_search = _build_last_search_payload(search_history)
     result: dict[str, object] = {
         "request": s._serialize_row(req),
         "tracks": tracks,
         "history": history_items,
+        "manual_reason": req.get("manual_reason"),
+        "last_search": last_search,
     }
     mbid = req.get("mb_release_id")
     b = s._beets_db()

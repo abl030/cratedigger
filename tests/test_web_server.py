@@ -183,6 +183,7 @@ def _make_server():
         },
     ]
 
+    mock_db.get_search_history.return_value = []
     mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
     mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
     mock_db.clear_wrong_match_path.return_value = True
@@ -823,16 +824,128 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline all item")
 
+    DETAIL_RESPONSE_REQUIRED_FIELDS = {
+        "request", "history", "tracks", "manual_reason", "last_search",
+    }
+    LAST_SEARCH_REQUIRED_FIELDS = {
+        "variant", "final_state", "outcome", "top_candidates",
+    }
+    CANDIDATE_SCORE_REQUIRED_FIELDS = {
+        "username", "dir", "filetype", "matched_tracks", "total_tracks",
+        "avg_ratio", "missing_titles", "file_count",
+    }
+
     def test_pipeline_detail_contract(self):
         status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"request", "history", "tracks"},
+        _assert_required_fields(self, data, self.DETAIL_RESPONSE_REQUIRED_FIELDS,
                                 "pipeline detail response")
         _assert_required_fields(self, data["request"], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline detail request")
         _assert_required_fields(self, data["history"][0], self.HISTORY_REQUIRED_FIELDS,
                                 "pipeline detail history item")
+        # Default mock state: no search history → last_search is None and
+        # manual_reason is None. Both keys are still present.
+        self.assertIsNone(data["last_search"])
+        self.assertIsNone(data["manual_reason"])
+
+    def test_pipeline_detail_surfaces_last_search_top_candidates(self):
+        """When the latest search_log row has candidates, the route emits the
+        top-3 by (matched_tracks DESC, avg_ratio DESC) via msgspec.to_builtins."""
+        candidates_blob = [
+            {"username": "u1", "dir": "A", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.95,
+             "missing_titles": [], "file_count": 26},
+            {"username": "u2", "dir": "B", "filetype": "mp3",
+             "matched_tracks": 22, "total_tracks": 26, "avg_ratio": 0.80,
+             "missing_titles": ["x"], "file_count": 22},
+            {"username": "u3", "dir": "C", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.85,
+             "missing_titles": [], "file_count": 26},
+            {"username": "u4", "dir": "D", "filetype": "flac",
+             "matched_tracks": 20, "total_tracks": 26, "avg_ratio": 0.99,
+             "missing_titles": ["a", "b"], "file_count": 20},
+        ]
+        self.mock_db.get_search_history.return_value = [{
+            "id": 99, "request_id": 100, "query": "*rtist Album",
+            "result_count": 100, "elapsed_s": 1.2, "outcome": "no_match",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": candidates_blob,
+            "variant": "v3_artist_only", "final_state": "Completed",
+        }]
+
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+
+        self.assertEqual(status, 200)
+        last = data["last_search"]
+        self.assertIsNotNone(last)
+        _assert_required_fields(self, last, self.LAST_SEARCH_REQUIRED_FIELDS,
+                                "last_search payload")
+        self.assertEqual(last["variant"], "v3_artist_only")
+        self.assertEqual(last["final_state"], "Completed")
+        self.assertEqual(last["outcome"], "no_match")
+        # Top-3, sorted by (matched_tracks DESC, avg_ratio DESC):
+        # u1 (26, 0.95) → u3 (26, 0.85) → u2 (22, 0.80)
+        usernames = [c["username"] for c in last["top_candidates"]]
+        self.assertEqual(usernames, ["u1", "u3", "u2"])
+        for cand in last["top_candidates"]:
+            _assert_required_fields(self, cand,
+                                    self.CANDIDATE_SCORE_REQUIRED_FIELDS,
+                                    "candidate score")
+
+    def test_pipeline_detail_handles_null_candidates_gracefully(self):
+        """Historical search_log row with NULL candidates → top_candidates=[]."""
+        self.mock_db.get_search_history.return_value = [{
+            "id": 1, "request_id": 100, "query": "q",
+            "result_count": None, "elapsed_s": None, "outcome": "timeout",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": None, "variant": None, "final_state": None,
+        }]
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(data["last_search"])
+        self.assertEqual(data["last_search"]["top_candidates"], [])
+        self.assertIsNone(data["last_search"]["variant"])
+
+    def test_pipeline_detail_handles_empty_candidates_list(self):
+        """Latest search row with an empty candidates list → top_candidates=[]."""
+        self.mock_db.get_search_history.return_value = [{
+            "id": 1, "request_id": 100, "query": "q",
+            "result_count": 0, "elapsed_s": 0.5, "outcome": "no_results",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": [], "variant": "v2_artist_album_no_year",
+            "final_state": "Completed",
+        }]
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["last_search"]["top_candidates"], [])
+        self.assertEqual(data["last_search"]["variant"], "v2_artist_album_no_year")
+
+    def test_pipeline_detail_surfaces_manual_reason(self):
+        """manual_reason='search_exhausted' is exposed on the detail response."""
+        row = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
+        row["manual_reason"] = "search_exhausted"
+        row["status"] = "manual"
+        self.mock_db.get_request.return_value = row
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["manual_reason"], "search_exhausted")
 
     def test_pipeline_detail_history_surfaces_wrong_match_triage_audit(self):
         original_history = copy.deepcopy(self.mock_db.get_download_history.return_value)
