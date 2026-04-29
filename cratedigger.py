@@ -550,9 +550,28 @@ def _log_search_result(album, result, ctx) -> None:
     )
     # Increment search_attempts + backoff for any non-found outcome.
     # Exhausted variants do not increment — the request will be flipped to
-    # manual by U6 and the attempt counter is the variant-ladder index.
+    # manual below and the attempt counter is the variant-ladder index.
     if result.outcome not in ("found", "exhausted"):
         db.record_attempt(request_id, "search")
+
+    # U6: variant ladder exhausted → flip request to status='manual' with
+    # manual_reason='search_exhausted'. The search_log row above is the
+    # audit trail; this status flip is a side effect after.
+    #
+    # Defensive: skip if status is already 'manual' to avoid clobbering an
+    # operator-set hold (a request flipped to 'manual' for an unrelated
+    # reason). `set_manual` itself will not overwrite an existing
+    # `manual_reason` with NULL, but re-flipping idempotently still
+    # rewrites the row's `updated_at` and broadcasts another status_history
+    # entry — neither is appropriate for an operator-held row.
+    if result.outcome == "exhausted":
+        row = db.get_request(request_id)
+        if row is not None and row.get("status") != "manual":
+            logger.info(
+                f"Flipping request {request_id} to manual "
+                f"(reason='search_exhausted')"
+            )
+            db.set_manual(request_id, manual_reason="search_exhausted")
 
 
 def _apply_find_download_result(album, result, find_result, failed_grab) -> None:
