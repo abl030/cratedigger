@@ -503,6 +503,41 @@ The drill-in flow (F1 trigger from a release-detail row) is just a click handler
 
 ---
 
+## Post-merge follow-ups (from code review 2026-04-29)
+
+Captured from `/ce-code-review` Tier 2 pass on PR #185. Run artifacts: `/tmp/compound-engineering/ce-code-review/20260429-ded45010/`. The P0 + safe_auto cluster were applied in commits `bf2d929` (cratedigger) and `cf22645` (discogs-api). The items below were surfaced but deferred — they did not block merge but warrant follow-up work.
+
+**Priority order: tackle P1 + P2 #6 first; the P3 cleanup cluster can land in one consolidation PR.**
+
+### P1 — fix soon
+
+- **Pagination plumbed but not consumed.** `web/discogs.py::get_label_releases` accepts `page`/`per_page`; route doesn't forward; UI shows "Showing first 100 of N". Plan U6 explicitly accepted this for v1, but it leaves R5 ("paginated for hundreds/thousands") unsatisfied. Forward query params from the route, add page controls in `web/js/labels.js`.
+- **Recursive CTE uses `UNION ALL` — cycle in `parent_label_id` would infinite-loop.** `discogs-api/src/db.rs:163`. Discogs probably has no label cycles in practice but defensive: switch to `UNION` (dedups exact tuples) or PG14+ `CYCLE` clause. Apply to both the count CTE and the matched CTE.
+- **Rust struct fields typed `String` for nullable `label.profile` / `contactinfo` / `data_quality`** would panic on NULL. `discogs-api/src/db.rs:80`. Schema has `NOT NULL DEFAULT ''` so unlikely in practice; read as `Option<String>` and `.unwrap_or_default()` for safety.
+
+### P2 — fix when convenient
+
+- **Big-label fallback dead code.** `web/js/labels.js` empty-results refetch never triggers because `loadLabelReleases` throws on `!r.ok`. Either remove the branch or replace with a real heuristic that checks `release_count` from a cheap detail call before deciding `include_sublabels`.
+- **Total-count header mismatch on rolled-up labels.** `web/discogs.py` ~ release-count display: header says "X releases" (direct count) but list shows direct + sub-label rows when `include_sublabels=true`. Either compute total over the recursive CTE Rust-side, or surface `payload.pagination.items` as the header count when the list is rolled up.
+- **`openLabelDetail` has no in-flight token: late response can stomp newer label.** `web/js/labels.js:298`. Rapid clicks across labels could land out of order. Stamp each fetch with a request token in module scope, discard responses whose token is stale.
+- **Upstream 503 handling on cratedigger side.** Discovered during the fix pass: the Rust mirror now returns 503 when the recursive CTE exceeds 5s `statement_timeout`. The cratedigger route surfaces this as a 500 to the browser. The auto-flip should prevent the 503 in the happy path, but a user explicitly passing `?include_sublabels=true` on a UMG-class label would still see a 500. Consider a graceful retry-without-sublabels on 503.
+
+### P3 — cleanup cluster (one consolidation PR)
+
+- **`overlay_release_rows` mutation contract is implicit.** `web/routes/_overlay.py:46-66`. If a future caller passes a cached dict, the in-place mutation could poison the cache. Document the mutation in the docstring or rename to make it explicit (`overlay_release_rows_in_place`), or return a new list.
+- **`overlay_release_rows` lacks a direct unit test.** Currently only indirectly covered through `get_release_group` and `get_discogs_master`. Add direct test per `.claude/rules/code-quality.md` "every pure function must have direct unit tests".
+- **Hardcoded `sub_labels: []` in label-detail response.** `web/routes/labels.py`. discogs-api returns `LabelDetail.sub_labels` populated; the route drops them. Either pass through (UI doesn't render today but Phase B may) or remove the field from the response shape.
+- **Year inputs fire on every keystroke without debounce.** `web/js/labels.js`. Negligible at 100 rows; will matter when pagination lands and the in-memory list grows.
+- **Adapter accepts arbitrary `int|str` `label_id` and interpolates raw into URL.** `web/discogs.py`. Defence-in-depth: `assert str(label_id).isdigit()`. Route regex already restricts at the entry.
+- **Rust `via_label_id` field naming differs from rest-of-schema `label_id`.** `discogs-api/src/types.rs`. Rename has consumers in cratedigger Python so coordinate the change.
+
+### Pre-existing (not blocking, but worth noting)
+
+- Stale results can overwrite fresh ones — same race exists in the existing artist search. Single fix in `web/js/browse.js` would address both.
+- Cache key for label search uses unbounded user query (no length cap) — same pattern as existing `search_artists`. Consider a 200-char cap.
+
+---
+
 ## Sources & References
 
 - **Origin document:** `docs/brainstorms/label-viewer-requirements.md`
