@@ -861,6 +861,42 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    def set_manual(
+        self,
+        request_id: int,
+        *,
+        manual_reason: str | None = None,
+    ) -> None:
+        """Flip a request to ``status='manual'``, optionally writing a reason.
+
+        - ``manual_reason`` is a system-driven cause string (e.g.
+          ``'search_exhausted'``). When non-None, it is written to the
+          new ``album_requests.manual_reason`` column.
+        - When ``manual_reason`` is None (the default), the column is left
+          untouched — never overwritten with NULL. This protects an
+          existing reason when a generic flip path runs against a row
+          that already has a populated reason.
+
+        Re-queue is the only path that clears ``manual_reason``; that
+        clearing happens in ``reset_to_wanted``.
+        """
+        now = datetime.now(timezone.utc)
+        sets = [
+            "status = 'manual'",
+            "active_download_state = NULL",
+            "updated_at = %s",
+        ]
+        params: list[object] = [now]
+        if manual_reason is not None:
+            sets.append("manual_reason = %s")
+            params.append(manual_reason)
+        params.append(request_id)
+        self._execute(
+            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
+            params,
+        )
+        self.conn.commit()
+
     def update_spectral_state(
         self,
         request_id: int,
@@ -920,6 +956,11 @@ class PipelineDB:
         Only fields explicitly passed are updated — omitted fields are
         preserved.  Pass ``search_filetype_override=None`` to clear the column;
         omitting it leaves the existing value untouched.
+
+        Always clears ``manual_reason`` — re-queueing past a manual flip
+        means the operator wants a clean slate. Per U6: every re-queue path
+        funnels through this method, so a single ``manual_reason = NULL``
+        write here covers web UI, CLI, and importer requeue paths.
         """
         now = datetime.now(timezone.utc)
         sets = [
@@ -930,6 +971,7 @@ class PipelineDB:
             "next_retry_after = NULL",
             "last_attempt_at = NULL",
             "active_download_state = NULL",
+            "manual_reason = NULL",
             "updated_at = %s",
         ]
         params: list[object] = [now]

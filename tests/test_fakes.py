@@ -330,6 +330,45 @@ class TestFakePipelineDB(unittest.TestCase):
             self.assertFalse(acquired)
         self.assertEqual(db.advisory_lock_calls, [(0x1234, 42)])
 
+    def test_set_manual_writes_reason(self):
+        """U6 fake parity: ``set_manual`` flips status and writes reason."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        db.set_manual(42, manual_reason="search_exhausted")
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "search_exhausted")
+        self.assertIn((42, "manual"), db.status_history)
+
+    def test_set_manual_does_not_overwrite_existing_reason_when_none(self):
+        """U6 fake parity: a None reason must NOT clobber a populated reason."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", manual_reason="operator_hold"))
+
+        db.set_manual(42)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "operator_hold")
+
+    def test_reset_to_wanted_clears_manual_reason(self):
+        """U6 fake parity: re-queue clears ``manual_reason`` and counters."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual", manual_reason="search_exhausted",
+            search_attempts=7,
+        ))
+
+        db.reset_to_wanted(42)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_attempts"], 0)
+        self.assertIsNone(row["manual_reason"])
+
 
 class TestFakeSlskdAPI(unittest.TestCase):
     def test_get_downloads_returns_queued_snapshots(self):

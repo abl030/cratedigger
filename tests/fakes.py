@@ -1019,6 +1019,7 @@ class FakePipelineDB:
         row["next_retry_after"] = None
         row["last_attempt_at"] = None
         row["active_download_state"] = None
+        row["manual_reason"] = None
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
@@ -1028,6 +1029,25 @@ class FakePipelineDB:
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))
+
+    def set_manual(
+        self,
+        request_id: int,
+        *,
+        manual_reason: str | None = None,
+    ) -> None:
+        """Mirror ``PipelineDB.set_manual``: flip to ``status='manual'``,
+        write ``manual_reason`` only when non-None (no NULL clobber).
+        """
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        row["status"] = "manual"
+        row["active_download_state"] = None
+        row["updated_at"] = _utcnow()
+        if manual_reason is not None:
+            row["manual_reason"] = manual_reason
+        self.status_history.append((request_id, "manual"))
 
     def set_downloading(self, request_id: int, state_json: str) -> bool:
         row = self._requests.get(request_id)
@@ -1388,6 +1408,7 @@ class FakePipelineDB:
             "current_lossless_source_v0_probe_avg_bitrate": None,
             "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
+            "manual_reason": None,
             "created_at": now,
             "updated_at": now,
         }
