@@ -2469,5 +2469,386 @@ class TestBadAudioHashSlice(unittest.TestCase):
         self.assertEqual(len(db.denylist), 0)
 
 
+class TestSearchForensicsCaptureSlice(unittest.TestCase):
+    """U5 integration slice: search_for_album → find_download → log_search.
+
+    Drives the production search loop end-to-end with FakeSlskdSearches +
+    FakePipelineDB and asserts the persisted ``search_log.candidates``
+    JSONB shape, ``variant``, and ``final_state``. Covers the headline U5
+    test scenarios from the plan: response limit, variant ladder, top-20
+    truncation, exhaustion short-circuit, and Discogs-source parity.
+    """
+
+    def setUp(self):
+        import cratedigger
+        self._cratedigger = cratedigger
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
+        self._orig_module_ctx = cratedigger._module_ctx
+
+    def tearDown(self):
+        self._cratedigger.cfg = self._orig_cfg
+        self._cratedigger.slskd = self._orig_slskd
+        self._cratedigger.pipeline_db_source = self._orig_pdb
+        self._cratedigger._module_ctx = self._orig_module_ctx
+
+    def _make_cfg(self, **overrides):
+        from lib.config import CratediggerConfig
+        defaults: dict[str, Any] = dict(
+            allowed_filetypes=("flac",),
+            search_response_limit=1000,
+            search_escalation_threshold=5,
+            search_timeout=30000,
+            delete_searches=False,
+            album_prepend_artist=False,
+            minimum_match_ratio=0.5,
+        )
+        defaults.update(overrides)
+        return CratediggerConfig(**defaults)
+
+    def _make_album(self, *, request_id=1843, source="request",
+                    discogs_release_id=None, mb_release_id="mbid-test"):
+        """Build an AlbumRecord matching the production from_db_row shape."""
+        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=2)]
+        release = ReleaseRecord(
+            id=-request_id, foreign_release_id=mb_release_id or "",
+            title="Album", track_count=2, medium_count=1,
+            format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        return AlbumRecord(
+            id=-request_id, title="Album",
+            release_date="1991-01-01T00:00:00Z",
+            artist_id=0, artist_name="Wiggles",
+            foreign_artist_id="",
+            releases=[release],
+            db_request_id=request_id, db_source=source,
+            db_mb_release_id=mb_release_id or "",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+
+    def _wire(self, cfg, slskd, db, album):
+        """Wire module globals + ctx so search_for_album can run.
+
+        The pipeline_db_source mock proxies ``_get_db`` to the FakePipelineDB,
+        and ``get_tracks(album)`` to the same fake's per-request tracks list
+        re-shaped into the ``TrackRecord`` dicts that ``find_download``
+        expects (``albumId`` = -request_id, mirroring the real DatabaseSource).
+        """
+        from lib.context import CratediggerContext
+        cratedigger = self._cratedigger
+        cratedigger.cfg = cfg
+        cratedigger.slskd = slskd
+        source = MagicMock()
+        source._get_db.return_value = db
+
+        def _get_tracks(album_record: Any) -> list[dict[str, Any]]:
+            request_id = getattr(album_record, "db_request_id", None)
+            if not request_id:
+                return []
+            rows = db.get_tracks(request_id)
+            album_id = request_id * -1
+            return [{
+                "title": r["title"],
+                "trackNumber": str(r["track_number"]),
+                "mediumNumber": r.get("disc_number", 1),
+                "duration": 0,
+                "id": 0,
+                "albumId": album_id,
+            } for r in rows]
+        source.get_tracks.side_effect = _get_tracks
+
+        cratedigger.pipeline_db_source = source
+        ctx = CratediggerContext(
+            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+        )
+        cratedigger._module_ctx = ctx
+        # search_for_album / find_download read the album from the cache.
+        ctx.current_album_cache[album.id] = album
+        return ctx
+
+    def test_default_variant_passes_response_limit_and_persists_candidates(self):
+        """Happy path: default variant, slskd returns peers, candidates persist."""
+        import json
+        import msgspec
+        from lib.quality import CandidateScore
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(search_response_limit=1500)
+        slskd = FakeSlskdAPI()
+        # One peer returns a full 2-track FLAC dir for the album.
+        slskd.searches.add_search(
+            search_id=42,
+            state="Completed",
+            responses=[{
+                "username": "good_peer",
+                "uploadSpeed": 100_000,
+                "files": [
+                    {"filename": "Music\\Album\\01 - Track One.flac", "bitRate": 1411},
+                    {"filename": "Music\\Album\\02 - Track Two.flac", "bitRate": 1411},
+                ],
+            }],
+        )
+        slskd.searches.search_text_id_sequence = [42]
+        # find_download → check_for_match → users.directory(); seed it
+        # with the same files so the count gate passes.
+        slskd.users.set_directory("good_peer", "Music\\Album", [{
+            "directory": "Music\\Album",
+            "files": [
+                {"filename": "01 - Track One.flac", "size": 1, "id": "tid-1"},
+                {"filename": "02 - Track Two.flac", "size": 1, "id": "tid-2"},
+            ],
+        }])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-test", year=1991,
+        )
+        db.set_tracks(rid, [
+            {"track_number": 1, "title": "Track One"},
+            {"track_number": 2, "title": "Track Two"},
+        ])
+        album = self._make_album(request_id=rid)
+        ctx = self._wire(cfg, slskd, db, album)
+
+        # Stub slskd_do_enqueue so we do not exercise the real download path.
+        with patch("lib.enqueue.slskd_do_enqueue", return_value=[
+            MagicMock(),
+        ]):
+            result = self._cratedigger.search_for_album(album, ctx)
+            grab_list: dict[Any, Any] = {}
+            from lib.enqueue import find_download
+            find_result = find_download(album, grab_list, ctx)
+            self._cratedigger._apply_find_download_result(
+                album, result, find_result, [])
+            self._cratedigger._log_search_result(album, result, ctx)
+
+        # responseLimit was forwarded to slskd at the wire boundary.
+        call = slskd.searches.search_text_calls[0]
+        self.assertEqual(call.kwargs["responseLimit"], 1500)
+
+        # SearchResult carries the variant and final state.
+        self.assertEqual(result.variant_tag, "default")
+        self.assertEqual(result.final_state, "Completed")
+
+        # search_log row was written with variant + final_state + candidates.
+        self.assertEqual(len(db.search_logs), 1)
+        row = db.search_logs[0]
+        self.assertEqual(row.variant, "default")
+        self.assertEqual(row.final_state, "Completed")
+        # JSONB blob round-trips through msgspec.convert.
+        assert row.candidates is not None, "expected candidates to persist"
+        decoded = msgspec.convert(
+            json.loads(row.candidates), type=list[CandidateScore])
+        self.assertGreaterEqual(len(decoded), 1)
+        self.assertEqual(decoded[0].username, "good_peer")
+        self.assertEqual(decoded[0].matched_tracks, 2)
+        self.assertEqual(decoded[0].total_tracks, 2)
+
+    def test_v1_year_variant_used_when_search_attempts_at_threshold(self):
+        """Cycle 5 with year known → variant=v1_year, query includes year."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(search_escalation_threshold=5)
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [99]
+        slskd.searches.add_search(search_id=99, state="Completed", responses=[])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-y", year=1991,
+        )
+        # Bump search_attempts to the threshold — cycle 5 selects v1_year.
+        db.update_request_fields(rid, search_attempts=5)
+        db.set_tracks(rid, [{"track_number": 1, "title": "Hot Potato"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-y")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.variant_tag, "v1_year")
+        # Query was the base + year suffix.
+        call = slskd.searches.search_text_calls[0]
+        self.assertIn("1991", call.search_text)
+        # search_log persisted the variant.
+        self.assertEqual(db.search_logs[0].variant, "v1_year")
+
+    def test_exhausted_variant_short_circuits_without_slskd_call(self):
+        """search_attempts past pool size → exhausted; no slskd round-trip."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(search_escalation_threshold=5)
+        slskd = FakeSlskdAPI()
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-x", year=None,
+        )
+        # No tracks, no year — variant ladder exhausts at cycle 5.
+        db.update_request_fields(rid, search_attempts=5)
+        # Build the AlbumRecord with an unknown-year release_date so the
+        # variant generator sees year as None and falls straight to V4 →
+        # exhausted (empty track pool).
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=0)]
+        release = ReleaseRecord(
+            id=-rid, foreign_release_id="mbid-x", title="Album",
+            track_count=0, medium_count=1, format="CD", media=media,
+            monitored=True, country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-rid, title="Album",
+            release_date="0000-01-01T00:00:00Z",
+            artist_id=0, artist_name="Wiggles", foreign_artist_id="",
+            releases=[release], db_request_id=rid, db_source="request",
+            db_mb_release_id="mbid-x",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # No slskd search was submitted.
+        self.assertEqual(slskd.searches.search_text_calls, [])
+        # Outcome propagates and search_log persists exhausted.
+        self.assertEqual(result.outcome, "exhausted")
+        self.assertEqual(result.variant_tag, "exhausted")
+        row = db.search_logs[0]
+        self.assertEqual(row.outcome, "exhausted")
+        self.assertEqual(row.variant, "exhausted")
+        self.assertIsNone(row.candidates)
+        # Exhaustion doesn't bump search_attempts (U6 will flip to manual).
+        self.assertEqual(db.recorded_attempts, [])
+
+    def test_no_results_writes_empty_candidates_and_final_state(self):
+        """A search that returns 0 hits still writes a row, candidates NULL."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [7]
+        slskd.searches.add_search(
+            search_id=7, state="ResponseLimitReached", responses=[])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-n", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-n")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.outcome, "no_results")
+        self.assertEqual(result.final_state, "ResponseLimitReached")
+        row = db.search_logs[0]
+        self.assertEqual(row.outcome, "no_results")
+        self.assertEqual(row.final_state, "ResponseLimitReached")
+        # No candidates collected — find_download didn't run.
+        self.assertIsNone(row.candidates)
+
+    def test_top_20_truncation_when_many_candidates(self):
+        """JSONB blob caps at top-20 by (matched_tracks, avg_ratio) DESC."""
+        import json
+        from lib.quality import CandidateScore
+        from lib.search import SearchResult
+        from tests.fakes import FakePipelineDB
+
+        cfg = self._make_cfg()
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+        )
+        ctx = self._wire(cfg, MagicMock(), db, self._make_album(request_id=rid))
+
+        # Build 30 synthetic candidates, descending matched_tracks.
+        many = tuple(
+            CandidateScore(
+                username=f"u{i}", dir=f"d{i}", filetype="flac",
+                matched_tracks=30 - i, total_tracks=30,
+                avg_ratio=0.5, missing_titles=[], file_count=30 - i,
+            )
+            for i in range(30)
+        )
+        result = SearchResult(
+            album_id=-rid, success=False, query="q", outcome="no_match",
+            variant_tag="default", final_state="Completed",
+            candidates=many,
+        )
+        album = self._make_album(request_id=rid)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        row = db.search_logs[0]
+        assert row.candidates is not None
+        decoded = json.loads(row.candidates)
+        self.assertEqual(len(decoded), 20, "must truncate to top 20")
+        # The very top entry has matched_tracks=30 (i=0 in the source list).
+        self.assertEqual(decoded[0]["matched_tracks"], 30)
+        self.assertEqual(decoded[-1]["matched_tracks"], 11)
+
+    def test_discogs_source_request_produces_same_blob_shape(self):
+        """A Discogs-source request flows through the same forensic capture."""
+        import json
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [123]
+        slskd.searches.add_search(
+            search_id=123, state="Completed", responses=[{
+                "username": "discog_peer",
+                "uploadSpeed": 1,
+                "files": [
+                    {"filename": "A\\B\\Disco Track.flac", "bitRate": 1411},
+                ],
+            }])
+        slskd.users.set_directory("discog_peer", "A\\B", [{
+            "directory": "A\\B",
+            "files": [{"filename": "Disco Track.flac", "size": 1, "id": "z"}],
+        }])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Disco Artist", album_title="Disco",
+            source="request",
+            # Discogs-numeric id stored in the dedicated column.
+            discogs_release_id="123456", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Disco Track"}])
+        album = self._make_album(
+            request_id=rid, source="request",
+            mb_release_id="",  # MB unknown; release id sits in discogs col.
+        )
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        grab_list: dict[Any, Any] = {}
+        from lib.enqueue import find_download
+        with patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+            find_result = find_download(album, grab_list, ctx)
+        self._cratedigger._apply_find_download_result(
+            album, result, find_result, [])
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # Same blob shape regardless of MB-vs-Discogs origin.
+        row = db.search_logs[0]
+        self.assertEqual(row.variant, "default")
+        assert row.candidates is not None
+        decoded = json.loads(row.candidates)
+        self.assertEqual(decoded[0]["username"], "discog_peer")
+        self.assertEqual(decoded[0]["matched_tracks"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

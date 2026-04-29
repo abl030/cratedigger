@@ -102,6 +102,13 @@ class SearchLogRow:
     outcome: str = "error"
     id: int = 0
     created_at: datetime = field(default_factory=_utcnow)
+    # Forensic capture (U5 of search-escalation-and-forensics).
+    # ``candidates`` is the JSONB blob persisted by ``log_search`` — the
+    # in-memory representation is the JSON string the production code
+    # would have written via ``msgspec.json.encode``. NULL on error rows.
+    candidates: str | None = None
+    variant: str | None = None
+    final_state: str | None = None
 
 
 @dataclass
@@ -211,6 +218,92 @@ class FakeSlskdUsers:
         return copy.deepcopy(self._directories.get((username, directory), []))
 
 
+@dataclass
+class SearchTextCall:
+    """One slskd ``searches.search_text`` call captured by FakeSlskdSearches."""
+    search_text: str
+    kwargs: dict[str, Any]
+
+
+class FakeSlskdSearches:
+    """Stateful fake for the slskd searches API.
+
+    Drives orchestration tests over `search_for_album` / `_submit_search`:
+    pre-seed canned ``state``, ``responses`` for known search ids; record
+    every ``search_text`` kwargs (especially ``responseLimit``) for later
+    assertion.
+
+    Usage:
+        searches = FakeSlskdSearches()
+        searches.add_search(search_id=1, state="Completed", responses=[...])
+        searches.search_text_id_sequence = [1]   # next call returns id=1
+        # ... drive code under test ...
+        assert searches.search_text_calls[0].kwargs["responseLimit"] == 1000
+    """
+
+    def __init__(self) -> None:
+        self.search_text_calls: list[SearchTextCall] = []
+        self.state_calls: list[tuple[Any, bool]] = []
+        self.responses_calls: list[Any] = []
+        self.delete_calls: list[Any] = []
+        self.search_text_error: Exception | None = None
+        # Each call returns the next id from this list; falls back to a
+        # monotonically incrementing counter once the list is exhausted.
+        self.search_text_id_sequence: list[Any] = []
+        self._next_auto_id = 1
+        # search_id -> {"state": str, "responses": list[dict]}
+        self._searches: dict[Any, dict[str, Any]] = {}
+
+    def add_search(
+        self,
+        *,
+        search_id: Any,
+        state: str = "Completed",
+        responses: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Pre-register a canned response set for a search id."""
+        self._searches[search_id] = {
+            "state": state,
+            "responses": copy.deepcopy(responses or []),
+        }
+
+    def search_text(self, **kwargs: Any) -> dict[str, Any]:
+        text = kwargs.pop("searchText", "")
+        self.search_text_calls.append(
+            SearchTextCall(search_text=text, kwargs=copy.deepcopy(kwargs)))
+        if self.search_text_error is not None:
+            raise self.search_text_error
+        if self.search_text_id_sequence:
+            search_id = self.search_text_id_sequence.pop(0)
+        else:
+            search_id = self._next_auto_id
+            self._next_auto_id += 1
+        # Default state for an unconfigured id keeps the fake usable
+        # without explicit ``add_search`` for one-shot tests.
+        self._searches.setdefault(search_id, {
+            "state": "Completed",
+            "responses": [],
+        })
+        return {"id": search_id}
+
+    def state(self, search_id: Any, _include_responses: bool = False) -> dict[str, Any]:
+        self.state_calls.append((search_id, _include_responses))
+        cfg = self._searches.get(search_id, {"state": "Completed", "responses": []})
+        return {
+            "id": search_id,
+            "state": cfg["state"],
+            "isComplete": True,
+        }
+
+    def search_responses(self, search_id: Any) -> list[dict[str, Any]]:
+        self.responses_calls.append(search_id)
+        cfg = self._searches.get(search_id)
+        return copy.deepcopy(cfg["responses"]) if cfg else []
+
+    def delete(self, search_id: Any) -> None:
+        self.delete_calls.append(search_id)
+
+
 class FakeSlskdAPI:
     """In-memory fake for slskd API clients used by download tests."""
 
@@ -222,6 +315,7 @@ class FakeSlskdAPI:
     ) -> None:
         self.transfers = FakeSlskdTransfers(self)
         self.users = FakeSlskdUsers()
+        self.searches = FakeSlskdSearches()
         self._downloads = copy.deepcopy(downloads or [])
         self._download_snapshots = [
             copy.deepcopy(snapshot) for snapshot in (download_snapshots or [])
@@ -1686,8 +1780,22 @@ class FakePipelineDB:
     def log_search(self, request_id: int, query: str | None = None,
                    result_count: int | None = None,
                    elapsed_s: float | None = None,
-                   outcome: str = "error") -> None:
+                   outcome: str = "error",
+                   candidates: list[Any] | None = None,
+                   variant: str | None = None,
+                   final_state: str | None = None) -> None:
+        """Mirror PipelineDB.log_search wire boundary.
+
+        ``candidates`` is encoded via ``msgspec.json.encode`` (same as the
+        real DB writer) and stored as a JSON string so tests can decode it
+        with ``msgspec.convert(json.loads(row.candidates), type=list[CandidateScore])``
+        — the same path U7 will use to read the JSONB blob back.
+        """
         self._next_search_log_id += 1
+        candidates_json: str | None = None
+        if candidates is not None:
+            import msgspec
+            candidates_json = msgspec.json.encode(candidates).decode()
         self.search_logs.append(SearchLogRow(
             request_id=request_id,
             query=query,
@@ -1695,6 +1803,9 @@ class FakePipelineDB:
             elapsed_s=elapsed_s,
             outcome=outcome,
             id=self._next_search_log_id,
+            candidates=candidates_json,
+            variant=variant,
+            final_state=final_state,
         ))
 
     def get_search_history(self,
@@ -1727,6 +1838,9 @@ class FakePipelineDB:
             "elapsed_s": entry.elapsed_s,
             "outcome": entry.outcome,
             "created_at": entry.created_at,
+            "candidates": entry.candidates,
+            "variant": entry.variant,
+            "final_state": entry.final_state,
         }
 
     # --- User cooldowns ---

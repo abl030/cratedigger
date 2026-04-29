@@ -390,6 +390,68 @@ class TestFakeSlskdAPI(unittest.TestCase):
         ])
 
 
+class TestFakeSlskdSearches(unittest.TestCase):
+    """Self-test for the FakeSlskdSearches stub introduced in U5."""
+
+    def test_search_text_records_kwargs_and_returns_id(self):
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [101]
+        result = slskd.searches.search_text(
+            searchText="*rtist Album",
+            searchTimeout=30000,
+            filterResponses=True,
+            maximumPeerQueueLength=5,
+            minimumPeerUploadSpeed=0,
+            responseLimit=1000,
+        )
+        self.assertEqual(result, {"id": 101})
+        call = slskd.searches.search_text_calls[0]
+        self.assertEqual(call.search_text, "*rtist Album")
+        self.assertEqual(call.kwargs["responseLimit"], 1000)
+        self.assertEqual(call.kwargs["searchTimeout"], 30000)
+
+    def test_state_returns_canned_terminal_state(self):
+        slskd = FakeSlskdAPI()
+        slskd.searches.add_search(search_id=7, state="ResponseLimitReached")
+
+        state = slskd.searches.state(7, False)
+
+        self.assertEqual(state["state"], "ResponseLimitReached")
+        self.assertEqual(slskd.searches.state_calls, [(7, False)])
+
+    def test_search_responses_returns_canned_payload(self):
+        slskd = FakeSlskdAPI()
+        responses = [
+            {"username": "u1", "uploadSpeed": 100, "files": [
+                {"filename": "u1\\Music\\01.flac"},
+            ]},
+        ]
+        slskd.searches.add_search(search_id=11, responses=responses)
+
+        out = slskd.searches.search_responses(11)
+
+        self.assertEqual(out, responses)
+        # Response list must be a deep copy — tests can mutate freely.
+        out[0]["files"].append({"filename": "tampered.flac"})
+        again = slskd.searches.search_responses(11)
+        self.assertEqual(len(again[0]["files"]), 1)
+
+    def test_search_text_error_propagates(self):
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error = RuntimeError("slskd offline")
+        with self.assertRaises(RuntimeError):
+            slskd.searches.search_text(searchText="x", responseLimit=1000)
+
+    def test_unknown_search_id_returns_completed_with_no_responses(self):
+        slskd = FakeSlskdAPI()
+        # No add_search() call — the fake should still answer politely.
+        state = slskd.searches.search_text(
+            searchText="x", responseLimit=1000)
+        sid = state["id"]
+        self.assertEqual(slskd.searches.state(sid)["state"], "Completed")
+        self.assertEqual(slskd.searches.search_responses(sid), [])
+
+
 class TestBuilders(unittest.TestCase):
     def test_make_download_file_defaults(self):
         f = make_download_file()

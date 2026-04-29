@@ -1058,6 +1058,96 @@ class TestSearchLog(unittest.TestCase):
         history = self.db.get_search_history(self.req_id)
         self.assertEqual(len(history), 6)
 
+    def test_exhausted_outcome_now_allowed_post_migration_010(self):
+        """Migration 010 widened the CHECK constraint to include 'exhausted'."""
+        self.db.log_search(
+            self.req_id, query=None, outcome="exhausted",
+            variant="exhausted",
+        )
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(history[0]["outcome"], "exhausted")
+        self.assertEqual(history[0]["variant"], "exhausted")
+
+    def test_log_search_persists_candidates_jsonb_and_round_trips(self):
+        """U5 wire-boundary: encode list[CandidateScore] → JSONB → decode."""
+        import json
+        import msgspec
+        from lib.quality import CandidateScore
+
+        candidates = [
+            CandidateScore(
+                username="u1", dir="A\\Album", filetype="flac",
+                matched_tracks=26, total_tracks=26, avg_ratio=0.95,
+                missing_titles=[], file_count=26,
+            ),
+            CandidateScore(
+                username="u2", dir="B\\Album", filetype="flac",
+                matched_tracks=22, total_tracks=26, avg_ratio=0.0,
+                missing_titles=[], file_count=22,
+            ),
+        ]
+        self.db.log_search(
+            request_id=self.req_id,
+            query="*rtist Album",
+            result_count=10,
+            elapsed_s=2.5,
+            outcome="no_match",
+            candidates=candidates,
+            variant="default",
+            final_state="Completed",
+        )
+
+        history = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        row = history[0]
+        self.assertEqual(row["variant"], "default")
+        self.assertEqual(row["final_state"], "Completed")
+
+        # psycopg2 returns JSONB as already-decoded Python objects, but
+        # accept a str fallback in case driver settings differ.
+        raw = row["candidates"]
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        assert isinstance(raw, list)
+        self.assertEqual(len(raw), 2)
+        decoded = msgspec.convert(raw, type=list[CandidateScore])
+        self.assertEqual(decoded[0].username, "u1")
+        self.assertEqual(decoded[0].matched_tracks, 26)
+        self.assertEqual(decoded[1].file_count, 22)
+
+    def test_log_search_with_null_candidates_writes_sql_null(self):
+        """Failure rows (timeout/error) still write a row, candidates NULL."""
+        self.db.log_search(
+            request_id=self.req_id, query="q", outcome="timeout",
+            variant="v1_year", final_state="TimedOut",
+            candidates=None,
+        )
+        history = self.db.get_search_history(self.req_id)
+        self.assertIsNone(history[0]["candidates"])
+        self.assertEqual(history[0]["variant"], "v1_year")
+        self.assertEqual(history[0]["final_state"], "TimedOut")
+
+    def test_log_search_candidates_decode_rejects_wrong_type(self):
+        """Wire-boundary regression: msgspec.convert raises on type drift.
+
+        At least one RED test that feeds the wrong type at the boundary and
+        asserts ``msgspec.ValidationError`` — the strict-typed decoder is
+        what catches int-vs-str drift in the JSONB blob downstream.
+        """
+        import msgspec
+        from lib.quality import CandidateScore
+
+        # ``matched_tracks`` is declared int — passing a string at the wire
+        # must trip msgspec on read, not silently coerce.
+        wrong = [{
+            "username": "u1", "dir": "A", "filetype": "flac",
+            "matched_tracks": "26",  # WRONG: string for int field
+            "total_tracks": 26, "avg_ratio": 0.9,
+            "missing_titles": [], "file_count": 26,
+        }]
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(wrong, type=list[CandidateScore])
+
 
 @requires_postgres
 class TestDenylist(unittest.TestCase):

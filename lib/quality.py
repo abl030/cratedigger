@@ -424,6 +424,32 @@ class ValidationResult(msgspec.Struct):
         return msgspec.json.decode(s.encode(), type=cls)
 
 
+class CandidateScore(msgspec.Struct):
+    """Forensic record of one (user, dir, filetype) candidate's match score.
+
+    Wire-boundary type — written into ``search_log.candidates`` JSONB by
+    ``PipelineDB.log_search`` and decoded by U7 readers (CLI + web UI).
+    Encode via ``msgspec.json.encode``; decode via
+    ``msgspec.convert(blob, type=list[CandidateScore])`` — symmetric strict
+    validation at both boundaries per ``.claude/rules/code-quality.md`` §
+    Wire-boundary types.
+
+    Construct via keyword arguments only. ``check_for_match`` builds the
+    full-score variant when ``album_match`` runs; the count-gate-failure
+    variant is the cheap zero-score record (``matched_tracks=0``,
+    ``avg_ratio=0.0``, ``missing_titles=[]``) so the forensic blob still
+    captures peers that had a sub-count audio file count.
+    """
+    username: str
+    dir: str
+    filetype: str
+    matched_tracks: int
+    total_tracks: int
+    avg_ratio: float
+    missing_titles: list[str]
+    file_count: int
+
+
 @dataclass
 class SpectralContext:
     """Gathered spectral analysis data for both new and existing files.

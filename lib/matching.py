@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence, TYPE_CHECKING
 
 from lib.browse import _browse_directories, rank_candidate_dirs
+from lib.quality import CandidateScore
 from lib.util import _track_titles_cross_check
 
 if TYPE_CHECKING:
@@ -23,6 +24,24 @@ logger = logging.getLogger("cratedigger")
 # ---------------------------------------------------------------------------
 # Structured return types (U2 of search-escalation-and-forensics)
 # ---------------------------------------------------------------------------
+#
+# `CandidateScore` is the wire-boundary type written into
+# ``search_log.candidates`` JSONB. It lives in ``lib/quality.py`` alongside
+# other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``)
+# and is re-exported here only so existing ``from lib.matching import
+# CandidateScore`` callers keep working. Construct via keyword arguments only.
+
+__all__ = [
+    "AlbumMatchScore",
+    "CandidateScore",
+    "MatchResult",
+    "album_match",
+    "album_track_num",
+    "check_for_match",
+    "check_ratio",
+    "get_album_by_id",
+]
+
 
 @dataclass
 class AlbumMatchScore:
@@ -33,8 +52,7 @@ class AlbumMatchScore:
     callers from these fields — this dataclass carries facts only.
 
     Internal — not a wire-boundary type. Forensic persistence uses
-    `CandidateScore` (defined below; will move to lib/quality.py as a
-    msgspec.Struct in U5).
+    `CandidateScore` (re-exported above from ``lib.quality``).
     """
 
     matched_tracks: int
@@ -42,27 +60,6 @@ class AlbumMatchScore:
     avg_ratio: float
     missing_titles: list[str]
     best_per_track: list[float]
-
-
-@dataclass
-class CandidateScore:
-    """Forensic record of one (user, dir, filetype) candidate's match score.
-
-    NOTE: this is the U2 internal placeholder. U5 will replace this dataclass
-    with a `msgspec.Struct` of the same shape and move it to `lib/quality.py`
-    so it can persist as JSONB. To make that swap painless, **construct
-    CandidateScore only via keyword arguments** — a Struct-based replacement
-    will not accept positional construction.
-    """
-
-    username: str
-    dir: str
-    filetype: str
-    matched_tracks: int
-    total_tracks: int
-    avg_ratio: float
-    missing_titles: list[str]
-    file_count: int
 
 
 @dataclass
