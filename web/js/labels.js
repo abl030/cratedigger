@@ -18,7 +18,6 @@ import { state, API, toast } from './state.js';
 import { esc, jsArg } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
-import { loadReleaseGroup } from './discography.js';
 
 /**
  * Threshold above which the initial label-detail fetch defaults to
@@ -85,8 +84,17 @@ export function parseYear(dateStr) {
  * @returns {Array<Object>}
  */
 export function applyLabelFilters(releases, filters) {
-  const yMin = (filters && filters.yearMin != null) ? Number(filters.yearMin) : null;
-  const yMax = (filters && filters.yearMax != null) ? Number(filters.yearMax) : null;
+  // NaN slipped past the bare null check pre-fix #10: an empty input that
+  // happened to be `Number(NaN)` would silently drop every dated release
+  // because all comparisons against NaN are false. Treat non-finite values
+  // as "no bound."
+  const coerceYear = (v) => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const yMin = coerceYear(filters && filters.yearMin);
+  const yMax = coerceYear(filters && filters.yearMax);
   const yearActive = yMin != null || yMax != null;
   const fmtRaw = (filters && filters.format) ? String(filters.format).trim() : '';
   const fmt = fmtRaw.toLowerCase();
@@ -218,19 +226,21 @@ export function renderLabelLinks(labels) {
 
 /**
  * Search for labels via `/api/discogs/label/search`.
+ *
+ * Errors propagate to the caller — `browse.js` wraps the call in
+ * its own try/catch and renders a "Label search failed" notice.
+ * Don't swallow here; that hid the original 503 vs network-failure
+ * distinction during big-label triage.
+ *
  * @param {string} query
  * @returns {Promise<Array<Object>>}
  */
 export async function searchLabels(query) {
   const url = `${API}${buildLabelSearchUrl(query)}`;
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return [];
-    const data = await r.json();
-    return Array.isArray(data.results) ? data.results : [];
-  } catch (_e) {
-    return [];
-  }
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  return Array.isArray(data.results) ? data.results : [];
 }
 
 /**
@@ -529,9 +539,17 @@ export function onLabelFilterChange() {
 
   const yMinRaw = yMinEl && yMinEl.value.trim();
   const yMaxRaw = yMaxEl && yMaxEl.value.trim();
+  // Number('foo') is NaN, which silently passes through the predicate
+  // (every comparison is false). Guard with Number.isFinite so a typo
+  // in the year field becomes "no filter" instead of "drop everything".
+  const parseYearInput = (raw) => {
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
   state.labelFilters = {
-    yearMin: yMinRaw ? Number(yMinRaw) : null,
-    yearMax: yMaxRaw ? Number(yMaxRaw) : null,
+    yearMin: parseYearInput(yMinRaw),
+    yearMax: parseYearInput(yMaxRaw),
     format: fmtEl ? fmtEl.value : '',
     hideHeld: !!(hideEl && hideEl.checked),
   };

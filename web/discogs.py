@@ -15,7 +15,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from typing import Literal, Optional
+from typing import Literal
 
 import msgspec
 
@@ -321,8 +321,8 @@ class _DiscogsLabelHit(msgspec.Struct):
     id: int
     name: str
     profile: str
-    parent_label_id: Optional[int]
-    parent_label_name: Optional[str]
+    parent_label_id: int | None
+    parent_label_name: str | None
     release_count: int
     score: float
 
@@ -349,8 +349,8 @@ class _DiscogsLabelDetail(msgspec.Struct):
     profile: str
     contactinfo: str
     data_quality: str
-    parent_label_id: Optional[int]
-    parent_label_name: Optional[str]
+    parent_label_id: int | None
+    parent_label_name: str | None
     total_releases: int
     sub_labels: list[_DiscogsSubLabel]
 
@@ -381,18 +381,17 @@ class _DiscogsLabelReleaseEntry(msgspec.Struct):
     title: str
     country: str
     released: str
-    master_id: Optional[int]
+    master_id: int | None
     primary_type: str
     via_label_id: int
     artists: list[_DiscogsApiArtistCredit]
     labels: list[_DiscogsApiLabel]
     formats: list[_DiscogsApiFormat]
-    # Optional fields (skipped on the Rust side when None) — declared
-    # Optional[...] with a default so msgspec accepts payloads where the
-    # key is omitted entirely.
-    master_title: Optional[str] = None
-    master_first_released: Optional[str] = None
-    sub_label_name: Optional[str] = None
+    # Optional fields (skipped on the Rust side when None) — declared with
+    # a default so msgspec accepts payloads where the key is omitted entirely.
+    master_title: str | None = None
+    master_first_released: str | None = None
+    sub_label_name: str | None = None
 
 
 class _DiscogsLabelPagination(msgspec.Struct):
@@ -431,10 +430,10 @@ class LabelEntity(msgspec.Struct):
     source: Literal["discogs", "musicbrainz"]
     id: str
     name: str
-    country: Optional[str]
-    profile: Optional[str]
-    parent_label_id: Optional[str]
-    parent_label_name: Optional[str]
+    country: str | None
+    profile: str | None
+    parent_label_id: str | None
+    parent_label_name: str | None
     release_count: int
 
 
@@ -464,25 +463,7 @@ def _label_entity_from_detail(detail: _DiscogsLabelDetail) -> LabelEntity:
     )
 
 
-def _label_entity_to_dict(entity: LabelEntity) -> dict:
-    """Round-trip helper for Redis cache (`memoize_meta` uses json.dumps)."""
-    return {
-        "source": entity.source,
-        "id": entity.id,
-        "name": entity.name,
-        "country": entity.country,
-        "profile": entity.profile,
-        "parent_label_id": entity.parent_label_id,
-        "parent_label_name": entity.parent_label_name,
-        "release_count": entity.release_count,
-    }
-
-
-def _label_entity_from_dict(d: dict) -> LabelEntity:
-    return msgspec.convert(d, type=LabelEntity)
-
-
-def search_labels(query: str) -> list[LabelEntity]:
+def search_labels(query: str, *, page: int = 1, per_page: int = 25) -> list[LabelEntity]:
     """Search labels by name via `/api/labels?name=`.
 
     Decodes the response at the wire boundary into a typed
@@ -490,18 +471,24 @@ def search_labels(query: str) -> list[LabelEntity]:
     arriving as a string instead of int) raises
     `msgspec.ValidationError` from inside `_fetch`.
 
-    Returns a list of `LabelEntity` (typed), with the cache layer
-    storing the dict form so Redis JSON-serialization stays lossless.
+    Returns a list of `LabelEntity` (typed). The cache layer stores
+    the dict form (via `msgspec.to_builtins`) so Redis JSON encoding
+    stays lossless; on read we rehydrate via `msgspec.convert`. Per
+    `.claude/rules/code-quality.md` § "Wire-boundary types".
     """
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
-        raw = _get(f"{DISCOGS_API_BASE}/api/labels?name={q}&per_page=25")
+        raw = _get(
+            f"{DISCOGS_API_BASE}/api/labels"
+            f"?name={q}&page={page}&per_page={per_page}"
+        )
         decoded = msgspec.convert(raw, type=_DiscogsLabelSearchResponse)
-        return [_label_entity_to_dict(_label_entity_from_hit(h))
+        return [msgspec.to_builtins(_label_entity_from_hit(h))
                 for h in decoded.results]
 
-    cached = _cache.memoize_meta(f"discogs:search:labels:{query}", _fetch)
-    return [_label_entity_from_dict(d) for d in cached]
+    cache_key = f"discogs:search:labels:{query}:p={page}:pp={per_page}"
+    cached = _cache.memoize_meta(cache_key, _fetch)
+    return [msgspec.convert(d, type=LabelEntity) for d in cached]
 
 
 def get_label(label_id: int | str) -> LabelEntity:
@@ -514,10 +501,10 @@ def get_label(label_id: int | str) -> LabelEntity:
     def _fetch() -> dict:
         raw = _get(f"{DISCOGS_API_BASE}/api/labels/{label_id}")
         decoded = msgspec.convert(raw, type=_DiscogsLabelDetail)
-        return _label_entity_to_dict(_label_entity_from_detail(decoded))
+        return msgspec.to_builtins(_label_entity_from_detail(decoded))
 
     cached = _cache.memoize_meta(f"discogs:label:{label_id}", _fetch)
-    return _label_entity_from_dict(cached)
+    return msgspec.convert(cached, type=LabelEntity)
 
 
 def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
