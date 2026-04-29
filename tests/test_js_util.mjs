@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 
@@ -467,6 +467,69 @@ assertEqual(nanBoth.length, 3, 'both NaN bounds → no filter');
 const mixedNan = applyLabelFilters(NAN_ROWS, { yearMin: NaN, yearMax: 2005 });
 assertEqual(mixedNan.map(r => r.id).join(','), '1',
   'valid yearMax with NaN yearMin still filters correctly');
+
+// --- manualReasonLabel tests ---
+console.log('manualReasonLabel()');
+assertEqual(manualReasonLabel(null), '', 'null → empty string');
+assertEqual(manualReasonLabel(undefined), '', 'undefined → empty string');
+assertEqual(manualReasonLabel(''), '', 'empty string → empty string');
+assertEqual(manualReasonLabel('search_exhausted'), 'search exhausted',
+  'search_exhausted → friendly label');
+assertEqual(manualReasonLabel('custom_reason'), 'custom_reason',
+  'unknown reason passes through unchanged');
+
+// --- renderForensicBlock tests ---
+console.log('renderForensicBlock()');
+const noBlock = renderForensicBlock(null);
+assert(noBlock.includes('No search forensic data yet'),
+  'null last_search → "no forensic data" message');
+assert(noBlock.includes('p-forensic'),
+  'null last_search still wraps in .p-forensic for layout');
+
+const emptyTopBlock = renderForensicBlock({
+  variant: 'v1_year', final_state: 'Completed', outcome: 'no_match',
+  top_candidates: [],
+});
+assert(emptyTopBlock.includes('v1_year'),
+  'variant tag rendered');
+assert(emptyTopBlock.includes('Completed'),
+  'final_state rendered');
+assert(emptyTopBlock.includes('No candidates captured'),
+  'empty top_candidates → no-candidates body');
+
+const populatedBlock = renderForensicBlock({
+  variant: 'default', final_state: 'Completed', outcome: 'no_match',
+  top_candidates: [
+    { username: 'alice', dir: 'A\\Album', filetype: 'flac',
+      matched_tracks: 26, total_tracks: 26, avg_ratio: 0.95,
+      missing_titles: [], file_count: 26 },
+    { username: 'bob', dir: 'B\\Album', filetype: 'mp3',
+      matched_tracks: 22, total_tracks: 26, avg_ratio: 0.80,
+      missing_titles: ['x'], file_count: 22 },
+  ],
+});
+assert(populatedBlock.includes('alice'), 'first candidate username rendered');
+assert(populatedBlock.includes('bob'), 'second candidate username rendered');
+assert(populatedBlock.includes('26/26'),
+  'matched/total rendered for first row');
+assert(populatedBlock.includes('0.95'),
+  'avg_ratio rendered to 2 decimals');
+assert(populatedBlock.includes('flac'),
+  'filetype rendered');
+
+// HTML-escape coverage — adversarial username/dir must not leak markup.
+const xssBlock = renderForensicBlock({
+  variant: 'default', final_state: 'Completed', outcome: 'no_match',
+  top_candidates: [{
+    username: '<script>x</script>', dir: '"><img>', filetype: 'flac',
+    matched_tracks: 1, total_tracks: 1, avg_ratio: 0,
+    missing_titles: [], file_count: 1,
+  }],
+});
+assert(!xssBlock.includes('<script>x</script>'),
+  'malicious username escaped');
+assert(!xssBlock.includes('"><img>'),
+  'malicious dir escaped');
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
