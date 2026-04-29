@@ -1,7 +1,7 @@
 ---
 title: "feat: Bad-Rip Button + Content-Hash Defense"
 type: feat
-status: active
+status: completed
 date: 2026-04-29
 origin: docs/brainstorms/bad-rip-button-and-content-hash-defense-requirements.md
 ---
