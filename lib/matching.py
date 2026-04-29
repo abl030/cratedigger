@@ -27,13 +27,11 @@ logger = logging.getLogger("cratedigger")
 #
 # `CandidateScore` is the wire-boundary type written into
 # ``search_log.candidates`` JSONB. It lives in ``lib/quality.py`` alongside
-# other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``)
-# and is re-exported here only so existing ``from lib.matching import
-# CandidateScore`` callers keep working. Construct via keyword arguments only.
+# other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``).
+# Import it from ``lib.quality`` directly — no re-export here.
 
 __all__ = [
     "AlbumMatchScore",
-    "CandidateScore",
     "MatchResult",
     "album_match",
     "album_track_num",

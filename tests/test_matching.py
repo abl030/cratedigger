@@ -21,10 +21,10 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.matching import (
     AlbumMatchScore,
-    CandidateScore,
     album_match,
     check_for_match,
 )
+from lib.quality import CandidateScore
 
 
 # ---------------------------------------------------------------------------
