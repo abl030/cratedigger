@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from lib.audio_hash import AudioHashError, hash_audio_content
+
+# Extensions audio_hash.py currently knows how to hash. AUDIO_EXTS is broader
+# (includes wav, alac); the bad-hash gate filters to this subset so legitimate
+# wav/alac albums don't trip a per-track warning every validation cycle.
+_BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement,
                          spectral_import_decision)
@@ -327,7 +332,10 @@ def _check_bad_audio_hashes(
     """
     for p in paths:
         ext = p.suffix.lstrip(".").lower()
-        if not ext:
+        if not ext or ext not in _BAD_HASH_SUPPORTED_EXTS:
+            # alac / wav are in AUDIO_EXTS but audio_hash.py doesn't support
+            # them yet; skip silently rather than logging a warning per track
+            # for every legitimate album in those formats.
             continue
         try:
             digest = hash_audio_content(p, ext)
