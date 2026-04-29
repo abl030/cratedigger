@@ -12,7 +12,10 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
+
+if TYPE_CHECKING:
+    from lib.quality import CandidateScore
 
 from lib.import_queue import (
     ImportJob,
@@ -1802,7 +1805,7 @@ class FakePipelineDB:
                    result_count: int | None = None,
                    elapsed_s: float | None = None,
                    outcome: str = "error",
-                   candidates: list[Any] | None = None,
+                   candidates: list[CandidateScore] | None = None,
                    variant: str | None = None,
                    final_state: str | None = None) -> None:
         """Mirror PipelineDB.log_search wire boundary.
