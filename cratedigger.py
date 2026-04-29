@@ -232,7 +232,11 @@ def search_for_album(album, ctx):
     t0 = time.time()
 
     db = ctx.pipeline_db_source._get_db()
-    variant, base_query = _select_variant_for_album(album, cfg, db)
+    # Use ctx.cfg (typed CratediggerContext) instead of the module-global
+    # `cfg`. The parallel path (`_submit_search`) takes its config as the
+    # `search_cfg` param wired from `ctx.cfg` at the call site, and this
+    # serial path matches that convention now.
+    variant, base_query = _select_variant_for_album(album, ctx.cfg, db)
     query = variant.query
 
     if variant.kind == "exhausted":
