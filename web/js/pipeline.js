@@ -2,6 +2,7 @@
 import { state, API, toast } from './state.js';
 import { esc, awstDate, awstDateTime, qualityLabel, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
+import { renderBadRipButton } from './release_actions.js';
 
 /**
  * Load pipeline data from API and render.
@@ -249,8 +250,14 @@ export async function toggleDetail(elId, requestId) {
       <span class="p-detail-label" style="line-height:28px;">Status:</span>
       <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'wanted')">wanted</button>
       <button class="p-btn ${req.status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'imported')">imported</button>
-      <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'manual')">manual</button>
-      <button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
+      <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'manual')">manual</button>`;
+    // Bad-rip reuses the library renderer — pipelineId + releaseId are all
+    // it needs from state. Hidden when either is absent (issue #188).
+    html += renderBadRipButton(/** @type {any} */ ({pipelineId: id, releaseId: req.mb_release_id}), {
+      className: 'p-btn delete',
+      stopPropagation: true,
+    });
+    html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
     </div>`;
 
     el.innerHTML = html;
