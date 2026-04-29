@@ -2994,6 +2994,67 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertIsNone(row.candidates)
 
 
+class TestVariantSelectFallbackObservability(unittest.TestCase):
+    """Finding #14: VARIANT_SELECT_FALLBACK log line is the observability hook
+    for silent escalation-ladder bypasses.
+
+    The fallback itself is intentional for DB resilience — when ``get_request``
+    or ``get_tracks`` raises (transient DB outage, etc.), the helper falls back
+    to a default variant and the next cycle retries. Without the stable log
+    prefix operators have no way to count silent fallbacks; they show up as
+    "requests grinding on default forever". The prefix
+    ``VARIANT_SELECT_FALLBACK`` lets operators run
+    ``journalctl -u cratedigger | grep VARIANT_SELECT_FALLBACK | wc -l``.
+    """
+
+    def test_db_exception_logs_stable_prefix_and_falls_back(self):
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+        from cratedigger import _select_variant_for_album
+        from lib.config import CratediggerConfig
+
+        ini_cfg = CratediggerConfig.from_ini(__import__("configparser").ConfigParser())
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-1, foreign_release_id="mbid-x", title="Album",
+            track_count=1, medium_count=1, format="CD", media=media,
+            monitored=True, country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-1, title="Album", release_date="1990-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=42, db_source="request",
+            db_mb_release_id="mbid-x", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        # Mock DB that raises on get_request — simulates transient DB outage.
+        class _BoomDB:
+            def get_request(self, _rid):
+                raise RuntimeError("transient connection error")
+            def get_tracks(self, _rid):
+                return []
+
+        # Capture warnings logged on the cratedigger logger.
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            variant, base_query = _select_variant_for_album(album, ini_cfg, _BoomDB())
+
+        # Existing fallback behaviour preserved: kind='default'.
+        self.assertEqual(variant.kind, "default")
+        self.assertEqual(variant.tag, "default")
+        # base_query computed from album info, independent of the DB call.
+        self.assertTrue(base_query)
+
+        # Stable greppable prefix is the observability hook.
+        joined = "\n".join(captured.output)
+        self.assertIn("VARIANT_SELECT_FALLBACK", joined)
+        # Includes the request_id and album metadata for triage.
+        self.assertIn("request_id=42", joined)
+        self.assertIn("artist=Artist", joined)
+        # exc_info=True => traceback is included.
+        self.assertIn("RuntimeError", joined)
+
+
 class TestSearchExhaustionFlipsToManualSlice(unittest.TestCase):
     """U6 integration slice: variant=exhausted → manual flip + re-queue reset.
 

@@ -189,9 +189,15 @@ def _select_variant_for_album(album, search_cfg, db):
                 str(t["title"]) for t in tracks if t.get("title")
             ]
         except Exception:
-            logger.exception(
-                f"Failed to load variant inputs for request {request_id}; "
-                "falling back to default variant"
+            # Stable-greppable prefix: operators can count silent
+            # escalation-ladder bypasses via
+            # `journalctl -u cratedigger | grep VARIANT_SELECT_FALLBACK`.
+            # The fallback itself is intentional for DB resilience —
+            # this is the observability hook for it.
+            logger.warning(
+                "VARIANT_SELECT_FALLBACK request_id=%s artist=%s album=%s",
+                request_id, album.artist_name, album.title,
+                exc_info=True,
             )
             return SearchVariant(
                 kind="default", query=base_query or "",
