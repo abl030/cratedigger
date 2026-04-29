@@ -920,6 +920,31 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     if hash_capture_errors:
         partial_failures["hash_capture_errors"] = hash_capture_errors
 
+    # Record the ban as a download_log event (#188 follow-up). It's just
+    # another event — surfacing it through the same audit channel makes
+    # it appear uniformly on recents, the pipeline tab's "last:" verdict
+    # line, and per-row download history without per-surface plumbing.
+    ban_detail = (
+        f"Marked bad rip; {hashes_recorded} hashes captured"
+        if hashes_recorded > 0
+        else "Marked bad rip (no tracks hashed)"
+    )
+    ban_validation = json.dumps({
+        "scenario": "curator_ban",
+        "hashes_recorded": hashes_recorded,
+        "denylisted_username": reported_username,
+        "reason": reason,
+        "cleanup_errors": cleanup_errors,
+        "hash_capture_errors": hash_capture_errors,
+    })
+    db.log_download(
+        request_id=request_id_int,
+        soulseek_username=reported_username,
+        outcome="curator_ban",
+        beets_detail=ban_detail,
+        validation_result=ban_validation,
+    )
+
     payload: dict[str, object] = {
         "status": "ok",
         "username": reported_username,

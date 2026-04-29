@@ -414,6 +414,17 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         return ("Force imported", "badge-force", "#46a",
                 "Force imported after manual review")
 
+    # --- Curator ban (#188 follow-up: bad-rip click is just another event) ---
+    if entry.outcome == "curator_ban":
+        # validation_result JSONB carries hashes_recorded and the banned
+        # username; surface a terse human-readable verdict here. Detail
+        # already lives in beets_detail (e.g. "Marked bad rip; 12 hashes
+        # captured") which the row renderer can display directly.
+        verdict = "Marked bad rip"
+        if entry.soulseek_username:
+            verdict = f"Marked bad rip — denylisted {entry.soulseek_username}"
+        return ("Bad rip", "badge-rejected", "#a33", verdict)
+
     # --- Success ---
     if entry.outcome == "success":
         if _entry_decision(entry) == "provisional_lossless_upgrade":
