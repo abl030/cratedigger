@@ -104,6 +104,52 @@ class TestConfigFromIni(unittest.TestCase):
         cfg = CratediggerConfig.from_ini(ini)
         self.assertEqual(cfg.browse_parallelism, 8)
 
+    def test_search_response_limit_explicit(self):
+        """Explicit search_response_limit is parsed verbatim."""
+        ini = configparser.ConfigParser()
+        ini.read_string("[Search Settings]\nsearch_response_limit = 1500\n")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_response_limit, 1500)
+
+    def test_search_escalation_threshold_explicit(self):
+        """Explicit search_escalation_threshold is parsed verbatim."""
+        ini = configparser.ConfigParser()
+        ini.read_string("[Search Settings]\nsearch_escalation_threshold = 9\n")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_escalation_threshold, 9)
+
+    def test_search_response_limit_default(self):
+        """Missing key falls back to default of 1000."""
+        ini = configparser.ConfigParser()
+        ini.add_section("Search Settings")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_response_limit, 1000)
+
+    def test_search_escalation_threshold_default(self):
+        """Missing key falls back to default of 5."""
+        ini = configparser.ConfigParser()
+        ini.add_section("Search Settings")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_escalation_threshold, 5)
+
+    def test_search_settings_defaults_when_section_missing(self):
+        """Missing [Search Settings] section yields the documented defaults."""
+        ini = configparser.ConfigParser()
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_response_limit, 1000)
+        self.assertEqual(cfg.search_escalation_threshold, 5)
+
+    def test_search_response_limit_zero_passes_through(self):
+        """`from_ini` does not validate; a literal 0 is accepted as-is.
+
+        Defensive validation belongs further down the stack (slskd will reject
+        nonsense values); the config layer must remain a transparent loader.
+        """
+        ini = configparser.ConfigParser()
+        ini.read_string("[Search Settings]\nsearch_response_limit = 0\n")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_response_limit, 0)
+
     # --- Release ---
     def test_use_most_common_tracknum(self):
         self.assertTrue(self.cfg.use_most_common_tracknum)
