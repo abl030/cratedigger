@@ -17,6 +17,7 @@ Pure functions — no I/O, no external dependencies.
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
@@ -163,3 +164,135 @@ def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS
     all_tokens = cap_tokens(all_tokens, max_tokens)
 
     return " ".join(all_tokens)
+
+
+# ---------------------------------------------------------------------------
+# Variant generator (U4 of search-escalation-and-forensics)
+#
+# Pure function: given the current cycle counter, escalation threshold, base
+# query, year, and track titles, return which query to issue next. Single
+# source of truth for the search-cycle ladder. No I/O.
+#
+# Ladder:
+#   cycle < threshold        → kind="default",   query=base_query
+#   cycle == threshold       → kind="v1_year",   query="<base> <yyyy>" (if year known)
+#   cycle == threshold + N   → kind="v4_tracks", query=N×3 distinctive tokens
+#   pool exhausted           → kind="exhausted", query=None (search loop short-circuits)
+#
+# Year is treated as unknown when None or starts with "0000" (the AlbumRecord
+# fallback string when MusicBrainz has no year). When unknown, V1 is skipped
+# and V4 starts at the threshold cycle.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SearchVariant:
+    """One cycle's variant decision.
+
+    Internal type — never crosses JSON. The `tag` field is the persisted
+    label written to `search_log.variant`. `kind` drives loop behaviour:
+    "exhausted" tells the search loop to short-circuit before hitting slskd.
+    """
+    kind: Literal["default", "v1_year", "v4_tracks", "exhausted"]
+    query: str | None  # None for kind="exhausted"
+    tag: str           # "default" | "v1_year" | "v4_tracks_<idx>" | "exhausted"
+    slice_index: int | None  # V4 only, for diagnostics
+
+
+def _distinctive_token_pool(track_titles: list[str]) -> list[str]:
+    """Build the V4 token pool from track titles.
+
+    Rules:
+      - Strip punctuation via `strip_special_chars` (already used by the query
+        builder so the pool matches what slskd will tolerate).
+      - Drop tokens of length <= 2 (mirrors `strip_short_tokens` behaviour).
+      - Dedupe case-insensitively, preserving first-seen casing.
+      - Sort by length descending; alphabetical-lowercase secondary order
+        for determinism on length ties.
+    """
+    seen_lower: set[str] = set()
+    distinct: list[str] = []
+    for title in track_titles:
+        cleaned = strip_special_chars(title)
+        for token in cleaned.split():
+            if len(token) <= 2:
+                continue
+            lower = token.lower()
+            if lower in seen_lower:
+                continue
+            seen_lower.add(lower)
+            distinct.append(token)
+
+    # Sort by (-length, lowercase) for deterministic ordering on length ties.
+    distinct.sort(key=lambda t: (-len(t), t.lower()))
+    return distinct
+
+
+def _year_is_known(year: str | None) -> bool:
+    """Year is unknown when None or starts with the MB-fallback "0000"."""
+    if year is None:
+        return False
+    if year.startswith("0000"):
+        return False
+    return True
+
+
+def select_variant(
+    search_attempts: int,
+    threshold: int,
+    base_query: str,
+    year: str | None,
+    track_titles: list[str],
+) -> SearchVariant:
+    """Select the variant for this search cycle.
+
+    Deterministic for a given input — testable via subTest tables.
+
+    `search_attempts` is how many search cycles this album has already
+    consumed (0 on first attempt). `threshold` is the count at which
+    escalation begins. Below the threshold the default query repeats; at
+    and above, the ladder advances by one step per cycle.
+    """
+    if search_attempts < threshold:
+        return SearchVariant(
+            kind="default",
+            query=base_query,
+            tag="default",
+            slice_index=None,
+        )
+
+    year_known = _year_is_known(year)
+    esc_idx = search_attempts - threshold
+
+    if esc_idx == 0 and year_known:
+        # year_known guarantees year is not None; year[:4] yields the 4-char
+        # year prefix (e.g. "1991" from "1991" or "1991-08-01").
+        assert year is not None  # for type checker
+        return SearchVariant(
+            kind="v1_year",
+            query=f"{base_query} {year[:4]}",
+            tag="v1_year",
+            slice_index=None,
+        )
+
+    # V1 either ran (esc_idx 0 with year) or was skipped (year unknown).
+    v4_start = 1 if year_known else 0
+    v4_idx = esc_idx - v4_start
+
+    pool = _distinctive_token_pool(track_titles)
+    slice_start = v4_idx * 3
+    if slice_start >= len(pool):
+        return SearchVariant(
+            kind="exhausted",
+            query=None,
+            tag="exhausted",
+            slice_index=None,
+        )
+
+    slice_tokens = pool[slice_start : slice_start + 3]
+    return SearchVariant(
+        kind="v4_tracks",
+        query=" ".join(slice_tokens),
+        tag=f"v4_tracks_{v4_idx}",
+        slice_index=v4_idx,
+    )
