@@ -2361,5 +2361,113 @@ class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
 
+class TestBadAudioHashSlice(unittest.TestCase):
+    """Integration slice: bad-audio-hash gate inside ``run_preimport_gates``.
+
+    Plan 2026-04-29-005 / U5. Populates ``FakePipelineDB`` with the U3 fixture's
+    real hash, points ``run_preimport_gates`` at the fixture, and asserts the
+    full F2 path: rejection scenario, denylist row written, and
+    ``PreImportGateResult`` carries ``matched_bad_hash_id`` /
+    ``matched_bad_track_path`` for the caller to fold into ``ValidationResult``.
+    """
+
+    def test_known_bad_hash_rejects_and_denylists(self):
+        from pathlib import Path
+        from lib.audio_hash import hash_audio_content
+        from lib.config import CratediggerConfig
+        from lib.pipeline_db import BadAudioHashInput
+        from lib.preimport import run_preimport_gates
+
+        fixture_dir = (
+            Path(__file__).parent / "fixtures" / "audio_hash"
+        )
+        bad_track = fixture_dir / "sine_440.mp3"
+
+        # Compute the real fixture hash and seed it via the U2 fake method.
+        digest = hash_audio_content(bad_track, "mp3")
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.add_bad_audio_hashes(
+            request_id=99,
+            reported_username="curator",
+            reason="exemplar bad rip",
+            hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
+        )
+
+        # cfg.audio_check_mode='off' so the gate doesn't try to ffmpeg-decode
+        # the fixture (which is a 1-second sine and would pass anyway, but
+        # 'off' keeps the slice scoped to the bad-hash gate).
+        cfg = CratediggerConfig(audio_check_mode="off")
+
+        result = run_preimport_gates(
+            path=str(fixture_dir),
+            mb_release_id="mbid-bad",
+            label="Bad Rip Test",
+            download_filetype="mp3",
+            download_min_bitrate_bps=320_000,
+            download_is_vbr=False,
+            cfg=cfg,
+            db=db,  # type: ignore[arg-type]
+            request_id=42,
+            usernames={"H@rco"},
+        )
+
+        # 1. Gate rejected the candidate with the bad-hash scenario.
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "bad_audio_hash")
+        self.assertIsNotNone(result.matched_bad_hash_id)
+        # The matched track must be the actual fixture path we seeded.
+        self.assertEqual(result.matched_bad_track_path, str(bad_track))
+
+        # 2. Supplying user denylisted on this request, with bad-hash reason.
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].request_id, 42)
+        self.assertEqual(db.denylist[0].username, "H@rco")
+        self.assertIn("matched bad hash", db.denylist[0].reason or "")
+
+        # 3. Detail string surfaces the hash id + track path for log audit.
+        assert result.detail is not None
+        self.assertIn("matched bad audio hash", result.detail)
+        self.assertIn(str(bad_track), result.detail)
+
+    def test_empty_table_runs_no_hashing(self):
+        """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips:
+        no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
+        from pathlib import Path
+        from lib.config import CratediggerConfig
+        from lib.preimport import run_preimport_gates
+
+        fixture_dir = (
+            Path(__file__).parent / "fixtures" / "audio_hash"
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(audio_check_mode="off")
+
+        with patch("lib.preimport.hash_audio_content") as hashfn, \
+             patch.object(db, "lookup_bad_audio_hash") as lookup, \
+             patch("lib.preimport._needs_spectral_check", return_value=False):
+            result = run_preimport_gates(
+                path=str(fixture_dir),
+                mb_release_id="mbid-empty",
+                label="Empty Table",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"someone"},
+            )
+
+        self.assertTrue(result.valid)
+        self.assertIsNone(result.matched_bad_hash_id)
+        hashfn.assert_not_called()
+        lookup.assert_not_called()
+        self.assertEqual(len(db.denylist), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

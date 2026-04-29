@@ -760,6 +760,11 @@ def _process_beets_validation(album_data: GrabListEntry,
             bv_result.detail = preimport.detail
             if preimport.corrupt_files:
                 bv_result.corrupt_files = preimport.corrupt_files
+            # Carry bad-audio-hash gate match through to download_log via
+            # ValidationResult JSONB (plan 2026-04-29-005 / U5).
+            if preimport.matched_bad_hash_id is not None:
+                bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
+                bv_result.matched_bad_track_path = preimport.matched_bad_track_path
 
     if bv_result.valid:
         return _handle_valid_result(

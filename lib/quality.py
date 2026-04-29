@@ -399,6 +399,11 @@ class ValidationResult(msgspec.Struct):
     # Audio integrity
     corrupt_files: list[str] = []
     error: Optional[str] = None
+    # Bad-audio-hash gate (pre-import defense, plan 2026-04-29-005 / U5).
+    # Populated when ``scenario == "bad_audio_hash"``: the matched
+    # ``bad_audio_hashes.id`` and the candidate track that hashed to it.
+    matched_bad_hash_id: Optional[int] = None
+    matched_bad_track_path: Optional[str] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
