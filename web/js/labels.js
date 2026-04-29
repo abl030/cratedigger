@@ -349,20 +349,18 @@ export async function openLabelDetail(labelId, labelName) {
   if (!body) return;
   body.innerHTML = '<div class="loading">Loading label catalogue...</div>';
 
-  // First fetch with default include_sublabels=true. After we have
-  // the label entity we may decide to retry without sub-labels for
-  // very large labels.
+  // Single fetch; the route auto-flips include_sublabels=false on big
+  // labels, and the adapter's 503 fallback (Plan 003 U4) handles the
+  // genuinely-degraded case via `payload.sub_labels_dropped`. The old
+  // empty-results retry was dead code once those two landed — removed
+  // in Plan 003 U5.
   try {
-    let payload = await loadLabelReleases(labelId, { include_sublabels: true, page: 1 });
+    const payload = await loadLabelReleases(labelId, { include_sublabels: true, page: 1 });
     const totalCount = (payload && payload.label && payload.label.release_count) || 0;
-    if (totalCount > BIG_LABEL_THRESHOLD && payload.releases && payload.releases.length === 0) {
-      // Defensive: if the big-label query timed out and returned empty,
-      // refetch without sub-labels. (Cheap insurance — happy path on
-      // boutique labels never enters this branch.)
-      payload = await loadLabelReleases(labelId, { include_sublabels: false, page: 1 });
-    } else if (totalCount > BIG_LABEL_THRESHOLD) {
-      // Surface the sub-label opt-in toggle even when the first fetch
-      // succeeded — UX hint that this label has a long tail.
+    if (totalCount > BIG_LABEL_THRESHOLD) {
+      // Flag the label as big so any future affordance that wants to
+      // know can branch on it. (The toggle itself reads totalCount
+      // directly today, but the flag is cheap to keep.)
       state.labelFilters = state.labelFilters || {};
       /** @type {any} */ (state.labelFilters).bigLabel = true;
     }
