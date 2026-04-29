@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Sequence, TYPE_CHECKING
 
 from lib.browse import _browse_directories, rank_candidate_dirs
@@ -17,6 +18,81 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("cratedigger")
+
+
+# ---------------------------------------------------------------------------
+# Structured return types (U2 of search-escalation-and-forensics)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AlbumMatchScore:
+    """Per-track filename-similarity score for one (user, dir, filetype) triple.
+
+    Pure-function output of `album_match`. The strict-accept decision
+    (every track above ratio AND _track_titles_cross_check) is computed by
+    callers from these fields — this dataclass carries facts only.
+
+    Internal — not a wire-boundary type. Forensic persistence uses
+    `CandidateScore` (defined below; will move to lib/quality.py as a
+    msgspec.Struct in U5).
+    """
+
+    matched_tracks: int
+    total_tracks: int
+    avg_ratio: float
+    missing_titles: list[str]
+    best_per_track: list[float]
+
+
+@dataclass
+class CandidateScore:
+    """Forensic record of one (user, dir, filetype) candidate's match score.
+
+    NOTE: this is the U2 internal placeholder. U5 will replace this dataclass
+    with a `msgspec.Struct` of the same shape and move it to `lib/quality.py`
+    so it can persist as JSONB. To make that swap painless, **construct
+    CandidateScore only via keyword arguments** — a Struct-based replacement
+    will not accept positional construction.
+    """
+
+    username: str
+    dir: str
+    filetype: str
+    matched_tracks: int
+    total_tracks: int
+    avg_ratio: float
+    missing_titles: list[str]
+    file_count: int
+
+
+@dataclass
+class MatchResult:
+    """Return shape of `check_for_match`.
+
+    `matched=True` means: a dir strictly accepted (every track above ratio AND
+    cross-check passed). `directory` and `file_dir` describe that dir. The
+    `candidates` list captures every dir the loop iterated, including the
+    sub-count gate failures and cross-check rejections — used by U5 to persist
+    a `search_log.candidates` JSONB blob for post-hoc forensics.
+
+    Iterable as `(matched, directory, file_dir)` for backwards compatibility
+    with the historical 3-tuple return shape — pre-U2 callers in
+    `tests/test_integration.py` still unpack the result that way. New callers
+    should prefer attribute access.
+    """
+
+    matched: bool
+    directory: Any
+    file_dir: str
+    candidates: list[CandidateScore] = field(default_factory=list)
+
+    def __iter__(self) -> Any:
+        # Preserve historical unpacking: (matched, directory, file_dir).
+        # `candidates` is intentionally NOT yielded — old callers unpack three
+        # values; yielding four would silently break them.
+        yield self.matched
+        yield self.directory
+        yield self.file_dir
 
 
 def get_album_by_id(album_id: int, ctx: CratediggerContext) -> Any:
@@ -32,11 +108,15 @@ def album_match(
     username: str,
     filetype: str,
     ctx: CratediggerContext,
-) -> bool:
-    """Check whether the browsed directory matches the expected album."""
+) -> AlbumMatchScore:
+    """Compute the per-track filename-similarity score for a candidate dir.
+
+    Returns an `AlbumMatchScore` for every input. The strict-accept decision
+    (matched_tracks == total_tracks AND ignored_users gate) is left to the
+    caller — see `check_for_match`. This function is pure: no I/O, no
+    side effects, no decision logic beyond the per-track ratio comparison.
+    """
     match_cfg = ctx.cfg
-    counted = []
-    total_match = 0.0
 
     album_info = get_album_by_id(expected_tracks[0]["albumId"], ctx)
     album_name = album_info.title
@@ -45,6 +125,12 @@ def album_match(
 
     spec = parse_filetype_config(filetype)
     is_catch_all = spec.extension == "*"
+
+    matched_titles: list[str] = []
+    missing_titles: list[str] = []
+    best_per_track: list[float] = []
+    total_match = 0.0
+
     for expected_track in expected_tracks:
         best_match = 0.0
         expected_filename = expected_track["title"]
@@ -88,21 +174,33 @@ def album_match(
             if ratio > best_match:
                 best_match = ratio
 
+        best_per_track.append(best_match)
         if best_match > match_cfg.minimum_match_ratio:
-            counted.append(expected_filename)
+            matched_titles.append(expected_track["title"])
             total_match += best_match
+        else:
+            missing_titles.append(expected_track["title"])
 
-    if len(counted) == len(expected_tracks) and username not in match_cfg.ignored_users:
+    matched_tracks = len(matched_titles)
+    total_tracks = len(expected_tracks)
+    avg_ratio = (total_match / matched_tracks) if matched_tracks else 0.0
+
+    if matched_tracks == total_tracks and username not in match_cfg.ignored_users:
         logger.info(
-            f"Found match from user: {username} for {len(counted)} tracks! "
+            f"Found match from user: {username} for {matched_tracks} tracks! "
             f"Track attributes: {filetype}"
         )
-        logger.info(f"Average sequence match ratio: {total_match / len(counted)}")
+        logger.info(f"Average sequence match ratio: {avg_ratio}")
         logger.info("SUCCESSFUL MATCH")
         logger.info("-------------------")
-        return True
 
-    return False
+    return AlbumMatchScore(
+        matched_tracks=matched_tracks,
+        total_tracks=total_tracks,
+        avg_ratio=avg_ratio,
+        missing_titles=missing_titles,
+        best_per_track=best_per_track,
+    )
 
 
 def check_ratio(
@@ -174,11 +272,21 @@ def check_for_match(
     file_dirs: list[str],
     username: str,
     ctx: CratediggerContext,
-) -> tuple[bool, Any, str]:
-    """Check candidate directories for an album match."""
+) -> MatchResult:
+    """Check candidate directories for an album match.
+
+    Returns a `MatchResult` with the strict-accept boolean, the matched
+    directory + name (if any), and a list of `CandidateScore` entries
+    capturing every dir the loop touched — including dirs that failed the
+    sub-count gate (cheap zero-score entry) and dirs that strict-accepted
+    on filename ratio but failed `_track_titles_cross_check` (full score
+    plus a negative_matches entry). U5 persists `candidates` to
+    `search_log.candidates` for forensic introspection.
+    """
+    candidates: list[CandidateScore] = []
     logger.debug(f"Current broken users {ctx.broken_user}")
     if username in ctx.broken_user:
-        return False, {}, ""
+        return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
     track_num = len(tracks)
     album_info = get_album_by_id(tracks[0]["albumId"], ctx)
     ranked_dirs = rank_candidate_dirs(file_dirs, album_info.title, album_info.artist_name)
@@ -207,7 +315,7 @@ def check_for_match(
         dirs_to_try.append(file_dir)
 
     if not dirs_to_try:
-        return False, {}, ""
+        return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
 
     if username not in ctx.folder_cache:
         ctx.folder_cache[username] = {}
@@ -231,7 +339,9 @@ def check_for_match(
         if not browsed and len(uncached) == len(dirs_to_try):
             ctx.broken_user.append(username)
             logger.debug(f"All browses failed for {username}, marked as broken")
-            return False, {}, ""
+            return MatchResult(
+                matched=False, directory={}, file_dir="", candidates=candidates,
+            )
 
     for file_dir in dirs_to_try:
         if file_dir not in ctx.folder_cache[username]:
@@ -241,13 +351,52 @@ def check_for_match(
         tracks_info = album_track_num(directory, ctx.cfg)
         neg_key = (username, file_dir, track_num, allowed_filetype)
 
-        if tracks_info["count"] == track_num and tracks_info["filetype"] != "":
-            if album_match(tracks, directory["files"], username, allowed_filetype, ctx):
-                if _track_titles_cross_check(tracks, directory["files"]):
-                    return True, directory, file_dir
-                logger.warning(
-                    f"Track title cross-check FAILED for user {username}, "
-                    f"dir {file_dir} — skipping (wrong pressing?)"
+        # Sub-count gate: cheap CandidateScore, do NOT call album_match.
+        if tracks_info["count"] != track_num or tracks_info["filetype"] == "":
+            candidates.append(CandidateScore(
+                username=username,
+                dir=file_dir,
+                filetype=allowed_filetype,
+                matched_tracks=0,
+                total_tracks=track_num,
+                avg_ratio=0.0,
+                missing_titles=[],
+                file_count=tracks_info["count"],
+            ))
+            ctx.negative_matches.add(neg_key)
+            continue
+
+        # Count gate passed — score the dir.
+        score = album_match(tracks, directory["files"], username, allowed_filetype, ctx)
+        candidates.append(CandidateScore(
+            username=username,
+            dir=file_dir,
+            filetype=allowed_filetype,
+            matched_tracks=score.matched_tracks,
+            total_tracks=score.total_tracks,
+            avg_ratio=score.avg_ratio,
+            missing_titles=list(score.missing_titles),
+            file_count=tracks_info["count"],
+        ))
+
+        strict_accept = (
+            score.matched_tracks == score.total_tracks
+            and username not in ctx.cfg.ignored_users
+        )
+        if strict_accept:
+            if _track_titles_cross_check(tracks, directory["files"]):
+                return MatchResult(
+                    matched=True,
+                    directory=directory,
+                    file_dir=file_dir,
+                    candidates=candidates,
                 )
+            logger.warning(
+                f"Track title cross-check FAILED for user {username}, "
+                f"dir {file_dir} — skipping (wrong pressing?)"
+            )
         ctx.negative_matches.add(neg_key)
-    return False, {}, ""
+
+    return MatchResult(
+        matched=False, directory={}, file_dir="", candidates=candidates,
+    )

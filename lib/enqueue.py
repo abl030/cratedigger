@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence, cast
 from lib.browse import download_filter
 from lib.download import cancel_and_delete, slskd_do_enqueue
 from lib.grab_list import GrabListEntry
-from lib.matching import check_for_match, get_album_by_id
+from lib.matching import CandidateScore, check_for_match, get_album_by_id
 
 if TYPE_CHECKING:
     from cratedigger import SlskdDirectory, TrackRecord
@@ -22,11 +22,18 @@ logger = logging.getLogger("cratedigger")
 
 @dataclass(frozen=True)
 class EnqueueAttempt:
-    """Outcome of a single enqueue path after matching candidate directories."""
+    """Outcome of a single enqueue path after matching candidate directories.
+
+    ``candidates`` carries the per-dir forensic scores collected by
+    `check_for_match` for every dir touched during this attempt — including
+    sub-count gate failures and cross-check rejections. U5 will surface this
+    list in the persisted `search_log.candidates` JSONB blob.
+    """
 
     matched: bool
     downloads: list[Any] | None = None
     enqueue_failed: bool = False
+    candidates: tuple[CandidateScore, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,20 @@ class FindDownloadResult:
     """Final outcome of matching + enqueue for one album."""
 
     outcome: Literal["found", "no_match", "enqueue_failed"]
+
+
+@dataclass(frozen=True)
+class _FiletypeAttemptResult:
+    """Internal return shape of `_try_filetype`.
+
+    Carries the same outcome as `FindDownloadResult` plus the per-dir
+    `CandidateScore` accumulated across every release/dir/user touched while
+    trying this filetype. U5 will plumb `candidates` through `find_download`
+    into `search_log.candidates`; in U2 it stops here.
+    """
+
+    outcome: Literal["found", "no_match", "enqueue_failed"]
+    candidates: tuple[CandidateScore, ...] = ()
 
 
 def release_trackcount_mode(releases: list[Any]) -> Any:
@@ -195,6 +216,7 @@ def try_enqueue(
         reverse=True,
     )
     had_enqueue_failure = False
+    accumulated: list[CandidateScore] = []
     for username in sorted_users:
         if username in ctx.cooled_down_users:
             logger.info(
@@ -212,21 +234,26 @@ def try_enqueue(
         if file_dirs is None:
             continue
         logger.debug(f"Parsing result from user: {username}")
-        found, directory, file_dir = check_for_match(
+        match_result = check_for_match(
             all_tracks, allowed_filetype, file_dirs, username, ctx
         )
-        if found:
-            directory = download_filter(allowed_filetype, directory, ctx.cfg)
-            files_to_enqueue = _prefixed_directory_files(directory, file_dir)
+        accumulated.extend(match_result.candidates)
+        if match_result.matched:
+            directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
+            files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
             try:
                 downloads = slskd_do_enqueue(
                     username=username,
                     files=files_to_enqueue,
-                    file_dir=file_dir,
+                    file_dir=match_result.file_dir,
                     ctx=ctx,
                 )
                 if downloads is not None:
-                    return EnqueueAttempt(matched=True, downloads=downloads)
+                    return EnqueueAttempt(
+                        matched=True,
+                        downloads=downloads,
+                        candidates=tuple(accumulated),
+                    )
                 had_enqueue_failure = True
                 logger.info(
                     f"Failed to enqueue download to slskd for "
@@ -240,7 +267,11 @@ def try_enqueue(
                     f"{artist_name} - {album_name} from {username}"
                 )
     logger.info(f"Failed to enqueue {artist_name} - {album_name}")
-    return EnqueueAttempt(matched=False, enqueue_failed=had_enqueue_failure)
+    return EnqueueAttempt(
+        matched=False,
+        enqueue_failed=had_enqueue_failure,
+        candidates=tuple(accumulated),
+    )
 
 
 def try_multi_enqueue(
@@ -269,6 +300,7 @@ def try_multi_enqueue(
     album_name = album.title
     artist_name = album.artist_name
     denied_users = _get_denied_users(album_id, ctx)
+    accumulated: list[CandidateScore] = []
     for disk in split_release:
         ctx.negative_matches.clear()
         for username in results:
@@ -287,16 +319,19 @@ def try_multi_enqueue(
             file_dirs = _get_user_dirs(results[username], allowed_filetype)
             if file_dirs is None:
                 continue
-            found, directory, file_dir = check_for_match(
+            match_result = check_for_match(
                 disk["tracks"], allowed_filetype, file_dirs, username, ctx
             )
-            if found:
-                directory = download_filter(allowed_filetype, directory, ctx.cfg)
-                disk["source"] = (username, directory, file_dir)
+            accumulated.extend(match_result.candidates)
+            if match_result.matched:
+                directory = download_filter(
+                    allowed_filetype, match_result.directory, ctx.cfg,
+                )
+                disk["source"] = (username, directory, match_result.file_dir)
                 count_found += 1
                 break
         else:
-            return EnqueueAttempt(matched=False)
+            return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
     if count_found == total:
         all_downloads = []
         enqueued = 0
@@ -323,7 +358,11 @@ def try_multi_enqueue(
                     )
                     if len(all_downloads) > 0:
                         cancel_and_delete(all_downloads, ctx)
-                    return EnqueueAttempt(matched=False, enqueue_failed=True)
+                    return EnqueueAttempt(
+                        matched=False,
+                        enqueue_failed=True,
+                        candidates=tuple(accumulated),
+                    )
             except Exception:
                 logger.exception("Exception enqueueing tracks")
                 logger.info(
@@ -332,14 +371,26 @@ def try_multi_enqueue(
                 )
                 if len(all_downloads) > 0:
                     cancel_and_delete(all_downloads, ctx)
-                return EnqueueAttempt(matched=False, enqueue_failed=True)
+                return EnqueueAttempt(
+                    matched=False,
+                    enqueue_failed=True,
+                    candidates=tuple(accumulated),
+                )
         if enqueued == total:
-            return EnqueueAttempt(matched=True, downloads=all_downloads)
+            return EnqueueAttempt(
+                matched=True,
+                downloads=all_downloads,
+                candidates=tuple(accumulated),
+            )
         if len(all_downloads) > 0:
             cancel_and_delete(all_downloads, ctx)
-        return EnqueueAttempt(matched=False, enqueue_failed=True)
+        return EnqueueAttempt(
+            matched=False,
+            enqueue_failed=True,
+            candidates=tuple(accumulated),
+        )
 
-    return EnqueueAttempt(matched=False)
+    return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
 
 
 def _try_filetype(
@@ -348,13 +399,14 @@ def _try_filetype(
     allowed_filetype: str,
     grab_list: dict[int, GrabListEntry],
     ctx: CratediggerContext,
-) -> FindDownloadResult:
+) -> _FiletypeAttemptResult:
     """Try to match and enqueue an album at a specific filetype quality."""
     album_id = album.id
     artist_name = album.artist_name
     releases = list(album.releases)
     has_monitored = any(r.monitored for r in releases)
     had_enqueue_failure = False
+    accumulated: list[CandidateScore] = []
 
     for _ in range(len(releases)):
         if not releases:
@@ -370,10 +422,12 @@ def _try_filetype(
             continue
 
         attempt = try_enqueue(all_tracks, results, allowed_filetype, ctx)
+        accumulated.extend(attempt.candidates)
         if not attempt.matched and len(release.media) > 1:
             attempt = try_multi_enqueue(
                 release, all_tracks, results, allowed_filetype, ctx
             )
+            accumulated.extend(attempt.candidates)
 
         if attempt.matched:
             assert attempt.downloads is not None
@@ -390,7 +444,9 @@ def _try_filetype(
                 db_search_filetype_override=album.db_search_filetype_override,
                 db_target_format=album.db_target_format,
             )
-            return FindDownloadResult(outcome="found")
+            return _FiletypeAttemptResult(
+                outcome="found", candidates=tuple(accumulated),
+            )
 
         if attempt.enqueue_failed:
             had_enqueue_failure = True
@@ -405,8 +461,9 @@ def _try_filetype(
         if has_monitored and not release.monitored:
             break
 
-    return FindDownloadResult(
-        outcome="enqueue_failed" if had_enqueue_failure else "no_match"
+    return _FiletypeAttemptResult(
+        outcome="enqueue_failed" if had_enqueue_failure else "no_match",
+        candidates=tuple(accumulated),
     )
 
 
@@ -440,7 +497,7 @@ def find_download(
         logger.info(f"Checking for Quality: {allowed_filetype}")
         result = _try_filetype(album, results, allowed_filetype, grab_list, ctx)
         if result.outcome == "found":
-            return result
+            return FindDownloadResult(outcome="found")
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 
@@ -454,7 +511,7 @@ def find_download(
         )
         result = _try_filetype(album, results, "*", grab_list, ctx)
         if result.outcome == "found":
-            return result
+            return FindDownloadResult(outcome="found")
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 

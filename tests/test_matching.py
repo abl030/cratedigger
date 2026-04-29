@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
+from cratedigger import SlskdFile, TrackRecord
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.matching import (
@@ -68,12 +69,15 @@ def _make_ctx(
     return ctx
 
 
-def _track(album_id: int, title: str, medium: int = 1) -> dict[str, Any]:
-    return {"albumId": album_id, "title": title, "mediumNumber": medium}
+def _track(album_id: int, title: str, medium: int = 1) -> TrackRecord:
+    return cast(
+        TrackRecord,
+        {"albumId": album_id, "title": title, "mediumNumber": medium},
+    )
 
 
-def _file(filename: str, **extra: Any) -> dict[str, Any]:
-    return {"filename": filename, **extra}
+def _file(filename: str, **extra: Any) -> SlskdFile:
+    return cast(SlskdFile, {"filename": filename, **extra})
 
 
 # ---------------------------------------------------------------------------
@@ -111,18 +115,28 @@ class TestAlbumMatchScore(unittest.TestCase):
 
     def test_partial_match_lists_missing_titles(self) -> None:
         """2 of 4 tracks unmatched → matched=2, total=4, missing populated."""
-        tracks = [_track(1, t) for t in ("Alpha", "Bravo", "Charlie", "Delta")]
+        # Use long, distinctive titles so the .flac suffix doesn't carry the
+        # SequenceMatcher ratio above 0.5.
+        tracks = [
+            _track(1, "Walking In The Rain Tonight"),
+            _track(1, "Catching Up With The Sunshine"),
+            _track(1, "MissingThirdTrackUnique"),
+            _track(1, "MissingFourthTrackUnique"),
+        ]
         files = [
-            _file("Alpha.flac"),
-            _file("Bravo.flac"),
-            _file("Random Junk Filename.flac"),
-            _file("Another Unrelated.flac"),
+            _file("Walking In The Rain Tonight.flac"),
+            _file("Catching Up With The Sunshine.flac"),
+            _file("zzzz.flac"),
+            _file("yyyy.flac"),
         ]
         score = album_match(tracks, files, "user1", "flac", self.ctx)
 
         self.assertEqual(score.matched_tracks, 2)
         self.assertEqual(score.total_tracks, 4)
-        self.assertCountEqual(score.missing_titles, ["Charlie", "Delta"])
+        self.assertCountEqual(
+            score.missing_titles,
+            ["MissingThirdTrackUnique", "MissingFourthTrackUnique"],
+        )
 
     def test_track_number_prefix_separator_logic(self) -> None:
         """`01 - Title.flac` style — check_ratio separator path keeps matches."""
@@ -150,7 +164,7 @@ class TestAlbumMatchScore(unittest.TestCase):
     def test_empty_slskd_files_lists_every_expected(self) -> None:
         """Empty slskd_tracks → matched=0, missing lists every title."""
         tracks = [_track(1, "Alpha"), _track(1, "Bravo")]
-        files: list[dict[str, Any]] = []
+        files: list[SlskdFile] = []
         score = album_match(tracks, files, "user1", "flac", self.ctx)
         self.assertEqual(score.matched_tracks, 0)
         self.assertEqual(score.total_tracks, 2)
@@ -194,7 +208,7 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
             _track(1, "Charlie"),
         ]
 
-    def _set_browse(self, file_dir: str, files: list[dict[str, Any]]) -> None:
+    def _set_browse(self, file_dir: str, files: list[SlskdFile]) -> None:
         """Pre-populate folder_cache so the real browse never runs."""
         self.ctx.folder_cache.setdefault(self.username, {})[file_dir] = {
             "directory": file_dir,
@@ -358,21 +372,29 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         """Dir with full file_count but only 2 of 3 titles matching →
         full CandidateScore with matched_tracks=2, total_tracks=3, and
         missing_titles populated. Strict accept fails (2 != 3)."""
-        # Need 3 audio files (so count gate passes), but only 2 match titles
+        # Use distinctive long names so the `.flac` suffix doesn't carry the
+        # SequenceMatcher ratio above the minimum_match_ratio threshold.
+        partial_tracks = [
+            _track(1, "First Track Distinct Name"),
+            _track(1, "Second Track Distinct Name"),
+            _track(1, "QQQQQQQQQQQ"),
+        ]
         self._set_browse("dirA", [
-            _file("Alpha.flac"),
-            _file("Bravo.flac"),
-            _file("Random Junk.flac"),
+            _file("First Track Distinct Name.flac"),
+            _file("Second Track Distinct Name.flac"),
+            _file("XXXXXXXXXXXXX.flac"),
         ])
         result = check_for_match(
-            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+            partial_tracks, "flac", ["dirA"], self.username, self.ctx,
         )
         self.assertFalse(self._matched(result))
         candidates = self._candidates(result)
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].matched_tracks, 2)
         self.assertEqual(candidates[0].total_tracks, 3)
-        self.assertCountEqual(candidates[0].missing_titles, ["Charlie"])
+        self.assertCountEqual(
+            candidates[0].missing_titles, ["QQQQQQQQQQQ"],
+        )
         self.assertEqual(candidates[0].file_count, 3)
 
 

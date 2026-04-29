@@ -119,8 +119,11 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         ]
         results = {"gooduser": {"flac": ["Music\\Album"]}}
 
-        with patch("lib.enqueue.check_for_match",
-                   return_value=(False, None, None)):
+        from lib.matching import MatchResult
+        with patch(
+            "lib.enqueue.check_for_match",
+            return_value=MatchResult(matched=False, directory=None, file_dir=""),
+        ):
             attempt = try_enqueue(tracks, results, "flac", ctx)
 
         # check_for_match WAS called for the non-cooled user
