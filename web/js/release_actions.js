@@ -127,6 +127,33 @@ export function renderRemoveFromBeetsButton(state, opts = {}) {
 }
 
 /**
+ * Render the "Bad rip" button for library rows whose album was imported via
+ * the pipeline. Click → window.banSource(requestId, mbid). The route resolves
+ * the supplying user server-side from download_log, hashes the imported
+ * tracks (tag-stripped), records them as known-bad, denylists the user (if
+ * resolved), removes the album from beets, and requeues — see
+ * docs/plans/2026-04-29-005-feat-bad-rip-button-and-content-hash-defense-plan.md.
+ *
+ * Only renders when the row has both a pipeline request and a release id;
+ * library rows imported outside the pipeline have nothing to ban.
+ *
+ * @param {ReleaseActionState} state
+ * @param {Object} [opts]
+ * @param {string} [opts.className]
+ * @param {string} [opts.label]
+ * @param {boolean} [opts.stopPropagation]
+ * @returns {string}
+ */
+export function renderBadRipButton(state, opts = {}) {
+  if (!state.pipelineId || !state.releaseId) return '';
+  const className = opts.className || 'btn';
+  const label = opts.label || 'Bad rip';
+  const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+  const releaseArg = jsArg(state.releaseId);
+  return `<button class="${className}" onclick="${stopPropagation}window.banSource(${state.pipelineId}, ${releaseArg})">${label}</button>`;
+}
+
+/**
  * Render the toolbar HTML for one row.
  *
  * @param {ReleaseActionState} state
