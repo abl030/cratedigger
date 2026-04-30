@@ -83,6 +83,7 @@ class CratediggerConfig:
     browse_parallelism: int = 4
     title_blacklist: tuple[str, ...] = ()
     search_response_limit: int = 1000
+    search_file_limit: int = 50000
     search_escalation_threshold: int = 5
 
     # --- Release ---
@@ -249,6 +250,7 @@ class CratediggerConfig:
             browse_parallelism=min(getint("Search Settings", "browse_parallelism", 4), 8),
             title_blacklist=title_blacklist,
             search_response_limit=getint("Search Settings", "search_response_limit", 1000),
+            search_file_limit=getint("Search Settings", "search_file_limit", 50000),
             search_escalation_threshold=getint("Search Settings", "search_escalation_threshold", 5),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),

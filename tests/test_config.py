@@ -137,7 +137,22 @@ class TestConfigFromIni(unittest.TestCase):
         ini = configparser.ConfigParser()
         cfg = CratediggerConfig.from_ini(ini)
         self.assertEqual(cfg.search_response_limit, 1000)
+        self.assertEqual(cfg.search_file_limit, 50000)
         self.assertEqual(cfg.search_escalation_threshold, 5)
+
+    def test_search_file_limit_explicit(self):
+        """Explicit search_file_limit is parsed verbatim."""
+        ini = configparser.ConfigParser()
+        ini.read_string("[Search Settings]\nsearch_file_limit = 100000\n")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_file_limit, 100000)
+
+    def test_search_file_limit_default(self):
+        """Missing key falls back to default of 50000."""
+        ini = configparser.ConfigParser()
+        ini.add_section("Search Settings")
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.search_file_limit, 50000)
 
     def test_search_response_limit_zero_passes_through(self):
         """`from_ini` does not validate; a literal 0 is accepted as-is.

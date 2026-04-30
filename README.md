@@ -298,6 +298,18 @@ mp3 v0,mp3 320,flac 24/192,flac 24/96,flac 24/48,flac 16/44.1,flac,alac,aac,opus
 - `tests/test_quality_decisions.py:TestQualityRankConfigDefaults` -- pin tests that fail loudly on any drift.
 - `lib/quality.py:file_identity()` / `filetype_matches()` / `parse_filetype_config()` -- the search-side filetype spec model that backs `allowed_filetypes`.
 
+### Search loop tunables
+
+Three Nix options control the slskd search window and the variant escalation ladder. All live under `services.cratedigger.searchSettings.*` and render into `[Search Settings]` in `config.ini`. See [`docs/pipeline-db-schema.md`](docs/pipeline-db-schema.md#search_log) for what the variants do; see GitHub issue #196 for the long-term plan to escape these caps entirely.
+
+| Option | Default | Maps to | What it caps |
+|--------|---------|---------|--------------|
+| `searchResponseLimit` | `1000` | slskd `responseLimit` | Number of peer responses slskd buffers per search. Raising this gives the matcher more peer diversity. Caps at this value when peers stop responding. |
+| `searchFileLimit` | `50000` | slskd `fileLimit` | Total files across all peer responses. Multi-disc / OST / compilation searches fill this fast (each peer holds 50+ tracks); the slskd-api default of 10000 terminates such searches in ~3s, possibly before the right peer responds. |
+| `searchEscalationThreshold` | `5` | (cratedigger only) | After this many failed cycles the variant ladder kicks in: V1 (year-augmented) → V4 (rotating 3-token track-name slices) → exhausted → wrap. See `lib/search.py:select_variant`. |
+
+**What you cannot tune from here**: the per-search `searchTimeout` is fixed at 30s by slskd itself (see `cfg.search_timeout` in `config.ini`, but slskd ignores values above 30000ms). The dominant cycle cost is searches running to that timeout because vague variants don't fill the response/file caps. Issue #196 tracks options to remove this ceiling.
+
 ## Audit trail
 
 Every download stores two JSONB blobs in `download_log` for complete auditability:

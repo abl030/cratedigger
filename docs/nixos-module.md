@@ -27,13 +27,25 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile}` | disabled | Jellyfin notifier. |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
-| `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. |
+| `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See README § "Tuning the quality rank model". |
 | `timer.{enable,onBootSec,onUnitActiveSec}` | every 5 min | Cycle frequency. |
 | `importer.enable` | `true` | Long-lived serial importer that drains queued import work. |
 | `importer.preview.enable` | `false` | Enable the async preview gate. When disabled, new import jobs are marked importable immediately for backward-compatible draining. |
 | `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.preview.enable = true`. Must be at least 1. |
 | `logging.{level,format,datefmt}` | INFO | Python logging config. |
+
+## Search loop tunables
+
+Three options under `services.cratedigger.searchSettings.*` control the slskd search window and the variant escalation ladder shipped in PR #193. Listed together here because they're easy to forget when triaging stuck releases.
+
+| Option | Default | Maps to | Effect |
+|--------|---------|---------|--------|
+| `searchResponseLimit` | `1000` | slskd `responseLimit` | Caps peer responses per search. The slskd-api default is 100; popular albums returning more than 100 peers had their results truncated. 1000 covers ~99% of observed searches without triggering the cap. |
+| `searchFileLimit` | `50000` | slskd `fileLimit` | Caps total files across all peer responses. The slskd-api default is 10000; popular multi-disc/OST/compilation searches (peers each holding 50+ tracks) fill 10000 in ~3 seconds and terminate the search early — sometimes before the right peer responds. 50000 lets the buffer run to the search timeout for these. |
+| `searchEscalationThreshold` | `5` | cratedigger only | After this many failed cycles, `lib/search.py:select_variant` switches from the default `<artist> <album>` query to V1 (year-augmented), V4 (rotating 3-token track-name slices), then `exhausted` (which resets `search_attempts=0` so the ladder wraps; see [`docs/pipeline-db-schema.md`](pipeline-db-schema.md#search_log)). |
+
+**The 30s cycle floor is upstream.** `cfg.search_timeout` exists but slskd caps it at 30000ms; values above that are silently ignored. With response/file limits high enough that they rarely cap, every search runs the full 30s. The path to shorter cycles is changing the client (issue #196), not tuning these options.
 
 ## What the module does
 
