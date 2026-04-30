@@ -305,6 +305,19 @@ def select_variant(
     v4_start = 1 if year_known else 0
     v4_idx = esc_idx - v4_start
 
+    # Skip V4 entirely for single-track albums. A lone track title produces
+    # slskd matches that pass the 0.15 distance gate too easily — the query
+    # collapses to "single song" tokens and unrelated albums on Soulseek that
+    # happen to share that song name slip through. Multi-track pools dilute
+    # this risk by combining several distinctive tokens per slice.
+    if len(track_titles) <= 1:
+        return SearchVariant(
+            kind="exhausted",
+            query=None,
+            tag="exhausted",
+            slice_index=None,
+        )
+
     pool = _distinctive_token_pool(track_titles)
     slice_start = v4_idx * 3
     if slice_start >= len(pool):

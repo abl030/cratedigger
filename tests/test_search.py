@@ -544,6 +544,47 @@ class TestSelectVariant(unittest.TestCase):
                 self.assertEqual(v.tag, f"v4_tracks_{idx}")
                 self.assertEqual(v.slice_index, idx)
 
+    def test_single_track_skips_v4_after_v1(self):
+        """Albums with one track must not enter V4 — the lone track title
+        produces matches that slip through the 0.15 distance filter too easily.
+        With a known year, V1 still runs at the threshold; the next cycle
+        exhausts immediately instead of issuing a single-token track query.
+        """
+        # Cycle 5: V1 year (still useful for single-track albums)
+        v5 = select_variant(
+            search_attempts=5,
+            threshold=5,
+            base_query="base",
+            year="1991",
+            track_titles=["Lonely Track"],
+        )
+        self.assertEqual(v5.kind, "v1_year")
+        # Cycle 6: would be V4 slice 0 — must short-circuit to exhausted.
+        v6 = select_variant(
+            search_attempts=6,
+            threshold=5,
+            base_query="base",
+            year="1991",
+            track_titles=["Lonely Track"],
+        )
+        self.assertEqual(v6.kind, "exhausted")
+        self.assertIsNone(v6.query)
+        self.assertEqual(v6.tag, "exhausted")
+        self.assertIsNone(v6.slice_index)
+
+    def test_single_track_no_year_immediate_exhausted(self):
+        """One track and no year → V1 is skipped, V4 is suppressed → exhausted
+        on the first escalation cycle."""
+        v = select_variant(
+            search_attempts=5,
+            threshold=5,
+            base_query="base",
+            year=None,
+            track_titles=["Only Song"],
+        )
+        self.assertEqual(v.kind, "exhausted")
+        self.assertIsNone(v.query)
+        self.assertEqual(v.tag, "exhausted")
 
 if __name__ == "__main__":
     unittest.main()
