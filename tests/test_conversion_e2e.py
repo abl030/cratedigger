@@ -753,5 +753,86 @@ class TestConversionPipelineE2E(unittest.TestCase):
                                     f"V2 bitrate {br}kbps seems too high for V2")
 
 
+# ============================================================================
+# Native lossy V0 research probe — temp re-encode of lossy candidates
+# ============================================================================
+
+@unittest.skipUnless(shutil.which("sox") and shutil.which("ffmpeg"),
+                     "sox or ffmpeg not available")
+class TestProbeNativeLossyAsV0(unittest.TestCase):
+    """`_probe_native_lossy_as_v0` re-encodes a candidate's lossy audio files
+    to V0 in a temp dir and returns research-kind probe evidence. It must
+    never claim the lossless-source kind."""
+
+    def _make_lossy_album(self, album_dir, *, cutoff_hz, codec_args, ext,
+                          track_count=2):
+        """Generate FLAC fixture and re-encode each track to a lossy format,
+        leaving only the lossy files in album_dir."""
+        os.makedirs(album_dir, exist_ok=True)
+        for i in range(1, track_count + 1):
+            flac_path = os.path.join(album_dir, f"{i:02d} - Track {i}.flac")
+            from tests.audio_fixtures import make_test_flac
+            make_test_flac(flac_path, cutoff_hz=cutoff_hz)
+            out_path = os.path.join(album_dir, f"{i:02d} - Track {i}.{ext}")
+            subprocess.run(
+                ["ffmpeg", "-i", flac_path, *codec_args, "-y", out_path],
+                capture_output=True, check=True, timeout=30)
+            os.remove(flac_path)
+
+    def test_genuine_320_mp3_yields_research_probe(self):
+        """Real-content MP3 320 → research probe with sensible avg bitrate.
+        Mirrors the somafalls 320 case from request 2257."""
+        from harness.import_one import _probe_native_lossy_as_v0
+        from lib.quality import V0_PROBE_NATIVE_LOSSY_RESEARCH
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            self._make_lossy_album(
+                album, cutoff_hz=15500,
+                codec_args=["-c:a", "libmp3lame", "-b:a", "320k"],
+                ext="mp3")
+            probe = _probe_native_lossy_as_v0(album)
+            self.assertIsNotNone(probe)
+            assert probe is not None  # for type narrowing
+            self.assertEqual(probe.kind, V0_PROBE_NATIVE_LOSSY_RESEARCH)
+            self.assertIsNotNone(probe.avg_bitrate_kbps)
+            self.assertIsNotNone(probe.min_bitrate_kbps)
+            self.assertIsNotNone(probe.median_bitrate_kbps)
+            # Genuine content re-encoded to V0 produces ~190-260kbps.
+            assert probe.avg_bitrate_kbps is not None
+            self.assertGreater(probe.avg_bitrate_kbps, 150)
+            self.assertLess(probe.avg_bitrate_kbps, 320)
+
+    def test_returns_none_when_no_lossy_files(self):
+        """Empty/lossless-only folder → None (nothing to probe)."""
+        from harness.import_one import _probe_native_lossy_as_v0
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            from tests.audio_fixtures import make_test_album
+            make_test_album(album, track_count=1, cutoff_hz=15500)
+            self.assertIsNone(_probe_native_lossy_as_v0(album))
+
+    def test_returns_none_for_empty_dir(self):
+        from harness.import_one import _probe_native_lossy_as_v0
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            os.makedirs(album)
+            self.assertIsNone(_probe_native_lossy_as_v0(album))
+
+    def test_research_probe_does_not_pass_comparable_guard(self):
+        """Decision purity: a research probe must not be eligible for
+        provisional_lossless_decision comparison."""
+        from harness.import_one import _probe_native_lossy_as_v0
+        from lib.quality import is_comparable_lossless_source_probe
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            self._make_lossy_album(
+                album, cutoff_hz=15500,
+                codec_args=["-c:a", "libmp3lame", "-b:a", "320k"],
+                ext="mp3")
+            probe = _probe_native_lossy_as_v0(album)
+            self.assertIsNotNone(probe)
+            self.assertFalse(is_comparable_lossless_source_probe(probe))
+
+
 if __name__ == "__main__":
     unittest.main()

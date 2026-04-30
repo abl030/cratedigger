@@ -452,6 +452,31 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
         result = self._decide(avg=320, existing=None, supported=False)
         self.assertIsNone(result.decision)
 
+    def test_native_lossy_research_probe_is_not_comparable(self):
+        # Research probes (kind=native_lossy_research_v0) are audit-only and
+        # must not trigger any provisional decision branch — neither upgrade
+        # nor suspect_lossless_probe_missing — regardless of which side
+        # carries the research kind.
+        for grade in ("suspect", "likely_transcode", "genuine"):
+            with self.subTest(side="candidate", grade=grade):
+                result = self._decide(
+                    avg=200, existing=self._probe(171),
+                    grade=grade, supported=True,
+                    kind="native_lossy_research_v0")
+                self.assertNotEqual(
+                    result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        result = self._decide(
+            avg=200,
+            existing=V0ProbeEvidence(
+                kind="native_lossy_research_v0",
+                min_bitrate_kbps=160, avg_bitrate_kbps=171,
+                median_bitrate_kbps=175),
+            grade="suspect", supported=True)
+        # Existing-side research probe → treated as if no comparable existing
+        # probe exists, so suspect_lossless_probe_missing path applies.
+        self.assertNotEqual(
+            result.decision, DECISION_SUSPECT_LOSSLESS_DOWNGRADE)
+
     def test_supported_lossless_source_bypasses_lock(self):
         # The lock fires only on lossy candidates. A FLAC candidate facing
         # an existing lossless-source V0 probe must still be eligible to

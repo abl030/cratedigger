@@ -54,7 +54,9 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          PostflightInfo, QualityRankConfig,
                          MeasuredImportDecisionInput,
                          ProvisionalLosslessDecisionInput,
-                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
+                         V0_PROBE_LOSSLESS_SOURCE,
+                         V0_PROBE_NATIVE_LOSSY_RESEARCH,
+                         V0ProbeEvidence,
                          build_existing_quality_measurement,
                          comparison_format_hint, determine_verified_lossless,
                          measured_import_decision,
@@ -646,10 +648,32 @@ def _probe_lossless_source_as_v0(album_path: str) -> V0ProbeEvidence | None:
         f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
     if not lossless_files:
         return None
+    return _temp_v0_probe(
+        album_path, lossless_files, kind=V0_PROBE_LOSSLESS_SOURCE)
 
+
+def _probe_native_lossy_as_v0(album_path: str) -> V0ProbeEvidence | None:
+    """Non-destructively encode native lossy sources to temp V0 files and
+    measure them. Audit-only research evidence; never eligible for the
+    lossless-source provisional comparison (kind != lossless_source_v0).
+    """
+    lossy_files = sorted(
+        f for f in os.listdir(album_path)
+        if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
+        and not _is_lossless_file(f, album_path))
+    if not lossy_files:
+        return None
+    return _temp_v0_probe(
+        album_path, lossy_files, kind=V0_PROBE_NATIVE_LOSSY_RESEARCH)
+
+
+def _temp_v0_probe(
+    album_path: str, files: list[str], *, kind: str,
+) -> V0ProbeEvidence | None:
+    """Re-encode the given audio files to V0 in a temp dir and measure them."""
     with tempfile.TemporaryDirectory(prefix="cratedigger-v0-probe-") as temp_dir:
         failed = 0
-        for index, fname in enumerate(lossless_files):
+        for index, fname in enumerate(files):
             src_path = os.path.join(album_path, fname)
             base = os.path.splitext(os.path.basename(fname))[0]
             out_path = os.path.join(temp_dir, f"{index:03d}-{base}.mp3")
@@ -673,10 +697,10 @@ def _probe_lossless_source_as_v0(album_path: str) -> V0ProbeEvidence | None:
                 failed += 1
 
         if failed:
-            _log(f"  [V0 PROBE] {failed} temporary probe conversion(s) failed")
+            _log(f"  [V0 PROBE] {failed} temporary probe conversion(s) failed (kind={kind})")
             return None
         bitrates = _get_folder_bitrates(temp_dir, ext_filter={".mp3"})
-        return _v0_probe_from_bitrates(bitrates)
+        return _v0_probe_from_bitrates(bitrates, kind=kind)
 
 
 def _remove_files_by_ext(folder: str, ext: str) -> None:
@@ -1270,6 +1294,12 @@ def main():
         r.v0_probe = _v0_probe_from_bitrates(new_bitrates)
         if r.v0_probe:
             _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
+    elif not keep_lossless and not supported_lossless_source:
+        # Native lossy candidate: emit a research probe (audit-only,
+        # never eligible for the lossless-source provisional comparison).
+        r.v0_probe = _probe_native_lossy_as_v0(work_path)
+        if r.v0_probe:
+            _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
     new_median_br = (
