@@ -274,6 +274,7 @@ def search_for_album(album, ctx):
             maximumPeerQueueLength=cfg.maximum_peer_queue,
             minimumPeerUploadSpeed=cfg.minimum_peer_upload_speed,
             responseLimit=cfg.search_response_limit,
+            fileLimit=cfg.search_file_limit,
         )
     except Exception:
         logger.exception(f"Failed to perform search via SLSKD: {query}")
@@ -392,6 +393,7 @@ def _submit_search(album, variant, search_cfg, slskd_client):
                 maximumPeerQueueLength=search_cfg.maximum_peer_queue,
                 minimumPeerUploadSpeed=search_cfg.minimum_peer_upload_speed,
                 responseLimit=search_cfg.search_response_limit,
+                fileLimit=search_cfg.search_file_limit,
             )
             return (search["id"], query, album_id, variant.tag)
         except requests.exceptions.HTTPError as e:

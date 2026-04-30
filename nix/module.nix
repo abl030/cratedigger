@@ -155,6 +155,7 @@
     title_blacklist = ${concatStringsSep "," cfg.searchSettings.titleBlacklist}
     search_blacklist = ${concatStringsSep "," cfg.searchSettings.searchBlacklist}
     search_response_limit = ${toString cfg.searchSettings.searchResponseLimit}
+    search_file_limit = ${toString cfg.searchSettings.searchFileLimit}
 
     [Download Settings]
     download_filtering = ${if cfg.downloadSettings.downloadFiltering then "True" else "False"}
@@ -584,6 +585,18 @@ in {
           Caps how many peer responses slskd collects per search. Maps to
           slskd's `responseLimit` ceiling — raising this lets the matcher
           consider more peers per query at the cost of a longer search window.
+        '';
+      };
+      searchFileLimit = mkOption {
+        type = types.int;
+        default = 50000;
+        description = ''
+          Caps how many total files slskd collects across all peer responses
+          per search. Maps to slskd's `fileLimit` ceiling. The slskd-api
+          default (10000) terminates popular multi-disc searches in a few
+          seconds — possibly before the right peer responds. 50000 gives the
+          matcher more peer diversity for albums where each peer holds 50+
+          files (compilations, OSTs, multi-disc reissues).
         '';
       };
       titleBlacklist = mkOption {
