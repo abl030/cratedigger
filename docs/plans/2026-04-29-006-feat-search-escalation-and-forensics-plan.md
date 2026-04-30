@@ -348,6 +348,7 @@ Integration:
 - Edge case: year=`"0000-00-00"` → also treated as unknown via the `startswith("0000")` check.
 - Edge case: track_titles=[] (no track rows) → cycle 5 with year=1991 returns v1_year; cycle 6 returns exhausted (V4 has no pool).
 - Edge case: track_titles=[] and year=None → cycle 5 returns exhausted immediately.
+- Edge case: single-track album (`len(track_titles) == 1`) → V4 is suppressed even with a non-empty pool. With year known: cycle 5 = v1_year, cycle 6 = exhausted. With year=None: cycle 5 = exhausted immediately. Rationale: a one-token V4 query (the lone track title) produces slskd matches that pass the 0.15 distance gate too easily — unrelated albums that happen to share that song name leak through. (Added 2026-04-30 after the V4 ladder was deployed and observed misfiring on EPs/singles.)
 - Edge case: `_distinctive_token_pool` with all duplicate-after-dedupe tokens → pool is the deduped set; slice_index that overshoots returns exhausted.
 - Edge case: cycle 100 with a 3-token pool → exhausted (only one V4 slice available; subsequent cycles all exhausted).
 - Edge case: token pool of size 7 with year present → v1 at cycle 5, v4 slices at cycles 6 (idx 0, tokens 0-2), 7 (idx 1, tokens 3-5), 8 (idx 2, tokens 6-6 — single token), 9 (exhausted).

@@ -128,8 +128,8 @@ Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable down
 
 - `default` — base query (`<artist> <album>`), used for `search_attempts < threshold`.
 - `v1_year` — base query plus the 4-digit year token (skipped when year is unknown — `None`, `"0000"`, non-numeric, or shorter than 4 chars).
-- `v4_tracks_<idx>` — rotating 3-token slices of distinctive track titles, sorted length-descending. No artist, no wildcard.
-- `exhausted` — the V4 token pool ran out. **No slskd call is made.** `search_attempts` is reset to `0` so the ladder wraps back to `default` on the next cycle; the request stays `wanted`. The `search_log` row records the exhaustion event for forensic purposes.
+- `v4_tracks_<idx>` — rotating 3-token slices of distinctive track titles, sorted length-descending. No artist, no wildcard. **Suppressed entirely for single-track albums** (`len(track_titles) <= 1`) — a one-token V4 query passes the 0.15 distance gate too easily on slskd, so single-track albums fall straight to `exhausted` after V1.
+- `exhausted` — the V4 token pool ran out (or V4 was suppressed for a single-track album). **No slskd call is made.** `search_attempts` is reset to `0` so the ladder wraps back to `default` on the next cycle; the request stays `wanted`. The `search_log` row records the exhaustion event for forensic purposes.
 
 ### `candidates` JSONB
 
