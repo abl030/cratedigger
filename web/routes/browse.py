@@ -544,14 +544,12 @@ def _resolve_discogs(raw_id: str, kind: str) -> dict:
     """Resolve a Discogs numeric ID into the resolver response shape.
 
     Same leaf-first / group-fallback pattern as `_resolve_mb`.
-    """
-    try:
-        numeric = int(raw_id)
-    except ValueError as e:
-        raise urllib.error.HTTPError(
-            url="", code=400, msg=f"Invalid Discogs ID: {raw_id}", hdrs=None, fp=None
-        ) from e
 
+    Caller is responsible for validating that `raw_id` parses as int —
+    the route handler does this before dispatching. ValueError here
+    indicates a programmer bug, not user input.
+    """
+    numeric = int(raw_id)
     if kind in ("release", "unknown"):
         try:
             data = discogs_api.get_release(numeric)
@@ -605,6 +603,11 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         return
     if kind not in _RESOLVE_VALID_KINDS:
         h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")  # type: ignore[attr-defined]
+        return
+    # Discogs IDs must be all-digit. Frontend parsePastedId already enforces
+    # this, but defense-in-depth so the resolver never hits int() on garbage.
+    if source == "discogs" and not raw_id.isdigit():
+        h._error("Invalid Discogs ID (must be numeric)")  # type: ignore[attr-defined]
         return
 
     cache_key = f"browse-resolve:{source}:{kind}:{raw_id}"
