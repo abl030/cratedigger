@@ -43,8 +43,11 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
         ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
       const badges = renderStatusBadges(rg);
+      // Masterless Discogs releases have no child master to expand; the rg row
+      // is the leaf, so it carries data-release-id for search-by-ID ringing.
+      const leafAttr = rg.is_masterless ? ` data-release-id="${rg.id}"` : '';
       return `
-        <div class="rg">
+        <div class="rg"${leafAttr}>
           <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
             <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}
           </div>
@@ -148,7 +151,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       });
       const toolbar = renderActionToolbar(actionState, { size: 'small' });
       return `
-        <div class="release" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
+        <div class="release" data-release-id="${rel.id}" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
