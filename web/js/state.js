@@ -7,7 +7,7 @@
 
 import { normalizeReleaseId } from './util.js';
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -26,6 +26,13 @@ export const state = {
   disambData: null,
   searchTimer: null,
   manualSub: 'complete',
+  // Search-by-ID ring state. Cleared on closeBrowseArtist / setSearchType /
+  // next paste. searchTargetId is the leaf .release[data-release-id]; null
+  // for group-level inputs (master / release-group). searchTargetExpandId
+  // is the parent .rg the discography post-render hook auto-expands.
+  searchTargetId: null,
+  searchTargetExpandId: null,
+  searchTargetSource: null,
 };
 
 export const API = '';

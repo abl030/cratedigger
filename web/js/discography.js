@@ -109,6 +109,59 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       `;
     }
     rgEl.innerHTML = html;
+    applySearchTargetAfterDiscography(rgEl);
+}
+
+/**
+ * Search-by-ID post-discography-render hook.
+ *
+ * Reads `state.searchTargetExpandId` / `state.searchTargetId`; if both
+ * targets resolve into the just-rendered DOM, auto-expand the parent
+ * release-group and (after the inner releases render) apply the ring.
+ *
+ * Masterless rg rows ARE the leaf — they carry data-release-id directly
+ * (web/js/discography.js renderRgRow), so we ring + scroll the rg row
+ * itself with no expansion step.
+ *
+ * @param {HTMLElement} rgEl - The discography container that just rendered.
+ */
+function applySearchTargetAfterDiscography(rgEl) {
+  const expandId = state.searchTargetExpandId;
+  if (!expandId) return;
+  // Source guard: only apply ring when the discography source matches
+  // the source the resolver returned. Avoids ringing the wrong row when
+  // the user is browsing MB but the resolver returned a Discogs target
+  // (or vice versa).
+  if (state.searchTargetSource && state.browseSource !== state.searchTargetSource) return;
+
+  // Masterless: the rg row IS the leaf. Ring + scroll directly, no expand.
+  const masterlessRow = /** @type {HTMLElement|null} */ (
+    rgEl.querySelector(`.rg[data-release-id="${cssEscape(expandId)}"]`));
+  if (masterlessRow) {
+    masterlessRow.classList.add('search-target');
+    masterlessRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+
+  // Non-masterless: find the parent rg row (no data-release-id) and
+  // expand it via the same loadReleaseGroup helper that powers manual
+  // clicks. The post-render hook in loadReleaseGroup applies the leaf ring.
+  const inner = /** @type {HTMLElement|null} */ (rgEl.querySelector(`#rel-${cssEscape(expandId)}`));
+  if (!inner) return;
+  if (inner.innerHTML) return;  // already expanded (cache re-render); ring will re-apply on next loadReleaseGroup
+  loadReleaseGroup(expandId, inner, { targetEl: inner });
+}
+
+/**
+ * CSS.escape polyfill — vendored to keep util.js framework-free.
+ * Used for ID values that may contain hyphens, dots, or other
+ * selector-special characters (MB UUIDs, Discogs IDs).
+ * @param {string} s
+ * @returns {string}
+ */
+function cssEscape(s) {
+  if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, ch => `\\${ch}`);
 }
 
 /**
@@ -174,7 +227,30 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       `;
     }
     relEl.innerHTML = html;
+    applySearchTargetAfterReleases(relEl);
   } catch (e) { relEl.innerHTML = '<div class="loading">Failed to load</div>'; }
+}
+
+/**
+ * Search-by-ID post-loadReleaseGroup hook.
+ *
+ * Now that the master/release-group's child .release rows are in the
+ * DOM, find the one matching state.searchTargetId, ring it, and scroll
+ * it into view. No-op when the search-by-ID flow isn't active or the
+ * target leaf isn't a child of this group (e.g. compare view rendering
+ * a different group into its own targetEl).
+ *
+ * @param {HTMLElement} relEl - The .releases container that just rendered.
+ */
+function applySearchTargetAfterReleases(relEl) {
+  const targetId = state.searchTargetId;
+  if (!targetId) return;
+  if (state.searchTargetSource && state.browseSource !== state.searchTargetSource) return;
+  const row = /** @type {HTMLElement|null} */ (
+    relEl.querySelector(`.release[data-release-id="${cssEscape(targetId)}"]`));
+  if (!row) return;
+  row.classList.add('search-target');
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 /**

@@ -43,6 +43,9 @@
   .rg-meta { color: #777; font-size: 0.8em; }
   .releases { margin-top: 6px; padding-left: 12px; }
   .release { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #222; border-radius: 6px; margin-bottom: 0; cursor: pointer; }
+  /* Search-by-ID target ring. Persistent until close-artist / mode-switch / next paste. */
+  .release.search-target { background: #1a2a22; box-shadow: 0 0 0 2px #6a9; }
+  .rg.search-target { background: #1a2a22; border-left-color: #6a9; box-shadow: 0 0 0 2px #6a9; }
   .release:hover { background: #2a2a2a; }
   .release-info { flex: 1; }
   .release-title { font-size: 0.9em; }
@@ -242,6 +245,7 @@
       <button class="p-btn active-status" id="search-type-artist" onclick="setSearchType('artist')">Artist</button>
       <button class="p-btn" id="search-type-release" onclick="setSearchType('release')">Album</button>
       <button class="p-btn" id="search-type-label" onclick="setSearchType('label')">Label</button>
+      <button class="p-btn" id="search-type-id" onclick="setSearchType('id')">ID</button>
     </div>
     <div style="display:flex;gap:2px;margin-left:8px;border-left:1px solid #444;padding-left:8px;">
       <button class="p-btn active-status" id="source-mb" onclick="setBrowseSource('mb')">MB</button>
