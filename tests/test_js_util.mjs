@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 
@@ -530,6 +530,158 @@ assert(!xssBlock.includes('<script>x</script>'),
   'malicious username escaped');
 assert(!xssBlock.includes('"><img>'),
   'malicious dir escaped');
+
+// --- parsePastedId tests (search-by-ID) ---
+console.log('parsePastedId()');
+
+function assertParse(input, expected, msg) {
+  const actual = parsePastedId(input);
+  assertEqual(JSON.stringify(actual), JSON.stringify(expected), msg);
+}
+
+// Bare IDs (kind unknown — resolver disambiguates server-side)
+assertParse(
+  'c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  { family: 'mb', kind: 'unknown', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'bare MB UUID lowercase',
+);
+assertParse(
+  'C1F6A2C9-BCBA-4E69-96F5-233C85B2830A',
+  { family: 'mb', kind: 'unknown', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'bare MB UUID uppercase normalised to lowercase',
+);
+assertParse(
+  '32457180',
+  { family: 'discogs', kind: 'unknown', id: '32457180' },
+  'bare Discogs digits',
+);
+assertParse(
+  '1',
+  { family: 'discogs', kind: 'unknown', id: '1' },
+  'single digit accepted (Discogs ID space starts at 1)',
+);
+assertParse(
+  '123456789012',
+  { family: 'discogs', kind: 'unknown', id: '123456789012' },
+  '12-digit Discogs ID at boundary',
+);
+
+// MB URLs — type disambiguated by URL path
+assertParse(
+  'https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB release URL with https',
+);
+assertParse(
+  'http://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB release URL with http',
+);
+assertParse(
+  'musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB release URL without protocol',
+);
+assertParse(
+  'https://musicbrainz.org/release-group/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  { family: 'mb', kind: 'release-group', id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+  'MB release-group URL',
+);
+assertParse(
+  'https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a/',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB URL with trailing slash',
+);
+assertParse(
+  'https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a?source=foo',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB URL with querystring',
+);
+assertParse(
+  'https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a#discs',
+  { family: 'mb', kind: 'release', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'MB URL with fragment',
+);
+
+// Discogs URLs — type disambiguated by URL path
+assertParse(
+  'https://www.discogs.com/release/32457180',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'Discogs release URL with www',
+);
+assertParse(
+  'https://discogs.com/release/32457180',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'Discogs release URL without www',
+);
+assertParse(
+  'https://www.discogs.com/release/32457180-Various-Rock-Christmas-The-Very-Best-Of',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'Discogs release URL with slug',
+);
+assertParse(
+  'https://www.discogs.com/master/3673686',
+  { family: 'discogs', kind: 'master', id: '3673686' },
+  'Discogs master URL',
+);
+assertParse(
+  'https://www.discogs.com/master/3673686-Slug-Words',
+  { family: 'discogs', kind: 'master', id: '3673686' },
+  'Discogs master URL with slug',
+);
+assertParse(
+  'https://www.discogs.com/release/32457180?utm_source=share',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'Discogs URL with querystring',
+);
+
+// Whitespace handling
+assertParse(
+  '  c1f6a2c9-bcba-4e69-96f5-233c85b2830a  ',
+  { family: 'mb', kind: 'unknown', id: 'c1f6a2c9-bcba-4e69-96f5-233c85b2830a' },
+  'bare UUID with surrounding whitespace',
+);
+assertParse(
+  '\thttps://www.discogs.com/release/32457180\n',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'URL with tab/newline padding',
+);
+
+// Embedded /release/ in slug — first canonical match wins, no false positive
+assertParse(
+  'https://www.discogs.com/release/32457180-Various-release-of-the-year',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'embedded "release" word in slug does not confuse parser',
+);
+
+// Garbage / invalid
+assertParse('hello world', null, 'random text rejected');
+assertParse('', null, 'empty string rejected');
+assertParse('   ', null, 'whitespace-only rejected');
+assertParse('abc123', null, 'mixed alphanumeric rejected');
+assertParse(
+  'c1f6a2c9bcba4e6996f5233c85b2830a',
+  null,
+  '32-char UUID without dashes rejected',
+);
+assertParse('1234567890123', null, '13-digit numeric rejected (out of range)');
+
+// Non-canonical hosts (deferred per Scope Boundaries)
+assertParse(
+  'https://beta.musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'beta.musicbrainz.org subdomain rejected (deferred)',
+);
+assertParse(
+  'https://mbid.eu/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'mbid.eu short URL rejected (deferred)',
+);
+assertParse(
+  'https://www.discogs.com/sell/release/32457180',
+  null,
+  'Discogs marketplace URL rejected (deferred per Scope Boundaries)',
+);
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

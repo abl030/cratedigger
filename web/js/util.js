@@ -249,3 +249,53 @@ export function renderForensicBlock(last) {
     <div class="p-forensic-body">${body}</div>
   </div>`;
 }
+
+/**
+ * Parse pasted text for the Browse > Search-by-ID flow.
+ *
+ * Accepts a bare MBID, bare Discogs ID, or a canonical MB / Discogs URL
+ * (with or without slug, querystring, fragment, trailing slash). URL
+ * paths disambiguate `kind`; bare IDs return `kind: 'unknown'` and the
+ * server-side resolver decides via leaf-first / group-fallback.
+ *
+ * @param {string} text
+ * @returns {{family:'mb'|'discogs', kind:'release'|'release-group'|'master'|'unknown', id:string}|null}
+ */
+export function parsePastedId(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  // Canonical URL forms — the URL path tells us the type, so the resolver
+  // doesn't need to probe both endpoints. release-group must be checked
+  // before release because the prefix matters.
+  const mbRgRe = /(?:^|\/)musicbrainz\.org\/release-group\/([0-9a-f-]{36})(?:[/?#]|$)/i;
+  const mbReleaseRe = /(?:^|\/)musicbrainz\.org\/release\/([0-9a-f-]{36})(?:[/?#]|$)/i;
+  const discogsMasterRe = /(?:^|\/)(?:www\.)?discogs\.com\/master\/(\d{1,12})(?:[-/?#]|$)/i;
+  const discogsReleaseRe = /(?:^|\/)(?:www\.)?discogs\.com\/release\/(\d{1,12})(?:[-/?#]|$)/i;
+
+  let m;
+  if ((m = trimmed.match(mbRgRe))) {
+    return { family: 'mb', kind: 'release-group', id: m[1].toLowerCase() };
+  }
+  if ((m = trimmed.match(mbReleaseRe))) {
+    return { family: 'mb', kind: 'release', id: m[1].toLowerCase() };
+  }
+  if ((m = trimmed.match(discogsMasterRe))) {
+    return { family: 'discogs', kind: 'master', id: m[1] };
+  }
+  if ((m = trimmed.match(discogsReleaseRe))) {
+    return { family: 'discogs', kind: 'release', id: m[1] };
+  }
+
+  // Bare IDs — kind unknown, resolver disambiguates server-side.
+  const bareUuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const bareDigitsRe = /^\d{1,12}$/;
+  if (bareUuidRe.test(trimmed)) {
+    return { family: 'mb', kind: 'unknown', id: trimmed.toLowerCase() };
+  }
+  if (bareDigitsRe.test(trimmed)) {
+    return { family: 'discogs', kind: 'unknown', id: trimmed };
+  }
+  return null;
+}
