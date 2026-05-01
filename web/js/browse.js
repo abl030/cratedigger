@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, jsArg } from './util.js';
+import { esc, jsArg, parsePastedId } from './util.js';
 import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
 import { renderTypedSections, classify as groupingClassify } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
@@ -68,13 +68,20 @@ export async function setBrowseSource(src) {
 }
 
 /**
- * Set the browse search type (artist, release, or label).
- * @param {string} type - 'artist' | 'release' | 'label'
+ * Set the browse search type (artist, release, label, or id).
+ * @param {string} type - 'artist' | 'release' | 'label' | 'id'
  */
 export function setSearchType(type) {
   searchArtistsRequestToken++;
   state.browseSearchType = type;
-  const btnIds = { artist: 'search-type-artist', release: 'search-type-release', label: 'search-type-label' };
+  // Switching modes clears any active search-by-ID ring (R15).
+  clearSearchTarget();
+  const btnIds = {
+    artist: 'search-type-artist',
+    release: 'search-type-release',
+    label: 'search-type-label',
+    id: 'search-type-id',
+  };
   for (const [t, id] of Object.entries(btnIds)) {
     const el = document.getElementById(id);
     if (el) el.className = 'p-btn' + (type === t ? ' active-status' : '');
@@ -83,7 +90,9 @@ export function setSearchType(type) {
     ? 'Search artists or albums...'
     : type === 'release'
       ? 'Search album titles...'
-      : 'Search record labels...';
+      : type === 'label'
+        ? 'Search record labels...'
+        : 'Paste MBID, Discogs release/master ID, or URL...';
   /** @type {HTMLInputElement} */ (document.getElementById('q')).placeholder = placeholder;
   // Hide label-detail view when switching modes (search results take focus).
   if (state.browseLabel) closeLabelDetail();
@@ -128,8 +137,96 @@ export function openBrowseArtist(id, name) {
  */
 export function closeBrowseArtist() {
   state.browseArtist = null;
+  // Closing the artist view clears any search-by-ID ring (R15).
+  clearSearchTarget();
   document.getElementById('browse-artist').style.display = 'none';
   document.getElementById('results').style.display = 'block';
+}
+
+/**
+ * Clear the search-by-ID target so subsequent renders don't apply the ring.
+ * Used by close-artist-view, mode-switch, and as the first step of each
+ * new paste resolution.
+ */
+export function clearSearchTarget() {
+  state.searchTargetId = null;
+  state.searchTargetExpandId = null;
+  state.searchTargetSource = null;
+}
+
+/**
+ * Resolve a pasted MBID / Discogs ID / URL via /api/browse/resolve and
+ * drive the artist view (or VA fallback) accordingly. Called from
+ * searchArtists when state.browseSearchType === 'id'.
+ *
+ * @param {string} q - Pasted text (raw, untrimmed; parsePastedId handles it)
+ * @param {number} requestToken - Token from the calling searchArtists; if
+ *   it doesn't match searchArtistsRequestToken when the resolver returns,
+ *   the response is stale (a newer paste superseded this one) and discarded.
+ */
+export async function resolveAndNavigate(q, requestToken) {
+  const el = document.getElementById('results');
+  const parsed = parsePastedId(q);
+  if (!parsed) {
+    el.innerHTML = '<div class="loading">Not a recognised ID. Paste a MusicBrainz UUID, Discogs release/master ID, or URL.</div>';
+    return;
+  }
+  // New paste — clear any previous ring before navigation begins.
+  clearSearchTarget();
+  el.innerHTML = '<div class="loading">Resolving...</div>';
+  let data;
+  try {
+    const url = `${API}/api/browse/resolve?source=${parsed.family}&id=${encodeURIComponent(parsed.id)}&kind=${parsed.kind}`;
+    const r = await fetch(url);
+    if (requestToken !== searchArtistsRequestToken) return;
+    if (!r.ok) {
+      el.innerHTML = `<div class="loading">Resolve failed (HTTP ${r.status}). The ID may not exist on the ${parsed.family === 'mb' ? 'MusicBrainz' : 'Discogs'} mirror.</div>`;
+      return;
+    }
+    data = await r.json();
+  } catch (_e) {
+    if (requestToken !== searchArtistsRequestToken) return;
+    el.innerHTML = '<div class="loading">Resolve failed (network error).</div>';
+    return;
+  }
+  if (requestToken !== searchArtistsRequestToken) return;
+
+  // Switch source to match the resolved ID's family before opening the
+  // artist view, otherwise the discography fetch would hit the wrong API.
+  if (state.browseSource !== parsed.family) {
+    state.browseSource = parsed.family;
+    const mbBtn = document.getElementById('source-mb');
+    const dgBtn = document.getElementById('source-discogs');
+    if (mbBtn) mbBtn.className = 'p-btn' + (parsed.family === 'mb' ? ' active-status' : '');
+    if (dgBtn) dgBtn.className = 'p-btn' + (parsed.family === 'discogs' ? ' active-status' : '');
+    state.browseCache = {};
+  }
+
+  // Stash ring targets BEFORE openBrowseArtist triggers the discography
+  // render — the render hook reads these to decide what to expand and ring.
+  state.searchTargetId = data.leaf_id || null;
+  state.searchTargetExpandId = data.expand_id || null;
+  state.searchTargetSource = data.source;
+
+  // Force a discography re-render even if the artist is already cached.
+  // Without this, two consecutive pastes for different releases on the
+  // same artist would leave the first paste's ring in place and skip
+  // the post-render hook on the second paste.
+  if (data.artist_id) {
+    delete state.browseCache[data.artist_id];
+  }
+
+  if (data.is_va) {
+    // U5 VA fallback handles this. Until U5 lands, surface a placeholder.
+    el.innerHTML = '<div class="loading">Various Artists fallback render is not implemented yet (U5).</div>';
+    clearSearchTarget();
+    return;
+  }
+
+  // Non-VA: hand off to the existing artist view. The render hooks in
+  // discography.js pick up state.searchTargetExpandId / state.searchTargetId
+  // and apply the ring after the discography + master expansion render.
+  openBrowseArtist(data.artist_id, data.artist_name);
 }
 
 /**
@@ -445,6 +542,10 @@ export async function searchArtists(q) {
   const browseLabel = document.getElementById('browse-label');
   if (browseLabel) browseLabel.style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
+  // Search-by-ID short-circuits search entirely: parse, resolve, navigate.
+  if (searchType === 'id') {
+    return resolveAndNavigate(q, requestToken);
+  }
   // Label search is Discogs-only in Phase A — independent of browseSource.
   if (searchType === 'label') {
     try {
