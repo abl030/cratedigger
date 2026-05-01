@@ -1,7 +1,7 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
-import { renderArtistDiscography, loadReleaseGroup } from './discography.js';
+import { renderArtistDiscography, loadReleaseGroup, renderReleaseDetail } from './discography.js';
 import { renderTypedSections, classify as groupingClassify } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDisambiguateInto } from './analysis.js';
@@ -217,9 +217,10 @@ export async function resolveAndNavigate(q, requestToken) {
   }
 
   if (data.is_va) {
-    // U5 VA fallback handles this. Until U5 lands, surface a placeholder.
-    el.innerHTML = '<div class="loading">Various Artists fallback render is not implemented yet (U5).</div>';
-    clearSearchTarget();
+    // VA fallback: bypass the artist view (the VA artist page is unworkably
+    // large) and render a single-release detail card or a master/release-group
+    // pressings list directly. Plan U5.
+    openVaFallback(data, parsed.id);
     return;
   }
 
@@ -227,6 +228,80 @@ export async function resolveAndNavigate(q, requestToken) {
   // discography.js pick up state.searchTargetExpandId / state.searchTargetId
   // and apply the ring after the discography + master expansion render.
   openBrowseArtist(data.artist_id, data.artist_name);
+}
+
+/**
+ * Render the Various Artists fallback card. Branches on data.kind:
+ *  - 'release'        → single-release detail via renderReleaseDetail.
+ *  - 'master'         → Discogs master title + pressings list (loadReleaseGroup).
+ *  - 'release-group'  → MB release-group title + pressings list (loadReleaseGroup).
+ *
+ * Shows the va-fallback container and hides the artist view + search results.
+ *
+ * @param {Object} data - resolver response
+ * @param {string} parsedId - the raw pasted id (used as the leaf for kind='release')
+ */
+async function openVaFallback(data, parsedId) {
+  const wrap = document.getElementById('va-fallback');
+  const titleEl = document.getElementById('va-fallback-title');
+  const bodyEl = document.getElementById('va-fallback-body');
+  if (!wrap || !titleEl || !bodyEl) return;
+
+  // Hide other Browse views
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('browse-artist').style.display = 'none';
+  const browseLabel = document.getElementById('browse-label');
+  if (browseLabel) browseLabel.style.display = 'none';
+  wrap.style.display = 'block';
+  bodyEl.innerHTML = '<div class="loading">Loading...</div>';
+  titleEl.textContent = 'Loading…';
+
+  try {
+    if (data.kind === 'release') {
+      const releaseId = data.leaf_id || parsedId;
+      const url = data.source === 'discogs'
+        ? `${API}/api/discogs/release/${encodeURIComponent(releaseId)}`
+        : `${API}/api/release/${encodeURIComponent(releaseId)}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const releaseData = await r.json();
+      titleEl.textContent = releaseData.title || 'Various Artists';
+      bodyEl.innerHTML = '';
+      renderReleaseDetail(bodyEl, releaseId, releaseData);
+      return;
+    }
+    // Master (Discogs) or release-group (MB) — render pressings via the
+    // existing loadReleaseGroup, which gives each row an Add button and
+    // the same toggleReleaseDetail expansion as the artist view.
+    const groupId = data.expand_id;
+    const groupUrl = data.source === 'discogs'
+      ? `${API}/api/discogs/master/${encodeURIComponent(groupId)}`
+      : `${API}/api/release-group/${encodeURIComponent(groupId)}`;
+    const r = await fetch(groupUrl);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const groupData = await r.json();
+    titleEl.textContent = groupData.title || 'Various Artists';
+    // Reuse loadReleaseGroup with an explicit target. It re-fetches the
+    // same endpoint internally; that's a duplicate request but only ~80ms
+    // for MB and ~20ms for Discogs, and it keeps the render path identical
+    // to the artist view's expansion path. Pass source explicitly so the
+    // helper hits the right API regardless of state.browseSource.
+    bodyEl.innerHTML = '';
+    await loadReleaseGroup(groupId, bodyEl, { targetEl: bodyEl, source: data.source });
+  } catch (_e) {
+    bodyEl.innerHTML = '<div class="loading">Failed to load Various Artists fallback.</div>';
+    titleEl.textContent = 'Various Artists';
+  }
+}
+
+/**
+ * Close the VA fallback card and return to search results.
+ */
+export function closeVaFallback() {
+  clearSearchTarget();
+  const wrap = document.getElementById('va-fallback');
+  if (wrap) wrap.style.display = 'none';
+  document.getElementById('results').style.display = 'block';
 }
 
 /**
@@ -541,6 +616,8 @@ export async function searchArtists(q) {
   document.getElementById('browse-artist').style.display = 'none';
   const browseLabel = document.getElementById('browse-label');
   if (browseLabel) browseLabel.style.display = 'none';
+  const vaFallback = document.getElementById('va-fallback');
+  if (vaFallback) vaFallback.style.display = 'none';
   el.innerHTML = '<div class="loading">Searching...</div>';
   // Search-by-ID short-circuits search entirely: parse, resolve, navigate.
   if (searchType === 'id') {
