@@ -8,9 +8,13 @@ AFI, Kanye, etc.). Searches containing banned terms return 0 results.
 Replacing the first character with * bypasses the filter:
   "Beatles" → "*eatles" (17786 results vs 0).
 
-We wildcard ALL artist tokens unconditionally — there's no downside
-(*ountain matches Mountain) and it avoids needing to maintain a
-banned word list.
+The wildcarded form is the default. It bypasses server-side bans but
+is silently dropped by ~95% of peer clients on the network — many
+older Soulseek/Nicotine+/museek+ clients don't index wildcarded
+terms (live A/B for "the wiggles 1991": 241 hits un-wildcarded vs
+14 hits wildcarded). The escalation ladder therefore retries the
+un-wildcarded form once base/year cycles fail, before falling back
+to per-track queries.
 
 Pure functions — no I/O, no external dependencies.
 """
@@ -129,7 +133,10 @@ def cap_tokens(tokens, max_tokens=MAX_SEARCH_TOKENS):
     return ordered
 
 
-def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS):
+def build_query(
+    artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS,
+    wildcard_artist=True,
+):
     """Build a Soulseek search query from artist + album title.
 
     Returns the final query string.
@@ -138,10 +145,12 @@ def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS
       1. Clean punctuation from both artist and title
       2. Tokenize separately
       3. Strip short tokens (<=2 chars)
-      4. Wildcard artist tokens (bypass bans)
+      4. Wildcard artist tokens (bypass bans) — when wildcard_artist=True
       5. Combine and cap total token count
 
-    Artist tokens are always prepended and wildcarded.
+    With ``wildcard_artist=False`` artist tokens are still prepended (when
+    ``prepend_artist=True``) but kept literal. Used by the un-wildcarded
+    escalation tier where peers that drop wildcarded queries are the goal.
     """
     # Clean punctuation
     clean_artist = strip_special_chars(artist)
@@ -167,8 +176,8 @@ def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS
     if clean_artist.lower() in ("various artists", "various"):
         artist_tokens = []
 
-    # Wildcard artist tokens
-    artist_tokens = wildcard_artist_tokens(artist_tokens)
+    if wildcard_artist:
+        artist_tokens = wildcard_artist_tokens(artist_tokens)
 
     if prepend_artist and artist_tokens:
         all_tokens = artist_tokens + title_tokens
@@ -185,21 +194,26 @@ def build_query(artist, title, prepend_artist=True, max_tokens=MAX_SEARCH_TOKENS
 
 
 # ---------------------------------------------------------------------------
-# Variant generator (U4 of search-escalation-and-forensics)
+# Variant generator
 #
-# Pure function: given the current cycle counter, escalation threshold, base
-# query, year, and track titles, return which query to issue next. Single
-# source of truth for the search-cycle ladder. No I/O.
+# Pure function: given the current cycle counter, escalation threshold, both
+# base queries (wildcarded + un-wildcarded), year, and track titles, return
+# which query to issue next. Single source of truth for the search-cycle
+# ladder. No I/O.
 #
 # Ladder:
-#   cycle < threshold        → kind="default",   query=base_query
-#   cycle == threshold       → kind="v1_year",   query="<base> <yyyy>" (if year known)
-#   cycle == threshold + N   → kind="v4_tracks", query=N×3 distinctive tokens
-#   pool exhausted           → kind="exhausted", query=None (search loop short-circuits)
+#   cycle < threshold        → kind="default",     query=base_query (wildcarded)
+#   cycle == threshold       → kind="unwild",      query=base_query_unwild
+#   cycle == threshold + 1   → kind="unwild_year", query="<unwild> <yyyy>" (if year known)
+#   cycle == threshold + N   → kind="track",       query=<one track title>, idx N
+#   queue drained            → kind="exhausted",   query=None (search loop short-circuits)
 #
 # Year is treated as unknown when None or starts with "0000" (the AlbumRecord
-# fallback string when MusicBrainz has no year). When unknown, V1 is skipped
-# and V4 starts at the threshold cycle.
+# fallback string when MusicBrainz has no year). When unknown, the
+# unwild_year tier is skipped and the per-track tier starts one cycle earlier.
+#
+# Single-track albums skip the per-track tier entirely (lone-track-title
+# queries match unrelated albums too easily for the 0.15 distance gate).
 # ---------------------------------------------------------------------------
 
 
@@ -211,39 +225,51 @@ class SearchVariant:
     label written to `search_log.variant`. `kind` drives loop behaviour:
     "exhausted" tells the search loop to short-circuit before hitting slskd.
     """
-    kind: Literal["default", "v1_year", "v4_tracks", "exhausted"]
+    kind: Literal["default", "unwild", "unwild_year", "track", "exhausted"]
     query: str | None  # None for kind="exhausted"
-    tag: str           # "default" | "v1_year" | "v4_tracks_<idx>" | "exhausted"
-    slice_index: int | None  # V4 only, for diagnostics
+    tag: str           # "default" | "unwild" | "unwild_year" | "track_<idx>" | "exhausted"
+    slice_index: int | None  # track tier only, for diagnostics
 
 
-def _distinctive_token_pool(track_titles: list[str]) -> list[str]:
-    """Build the V4 token pool from track titles.
+def _per_track_queries(track_titles: list[str]) -> list[str]:
+    """Build the per-track query list.
 
-    Rules:
-      - Strip punctuation via `strip_special_chars` (already used by the query
-        builder so the pool matches what slskd will tolerate).
-      - Drop tokens of length <= 2 (mirrors `strip_short_tokens` behaviour).
-      - Dedupe case-insensitively, preserving first-seen casing.
-      - Sort by length descending; alphabetical-lowercase secondary order
-        for determinism on length ties.
+    Each track title is independently cleaned and tokenised by the same
+    pipeline that ``build_query`` uses for album titles: strip punctuation,
+    drop short tokens (<=2 chars, with the standard fallback when *all*
+    tokens are short), then cap to ``MAX_SEARCH_TOKENS``. The result is a
+    list of ready-to-issue Soulseek query strings, one per track, in
+    source-tracklist order.
+
+    Cleaning rules:
+      - Empty queries (titles that clean to nothing alpha) are skipped.
+      - Identical tokenised queries are deduplicated case-insensitively
+        so duplicate tracklist entries (e.g. two ``Archie's Theme`` tracks
+        on the Wiggles 1991 album) don't burn two cycles on the same
+        query.
+
+    No artist context is added. The album-match step (sub-count gate +
+    filename ratio + cross-check) handles disambiguation after slskd
+    returns peers, so the per-track query optimises for recall.
     """
     seen_lower: set[str] = set()
-    distinct: list[str] = []
+    queries: list[str] = []
     for title in track_titles:
         cleaned = strip_special_chars(title)
-        for token in cleaned.split():
-            if len(token) <= 2:
-                continue
-            lower = token.lower()
-            if lower in seen_lower:
-                continue
-            seen_lower.add(lower)
-            distinct.append(token)
-
-    # Sort by (-length, lowercase) for deterministic ordering on length ties.
-    distinct.sort(key=lambda t: (-len(t), t.lower()))
-    return distinct
+        tokens = cleaned.split()
+        tokens = strip_short_tokens(tokens)
+        if not tokens:
+            continue
+        tokens = cap_tokens(tokens)
+        query = " ".join(tokens)
+        if not query:
+            continue
+        key = query.lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        queries.append(query)
+    return queries
 
 
 def _year_is_known(year: str | None) -> bool:
@@ -251,9 +277,9 @@ def _year_is_known(year: str | None) -> bool:
 
     MB sometimes returns a fallback "0000" year, an empty string, whitespace,
     or non-numeric placeholders ("unknown"). Treat all of those as unknown
-    so the V1 cycle does not append a meaningless year token to the slskd
-    query (degrading match recall). Also rejects shorter-than-4-char numeric
-    prefixes ("199") because they are clearly malformed.
+    so the unwild_year cycle does not append a meaningless year token to the
+    slskd query (degrading match recall). Also rejects shorter-than-4-char
+    numeric prefixes ("199") because they are clearly malformed.
     """
     return (
         year is not None
@@ -267,6 +293,7 @@ def select_variant(
     search_attempts: int,
     threshold: int,
     base_query: str,
+    base_query_unwild: str,
     year: str | None,
     track_titles: list[str],
 ) -> SearchVariant:
@@ -276,8 +303,13 @@ def select_variant(
 
     `search_attempts` is how many search cycles this album has already
     consumed (0 on first attempt). `threshold` is the count at which
-    escalation begins. Below the threshold the default query repeats; at
-    and above, the ladder advances by one step per cycle.
+    escalation begins. Below the threshold the wildcarded default query
+    repeats; at and above, the ladder advances by one step per cycle:
+
+      threshold     → unwild      (un-wildcarded base)
+      threshold+1   → unwild_year (un-wildcarded base + year, if known)
+      threshold+N   → track_<i>   (one bare track title per cycle)
+      drained       → exhausted
     """
     if search_attempts < threshold:
         return SearchVariant(
@@ -287,29 +319,33 @@ def select_variant(
             slice_index=None,
         )
 
-    year_known = _year_is_known(year)
     esc_idx = search_attempts - threshold
 
-    if esc_idx == 0 and year_known:
+    if esc_idx == 0:
+        return SearchVariant(
+            kind="unwild",
+            query=base_query_unwild,
+            tag="unwild",
+            slice_index=None,
+        )
+
+    year_known = _year_is_known(year)
+
+    if esc_idx == 1 and year_known:
         # year_known guarantees year is not None; year[:4] yields the 4-char
         # year prefix (e.g. "1991" from "1991" or "1991-08-01").
         assert year is not None  # for type checker
         return SearchVariant(
-            kind="v1_year",
-            query=f"{base_query} {year[:4]}",
-            tag="v1_year",
+            kind="unwild_year",
+            query=f"{base_query_unwild} {year[:4]}",
+            tag="unwild_year",
             slice_index=None,
         )
 
-    # V1 either ran (esc_idx 0 with year) or was skipped (year unknown).
-    v4_start = 1 if year_known else 0
-    v4_idx = esc_idx - v4_start
-
-    # Skip V4 entirely for single-track albums. A lone track title produces
-    # slskd matches that pass the 0.15 distance gate too easily — the query
-    # collapses to "single song" tokens and unrelated albums on Soulseek that
-    # happen to share that song name slip through. Multi-track pools dilute
-    # this risk by combining several distinctive tokens per slice.
+    # Skip the per-track tier entirely for single-track albums. A lone track
+    # title produces slskd matches that pass the 0.15 distance gate too
+    # easily — the query collapses to "single song" tokens and unrelated
+    # albums on Soulseek that happen to share that song name slip through.
     if len(track_titles) <= 1:
         return SearchVariant(
             kind="exhausted",
@@ -318,9 +354,11 @@ def select_variant(
             slice_index=None,
         )
 
-    pool = _distinctive_token_pool(track_titles)
-    slice_start = v4_idx * 3
-    if slice_start >= len(pool):
+    track_start_offset = 2 if year_known else 1
+    track_idx = esc_idx - track_start_offset
+
+    queries = _per_track_queries(track_titles)
+    if track_idx < 0 or track_idx >= len(queries):
         return SearchVariant(
             kind="exhausted",
             query=None,
@@ -328,10 +366,9 @@ def select_variant(
             slice_index=None,
         )
 
-    slice_tokens = pool[slice_start : slice_start + 3]
     return SearchVariant(
-        kind="v4_tracks",
-        query=" ".join(slice_tokens),
-        tag=f"v4_tracks_{v4_idx}",
-        slice_index=v4_idx,
+        kind="track",
+        query=queries[track_idx],
+        tag=f"track_{track_idx}",
+        slice_index=track_idx,
     )

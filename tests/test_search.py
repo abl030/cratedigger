@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.search import (
     build_query, strip_special_chars, strip_short_tokens,
     wildcard_artist_tokens, cap_tokens,
-    SearchVariant, _distinctive_token_pool, select_variant,
+    _per_track_queries, select_variant,
 )
 
 
@@ -231,193 +231,247 @@ class TestBuildQuery(unittest.TestCase):
         self.assertEqual(q, "Abbey Road")
         self.assertNotIn("*eatles", q)
 
+    def test_wildcard_artist_false_keeps_artist_literal(self):
+        # wildcard_artist=False: artist prepended but NOT wildcarded.
+        # Used by the un-wildcarded escalation tier — the wildcarded form
+        # bypasses Soulseek's artist banlist but is silently dropped by many
+        # peer clients, costing ~95% of recall.
+        q = build_query("The Wiggles", "The Wiggles", wildcard_artist=False)
+        self.assertEqual(q, "The Wiggles")
 
-class TestDistinctiveTokenPool(unittest.TestCase):
-    """Token pool ordering: dedup case-insensitive, sort length-desc, drop short."""
+    def test_wildcard_artist_false_non_self_titled(self):
+        q = build_query(
+            "The Beatles", "Abbey Road", wildcard_artist=False,
+        )
+        self.assertEqual(q, "The Beatles Abbey Road")
+        self.assertNotIn("*eatles", q or "")
 
-    def test_basic_length_desc_sort(self):
-        pool = _distinctive_token_pool(["Tallahassee", "Idylls", "Peg"])
-        # All >2 chars; sorted by length desc
-        self.assertEqual(pool, ["Tallahassee", "Idylls", "Peg"])
+
+class TestPerTrackQueries(unittest.TestCase):
+    """Per-track queries: cleaned title tokens, no artist, no wildcards.
+
+    Each track title becomes one full query; no AND-mash across multiple
+    tracks. The album-match scoring step (sub-count gate + filename ratio
+    + cross-check) disambiguates wrong albums after slskd responses come
+    back, so we want maximal recall per query.
+    """
+
+    def test_basic_titles_in_original_order(self):
+        # Cleaned with strip_special_chars; preserves source-tracklist order.
+        out = _per_track_queries([
+            "Get Ready to Wiggle",
+            "Rock-A-Bye Your Bear",
+            "Dorothy the Dinosaur",
+        ])
+        # Short tokens (<=2) dropped: "to" → drop
+        # Token cap = MAX_SEARCH_TOKENS (4)
+        self.assertEqual(out, [
+            "Get Ready Wiggle",
+            "Rock-A-Bye Your Bear",
+            "Dorothy the Dinosaur",
+        ])
+
+    def test_strips_punctuation(self):
+        # Apostrophes / commas / periods stripped via strip_special_chars
+        out = _per_track_queries(["Don't Stop", "Hum, Sound"])
+        self.assertEqual(out, ["Don Stop", "Hum Sound"])
+
+    def test_dedupes_case_insensitively(self):
+        # Wiggles tracklist has two "Archie's Theme" entries — emit once.
+        out = _per_track_queries([
+            "Archie's Theme", "ARCHIE'S theme", "Glub Glub Train",
+        ])
+        self.assertEqual(out, ["Archie Theme", "Glub Glub Train"])
+
+    def test_skips_titles_that_clean_to_empty(self):
+        # "??" → no alpha after strip_special_chars → query empty → skip
+        out = _per_track_queries(["??", "Real Track"])
+        self.assertEqual(out, ["Real Track"])
 
     def test_drops_short_tokens(self):
-        # Tokens of length <=2 are dropped
-        pool = _distinctive_token_pool(["Of A Hum", "In It"])
-        # "Of", "A", "In", "It" all dropped; "Hum" kept (3 chars)
-        self.assertEqual(pool, ["Hum"])
+        # "A" (1 char) and "Go" (2 chars) dropped, "He" (2 chars) dropped.
+        # "A-Wooing" stays — hyphen kept by strip_special_chars.
+        out = _per_track_queries(["A Froggy He Would A-Wooing Go"])
+        self.assertEqual(out, ["Froggy Would A-Wooing"])
 
-    def test_dedupe_case_insensitive_preserves_first_seen(self):
-        # First-seen casing is preserved
-        pool = _distinctive_token_pool(["Hello World", "hello there", "WORLD peace"])
-        # "Hello" (kept), "World" (kept), "hello" dropped (dup), "there" kept,
-        # "WORLD" dropped (dup), "peace" kept
-        # By length desc: "there"(5), "peace"(5), "Hello"(5), "World"(5)
-        # Stable secondary alphabetical lowercase: hello, peace, there, world
-        self.assertEqual(set(pool), {"Hello", "World", "there", "peace"})
-        # All kept in case from first-seen
-        self.assertIn("Hello", pool)
-        self.assertIn("World", pool)
-        self.assertNotIn("hello", pool)
-        self.assertNotIn("WORLD", pool)
-
-    def test_strips_special_chars(self):
-        pool = _distinctive_token_pool(["Don't Stop", "Hum, Sound"])
-        # "Don" "t" "Stop" "Hum" "Sound" → drop t (1 char)
-        # Remaining: ["Don", "Stop", "Hum", "Sound"] → length desc
-        self.assertEqual(pool, ["Sound", "Stop", "Don", "Hum"])
+    def test_caps_long_titles_at_max_tokens(self):
+        # MAX_SEARCH_TOKENS = 4 — keep the four longest, restore original order.
+        # Tokens: One(3), Two(3), Three(5), Four(4), Five(4), Six(3), Seven(5).
+        # Longest 4 = {Three, Seven, Four, Five}; restored order in source.
+        out = _per_track_queries(["One Two Three Four Five Six Seven"])
+        self.assertEqual(out, ["Three Four Five Seven"])
 
     def test_empty_input(self):
-        self.assertEqual(_distinctive_token_pool([]), [])
+        self.assertEqual(_per_track_queries([]), [])
 
-    def test_all_short_tokens(self):
-        # If every token is length <=2, pool is empty
-        self.assertEqual(_distinctive_token_pool(["A B", "If So", "Of It"]), [])
-
-    def test_sort_is_stable_deterministic(self):
-        # Same-length tokens should be ordered deterministically (alpha lowercase)
-        pool = _distinctive_token_pool(["Delta Alpha Gamma"])
-        # All length 5, secondary sort alphabetical lowercase
-        self.assertEqual(pool, ["Alpha", "Delta", "Gamma"])
+    def test_all_short_tokens_title_falls_back(self):
+        # strip_short_tokens keeps originals when ALL tokens are short
+        out = _per_track_queries(["Of It"])
+        self.assertEqual(out, ["Of It"])
 
 
 class TestSelectVariant(unittest.TestCase):
-    """Variant generator ladder — pure decision logic via subTest table."""
+    """Variant generator ladder — pure decision logic.
 
-    # Reusable token pools
-    POOL_BIG = ["Tallahassee", "Idylls", "Frontier", "Treasure", "Going", "Peg"]
-    # _distinctive_token_pool sorted: Tallahassee(11), Treasure(8), Frontier(8),
-    # Idylls(6), Going(5), Peg(3) → stable alpha for ties
-    # → ["Tallahassee", "Frontier", "Treasure", "Idylls", "Going", "Peg"]
+    New ladder (post-Wiggles-1991 forensics):
+      cycle < threshold       → default     (wildcarded base)
+      cycle == threshold      → unwild      (un-wildcarded base)
+      cycle == threshold + 1  → unwild_year (un-wild base + year, if known)
+      cycle == threshold + N  → track_<i>   (one bare track title per cycle)
+      pool drained            → exhausted
 
-    POOL_SEVEN = ["Aaaaaaa", "Bbbbbb", "Ccccc", "Dddd", "Eee", "Fff", "Ggg"]
-    # length: 7,6,5,4,3,3,3 → sorted desc + alpha lowercase tie-break
-    # → ["Aaaaaaa", "Bbbbbb", "Ccccc", "Dddd", "Eee", "Fff", "Ggg"]
+    The wildcarded default form bypasses Soulseek's per-peer artist banlist
+    but is silently dropped by ~95% of peer clients (live A/B test:
+    `the wiggles 1991` → 241 hits vs `*he *iggles 1991` → 14 hits). The
+    un-wildcarded tiers re-acquire that recall before the per-track tier
+    fans out to peers who only share single tracks.
+    """
+
+    WIGGLES_TITLES = [
+        "Get Ready to Wiggle",
+        "Rock-A-Bye Your Bear",
+        "Dorothy the Dinosaur",
+        "Mischief the Monkey",
+    ]
 
     def test_default_branch_attempts_below_threshold(self):
-        # cycles 0-4 with threshold=5 all return default
-        cases = [
-            ("attempt_0", 0),
-            ("attempt_1", 1),
-            ("attempt_2", 2),
-            ("attempt_3", 3),
-            ("attempt_4", 4),
-        ]
-        for desc, attempts in cases:
-            with self.subTest(desc=desc, attempts=attempts):
+        # Cycles 0..threshold-1 all emit the wildcarded default.
+        for attempts in range(5):
+            with self.subTest(attempts=attempts):
                 v = select_variant(
                     search_attempts=attempts,
                     threshold=5,
-                    base_query="*ountain *oats Tallahassee",
+                    base_query="*he *iggles",
+                    base_query_unwild="The Wiggles",
                     year="1991",
-                    track_titles=["Tallahassee", "Idylls"],
+                    track_titles=self.WIGGLES_TITLES,
                 )
                 self.assertEqual(v.kind, "default")
-                self.assertEqual(v.query, "*ountain *oats Tallahassee")
+                self.assertEqual(v.query, "*he *iggles")
                 self.assertEqual(v.tag, "default")
                 self.assertIsNone(v.slice_index)
 
-    def test_v1_year_at_threshold_with_known_year(self):
+    def test_unwild_at_threshold(self):
+        # Cycle == threshold: emit the un-wildcarded base query.
         v = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="*he *eatles Abbey Road",
-            year="1969",
-            track_titles=["Something", "Octopus's Garden"],
+            base_query="*he *iggles",
+            base_query_unwild="The Wiggles",
+            year="1991",
+            track_titles=self.WIGGLES_TITLES,
         )
-        self.assertEqual(v.kind, "v1_year")
-        self.assertEqual(v.query, "*he *eatles Abbey Road 1969")
-        self.assertEqual(v.tag, "v1_year")
+        self.assertEqual(v.kind, "unwild")
+        self.assertEqual(v.query, "The Wiggles")
+        self.assertEqual(v.tag, "unwild")
         self.assertIsNone(v.slice_index)
 
-    def test_v1_year_with_long_date_uses_4char_prefix(self):
-        v = select_variant(
-            search_attempts=5,
-            threshold=5,
-            base_query="base",
-            year="1991-08-01",
-            track_titles=["Track"],
-        )
-        self.assertEqual(v.kind, "v1_year")
-        self.assertEqual(v.query, "base 1991")
-        self.assertEqual(v.tag, "v1_year")
-
-    def test_v4_first_slice_after_v1(self):
-        # cycle 6 with year known → V4 slice 0 (first 3 tokens of pool)
+    def test_unwild_year_at_threshold_plus_one(self):
         v = select_variant(
             search_attempts=6,
             threshold=5,
-            base_query="base",
+            base_query="*he *iggles",
+            base_query_unwild="The Wiggles",
             year="1991",
-            track_titles=self.POOL_BIG,
+            track_titles=self.WIGGLES_TITLES,
         )
-        self.assertEqual(v.kind, "v4_tracks")
-        self.assertEqual(v.tag, "v4_tracks_0")
-        self.assertEqual(v.slice_index, 0)
-        # Pool: Tallahassee, Frontier, Treasure, Idylls, Going, Peg
-        # First 3
-        self.assertEqual(v.query, "Tallahassee Frontier Treasure")
+        self.assertEqual(v.kind, "unwild_year")
+        self.assertEqual(v.query, "The Wiggles 1991")
+        self.assertEqual(v.tag, "unwild_year")
 
-    def test_v4_second_slice(self):
+    def test_unwild_year_uses_4char_prefix(self):
+        v = select_variant(
+            search_attempts=6,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year="1991-08-01",
+            track_titles=self.WIGGLES_TITLES,
+        )
+        self.assertEqual(v.kind, "unwild_year")
+        self.assertEqual(v.query, "base 1991")
+
+    def test_track_tier_after_unwild_year(self):
+        # Cycle threshold+2 → track_0 (first track title).
         v = select_variant(
             search_attempts=7,
             threshold=5,
-            base_query="base",
+            base_query="*he *iggles",
+            base_query_unwild="The Wiggles",
             year="1991",
-            track_titles=self.POOL_BIG,
+            track_titles=self.WIGGLES_TITLES,
         )
-        self.assertEqual(v.kind, "v4_tracks")
-        self.assertEqual(v.tag, "v4_tracks_1")
-        self.assertEqual(v.slice_index, 1)
-        self.assertEqual(v.query, "Idylls Going Peg")
+        self.assertEqual(v.kind, "track")
+        self.assertEqual(v.tag, "track_0")
+        self.assertEqual(v.slice_index, 0)
+        # First Wiggles title cleaned: "Get Ready to Wiggle" → "Get Ready Wiggle"
+        # ("to" dropped as short token).
+        self.assertEqual(v.query, "Get Ready Wiggle")
 
-    def test_year_none_skips_v1_goes_to_v4(self):
-        # cycle 5 with year=None → V4 slice 0 directly
-        v = select_variant(
+    def test_track_tier_advances_per_cycle(self):
+        # Each cycle past unwild_year emits the next track title.
+        cases = [
+            (7, "track_0", 0, "Get Ready Wiggle"),
+            (8, "track_1", 1, "Rock-A-Bye Your Bear"),
+            (9, "track_2", 2, "Dorothy the Dinosaur"),
+            (10, "track_3", 3, "Mischief the Monkey"),
+            (11, "exhausted", None, None),
+        ]
+        for attempts, expected_tag, expected_slice, expected_query in cases:
+            with self.subTest(attempts=attempts, tag=expected_tag):
+                v = select_variant(
+                    search_attempts=attempts,
+                    threshold=5,
+                    base_query="*he *iggles",
+                    base_query_unwild="The Wiggles",
+                    year="1991",
+                    track_titles=self.WIGGLES_TITLES,
+                )
+                self.assertEqual(v.tag, expected_tag)
+                self.assertEqual(v.slice_index, expected_slice)
+                self.assertEqual(v.query, expected_query)
+
+    def test_year_unknown_skips_unwild_year_tier(self):
+        # year=None: cycle threshold → unwild, threshold+1 → track_0
+        v_unwild = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
             year=None,
-            track_titles=self.POOL_BIG,
+            track_titles=self.WIGGLES_TITLES,
         )
-        self.assertEqual(v.kind, "v4_tracks")
-        self.assertEqual(v.tag, "v4_tracks_0")
-        self.assertEqual(v.slice_index, 0)
-        self.assertEqual(v.query, "Tallahassee Frontier Treasure")
+        self.assertEqual(v_unwild.kind, "unwild")
+
+        v_track0 = select_variant(
+            search_attempts=6,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year=None,
+            track_titles=self.WIGGLES_TITLES,
+        )
+        self.assertEqual(v_track0.kind, "track")
+        self.assertEqual(v_track0.tag, "track_0")
+        self.assertEqual(v_track0.query, "Get Ready Wiggle")
 
     def test_year_0000_treated_as_unknown(self):
-        # Literal "0000" string → unknown → skip V1
-        v = select_variant(
-            search_attempts=5,
-            threshold=5,
-            base_query="base",
-            year="0000",
-            track_titles=self.POOL_BIG,
-        )
-        self.assertEqual(v.kind, "v4_tracks")
-        self.assertEqual(v.tag, "v4_tracks_0")
-        self.assertEqual(v.slice_index, 0)
-
-    def test_year_0000_dash_treated_as_unknown(self):
-        # "0000-00-00" → also unknown
-        v = select_variant(
-            search_attempts=5,
-            threshold=5,
-            base_query="base",
-            year="0000-00-00",
-            track_titles=self.POOL_BIG,
-        )
-        self.assertEqual(v.kind, "v4_tracks")
-        self.assertEqual(v.tag, "v4_tracks_0")
-        self.assertEqual(v.slice_index, 0)
+        # "0000" / "0000-00-00" → MB-fallback unknown → skip unwild_year.
+        for bad_year in ("0000", "0000-00-00"):
+            with self.subTest(year=bad_year):
+                v = select_variant(
+                    search_attempts=6,
+                    threshold=5,
+                    base_query="*ase",
+                    base_query_unwild="base",
+                    year=bad_year,
+                    track_titles=self.WIGGLES_TITLES,
+                )
+                # threshold+1 with year unknown → track_0, not unwild_year.
+                self.assertEqual(v.kind, "track")
+                self.assertEqual(v.tag, "track_0")
 
     def test_malformed_year_strings_treated_as_unknown(self):
-        """Year strings that aren't a 4-char numeric prefix → V4, not V1.
-
-        Adversarial review A2: the original ``_year_is_known`` only checked
-        ``startswith("0000")`` so "0", "", whitespace, "unknown", and short
-        numeric prefixes like "199" all leaked through and produced a V1
-        query that appended a meaningless year token.
-        """
         bad_years = [
             ("single_digit", "0"),
             ("empty_string", ""),
@@ -428,163 +482,172 @@ class TestSelectVariant(unittest.TestCase):
         for desc, year in bad_years:
             with self.subTest(desc=desc, year=repr(year)):
                 v = select_variant(
-                    search_attempts=5,
+                    search_attempts=6,
                     threshold=5,
-                    base_query="base",
+                    base_query="*ase",
+                    base_query_unwild="base",
                     year=year,
-                    track_titles=self.POOL_BIG,
+                    track_titles=self.WIGGLES_TITLES,
                 )
-                self.assertEqual(v.kind, "v4_tracks")
-                self.assertEqual(v.tag, "v4_tracks_0")
-                self.assertEqual(v.slice_index, 0)
+                self.assertEqual(v.kind, "track")
+                self.assertEqual(v.tag, "track_0")
 
-    def test_empty_tracks_with_year_v1_then_exhausted(self):
-        # cycle 5: year present → v1_year (still works without tracks)
+    def test_empty_tracks_with_year_unwild_then_unwild_year_then_exhausted(self):
+        # No tracks but year known: unwild + unwild_year fire, then exhausted.
         v5 = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
             year="1991",
             track_titles=[],
         )
-        self.assertEqual(v5.kind, "v1_year")
-        # cycle 6: V4 with empty pool → exhausted
+        self.assertEqual(v5.kind, "unwild")
         v6 = select_variant(
             search_attempts=6,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
             year="1991",
             track_titles=[],
         )
-        self.assertEqual(v6.kind, "exhausted")
-        self.assertIsNone(v6.query)
-        self.assertEqual(v6.tag, "exhausted")
-        self.assertIsNone(v6.slice_index)
+        self.assertEqual(v6.kind, "unwild_year")
+        v7 = select_variant(
+            search_attempts=7,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year="1991",
+            track_titles=[],
+        )
+        self.assertEqual(v7.kind, "exhausted")
 
-    def test_empty_tracks_no_year_immediate_exhausted(self):
-        # cycle 5, year=None → skip V1 → V4 with empty pool → exhausted
-        v = select_variant(
+    def test_empty_tracks_no_year_unwild_then_exhausted(self):
+        v5 = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
             year=None,
             track_titles=[],
         )
-        self.assertEqual(v.kind, "exhausted")
-        self.assertIsNone(v.query)
-        self.assertEqual(v.tag, "exhausted")
-
-    def test_dedup_after_pool_overshoots(self):
-        # All-duplicate-after-dedupe titles → small pool
-        v = select_variant(
-            search_attempts=10,  # esc_idx=5, v4_idx=4, slice_start=12
-            threshold=5,
-            base_query="base",
-            year="1991",
-            track_titles=["Hello hello HELLO", "hello"],
-        )
-        # Pool: ["Hello"] (only 1 distinct token after case-insensitive dedup)
-        # slice_start = 12 (or any large index) >= 1 → exhausted
-        self.assertEqual(v.kind, "exhausted")
-
-    def test_cycle_100_with_3_token_pool_exhausted(self):
-        v = select_variant(
-            search_attempts=100,
-            threshold=5,
-            base_query="base",
-            year="1991",
-            track_titles=["Alpha Beta Gamma"],
-        )
-        # Pool size 3 → only one V4 slice (slice 0)
-        # esc_idx=95, v4_idx=94 → way past pool
-        self.assertEqual(v.kind, "exhausted")
-
-    def test_seven_token_pool_with_year_full_ladder(self):
-        # POOL_SEVEN length 7. With year present:
-        # cycle 5 → v1_year
-        # cycle 6 → v4_tracks_0 tokens 0-2
-        # cycle 7 → v4_tracks_1 tokens 3-5
-        # cycle 8 → v4_tracks_2 tokens 6-6 (single token)
-        # cycle 9 → exhausted
-        cases = [
-            (5, "v1_year", None, "base 1991"),
-            (6, "v4_tracks", 0, "Aaaaaaa Bbbbbb Ccccc"),
-            (7, "v4_tracks", 1, "Dddd Eee Fff"),
-            (8, "v4_tracks", 2, "Ggg"),
-            (9, "exhausted", None, None),
-        ]
-        for attempts, kind, slice_idx, expected_query in cases:
-            with self.subTest(attempts=attempts, kind=kind):
-                v = select_variant(
-                    search_attempts=attempts,
-                    threshold=5,
-                    base_query="base",
-                    year="1991",
-                    track_titles=self.POOL_SEVEN,
-                )
-                self.assertEqual(v.kind, kind)
-                self.assertEqual(v.slice_index, slice_idx)
-                self.assertEqual(v.query, expected_query)
-
-    def test_v4_tag_format_exact(self):
-        # Tag for V4 must be exactly "v4_tracks_<idx>"
-        for idx in [0, 1, 2, 5, 17]:
-            with self.subTest(idx=idx):
-                attempts = 5 + 1 + idx  # threshold + v1 + idx
-                # Build a pool large enough for the slice
-                pool_titles = [f"Token{n:03d}xxxx" for n in range((idx + 1) * 3)]
-                v = select_variant(
-                    search_attempts=attempts,
-                    threshold=5,
-                    base_query="base",
-                    year="1991",
-                    track_titles=pool_titles,
-                )
-                self.assertEqual(v.kind, "v4_tracks")
-                self.assertEqual(v.tag, f"v4_tracks_{idx}")
-                self.assertEqual(v.slice_index, idx)
-
-    def test_single_track_skips_v4_after_v1(self):
-        """Albums with one track must not enter V4 — the lone track title
-        produces matches that slip through the 0.15 distance filter too easily.
-        With a known year, V1 still runs at the threshold; the next cycle
-        exhausts immediately instead of issuing a single-token track query.
-        """
-        # Cycle 5: V1 year (still useful for single-track albums)
-        v5 = select_variant(
-            search_attempts=5,
-            threshold=5,
-            base_query="base",
-            year="1991",
-            track_titles=["Lonely Track"],
-        )
-        self.assertEqual(v5.kind, "v1_year")
-        # Cycle 6: would be V4 slice 0 — must short-circuit to exhausted.
+        self.assertEqual(v5.kind, "unwild")
         v6 = select_variant(
             search_attempts=6,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
+            year=None,
+            track_titles=[],
+        )
+        self.assertEqual(v6.kind, "exhausted")
+
+    def test_single_track_skips_track_tier(self):
+        """Albums with one track skip the per-track tier entirely.
+
+        Lone track-title queries match too many unrelated albums on Soulseek
+        that happen to share a track name; the 0.15 distance gate lets them
+        through. This was the rationale behind suppressing the old V4 tier
+        for single-track albums and still applies to the new track tier.
+        """
+        # Cycle 5: unwild still useful (full-recall artist query).
+        v5 = select_variant(
+            search_attempts=5,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
             year="1991",
             track_titles=["Lonely Track"],
         )
-        self.assertEqual(v6.kind, "exhausted")
-        self.assertIsNone(v6.query)
-        self.assertEqual(v6.tag, "exhausted")
-        self.assertIsNone(v6.slice_index)
+        self.assertEqual(v5.kind, "unwild")
+        # Cycle 6: unwild_year still useful.
+        v6 = select_variant(
+            search_attempts=6,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year="1991",
+            track_titles=["Lonely Track"],
+        )
+        self.assertEqual(v6.kind, "unwild_year")
+        # Cycle 7: would be track_0 — must short-circuit to exhausted.
+        v7 = select_variant(
+            search_attempts=7,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year="1991",
+            track_titles=["Lonely Track"],
+        )
+        self.assertEqual(v7.kind, "exhausted")
+        self.assertIsNone(v7.query)
+        self.assertEqual(v7.tag, "exhausted")
 
-    def test_single_track_no_year_immediate_exhausted(self):
-        """One track and no year → V1 is skipped, V4 is suppressed → exhausted
-        on the first escalation cycle."""
-        v = select_variant(
+    def test_single_track_no_year_unwild_then_exhausted(self):
+        # year=None, 1 track: unwild → exhausted (no unwild_year, no track tier).
+        v5 = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="base",
+            base_query="*ase",
+            base_query_unwild="base",
             year=None,
             track_titles=["Only Song"],
         )
-        self.assertEqual(v.kind, "exhausted")
-        self.assertIsNone(v.query)
-        self.assertEqual(v.tag, "exhausted")
+        self.assertEqual(v5.kind, "unwild")
+        v6 = select_variant(
+            search_attempts=6,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year=None,
+            track_titles=["Only Song"],
+        )
+        self.assertEqual(v6.kind, "exhausted")
+
+    def test_dedup_drops_repeated_titles_in_track_tier(self):
+        # Wiggles tracklist has duplicate "Archie's Theme" — emit once only.
+        titles = [
+            "Get Ready to Wiggle",
+            "Archie's Theme",
+            "ARCHIE'S theme",
+            "Glub Glub Train",
+        ]
+        cases = [
+            (7, "track_0", "Get Ready Wiggle"),
+            (8, "track_1", "Archie Theme"),
+            (9, "track_2", "Glub Glub Train"),
+            (10, "exhausted", None),
+        ]
+        for attempts, expected_tag, expected_query in cases:
+            with self.subTest(attempts=attempts, tag=expected_tag):
+                v = select_variant(
+                    search_attempts=attempts,
+                    threshold=5,
+                    base_query="*ase",
+                    base_query_unwild="base",
+                    year="1991",
+                    track_titles=titles,
+                )
+                self.assertEqual(v.tag, expected_tag)
+                self.assertEqual(v.query, expected_query)
+
+    def test_track_tag_format_exact(self):
+        # Tag for track tier must be exactly "track_<idx>".
+        titles = [f"Distinct{n:03d}xxxx" for n in range(20)]
+        for idx in (0, 1, 2, 5, 17):
+            with self.subTest(idx=idx):
+                attempts = 5 + 2 + idx  # threshold + unwild + unwild_year + idx
+                v = select_variant(
+                    search_attempts=attempts,
+                    threshold=5,
+                    base_query="*ase",
+                    base_query_unwild="base",
+                    year="1991",
+                    track_titles=titles,
+                )
+                self.assertEqual(v.kind, "track")
+                self.assertEqual(v.tag, f"track_{idx}")
+                self.assertEqual(v.slice_index, idx)
 
 if __name__ == "__main__":
     unittest.main()

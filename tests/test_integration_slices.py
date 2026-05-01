@@ -2661,11 +2661,13 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0].matched_tracks, 2)
         self.assertEqual(decoded[0].total_tracks, 2)
 
-    def test_v1_year_variant_used_when_search_attempts_at_threshold(self):
-        """Cycle 5 with year known → variant=v1_year, query includes year."""
+    def test_unwild_variant_at_threshold(self):
+        """Cycle == threshold → variant=unwild, query is un-wildcarded base."""
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
-        cfg = self._make_cfg(search_escalation_threshold=5)
+        cfg = self._make_cfg(
+            search_escalation_threshold=5, album_prepend_artist=True,
+        )
         slskd = FakeSlskdAPI()
         slskd.searches.search_text_id_sequence = [99]
         slskd.searches.add_search(search_id=99, state="Completed", responses=[])
@@ -2675,7 +2677,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-y", year=1991,
         )
-        # Bump search_attempts to the threshold — cycle 5 selects v1_year.
+        # cycle == threshold → unwild tier (un-wildcarded base query).
         db.update_request_fields(rid, search_attempts=5)
         db.set_tracks(rid, [{"track_number": 1, "title": "Hot Potato"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-y")
@@ -2684,12 +2686,43 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         result = self._cratedigger.search_for_album(album, ctx)
         self._cratedigger._log_search_result(album, result, ctx)
 
-        self.assertEqual(result.variant_tag, "v1_year")
-        # Query was the base + year suffix.
+        self.assertEqual(result.variant_tag, "unwild")
         call = slskd.searches.search_text_calls[0]
+        # No wildcard artist tokens — full-recall query.
+        self.assertNotIn("*", call.search_text)
+        self.assertIn("Wiggles", call.search_text)
+        self.assertEqual(db.search_logs[0].variant, "unwild")
+
+    def test_unwild_year_variant_at_threshold_plus_one(self):
+        """cycle == threshold+1 with year known → variant=unwild_year."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg(
+            search_escalation_threshold=5, album_prepend_artist=True,
+        )
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [99]
+        slskd.searches.add_search(search_id=99, state="Completed", responses=[])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-y", year=1991,
+        )
+        db.update_request_fields(rid, search_attempts=6)
+        db.set_tracks(rid, [{"track_number": 1, "title": "Hot Potato"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-y")
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.variant_tag, "unwild_year")
+        call = slskd.searches.search_text_calls[0]
+        self.assertNotIn("*", call.search_text)
+        self.assertIn("Wiggles", call.search_text)
         self.assertIn("1991", call.search_text)
-        # search_log persisted the variant.
-        self.assertEqual(db.search_logs[0].variant, "v1_year")
+        self.assertEqual(db.search_logs[0].variant, "unwild_year")
 
     def test_exhausted_variant_short_circuits_without_slskd_call(self):
         """search_attempts past pool size → exhausted; no slskd round-trip."""
@@ -2704,8 +2737,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-x", year=None,
         )
-        # No tracks, no year — variant ladder exhausts at cycle 5.
-        db.update_request_fields(rid, search_attempts=5)
+        # No tracks, no year. Ladder: cycle 5 → unwild, cycle 6 → exhausted
+        # (year unknown skips unwild_year, no tracks → no track tier).
+        db.update_request_fields(rid, search_attempts=6)
         # Build the AlbumRecord with an unknown-year release_date so the
         # variant generator sees year as None and falls straight to V4 →
         # exhausted (empty track pool).
@@ -2910,16 +2944,12 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(call.kwargs.get("responseLimit"),
                          cfg.search_response_limit)
 
-    def test_v4_tracks_variant_used_when_search_attempts_past_v1(self):
-        """Cycle 6 (threshold+1) with year + tracks → variant=v4_tracks_0.
+    def test_track_variant_used_after_unwild_year(self):
+        """Cycle threshold+2 with year + tracks → variant=track_0.
 
-        Mirrors test_v1_year_variant_used_when_search_attempts_at_threshold
-        but for the V4 token-slice escalation. Asserts:
-        - SearchResult.variant_tag == "v4_tracks_0"
-        - The slskd query carries the first 3 distinctive title tokens (no
-          artist tokens — V4 strips the artist prefix to bypass any name ban
-          plus the existing year/title combos that already failed).
-        - search_log persists variant='v4_tracks_0'.
+        First per-track query is the cleaned first-track title only — no
+        artist, no wildcards. Album-match scoring downstream disambiguates
+        wrong albums via the sub-count gate + filename ratio.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -2933,9 +2963,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-v4", year=1991,
         )
-        # search_attempts=6 → cycle past V1 → V4 slice 0.
-        db.update_request_fields(rid, search_attempts=6)
-        # Distinctive titles (>3 chars, varied) so the pool has at least 3.
+        # threshold(5) + unwild(1) + unwild_year(1) → cycle 7 = track_0.
+        db.update_request_fields(rid, search_attempts=7)
         db.set_tracks(rid, [
             {"track_number": 1, "title": "Tallahassee"},
             {"track_number": 2, "title": "Idylls"},
@@ -2948,18 +2977,16 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         result = self._cratedigger.search_for_album(album, ctx)
         self._cratedigger._log_search_result(album, result, ctx)
 
-        self.assertEqual(result.variant_tag, "v4_tracks_0")
+        self.assertEqual(result.variant_tag, "track_0")
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         call = slskd.searches.search_text_calls[0]
-        # V4 query is 3 distinctive title tokens — no wildcarded artist.
-        self.assertNotIn("*iggles", call.search_text)
-        # The pool sorts by length DESC then alpha; first 3 of
-        # [Tallahassee(11), Frontier(8), Treasure(8), Idylls(6)] is
-        # Tallahassee, Frontier, Treasure.
-        for tok in ("Tallahassee", "Frontier", "Treasure"):
-            self.assertIn(tok, call.search_text)
+        # Track tier query is the bare first track title — no wildcards,
+        # no artist tokens.
+        self.assertEqual(call.search_text, "Tallahassee")
+        self.assertNotIn("*", call.search_text)
+        self.assertNotIn("Wiggles", call.search_text)
         # search_log persisted the variant.
-        self.assertEqual(db.search_logs[0].variant, "v4_tracks_0")
+        self.assertEqual(db.search_logs[0].variant, "track_0")
 
     def test_slskd_error_writes_default_variant_and_null_candidates(self):
         """slskd raises during search → outcome=error, candidates=NULL.

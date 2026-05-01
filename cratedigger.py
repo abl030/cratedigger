@@ -168,6 +168,11 @@ def _select_variant_for_album(album, search_cfg, db):
         album.artist_name, album.title,
         prepend_artist=search_cfg.album_prepend_artist,
     )
+    base_query_unwild = build_query(
+        album.artist_name, album.title,
+        prepend_artist=search_cfg.album_prepend_artist,
+        wildcard_artist=False,
+    )
 
     request_id = getattr(album, "db_request_id", None)
     search_attempts = 0
@@ -222,6 +227,7 @@ def _select_variant_for_album(album, search_cfg, db):
         search_attempts=search_attempts,
         threshold=search_cfg.search_escalation_threshold,
         base_query=base_query,
+        base_query_unwild=base_query_unwild or base_query,
         year=year,
         track_titles=track_titles,
     )
