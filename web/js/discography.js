@@ -298,8 +298,97 @@ export async function addRelease(mbid, btn) {
 }
 
 /**
+ * Render the release-detail body — tracks, label links, external link,
+ * and acquire/remove action buttons — into a target element.
+ *
+ * Pure render: takes a fetched release payload (from /api/release/<mbid>
+ * or /api/discogs/release/<id>) plus the canonical release ID, writes
+ * innerHTML, returns nothing. Reused by `toggleReleaseDetail` (the
+ * artist-view expand path) and by the search-by-ID VA fallback card
+ * (`web/js/browse.js` resolveAndNavigate's VA branch — U5).
+ *
+ * Behavioural equivalence with the prior inline version is the explicit
+ * invariant: same input → same innerHTML.
+ *
+ * @param {HTMLElement} targetEl
+ * @param {string} releaseId - The canonical release ID (already normalized).
+ * @param {Object} data - Release payload from the API.
+ */
+export function renderReleaseDetail(targetEl, releaseId, data) {
+  let html = '';
+
+  // Use beets tracks if owned (has bitrate info), otherwise MB tracks
+  const hasBeets = data.beets_tracks && data.beets_tracks.length > 0;
+  const tracks = hasBeets ? data.beets_tracks : (data.tracks || []);
+
+  if (tracks.length > 0) {
+    html += '<div style="margin-bottom:6px;color:#666;font-size:0.8em;">Tracks (' + tracks.length + ')' + (hasBeets ? ' — from library' : '') + '</div>';
+    html += tracks.map(t => {
+      if (hasBeets) {
+        const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
+        const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
+        const depth = t.bitdepth && t.bitdepth > 16 ? `${t.bitdepth}bit` : '';
+        const sr = t.samplerate && t.samplerate > 44100 ? `${(t.samplerate/1000).toFixed(1)}kHz` : '';
+        const meta = [t.format, br, depth, sr].filter(Boolean).join(' ');
+        return `<div class="lib-track">
+          <span>${t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
+          <span class="lib-track-meta">${meta}</span>
+        </div>`;
+      } else {
+        const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
+        return `<div class="lib-track">
+          <span>${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
+        </div>`;
+      }
+    }).join('');
+  }
+
+  // Label links (U7) — Discogs releases carry `labels: [{id, name}]`;
+  // MB releases don't surface labels through the route layer in v1.
+  const labelLinksHtml = renderLabelLinks(data.labels);
+  if (labelLinksHtml) {
+    html += `<div class="release-labels" style="margin:4px 0;font-size:0.85em;color:#aaa;">`
+      + `<span style="color:#666;margin-right:6px;">Label:</span>${labelLinksHtml}</div>`;
+  }
+
+  // Links and actions
+  html += '<div class="release-links">';
+  const externalUrl = externalReleaseUrl(releaseId);
+  const label = sourceLabel(releaseId);
+  if (externalUrl && label) {
+    html += `<a href="${externalUrl}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${label}</a>`;
+  }
+  const actionState = buildReleaseActionState({
+    id: releaseId,
+    in_library: data.in_library,
+    beets_album_id: data.beets_album_id,
+    pipeline_status: data.pipeline_status,
+    pipeline_id: data.pipeline_id,
+    artist: data.artist_name || state.browseArtist?.name || '',
+    album: data.title || '',
+    track_count: tracks.length,
+  });
+  html += renderAcquireActionButton(actionState, {
+    addLabel: 'Add to pipeline',
+    stopPropagation: true,
+    hideDisabled: true,
+  });
+  html += renderRemoveFromBeetsButton(actionState, {
+    stopPropagation: true,
+    hideDisabled: true,
+  });
+  html += '</div>';
+
+  targetEl.innerHTML = html;
+}
+
+/**
  * Toggle release detail panel (tracks, links, actions).
- * @param {string} mbid - MusicBrainz release ID
+ * Wraps `renderReleaseDetail` with the fetch + open/close + error
+ * handling. The render itself is shared with the search-by-ID VA
+ * fallback card (U5).
+ *
+ * @param {string} mbid - MusicBrainz release ID or Discogs release ID
  */
 export async function toggleReleaseDetail(mbid) {
   const releaseId = normalizeReleaseId(mbid) || mbid;
@@ -313,70 +402,6 @@ export async function toggleReleaseDetail(mbid) {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    let html = '';
-
-    // Use beets tracks if owned (has bitrate info), otherwise MB tracks
-    const hasBeets = data.beets_tracks && data.beets_tracks.length > 0;
-    const tracks = hasBeets ? data.beets_tracks : (data.tracks || []);
-
-    if (tracks.length > 0) {
-      html += '<div style="margin-bottom:6px;color:#666;font-size:0.8em;">Tracks (' + tracks.length + ')' + (hasBeets ? ' — from library' : '') + '</div>';
-      html += tracks.map(t => {
-        if (hasBeets) {
-          const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
-          const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
-          const depth = t.bitdepth && t.bitdepth > 16 ? `${t.bitdepth}bit` : '';
-          const sr = t.samplerate && t.samplerate > 44100 ? `${(t.samplerate/1000).toFixed(1)}kHz` : '';
-          const meta = [t.format, br, depth, sr].filter(Boolean).join(' ');
-          return `<div class="lib-track">
-            <span>${t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-            <span class="lib-track-meta">${meta}</span>
-          </div>`;
-        } else {
-          const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
-          return `<div class="lib-track">
-            <span>${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-          </div>`;
-        }
-      }).join('');
-    }
-
-    // Label links (U7) — Discogs releases carry `labels: [{id, name}]`;
-    // MB releases don't surface labels through the route layer in v1.
-    const labelLinksHtml = renderLabelLinks(data.labels);
-    if (labelLinksHtml) {
-      html += `<div class="release-labels" style="margin:4px 0;font-size:0.85em;color:#aaa;">`
-        + `<span style="color:#666;margin-right:6px;">Label:</span>${labelLinksHtml}</div>`;
-    }
-
-    // Links and actions
-    html += '<div class="release-links">';
-    const externalUrl = externalReleaseUrl(releaseId);
-    const label = sourceLabel(releaseId);
-    if (externalUrl && label) {
-      html += `<a href="${externalUrl}" target="_blank" rel="noopener" style="color:#6af;font-size:0.85em;" onclick="event.stopPropagation()">${label}</a>`;
-    }
-    const actionState = buildReleaseActionState({
-      id: releaseId,
-      in_library: data.in_library,
-      beets_album_id: data.beets_album_id,
-      pipeline_status: data.pipeline_status,
-      pipeline_id: data.pipeline_id,
-      artist: data.artist_name || state.browseArtist?.name || '',
-      album: data.title || '',
-      track_count: tracks.length,
-    });
-    html += renderAcquireActionButton(actionState, {
-      addLabel: 'Add to pipeline',
-      stopPropagation: true,
-      hideDisabled: true,
-    });
-    html += renderRemoveFromBeetsButton(actionState, {
-      stopPropagation: true,
-      hideDisabled: true,
-    });
-    html += '</div>';
-
-    el.innerHTML = html;
+    renderReleaseDetail(el, releaseId, data);
   } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
 }
