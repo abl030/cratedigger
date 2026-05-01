@@ -608,6 +608,7 @@ class TestRouteContractAudit(unittest.TestCase):
 
     CLASSIFIED_ROUTES = {
         "/api/search",
+        "/api/browse/resolve",
         "/api/library/artist",
         "/api/artist/compare",
         r"^/api/artist/([a-f0-9-]+)$",
@@ -3173,6 +3174,225 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.DISCOGS_RELEASE_REQUIRED_FIELDS,
                                 "discogs release detail")
         self.assertEqual(data["beets_album_id"], 10)
+
+
+class TestSearchByIdResolveContract(_WebServerCase):
+    """Contract tests for /api/browse/resolve — the search-by-ID resolver."""
+
+    REQUIRED_FIELDS = {
+        "source", "kind", "artist_id", "artist_name",
+        "is_va", "expand_id", "leaf_id",
+    }
+
+    MB_RELEASE_ID = "c1f6a2c9-bcba-4e69-96f5-233c85b2830a"
+    MB_RG_ID = "11111111-1111-1111-1111-111111111111"
+    MB_ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+    MB_VA_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
+
+    def test_mb_release_resolved(self):
+        """Happy path: ?source=mb&id=<mbid>&kind=release returns leaf shape."""
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_release.return_value = {
+                "id": self.MB_RELEASE_ID,
+                "title": "Test Release",
+                "artist_id": self.MB_ARTIST_ID,
+                "artist_name": "Test Artist",
+                "release_group_id": self.MB_RG_ID,
+            }
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=release")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS, "resolve response")
+        self.assertEqual(data["source"], "mb")
+        self.assertEqual(data["kind"], "release")
+        self.assertEqual(data["artist_id"], self.MB_ARTIST_ID)
+        self.assertEqual(data["artist_name"], "Test Artist")
+        self.assertFalse(data["is_va"])
+        self.assertEqual(data["expand_id"], self.MB_RG_ID)
+        self.assertEqual(data["leaf_id"], self.MB_RELEASE_ID)
+
+    def test_mb_release_group_resolved(self):
+        """Happy path: ?source=mb&id=<mbid>&kind=release-group returns group shape."""
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_release_group.return_value = {
+                "id": self.MB_RG_ID,
+                "title": "Test RG",
+                "artist_id": self.MB_ARTIST_ID,
+                "artist_name": "Test Artist",
+            }
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=release-group")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS, "resolve response")
+        self.assertEqual(data["kind"], "release-group")
+        self.assertEqual(data["expand_id"], self.MB_RG_ID)
+        self.assertIsNone(data["leaf_id"])
+
+    def test_discogs_release_resolved_with_master(self):
+        """Discogs release with non-null master_id → leaf shape, expand=master."""
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.get_release.return_value = {
+                "id": "32457180",
+                "title": "Rock Christmas",
+                "artist_id": "194",
+                "artist_name": "Various",
+                "release_group_id": "3673686",
+            }
+            status, data = self._get(
+                "/api/browse/resolve?source=discogs&id=32457180&kind=release")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS, "resolve response")
+        self.assertEqual(data["source"], "discogs")
+        self.assertEqual(data["kind"], "release")
+        self.assertEqual(data["expand_id"], "3673686")
+        self.assertEqual(data["leaf_id"], "32457180")
+        # artists[0].id == 194 → VA
+        self.assertTrue(data["is_va"])
+
+    def test_discogs_master_resolved(self):
+        """Discogs master ID → group shape, no leaf."""
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.get_master_releases.return_value = {
+                "title": "Some Master",
+                "type": "Album",
+                "first_release_date": "1997",
+                "artist_credit": "Real Artist",
+                "primary_artist_id": "3840",
+                "releases": [],
+            }
+            status, data = self._get(
+                "/api/browse/resolve?source=discogs&id=3673686&kind=master")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS, "resolve response")
+        self.assertEqual(data["kind"], "master")
+        self.assertEqual(data["expand_id"], "3673686")
+        self.assertIsNone(data["leaf_id"])
+        self.assertFalse(data["is_va"])
+
+    def test_discogs_masterless_release(self):
+        """Masterless Discogs release: release_group_id is None → expand=leaf."""
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_dg.get_release.return_value = {
+                "id": "999",
+                "title": "Masterless",
+                "artist_id": "3840",
+                "artist_name": "Some Artist",
+                "release_group_id": None,
+            }
+            status, data = self._get(
+                "/api/browse/resolve?source=discogs&id=999&kind=release")
+
+        self.assertEqual(status, 200)
+        # When master_id is None, the bare release is its own expand target
+        # so the artist view rings the masterless rg row in place.
+        self.assertEqual(data["expand_id"], "999")
+        self.assertEqual(data["leaf_id"], "999")
+
+    def test_mb_va_release(self):
+        """MB release whose artist matches VA_MBID → is_va: true."""
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_release.return_value = {
+                "id": self.MB_RELEASE_ID,
+                "title": "VA Comp",
+                "artist_id": self.MB_VA_MBID,
+                "artist_name": "Various Artists",
+                "release_group_id": self.MB_RG_ID,
+            }
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=release")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["is_va"])
+
+    def test_unknown_kind_falls_back_mb_release_to_rg(self):
+        """kind=unknown: leaf endpoint 404 → falls back to release-group."""
+        with patch("web.server.mb_api") as mock_mb:
+            from urllib.error import HTTPError
+            mock_mb.get_release.side_effect = HTTPError(
+                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+            mock_mb.get_release_group.return_value = {
+                "id": self.MB_RG_ID,
+                "title": "RG",
+                "artist_id": self.MB_ARTIST_ID,
+                "artist_name": "Artist",
+            }
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=unknown")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["kind"], "release-group")
+        # Confirms TWO upstream calls: release tried, then release-group
+        self.assertEqual(mock_mb.get_release.call_count, 1)
+        self.assertEqual(mock_mb.get_release_group.call_count, 1)
+
+    def test_unknown_kind_falls_back_discogs_release_to_master(self):
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            from urllib.error import HTTPError
+            mock_dg.get_release.side_effect = HTTPError(
+                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+            mock_dg.get_master_releases.return_value = {
+                "title": "M", "type": "Album", "first_release_date": "1997",
+                "artist_credit": "Artist", "primary_artist_id": "3840",
+                "releases": [],
+            }
+            status, data = self._get(
+                "/api/browse/resolve?source=discogs&id=3673686&kind=unknown")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["kind"], "master")
+
+    def test_kind_hint_release_does_not_probe_group_on_404(self):
+        """kind=release explicit: 404 returns 404 immediately, no group probe.
+
+        Guards the URL-disambiguation optimisation from regressing into
+        always-probe-both behaviour. If the URL said 'release', we trust it.
+        """
+        with patch("web.server.mb_api") as mock_mb:
+            from urllib.error import HTTPError
+            mock_mb.get_release.side_effect = HTTPError(
+                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=release")
+
+        self.assertEqual(status, 404)
+        # release-group endpoint MUST NOT have been called
+        self.assertEqual(mock_mb.get_release_group.call_count, 0)
+
+    def test_not_found_both_endpoints(self):
+        with patch("web.server.mb_api") as mock_mb:
+            from urllib.error import HTTPError
+            mock_mb.get_release.side_effect = HTTPError(
+                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+            mock_mb.get_release_group.side_effect = HTTPError(
+                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=unknown")
+
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    def test_missing_id(self):
+        status, data = self._get("/api/browse/resolve?source=mb")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_missing_source(self):
+        status, data = self._get(f"/api/browse/resolve?id={self.MB_RELEASE_ID}")
+        self.assertEqual(status, 400)
+
+    def test_invalid_source(self):
+        status, data = self._get(
+            f"/api/browse/resolve?source=apple&id={self.MB_RELEASE_ID}")
+        self.assertEqual(status, 400)
+
+    def test_invalid_kind(self):
+        status, data = self._get(
+            f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=garbage")
+        self.assertEqual(status, 400)
 
 
 class TestLabelRouteContracts(_WebServerCase):

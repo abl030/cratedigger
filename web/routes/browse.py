@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
+import urllib.error
 from typing import TYPE_CHECKING
 
 from lib.release_identity import (
@@ -16,6 +17,11 @@ from lib.release_identity import (
 )
 from web import cache as _cache
 from web import discogs as discogs_api
+from web.discogs import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
+from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
+# VA constants are imported directly so that test patches of `discogs_api`
+# (web.routes.browse.discogs_api) and `mb_api` (web.server.mb_api) don't
+# replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
 from web.library_artist_service import list_library_artist_rows
 from web.routes._overlay import overlay_release_rows_in_place
@@ -489,10 +495,147 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     h._json(response)  # type: ignore[attr-defined]
 
 
+# ── Search-by-ID resolver ────────────────────────────────────────────
+
+_RESOLVE_VALID_KINDS = {"release", "release-group", "master", "unknown"}
+
+
+def _resolve_mb(srv, raw_id: str, kind: str) -> dict:
+    """Resolve an MB UUID into the resolver response shape.
+
+    Tries the leaf (release) endpoint first when kind ∈ {release, unknown}.
+    Falls back to the group (release-group) endpoint only when kind=='unknown'
+    and the leaf attempt 404s — kind=='release' explicit is honored and
+    surfaces the 404 to the caller (the URL path said 'release', trust it).
+    Raises HTTPError for the caller to translate to HTTP status.
+    """
+    if kind in ("release", "unknown"):
+        try:
+            data = srv.mb_api.get_release(raw_id)
+            artist_id = data.get("artist_id") or ""
+            return {
+                "source": "mb",
+                "kind": "release",
+                "artist_id": artist_id,
+                "artist_name": data.get("artist_name") or "",
+                "is_va": artist_id == _MB_VA_ARTIST_MBID,
+                "expand_id": data.get("release_group_id") or raw_id,
+                "leaf_id": raw_id,
+            }
+        except urllib.error.HTTPError as e:
+            if e.code != 404 or kind == "release":
+                raise
+
+    # kind == 'release-group' OR (kind=='unknown' and release attempt 404'd)
+    rg = srv.mb_api.get_release_group(raw_id)
+    artist_id = rg.get("artist_id") or ""
+    return {
+        "source": "mb",
+        "kind": "release-group",
+        "artist_id": artist_id,
+        "artist_name": rg.get("artist_name") or "",
+        "is_va": artist_id == _MB_VA_ARTIST_MBID,
+        "expand_id": raw_id,
+        "leaf_id": None,
+    }
+
+
+def _resolve_discogs(raw_id: str, kind: str) -> dict:
+    """Resolve a Discogs numeric ID into the resolver response shape.
+
+    Same leaf-first / group-fallback pattern as `_resolve_mb`.
+    """
+    try:
+        numeric = int(raw_id)
+    except ValueError as e:
+        raise urllib.error.HTTPError(
+            url="", code=400, msg=f"Invalid Discogs ID: {raw_id}", hdrs=None, fp=None
+        ) from e
+
+    if kind in ("release", "unknown"):
+        try:
+            data = discogs_api.get_release(numeric)
+            # discogs_api.get_release returns artist_id and release_group_id as
+            # str-or-None; release_group_id is master_id (None when masterless).
+            artist_id = data.get("artist_id") or ""
+            rg_id = data.get("release_group_id")
+            # Masterless release: ring it in place — no parent master to expand.
+            expand_id = rg_id if rg_id else raw_id
+            return {
+                "source": "discogs",
+                "kind": "release",
+                "artist_id": artist_id,
+                "artist_name": data.get("artist_name") or "",
+                "is_va": artist_id == _DISCOGS_VA_ARTIST_ID,
+                "expand_id": expand_id,
+                "leaf_id": raw_id,
+            }
+        except urllib.error.HTTPError as e:
+            if e.code != 404 or kind == "release":
+                raise
+
+    # kind == 'master' OR (kind=='unknown' and release attempt 404'd)
+    master = discogs_api.get_master_releases(numeric)
+    artist_id = master.get("primary_artist_id") or ""
+    return {
+        "source": "discogs",
+        "kind": "master",
+        "artist_id": artist_id,
+        "artist_name": master.get("artist_credit") or "",
+        "is_va": artist_id == _DISCOGS_VA_ARTIST_ID,
+        "expand_id": raw_id,
+        "leaf_id": None,
+    }
+
+
+def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+    """Resolve a pasted MBID / Discogs ID / URL-extracted ID into the
+    artist-view drop-in target. See docs/plans/2026-05-01-002-feat-search-by-id-plan.md.
+    """
+    srv = _server()
+    raw_id = (params.get("id", [""])[0]).strip()
+    source = (params.get("source", [""])[0]).strip()
+    kind = (params.get("kind", ["unknown"])[0]).strip() or "unknown"
+
+    if not raw_id:
+        h._error("Missing 'id' parameter")  # type: ignore[attr-defined]
+        return
+    if source not in ("mb", "discogs"):
+        h._error("Missing or invalid 'source' (must be 'mb' or 'discogs')")  # type: ignore[attr-defined]
+        return
+    if kind not in _RESOLVE_VALID_KINDS:
+        h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")  # type: ignore[attr-defined]
+        return
+
+    cache_key = f"browse-resolve:{source}:{kind}:{raw_id}"
+
+    def _run() -> dict:
+        if source == "mb":
+            return _resolve_mb(srv, raw_id, kind)
+        return _resolve_discogs(raw_id, kind)
+
+    try:
+        # 24h TTL via memoize_meta default — IDs are stable; rename incidents
+        # are rare enough that staleness here doesn't justify a shorter TTL.
+        result = _cache.memoize_meta(cache_key, _run)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            h._error("not_found", 404)  # type: ignore[attr-defined]
+        else:
+            h._error(f"upstream_error: HTTP {e.code}", 502)  # type: ignore[attr-defined]
+        return
+    except urllib.error.URLError as e:
+        h._error(f"upstream_unreachable: {e}", 502)  # type: ignore[attr-defined]
+        return
+
+    h._json(result)  # type: ignore[attr-defined]
+
+
 # ── Route tables ─────────────────────────────────────────────────────
 
 GET_ROUTES: dict[str, object] = {
     "/api/search": get_search,
+    "/api/browse/resolve": get_browse_resolve,
     "/api/library/artist": get_library_artist,
     "/api/artist/compare": get_artist_compare,
     "/api/discogs/search": get_discogs_search,

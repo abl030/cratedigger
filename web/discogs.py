@@ -30,6 +30,15 @@ SEARCH_CACHE_QUERY_PREFIX_CHARS = 200
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
 LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
 
+# Canonical Various Artists artist_id sentinel. The Discogs CC0 dump uses
+# 194 as the foreign key in `release_artist` for VA-credited releases, but
+# does NOT include a matching row in the `artist` table — so the mirror's
+# `/api/artists/194` returns 404 and the artist view cannot be rendered.
+# The resolver short-circuits to a single-release / single-master fallback
+# card when a release credits this ID. Stored as a string for consistent
+# comparison against `artist_id` fields, which are always normalised to str.
+VA_ARTIST_ID = "194"
+
 
 def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> dict:
     req = urllib.request.Request(url)
