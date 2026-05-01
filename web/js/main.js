@@ -52,10 +52,19 @@ if (qInput) {
   qInput.addEventListener('input', () => {
     clearTimeout(state.searchTimer ?? undefined);
     const q = qInput.value.trim();
-    if (q.length < 2) {
+    // ID mode parses single-character inputs (Discogs IDs start at 1);
+    // other modes need at least 2 chars before searching.
+    const minLen = state.browseSearchType === 'id' ? 1 : 2;
+    if (q.length < minLen) {
       cancelBrowseSearch();
       const results = document.getElementById('results');
       if (results) results.innerHTML = '';
+      // Hide the VA fallback if it's open — without this, a stale fetch
+      // landing post-clear renders into a card the user thought they
+      // dismissed. (Token bump from cancelBrowseSearch also gates the
+      // fetch via openVaFallback's isStale check.)
+      const vaFallback = document.getElementById('va-fallback');
+      if (vaFallback) vaFallback.style.display = 'none';
       return;
     }
     state.searchTimer = window.setTimeout(() => searchArtists(q), 300);

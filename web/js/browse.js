@@ -41,6 +41,12 @@ async function findArtistOnSource(name, src) {
 export async function setBrowseSource(src) {
   if (state.browseSource === src) return;
   searchArtistsRequestToken++;
+  // Explicit user source-toggle clears any active search-by-ID ring.
+  // The source-guard in applySearchTargetAfterDiscography would mask
+  // the immediate symptom, but a paste→toggle-twice sequence (away
+  // and back) would re-apply a stale ring after the user explicitly
+  // changed contexts.
+  clearSearchTarget();
   state.browseSource = src;
   const mbBtn = document.getElementById('source-mb');
   const dgBtn = document.getElementById('source-discogs');
@@ -202,7 +208,19 @@ export async function resolveAndNavigate(q, requestToken) {
     state.browseCache = {};
   }
 
-  // Stash ring targets BEFORE openBrowseArtist triggers the discography
+  if (data.is_va) {
+    // VA fallback: bypass the artist view (the VA artist page is unworkably
+    // large) and render a single-release detail card or a master/release-group
+    // pressings list directly. Plan U5. The ring-target state fields are
+    // unused on this path (openVaFallback consumes data.leaf_id / data.expand_id
+    // directly), so we deliberately don't set them — that way state stays
+    // dormant rather than load-bearing on every entry point remembering
+    // to clear it.
+    openVaFallback(data, parsed.id, requestToken);
+    return;
+  }
+
+  // Non-VA: stash ring targets BEFORE openBrowseArtist triggers the discography
   // render — the render hook reads these to decide what to expand and ring.
   state.searchTargetId = data.leaf_id || null;
   state.searchTargetExpandId = data.expand_id || null;
@@ -216,15 +234,7 @@ export async function resolveAndNavigate(q, requestToken) {
     delete state.browseCache[data.artist_id];
   }
 
-  if (data.is_va) {
-    // VA fallback: bypass the artist view (the VA artist page is unworkably
-    // large) and render a single-release detail card or a master/release-group
-    // pressings list directly. Plan U5.
-    openVaFallback(data, parsed.id);
-    return;
-  }
-
-  // Non-VA: hand off to the existing artist view. The render hooks in
+  // Hand off to the existing artist view. The render hooks in
   // discography.js pick up state.searchTargetExpandId / state.searchTargetId
   // and apply the ring after the discography + master expansion render.
   openBrowseArtist(data.artist_id, data.artist_name);
@@ -238,18 +248,32 @@ export async function resolveAndNavigate(q, requestToken) {
  *
  * Shows the va-fallback container and hides the artist view + search results.
  *
+ * In-flight token guard: each await is gated by `requestToken !==
+ * searchArtistsRequestToken`. Unlike the artist-view path where a re-render
+ * detaches prior #rel-X nodes (so a stale write goes to detached DOM and is
+ * harmless), va-fallback-body is a stable, never-replaced node — a stale
+ * fetch landing here would scribble onto a fresh card. The isStale callback
+ * is also threaded into loadReleaseGroup so the nested write is protected.
+ *
  * @param {Object} data - resolver response
  * @param {string} parsedId - the raw pasted id (used as the leaf for kind='release')
+ * @param {number} requestToken - in-flight token from the calling searchArtists
  */
-async function openVaFallback(data, parsedId) {
+async function openVaFallback(data, parsedId, requestToken) {
   const wrap = document.getElementById('va-fallback');
   const titleEl = document.getElementById('va-fallback-title');
   const bodyEl = document.getElementById('va-fallback-body');
   if (!wrap || !titleEl || !bodyEl) return;
+  const isStale = () => requestToken !== searchArtistsRequestToken;
 
-  // Hide other Browse views
+  // Hide other Browse views. Also blank the artist-view discography so its
+  // duplicate `id="reldet-${rel.id}"` nodes don't shadow the VA fallback's
+  // own — getElementById returns the first match in document order, and
+  // the hidden artist view DOM is preserved (display:none, not removed).
   document.getElementById('results').style.display = 'none';
   document.getElementById('browse-artist').style.display = 'none';
+  const dgEl = document.getElementById('browse-discography');
+  if (dgEl) dgEl.innerHTML = '';
   const browseLabel = document.getElementById('browse-label');
   if (browseLabel) browseLabel.style.display = 'none';
   wrap.style.display = 'block';
@@ -263,11 +287,18 @@ async function openVaFallback(data, parsedId) {
         ? `${API}/api/discogs/release/${encodeURIComponent(releaseId)}`
         : `${API}/api/release/${encodeURIComponent(releaseId)}`;
       const r = await fetch(url);
+      if (isStale()) return;
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const releaseData = await r.json();
+      if (isStale()) return;
       titleEl.textContent = releaseData.title || 'Various Artists';
       bodyEl.innerHTML = '';
-      renderReleaseDetail(bodyEl, releaseId, releaseData);
+      // Pass an explicit artist override so the action toolbar's artist
+      // label doesn't fall through to whatever state.browseArtist points
+      // at (which on the VA path is the previously-viewed non-VA artist).
+      renderReleaseDetail(bodyEl, releaseId, releaseData, {
+        artist: releaseData.artist_name || data.artist_name || 'Various Artists',
+      });
       return;
     }
     // Master (Discogs) or release-group (MB) — render pressings via the
@@ -278,17 +309,31 @@ async function openVaFallback(data, parsedId) {
       ? `${API}/api/discogs/master/${encodeURIComponent(groupId)}`
       : `${API}/api/release-group/${encodeURIComponent(groupId)}`;
     const r = await fetch(groupUrl);
+    if (isStale()) return;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const groupData = await r.json();
+    if (isStale()) return;
     titleEl.textContent = groupData.title || 'Various Artists';
     // Reuse loadReleaseGroup with an explicit target. It re-fetches the
     // same endpoint internally; that's a duplicate request but only ~80ms
     // for MB and ~20ms for Discogs, and it keeps the render path identical
     // to the artist view's expansion path. Pass source explicitly so the
-    // helper hits the right API regardless of state.browseSource.
+    // helper hits the right API regardless of state.browseSource. isStale
+    // is threaded so a stale fetch can't write into our live bodyEl.
     bodyEl.innerHTML = '';
-    await loadReleaseGroup(groupId, bodyEl, { targetEl: bodyEl, source: data.source });
+    await loadReleaseGroup(groupId, bodyEl, {
+      targetEl: bodyEl,
+      source: data.source,
+      isStale,
+    });
+    if (isStale()) {
+      // loadReleaseGroup's own isStale checks should have prevented any
+      // write, but blank the card defensively in case any partial render
+      // landed before the guard fired.
+      bodyEl.innerHTML = '';
+    }
   } catch (_e) {
+    if (isStale()) return;
     bodyEl.innerHTML = '<div class="loading">Failed to load Various Artists fallback.</div>';
     titleEl.textContent = 'Various Artists';
   }

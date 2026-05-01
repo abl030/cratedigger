@@ -177,19 +177,28 @@ function cssEscape(s) {
  * @param {string} [opts.source] - 'mb' or 'discogs'. Defaults to
  *   state.browseSource. Compare view passes the explicit source so MB and
  *   Discogs pressings can be loaded independently for the same row.
+ * @param {() => boolean} [opts.isStale] - Optional callback returning true
+ *   when this load should be discarded. Checked after each await and
+ *   before any DOM write. Used by the VA fallback (where the target
+ *   element is a stable, never-replaced node so a stale write is visible)
+ *   to thread the parent flow's in-flight token down. Artist-view callers
+ *   omit it because their target #rel-X is detached on re-render.
  */
 export async function loadReleaseGroup(id, el, opts = {}) {
   const relEl = opts.targetEl || document.getElementById('rel-' + id);
   if (!relEl) return;
   if (relEl.innerHTML) { relEl.innerHTML = ''; return; }
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';
+  const isStale = opts.isStale || (() => false);
   try {
     const source = opts.source || state.browseSource;
     const isDiscogs = source === 'discogs';
     const url = isDiscogs ? `${API}/api/discogs/master/${id}` : `${API}/api/release-group/${id}`;
     const r = await fetch(url);
+    if (isStale()) return;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
+    if (isStale()) return;
     if (data.error) throw new Error(data.error);
     const all = (data.releases || []).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const official = all.filter(r => r.status === 'Official' || !r.status);
@@ -226,9 +235,13 @@ export async function loadReleaseGroup(id, el, opts = {}) {
         </div>
       `;
     }
+    if (isStale()) return;
     relEl.innerHTML = html;
     applySearchTargetAfterReleases(relEl);
-  } catch (e) { relEl.innerHTML = '<div class="loading">Failed to load</div>'; }
+  } catch (e) {
+    if (isStale()) return;
+    relEl.innerHTML = '<div class="loading">Failed to load</div>';
+  }
 }
 
 /**
@@ -308,13 +321,19 @@ export async function addRelease(mbid, btn) {
  * (`web/js/browse.js` resolveAndNavigate's VA branch — U5).
  *
  * Behavioural equivalence with the prior inline version is the explicit
- * invariant: same input → same innerHTML.
+ * invariant: same input + no opts → same innerHTML.
  *
  * @param {HTMLElement} targetEl
  * @param {string} releaseId - The canonical release ID (already normalized).
  * @param {Object} data - Release payload from the API.
+ * @param {Object} [opts]
+ * @param {string} [opts.artist] - Explicit artist name override. Used by
+ *   the VA fallback to bypass the `state.browseArtist?.name` fallback,
+ *   which on the VA path points at whatever the user previously
+ *   navigated to (or null) rather than "Various Artists". Artist-view
+ *   callers omit it and keep the original fallback chain.
  */
-export function renderReleaseDetail(targetEl, releaseId, data) {
+export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
   let html = '';
 
   // Use beets tracks if owned (has bitrate info), otherwise MB tracks
@@ -364,7 +383,7 @@ export function renderReleaseDetail(targetEl, releaseId, data) {
     beets_album_id: data.beets_album_id,
     pipeline_status: data.pipeline_status,
     pipeline_id: data.pipeline_id,
-    artist: data.artist_name || state.browseArtist?.name || '',
+    artist: opts.artist || data.artist_name || state.browseArtist?.name || '',
     album: data.title || '',
     track_count: tracks.length,
   });
