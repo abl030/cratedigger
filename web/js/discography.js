@@ -123,6 +123,11 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
  * (web/js/discography.js renderRgRow), so we ring + scroll the rg row
  * itself with no expansion step.
  *
+ * Walks ancestors and opens any collapsed `.type-body` sections — without
+ * this, a target inside Appearances, Bootleg-only, or any own/EPs/Singles
+ * typed section is invisible even after the inner releases load (those
+ * wrappers default to display:none until the .open class is added).
+ *
  * @param {HTMLElement} rgEl - The discography container that just rendered.
  */
 function applySearchTargetAfterDiscography(rgEl) {
@@ -138,6 +143,7 @@ function applySearchTargetAfterDiscography(rgEl) {
   const masterlessRow = /** @type {HTMLElement|null} */ (
     rgEl.querySelector(`.rg[data-release-id="${cssEscape(expandId)}"]`));
   if (masterlessRow) {
+    openCollapsedAncestors(masterlessRow, rgEl);
     masterlessRow.classList.add('search-target');
     masterlessRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
@@ -148,8 +154,32 @@ function applySearchTargetAfterDiscography(rgEl) {
   // clicks. The post-render hook in loadReleaseGroup applies the leaf ring.
   const inner = /** @type {HTMLElement|null} */ (rgEl.querySelector(`#rel-${cssEscape(expandId)}`));
   if (!inner) return;
+  openCollapsedAncestors(inner, rgEl);
   if (inner.innerHTML) return;  // already expanded (cache re-render); ring will re-apply on next loadReleaseGroup
   loadReleaseGroup(expandId, inner, { targetEl: inner });
+}
+
+/**
+ * Walk up from an element and add `.open` to every `.type-body` ancestor
+ * up to (but not including) `stopEl`. Used by the search-by-ID hook so
+ * the user actually sees the ringed target — without this, a target
+ * inside Appearances, Bootleg-only, or any non-Albums typed section is
+ * present in the DOM but hidden behind a collapsed `display:none`
+ * wrapper, leaving the user staring at a discography with nothing
+ * visibly highlighted.
+ *
+ * @param {HTMLElement} el
+ * @param {HTMLElement} stopEl
+ */
+function openCollapsedAncestors(el, stopEl) {
+  /** @type {HTMLElement|null} */
+  let cursor = el.parentElement;
+  while (cursor && cursor !== stopEl) {
+    if (cursor.classList.contains('type-body')) {
+      cursor.classList.add('open');
+    }
+    cursor = cursor.parentElement;
+  }
 }
 
 /**
