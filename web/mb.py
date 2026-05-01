@@ -24,6 +24,11 @@ from web import cache as _cache
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 USER_AGENT = "cratedigger-web/1.0"
 
+# Canonical Various Artists MBID. Used by the resolver and the browse-tab
+# VA short-circuit (web/js/browse.js) to keep VA off the artist-view path
+# (the MB artist→release-group endpoint takes ~23s for VA).
+VA_ARTIST_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
+
 
 def _get(url):
     req = urllib.request.Request(url)
@@ -152,6 +157,30 @@ def get_official_release_group_ids(artist_mbid):
     cached = _cache.memoize_meta(
         f"mb:artist:{artist_mbid}:official_rg_ids", _fetch)
     return set(cached)
+
+
+def get_release_group(rg_mbid):
+    """Get release-group metadata + primary artist credit.
+
+    Distinct from `get_release_group_releases` (which paginates child
+    releases). The resolver (`web/routes/browse.py:resolve_id`) needs
+    just the parent group's metadata + artist to render the artist-view
+    drop-in target.
+    """
+    def _fetch() -> dict:
+        data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?inc=artist-credits&fmt=json")
+        ac = data.get("artist-credit", [{}])
+        artist = ac[0].get("artist", {}) if ac else {}
+        return {
+            "id": data.get("id", ""),
+            "title": data.get("title", ""),
+            "type": data.get("primary-type", ""),
+            "first_release_date": data.get("first-release-date", ""),
+            "artist_id": artist.get("id", ""),
+            "artist_name": artist.get("name", ""),
+        }
+
+    return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:meta", _fetch)
 
 
 def get_release_group_releases(rg_mbid):
