@@ -80,88 +80,103 @@ def save_caches(ctx: CratediggerContext, var_dir: str) -> None:
 
 
 def load_caches(ctx: CratediggerContext, var_dir: str) -> None:
-    """Load persisted caches into ctx. Evicts entries older than TTL."""
+    """Load persisted caches into ctx. Evicts entries older than TTL.
+
+    Records wall-clock duration on `ctx.cache_load_s` (issue #198 R15) so the
+    cycle summary can attribute time to the JSON load tax. Stays at 0.0 when
+    no file exists or the file is unreadable — those paths skip the load
+    entirely so there's no meaningful duration to attribute.
+    """
     path = cache_path(var_dir)
     if not os.path.exists(path):
         return
 
+    # try/finally so cache_load_s is always credited once we've passed the
+    # os.path.exists() guard, even if json.load or the data-walk raises.
+    # Corrupt files exit via the inner `return` and still credit their
+    # (tiny) parse-attempt cost — that's honest accounting, not a bug.
+    load_start = time.monotonic()
     try:
-        with open(path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.warning("Cache file corrupt or unreadable — starting fresh")
-        return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Cache file corrupt or unreadable — starting fresh")
+            return
 
-    if not isinstance(data, dict):
-        return
+        if not isinstance(data, dict):
+            return
 
-    now = time.time()
-    cutoff = now - FOLDER_CACHE_TTL_SECONDS
-    fc_loaded = 0
-    fc_evicted = 0
-    speed_loaded = 0
-    count_loaded = 0
+        now = time.time()
+        cutoff = now - FOLDER_CACHE_TTL_SECONDS
+        fc_loaded = 0
+        fc_evicted = 0
+        speed_loaded = 0
+        count_loaded = 0
 
-    # folder_cache
-    fc = data.get("folder_cache")
-    if isinstance(fc, dict):
-        for user, dirs in fc.items():
-            if not isinstance(dirs, dict):
-                continue
-            for d, entry in dirs.items():
-                if isinstance(entry, dict) and "_ts" in entry:
-                    ts = entry["_ts"]
-                    if isinstance(ts, (int, float)) and ts >= cutoff:
-                        ctx.folder_cache.setdefault(user, {})[d] = entry["d"]
-                        ctx._folder_cache_ts.setdefault(user, {})[d] = ts
-                        fc_loaded += 1
+        # folder_cache
+        fc = data.get("folder_cache")
+        if isinstance(fc, dict):
+            for user, dirs in fc.items():
+                if not isinstance(dirs, dict):
+                    continue
+                for d, entry in dirs.items():
+                    if isinstance(entry, dict) and "_ts" in entry:
+                        ts = entry["_ts"]
+                        if isinstance(ts, (int, float)) and ts >= cutoff:
+                            ctx.folder_cache.setdefault(user, {})[d] = entry["d"]
+                            ctx._folder_cache_ts.setdefault(user, {})[d] = ts
+                            fc_loaded += 1
+                        else:
+                            fc_evicted += 1
                     else:
-                        fc_evicted += 1
-                else:
-                    # Legacy format (no timestamp) — treat as fresh
-                    ctx.folder_cache.setdefault(user, {})[d] = entry
-                    ctx._folder_cache_ts.setdefault(user, {})[d] = now
-                    fc_loaded += 1
+                        # Legacy format (no timestamp) — treat as fresh
+                        ctx.folder_cache.setdefault(user, {})[d] = entry
+                        ctx._folder_cache_ts.setdefault(user, {})[d] = now
+                        fc_loaded += 1
 
-    # user_upload_speed
-    speed = data.get("user_upload_speed")
-    if isinstance(speed, dict):
-        for user, entry in speed.items():
-            if isinstance(entry, dict) and "_ts" in entry:
-                ts = entry["_ts"]
-                if isinstance(ts, (int, float)) and ts >= cutoff:
-                    v = entry.get("v")
-                    if isinstance(v, int):
-                        ctx.user_upload_speed[user] = v
-                        ctx._upload_speed_ts[user] = ts
-                        speed_loaded += 1
-            elif isinstance(entry, int):
-                # Legacy format
-                ctx.user_upload_speed[user] = entry
-                ctx._upload_speed_ts[user] = now
-                speed_loaded += 1
-
-    # search_dir_audio_count
-    counts = data.get("search_dir_audio_count")
-    if isinstance(counts, dict):
-        for user, dirs in counts.items():
-            if not isinstance(dirs, dict):
-                continue
-            for d, entry in dirs.items():
+        # user_upload_speed
+        speed = data.get("user_upload_speed")
+        if isinstance(speed, dict):
+            for user, entry in speed.items():
                 if isinstance(entry, dict) and "_ts" in entry:
                     ts = entry["_ts"]
                     if isinstance(ts, (int, float)) and ts >= cutoff:
                         v = entry.get("v")
                         if isinstance(v, int):
-                            ctx.search_dir_audio_count.setdefault(user, {})[d] = v
-                            ctx._dir_audio_count_ts.setdefault(user, {})[d] = ts
-                            count_loaded += 1
+                            ctx.user_upload_speed[user] = v
+                            ctx._upload_speed_ts[user] = ts
+                            speed_loaded += 1
                 elif isinstance(entry, int):
                     # Legacy format
-                    ctx.search_dir_audio_count.setdefault(user, {})[d] = entry
-                    ctx._dir_audio_count_ts.setdefault(user, {})[d] = now
-                    count_loaded += 1
+                    ctx.user_upload_speed[user] = entry
+                    ctx._upload_speed_ts[user] = now
+                    speed_loaded += 1
 
-    logger.info(f"Loaded caches from {path}: "
-                f"{fc_loaded} folder entries ({fc_evicted} evicted), "
-                f"{speed_loaded} speed entries, {count_loaded} count entries")
+        # search_dir_audio_count
+        counts = data.get("search_dir_audio_count")
+        if isinstance(counts, dict):
+            for user, dirs in counts.items():
+                if not isinstance(dirs, dict):
+                    continue
+                for d, entry in dirs.items():
+                    if isinstance(entry, dict) and "_ts" in entry:
+                        ts = entry["_ts"]
+                        if isinstance(ts, (int, float)) and ts >= cutoff:
+                            v = entry.get("v")
+                            if isinstance(v, int):
+                                ctx.search_dir_audio_count.setdefault(user, {})[d] = v
+                                ctx._dir_audio_count_ts.setdefault(user, {})[d] = ts
+                                count_loaded += 1
+                    elif isinstance(entry, int):
+                        # Legacy format
+                        ctx.search_dir_audio_count.setdefault(user, {})[d] = entry
+                        ctx._dir_audio_count_ts.setdefault(user, {})[d] = now
+                        count_loaded += 1
+
+        logger.info(f"Loaded caches from {path}: "
+                    f"{fc_loaded} folder entries ({fc_evicted} evicted), "
+                    f"{speed_loaded} speed entries, {count_loaded} count entries")
+    finally:
+        ctx.cache_load_s = time.monotonic() - load_start
+        logger.info(f"Cache load elapsed: {ctx.cache_load_s:.3f}s")

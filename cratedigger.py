@@ -750,6 +750,11 @@ def _search_and_queue_parallel(albums, ctx):
                 break
 
     wall_elapsed = time.time() - wall_start
+    # U1 instrumentation (issue #198 R13): credit the search phase wall time
+    # to the per-cycle accumulator so the cycle summary can split it from
+    # browse/match. Includes both submit (network round-trip) and collect
+    # (poll + result merge) since both are gated by slskd's pipeline depth.
+    ctx.search_time_s += wall_elapsed
     logger.info(f"Pipelined search complete: {total} albums in {wall_elapsed:.1f}s "
                 f"(found={len(grab_list)}, no_match={len(failed_grab)}, "
                 f"no_results={len(failed_search)})")
@@ -953,7 +958,8 @@ def main():
         slskd.transfers.remove_completed_downloads()
 
         elapsed = time.time() - cycle_start
-        logger.info(f"Cratedigger cycle complete in {elapsed:.1f}s")
+        from lib.cycle_summary import format_cycle_summary
+        logger.info(format_cycle_summary(_module_ctx, elapsed))
 
     finally:
         # Save caches for next run

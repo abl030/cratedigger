@@ -303,12 +303,21 @@ def check_for_match(
             f"Browsing {len(uncached)} dirs from {username} "
             f"(parallelism={ctx.cfg.browse_parallelism})"
         )
-        browsed = _browse_directories(
-            uncached,
-            username,
-            ctx.slskd,
-            ctx.cfg.browse_parallelism,
-        )
+        # U1 instrumentation (issue #198 R13): time the network-bound browse
+        # phase so the cycle summary can split browse vs match wall-clock.
+        # try/finally so an exception inside _browse_directories still
+        # credits the accumulator — silent loss skews the baseline.
+        browse_t0 = time.monotonic()
+        try:
+            browsed = _browse_directories(
+                uncached,
+                username,
+                ctx.slskd,
+                ctx.cfg.browse_parallelism,
+            )
+        finally:
+            ctx.browse_time_s += time.monotonic() - browse_t0
+            ctx.peers_browsed += len(uncached)
         for d, result in browsed.items():
             ctx.folder_cache[username][d] = result
             ctx._folder_cache_ts.setdefault(username, {})[d] = time.time()
@@ -320,73 +329,81 @@ def check_for_match(
                 matched=False, directory={}, file_dir="", candidates=candidates,
             )
 
-    for file_dir in dirs_to_try:
-        if file_dir not in ctx.folder_cache[username]:
-            continue
+    # U1 instrumentation: time the local matching/scoring loop separately
+    # from the network-bound browse above. try/finally so an exception
+    # inside album_match / cross-check / track_num still credits the
+    # accumulator — silent loss of measured time would skew the baseline.
+    match_t0 = time.monotonic()
+    try:
+        for file_dir in dirs_to_try:
+            if file_dir not in ctx.folder_cache[username]:
+                continue
 
-        directory = ctx.folder_cache[username][file_dir]
-        tracks_info = album_track_num(directory, ctx.cfg)
-        neg_key = (username, file_dir, track_num, allowed_filetype)
+            directory = ctx.folder_cache[username][file_dir]
+            tracks_info = album_track_num(directory, ctx.cfg)
+            neg_key = (username, file_dir, track_num, allowed_filetype)
 
-        # Sub-count gate: cheap CandidateScore, do NOT call album_match.
-        if tracks_info["count"] != track_num or tracks_info["filetype"] == "":
+            # Sub-count gate: cheap CandidateScore, do NOT call album_match.
+            if tracks_info["count"] != track_num or tracks_info["filetype"] == "":
+                candidates.append(CandidateScore(
+                    username=username,
+                    dir=file_dir,
+                    filetype=allowed_filetype,
+                    matched_tracks=0,
+                    total_tracks=track_num,
+                    avg_ratio=0.0,
+                    missing_titles=[],
+                    file_count=tracks_info["count"],
+                ))
+                ctx.negative_matches.add(neg_key)
+                continue
+
+            # Count gate passed — score the dir.
+            score = album_match(tracks, directory["files"], username, allowed_filetype, ctx)
             candidates.append(CandidateScore(
                 username=username,
                 dir=file_dir,
                 filetype=allowed_filetype,
-                matched_tracks=0,
-                total_tracks=track_num,
-                avg_ratio=0.0,
-                missing_titles=[],
+                matched_tracks=score.matched_tracks,
+                total_tracks=score.total_tracks,
+                avg_ratio=score.avg_ratio,
+                missing_titles=list(score.missing_titles),
                 file_count=tracks_info["count"],
             ))
-            ctx.negative_matches.add(neg_key)
-            continue
 
-        # Count gate passed — score the dir.
-        score = album_match(tracks, directory["files"], username, allowed_filetype, ctx)
-        candidates.append(CandidateScore(
-            username=username,
-            dir=file_dir,
-            filetype=allowed_filetype,
-            matched_tracks=score.matched_tracks,
-            total_tracks=score.total_tracks,
-            avg_ratio=score.avg_ratio,
-            missing_titles=list(score.missing_titles),
-            file_count=tracks_info["count"],
-        ))
-
-        strict_accept = (
-            score.matched_tracks == score.total_tracks
-            and username not in ctx.cfg.ignored_users
-        )
-        if strict_accept:
-            if _track_titles_cross_check(tracks, directory["files"]):
-                # Log SUCCESSFUL MATCH at the one place enqueue is going to
-                # happen — the previous log site in album_match fired before
-                # the cross-check / ignored_users gate at the caller, which
-                # was misleading for ignored users and for cross-check
-                # failures.
-                logger.info(
-                    f"Found match from user: {username} for "
-                    f"{score.matched_tracks} tracks! "
-                    f"Track attributes: {allowed_filetype}"
-                )
-                logger.info(f"Average sequence match ratio: {score.avg_ratio}")
-                logger.info("SUCCESSFUL MATCH")
-                logger.info("-------------------")
-                return MatchResult(
-                    matched=True,
-                    directory=directory,
-                    file_dir=file_dir,
-                    candidates=candidates,
-                )
-            logger.warning(
-                f"Track title cross-check FAILED for user {username}, "
-                f"dir {file_dir} — skipping (wrong pressing?)"
+            strict_accept = (
+                score.matched_tracks == score.total_tracks
+                and username not in ctx.cfg.ignored_users
             )
-        ctx.negative_matches.add(neg_key)
+            if strict_accept:
+                if _track_titles_cross_check(tracks, directory["files"]):
+                    # Log SUCCESSFUL MATCH at the one place enqueue is going
+                    # to happen — the previous log site in album_match fired
+                    # before the cross-check / ignored_users gate at the
+                    # caller, which was misleading for ignored users and for
+                    # cross-check failures.
+                    logger.info(
+                        f"Found match from user: {username} for "
+                        f"{score.matched_tracks} tracks! "
+                        f"Track attributes: {allowed_filetype}"
+                    )
+                    logger.info(f"Average sequence match ratio: {score.avg_ratio}")
+                    logger.info("SUCCESSFUL MATCH")
+                    logger.info("-------------------")
+                    return MatchResult(
+                        matched=True,
+                        directory=directory,
+                        file_dir=file_dir,
+                        candidates=candidates,
+                    )
+                logger.warning(
+                    f"Track title cross-check FAILED for user {username}, "
+                    f"dir {file_dir} — skipping (wrong pressing?)"
+                )
+            ctx.negative_matches.add(neg_key)
 
-    return MatchResult(
-        matched=False, directory={}, file_dir="", candidates=candidates,
-    )
+        return MatchResult(
+            matched=False, directory={}, file_dir="", candidates=candidates,
+        )
+    finally:
+        ctx.match_time_s += time.monotonic() - match_t0

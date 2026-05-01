@@ -39,3 +39,17 @@ class CratediggerContext:
     _folder_cache_ts: dict[str, dict[str, float]] = field(default_factory=dict)
     _upload_speed_ts: dict[str, float] = field(default_factory=dict)
     _dir_audio_count_ts: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    # --- Per-cycle timing accumulators (issue #198 U1 instrumentation).
+    # browse / match are wrapped at the call sites in lib/matching.py;
+    # search is wrapped around _search_and_queue_parallel in cratedigger.py;
+    # cache_load is set once by lib/cache.load_caches; cycle_browse_time_s
+    # is the running counter that U3's per-cycle budget guard reads.
+    browse_time_s: float = 0.0
+    match_time_s: float = 0.0
+    search_time_s: float = 0.0
+    cache_load_s: float = 0.0
+    cycle_browse_time_s: float = 0.0
+    peers_browsed: int = 0
+    peers_timed_out: int = 0
+    fanout_waves: int = 0
