@@ -235,7 +235,7 @@ def get_release(release_mbid, *, fresh: bool = False):
     def _fetch() -> dict:
         data = _get(
             f"{MB_API_BASE}/release/{release_mbid}"
-            f"?inc=recordings+artist-credits+media&fmt=json"
+            f"?inc=recordings+artist-credits+media+release-groups&fmt=json"
         )
         artist_credit = data.get("artist-credit", [{}])
         artist_name = artist_credit[0].get("name", "Unknown") if artist_credit else "Unknown"
