@@ -86,6 +86,14 @@ class CratediggerConfig:
     search_file_limit: int = 50000
     search_escalation_threshold: int = 5
 
+    # --- Browse fan-out (issue #198) ---
+    # Top-K + lazy-tail parallel browse across peers. See
+    # docs/plans/2026-05-01-001-feat-browse-fanout-and-pipeline-depth-plan.md.
+    browse_top_k: int = 20
+    browse_wave_deadline_s: float = 20.0
+    browse_global_max_workers: int = 32
+    browse_cycle_budget_s: float = 240.0
+
     # --- Release ---
     use_most_common_tracknum: bool = True
     allow_multi_disc: bool = True
@@ -252,6 +260,10 @@ class CratediggerConfig:
             search_response_limit=getint("Search Settings", "search_response_limit", 1000),
             search_file_limit=getint("Search Settings", "search_file_limit", 50000),
             search_escalation_threshold=getint("Search Settings", "search_escalation_threshold", 5),
+            browse_top_k=getint("Search Settings", "browse_top_k", 20),
+            browse_wave_deadline_s=getfloat("Search Settings", "browse_wave_deadline_s", 20.0),
+            browse_global_max_workers=getint("Search Settings", "browse_global_max_workers", 32),
+            browse_cycle_budget_s=getfloat("Search Settings", "browse_cycle_budget_s", 240.0),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),
             allow_multi_disc=getbool("Release Settings", "allow_multi_disc", True),
