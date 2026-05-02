@@ -258,5 +258,34 @@ class TestFanoutBrowseRaceRegression(unittest.TestCase):
             )
 
 
+class TestFanoutBrowseAtexitDetach(unittest.TestCase):
+    def test_workers_removed_from_atexit_registry_on_return(self):
+        """Workers must be detached from concurrent.futures' atexit registry.
+
+        Otherwise the process's shutdown handler joins them on exit, which
+        on a slow slskd peer (30-60 s TCP timeout) bleeds past the cycle
+        boundary and delays the next systemd-timer fire. Production fix
+        for issue #198 code-review finding #2.
+        """
+        import concurrent.futures.thread as _cft
+        slskd = FakeSlskdAPI()
+        for i in range(5):
+            slskd.users.set_directory(f"u{i}", f"d{i}", [_make_directory(f"d{i}")])
+        work = [(f"u{i}", f"d{i}") for i in range(5)]
+
+        ctx = _make_ctx(slskd)
+        registry_before = set(_cft._threads_queues)
+        _fanout_browse_users(work, slskd, ctx, max_workers=4, deadline_s=5.0)
+        registry_after = set(_cft._threads_queues)
+
+        # No new fan-out workers should remain in the global atexit registry.
+        new_entries = registry_after - registry_before
+        self.assertEqual(
+            new_entries, set(),
+            f"fan-out left {len(new_entries)} workers in atexit registry — "
+            f"these would block process exit on slow peers",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

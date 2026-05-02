@@ -685,5 +685,53 @@ class TestMainCLIParsing(unittest.TestCase):
                 )
 
 
+class TestFanoutConfigClamping(unittest.TestCase):
+    """Reject zero/negative fan-out config at parse time so a typo doesn't
+    crash the first album of every cycle (issue #198 review finding #4)."""
+
+    def _parse(self, **search_settings) -> CratediggerConfig:
+        ini = configparser.RawConfigParser()
+        ini["Search Settings"] = {k: str(v) for k, v in search_settings.items()}
+        return CratediggerConfig.from_ini(ini)
+
+    def test_browse_top_k_zero_clamps_to_one(self):
+        cfg = self._parse(browse_top_k=0)
+        self.assertEqual(cfg.browse_top_k, 1)
+
+    def test_browse_top_k_negative_clamps_to_one(self):
+        cfg = self._parse(browse_top_k=-5)
+        self.assertEqual(cfg.browse_top_k, 1)
+
+    def test_browse_global_max_workers_zero_clamps_to_one(self):
+        cfg = self._parse(browse_global_max_workers=0)
+        self.assertEqual(cfg.browse_global_max_workers, 1)
+
+    def test_search_max_inflight_zero_clamps_to_one(self):
+        cfg = self._parse(search_max_inflight=0)
+        self.assertEqual(cfg.search_max_inflight, 1)
+
+    def test_browse_wave_deadline_negative_clamps_to_zero(self):
+        cfg = self._parse(browse_wave_deadline_s=-1.0)
+        self.assertEqual(cfg.browse_wave_deadline_s, 0.0)
+
+    def test_browse_cycle_budget_negative_clamps_to_zero(self):
+        cfg = self._parse(browse_cycle_budget_s=-100.0)
+        self.assertEqual(cfg.browse_cycle_budget_s, 0.0)
+
+    def test_valid_values_pass_through_unchanged(self):
+        cfg = self._parse(
+            browse_top_k=15,
+            browse_wave_deadline_s=10.0,
+            browse_global_max_workers=64,
+            browse_cycle_budget_s=300.0,
+            search_max_inflight=2,
+        )
+        self.assertEqual(cfg.browse_top_k, 15)
+        self.assertEqual(cfg.browse_wave_deadline_s, 10.0)
+        self.assertEqual(cfg.browse_global_max_workers, 64)
+        self.assertEqual(cfg.browse_cycle_budget_s, 300.0)
+        self.assertEqual(cfg.search_max_inflight, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

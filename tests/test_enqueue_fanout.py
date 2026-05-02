@@ -330,6 +330,45 @@ class TestWaveDeadline(unittest.TestCase):
         match_users = {call.args[3] for call in m_match.call_args_list}
         self.assertTrue(slow_users.isdisjoint(match_users))
 
+    def test_broken_users_excluded_from_subsequent_wave_work_list(self):
+        """Wave-1 timeouts must NOT be re-submitted in wave-2's work plan.
+
+        Regression for the #198 code-review finding: the match loop already
+        skips broken users, but the work-list builder didn't — paying another
+        browse_wave_deadline_s to re-confirm dead peers each wave. With a
+        2-wave album where wave-1 times out users, wave-2's submitted work
+        must contain ZERO of those usernames.
+        """
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(40)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        wave1_users = set(users[:20])
+
+        call_history: list[set[str]] = []
+
+        def fake_fanout(work, slskd, ctx, max_workers, deadline_s):
+            wave_users = {u for (u, _d) in work}
+            call_history.append(wave_users)
+            # Wave 1: every user times out. Wave 2: nobody times out.
+            if wave_users <= wave1_users:
+                return wave_users
+            return set()
+
+        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
+             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertEqual(len(call_history), 2, "expected 2 waves")
+        wave2_users = call_history[1]
+        self.assertTrue(
+            wave2_users.isdisjoint(wave1_users),
+            f"wave-2 must not re-submit wave-1's timed-out users; "
+            f"overlap was {wave2_users & wave1_users}",
+        )
+        # And wave-2 should contain the actual rank 20-39 users.
+        self.assertEqual(wave2_users, set(users[20:40]))
+
     def test_match_rate_regression_high_rank_user_wins(self):
         """Wave-1 users all time out, wave-2 user X is the only true match."""
         cfg = _make_cfg(browse_top_k=20)

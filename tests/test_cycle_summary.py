@@ -149,6 +149,7 @@ class TestFormatCycleSummary(unittest.TestCase):
         "match_time_s=",
         "cache_load_s=",
         "peers_browsed=",
+        "peers_browsed_lazy=",
         "peers_timed_out=",
         "fanout_waves=",
         "cycle_total_s=",
@@ -166,6 +167,7 @@ class TestFormatCycleSummary(unittest.TestCase):
         ctx.match_time_s = 4.5
         ctx.cache_load_s = 6.7
         ctx.peers_browsed = 42
+        ctx.peers_browsed_lazy = 5
         ctx.peers_timed_out = 3
         ctx.fanout_waves = 2
         line = format_cycle_summary(ctx, elapsed_s=99.9)
@@ -173,6 +175,7 @@ class TestFormatCycleSummary(unittest.TestCase):
         self.assertIn("match_time_s=4.5", line)
         self.assertIn("cache_load_s=6.7", line)
         self.assertIn("peers_browsed=42", line)
+        self.assertIn("peers_browsed_lazy=5", line)
         self.assertIn("peers_timed_out=3", line)
         self.assertIn("fanout_waves=2", line)
         self.assertIn("cycle_total_s=99.9", line)
@@ -287,8 +290,10 @@ class TestBrowseTimeAccumulator(unittest.TestCase):
             ctx.browse_time_s, 0.0,
             "exception inside _browse_directories must still credit browse_time_s",
         )
-        # peers_browsed should also be credited (we tried)
-        self.assertEqual(ctx.peers_browsed, 1)
+        # The lazy-fallback path bumps peers_browsed_lazy (issue #198 review #5);
+        # peers_browsed is reserved for fan-out submissions in lib/enqueue.py.
+        self.assertEqual(ctx.peers_browsed_lazy, 1)
+        self.assertEqual(ctx.peers_browsed, 0, "fan-out path should not be credited")
 
     def test_browse_time_zero_when_cache_warm(self):
         ctx = _make_real_ctx()
@@ -302,6 +307,7 @@ class TestBrowseTimeAccumulator(unittest.TestCase):
             "cache hit shouldn't count as browse work",
         )
         self.assertEqual(ctx.peers_browsed, 0)
+        self.assertEqual(ctx.peers_browsed_lazy, 0)
 
 
 if __name__ == "__main__":

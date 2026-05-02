@@ -280,6 +280,13 @@ def _iter_wave_matches(
 
         work: list[tuple[str, str]] = []
         for username in wave:
+            # Skip users that already timed out in a previous wave (or in
+            # disc-1's waves when called per-disc from try_multi_enqueue).
+            # Re-submitting them re-pays browse_wave_deadline_s on known-dead
+            # peers — the match loop already skips them, but the work-list
+            # builder needs the same guard to keep waves cheap.
+            if username in ctx.broken_user:
+                continue
             cached = ctx.folder_cache.get(username, {})
             for file_dir in user_dirs.get(username, []):
                 if file_dir not in cached:
