@@ -45,11 +45,19 @@ class CratediggerContext:
     # search is wrapped around _search_and_queue_parallel in cratedigger.py;
     # cache_load is set once by lib/cache.load_caches; cycle_browse_time_s
     # is the running counter that U3's per-cycle budget guard reads.
+    #
+    # peers_browsed is the fan-out path's count (every (user, dir) submitted
+    # to a wave, success or failure). peers_browsed_lazy is the fallback
+    # path in lib/matching.py — it fires when fan-out left a (user, dir)
+    # unwritten via _browse_one's exception swallow, since timed-out users
+    # are skipped earlier via ctx.broken_user. Splitting them avoids
+    # double-counting that same (user, dir) when the lazy path retries it.
     browse_time_s: float = 0.0
     match_time_s: float = 0.0
     search_time_s: float = 0.0
     cache_load_s: float = 0.0
     cycle_browse_time_s: float = 0.0
     peers_browsed: int = 0
+    peers_browsed_lazy: int = 0
     peers_timed_out: int = 0
     fanout_waves: int = 0

@@ -317,7 +317,12 @@ def check_for_match(
             )
         finally:
             ctx.browse_time_s += time.monotonic() - browse_t0
-            ctx.peers_browsed += len(uncached)
+            # Lazy-fallback path: fan-out either swallowed an exception via
+            # _browse_one (no entry written, user not in broken_user) or
+            # this caller bypassed the wave loop. Either way, count
+            # separately from peers_browsed so the cycle summary can
+            # distinguish primary fan-out load from residual lazy retries.
+            ctx.peers_browsed_lazy += len(uncached)
         for d, result in browsed.items():
             ctx.folder_cache[username][d] = result
             ctx._folder_cache_ts.setdefault(username, {})[d] = time.time()

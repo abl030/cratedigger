@@ -266,11 +266,15 @@ class CratediggerConfig:
             search_response_limit=getint("Search Settings", "search_response_limit", 1000),
             search_file_limit=getint("Search Settings", "search_file_limit", 50000),
             search_escalation_threshold=getint("Search Settings", "search_escalation_threshold", 5),
-            browse_top_k=getint("Search Settings", "browse_top_k", 20),
-            browse_wave_deadline_s=getfloat("Search Settings", "browse_wave_deadline_s", 20.0),
-            browse_global_max_workers=getint("Search Settings", "browse_global_max_workers", 32),
-            browse_cycle_budget_s=getfloat("Search Settings", "browse_cycle_budget_s", 240.0),
-            search_max_inflight=getint("Search Settings", "search_max_inflight", 4),
+            # Clamp the parallel-browse / pipeline-depth knobs to safe minima.
+            # ThreadPoolExecutor(max_workers=0), range(0, n, 0), and a negative
+            # deadline all crash the cycle on the first album — reject them at
+            # parse time so a config typo doesn't take the whole timer down.
+            browse_top_k=max(1, getint("Search Settings", "browse_top_k", 20)),
+            browse_wave_deadline_s=max(0.0, getfloat("Search Settings", "browse_wave_deadline_s", 20.0)),
+            browse_global_max_workers=max(1, getint("Search Settings", "browse_global_max_workers", 32)),
+            browse_cycle_budget_s=max(0.0, getfloat("Search Settings", "browse_cycle_budget_s", 240.0)),
+            search_max_inflight=max(1, getint("Search Settings", "search_max_inflight", 4)),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),
             allow_multi_disc=getbool("Release Settings", "allow_multi_disc", True),
