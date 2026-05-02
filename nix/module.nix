@@ -160,6 +160,7 @@
     browse_wave_deadline_s = ${toString cfg.searchSettings.browseWaveDeadlineS}
     browse_global_max_workers = ${toString cfg.searchSettings.browseGlobalMaxWorkers}
     browse_cycle_budget_s = ${toString cfg.searchSettings.browseCycleBudgetS}
+    search_max_inflight = ${toString cfg.searchSettings.searchMaxInflight}
 
     [Download Settings]
     download_filtering = ${if cfg.downloadSettings.downloadFiltering then "True" else "False"}
@@ -646,6 +647,18 @@ in {
           exceeded, remaining `wanted` records short-circuit (no further
           browse waves) and stay queued for the next cycle. Defends against
           multi-album-no-match cycles compounding into 50+ minute runs.
+        '';
+      };
+      searchMaxInflight = mkOption {
+        type = types.int;
+        default = 4;
+        description = ''
+          Pipeline depth for the parallel search executor — number of
+          in-flight search-collection futures at once. Submission stays
+          sequential (slskd's `SearchRequestLimiter` is on POST only, with
+          a built-in 429-retry loop), but the collect-side workload runs
+          in this many threads. Raised from the legacy hard-coded 2 once
+          browse fan-out (issue #198) stops being the dominant cost.
         '';
       };
       titleBlacklist = mkOption {
