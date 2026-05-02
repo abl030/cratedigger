@@ -93,6 +93,12 @@ class CratediggerConfig:
     browse_wave_deadline_s: float = 20.0
     browse_global_max_workers: int = 32
     browse_cycle_budget_s: float = 240.0
+    # Pipeline depth for _search_and_queue_parallel — number of in-flight
+    # search-collect futures. Submission stays sequential through the existing
+    # 429-retry loop in _submit_search (slskd's SearchRequestLimiter is on POST
+    # only). Raised from the legacy hard-coded 2 to keep the search-collection
+    # thread fed once browse stops being the dominant cost.
+    search_max_inflight: int = 4
 
     # --- Release ---
     use_most_common_tracknum: bool = True
@@ -264,6 +270,7 @@ class CratediggerConfig:
             browse_wave_deadline_s=getfloat("Search Settings", "browse_wave_deadline_s", 20.0),
             browse_global_max_workers=getint("Search Settings", "browse_global_max_workers", 32),
             browse_cycle_budget_s=getfloat("Search Settings", "browse_cycle_budget_s", 240.0),
+            search_max_inflight=getint("Search Settings", "search_max_inflight", 4),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),
             allow_multi_disc=getbool("Release Settings", "allow_multi_disc", True),

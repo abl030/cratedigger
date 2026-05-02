@@ -626,7 +626,11 @@ def _search_and_queue_parallel(albums, ctx):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    MAX_INFLIGHT = 2  # matches slskd maximumConcurrentSearches
+    # Pipeline depth — number of search-collection futures in flight at once.
+    # Configurable via cfg.search_max_inflight (issue #198 U4). Submission
+    # stays sequential through the existing 429-retry loop; only the
+    # collect-side concurrency increases.
+    max_inflight = ctx.cfg.search_max_inflight
 
     grab_list: dict[Any, Any] = {}
     failed_grab: list[Any] = []
@@ -634,7 +638,7 @@ def _search_and_queue_parallel(albums, ctx):
     total = len(albums)
     album_queue = list(albums)  # mutable copy we pop from
 
-    logger.info(f"Pipelined search: {total} albums, {MAX_INFLIGHT} in flight")
+    logger.info(f"Pipelined search: {total} albums, {max_inflight} in flight")
     wall_start = time.time()
 
     def _submit_next() -> tuple[Any, Any] | None:
@@ -704,10 +708,10 @@ def _search_and_queue_parallel(albums, ctx):
             return (future, album)
         return None
 
-    with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as pool:
+    with ThreadPoolExecutor(max_workers=max_inflight) as pool:
         # Seed the pipeline with initial searches
         inflight: dict[Any, Any] = {}
-        for _ in range(min(MAX_INFLIGHT, len(album_queue))):
+        for _ in range(min(max_inflight, len(album_queue))):
             submitted = _submit_next()
             if submitted:
                 future, album = submitted
