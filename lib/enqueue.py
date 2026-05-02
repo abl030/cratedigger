@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import TYPE_CHECKING, Any, Literal, Sequence, cast
+import time
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast
 
-from lib.browse import download_filter
+from lib.browse import _fanout_browse_users, download_filter
 from lib.download import cancel_and_delete, slskd_do_enqueue
 from lib.grab_list import GrabListEntry
-from lib.matching import check_for_match, get_album_by_id
+from lib.matching import MatchResult, check_for_match, get_album_by_id
 from lib.quality import CandidateScore
 
 if TYPE_CHECKING:
@@ -193,25 +194,29 @@ def get_album_tracks(album: Any, ctx: CratediggerContext) -> list[TrackRecord]:
     return cast("list[TrackRecord]", ctx.pipeline_db_source.get_tracks(album))
 
 
-def try_enqueue(
-    all_tracks: Sequence[TrackRecord],
+def _eligible_user_dirs(
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
+    album_id: int,
     ctx: CratediggerContext,
-) -> EnqueueAttempt:
-    """Single album match and enqueue."""
-    album_id = all_tracks[0]["albumId"]
-    album = get_album_by_id(album_id, ctx)
-    album_name = album.title
-    artist_name = album.artist_name
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Filter+rank users into a fan-out work plan.
+
+    Returns ``(ordered_users, user_dirs)`` where:
+      * ``ordered_users`` is the iteration order — descending upload speed,
+        skipping cooled-down / denylisted users and users with no candidate
+        dirs at this filetype.
+      * ``user_dirs`` maps surviving username → candidate dirs at this
+        filetype, used to build the fan-out work list.
+    """
     denied_users = _get_denied_users(album_id, ctx)
     sorted_users = sorted(
         results.keys(),
         key=lambda u: ctx.user_upload_speed.get(u, 0),
         reverse=True,
     )
-    had_enqueue_failure = False
-    accumulated: list[CandidateScore] = []
+    ordered: list[str] = []
+    user_dirs: dict[str, list[str]] = {}
     for username in sorted_users:
         if username in ctx.cooled_down_users:
             logger.info(
@@ -228,39 +233,156 @@ def try_enqueue(
         file_dirs = _get_user_dirs(results[username], allowed_filetype)
         if file_dirs is None:
             continue
-        logger.debug(f"Parsing result from user: {username}")
-        match_result = check_for_match(
-            all_tracks, allowed_filetype, file_dirs, username, ctx
+        ordered.append(username)
+        user_dirs[username] = file_dirs
+    return ordered, user_dirs
+
+
+def _iter_wave_matches(
+    tracks: Sequence[TrackRecord],
+    eligible_users: list[str],
+    user_dirs: dict[str, list[str]],
+    allowed_filetype: str,
+    ctx: CratediggerContext,
+    accumulated: list[CandidateScore],
+) -> Iterator[tuple[str, MatchResult]]:
+    """Yield ``(username, match_result)`` for every dir that matches strictly.
+
+    Wave-based fan-out (issue #198 U3): chunks ``eligible_users`` into waves
+    of ``cfg.browse_top_k``, runs ``_fanout_browse_users`` to populate
+    ``ctx.folder_cache`` for the wave's uncached ``(user, dir)`` pairs in
+    parallel, then iterates ``check_for_match`` against the warm cache in
+    upload-speed order. Honors ``cfg.browse_cycle_budget_s`` — short-circuits
+    before any wave (and between waves) once cumulative cycle browse time
+    exceeds the budget.
+
+    Side effects: appends per-dir ``CandidateScore`` entries into
+    ``accumulated`` (caller-owned), bumps ``ctx.cycle_browse_time_s``,
+    ``ctx.fanout_waves``, ``ctx.peers_browsed``, ``ctx.peers_timed_out``;
+    extends ``ctx.broken_user`` with timed-out usernames (per-cycle scope —
+    a fresh ``CratediggerContext`` next cycle starts empty).
+
+    Caller is responsible for stopping iteration (``break``) once a match is
+    enqueued; the generator stops fan-out work as soon as iteration stops.
+    """
+    cfg = ctx.cfg
+    if ctx.cycle_browse_time_s >= cfg.browse_cycle_budget_s:
+        logger.info(
+            f"cycle_browse_budget_exhausted: skipping wave (budget="
+            f"{cfg.browse_cycle_budget_s:.0f}s, used="
+            f"{ctx.cycle_browse_time_s:.1f}s)"
         )
-        accumulated.extend(match_result.candidates)
-        if match_result.matched:
-            directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
-            files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
-            try:
-                downloads = slskd_do_enqueue(
-                    username=username,
-                    files=files_to_enqueue,
-                    file_dir=match_result.file_dir,
-                    ctx=ctx,
+        return
+
+    K = cfg.browse_top_k
+    for wave_start in range(0, len(eligible_users), K):
+        wave = eligible_users[wave_start:wave_start + K]
+
+        work: list[tuple[str, str]] = []
+        for username in wave:
+            cached = ctx.folder_cache.get(username, {})
+            for file_dir in user_dirs.get(username, []):
+                if file_dir not in cached:
+                    work.append((username, file_dir))
+
+        if work:
+            t0 = time.monotonic()
+            timed_out = _fanout_browse_users(
+                work, ctx.slskd, ctx,
+                max_workers=cfg.browse_global_max_workers,
+                deadline_s=cfg.browse_wave_deadline_s,
+            )
+            elapsed = time.monotonic() - t0
+            ctx.cycle_browse_time_s += elapsed
+            ctx.fanout_waves += 1
+            ctx.peers_browsed += len(work)
+            ctx.peers_timed_out += len(timed_out)
+            for username in timed_out:
+                if username not in ctx.broken_user:
+                    ctx.broken_user.append(username)
+            n_returned = sum(
+                1 for (u, d) in work if d in ctx.folder_cache.get(u, {})
+            )
+            logger.info(
+                f"wave: K={K} n_uncached={len(work)} n_returned={n_returned} "
+                f"n_timed_out={len(timed_out)} elapsed_s={elapsed:.1f}"
+            )
+
+        for username in wave:
+            if username in ctx.broken_user:
+                continue
+            file_dirs = user_dirs.get(username)
+            if not file_dirs:
+                continue
+            match_result = check_for_match(
+                tracks, allowed_filetype, file_dirs, username, ctx,
+            )
+            accumulated.extend(match_result.candidates)
+            if match_result.matched:
+                yield username, match_result
+
+        if ctx.cycle_browse_time_s >= cfg.browse_cycle_budget_s:
+            logger.info(
+                f"cycle_browse_budget_exhausted: stopping waves (budget="
+                f"{cfg.browse_cycle_budget_s:.0f}s, used="
+                f"{ctx.cycle_browse_time_s:.1f}s)"
+            )
+            return
+
+
+def try_enqueue(
+    all_tracks: Sequence[TrackRecord],
+    results: dict[str, dict[str, list[str]]],
+    allowed_filetype: str,
+    ctx: CratediggerContext,
+) -> EnqueueAttempt:
+    """Single album match and enqueue.
+
+    Wave-based: eligible users are chunked into waves of
+    ``cfg.browse_top_k``; each wave runs ``_fanout_browse_users`` in
+    parallel, then iterates matching against the warm cache. Returns on
+    the first successful enqueue; falls through to the next user (and
+    next wave) on enqueue failure.
+    """
+    album_id = all_tracks[0]["albumId"]
+    album = get_album_by_id(album_id, ctx)
+    album_name = album.title
+    artist_name = album.artist_name
+
+    eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
+
+    had_enqueue_failure = False
+    accumulated: list[CandidateScore] = []
+    for username, match_result in _iter_wave_matches(
+        all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
+    ):
+        directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
+        files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
+        try:
+            downloads = slskd_do_enqueue(
+                username=username,
+                files=files_to_enqueue,
+                file_dir=match_result.file_dir,
+                ctx=ctx,
+            )
+            if downloads is not None:
+                return EnqueueAttempt(
+                    matched=True,
+                    downloads=downloads,
+                    candidates=tuple(accumulated),
                 )
-                if downloads is not None:
-                    return EnqueueAttempt(
-                        matched=True,
-                        downloads=downloads,
-                        candidates=tuple(accumulated),
-                    )
-                had_enqueue_failure = True
-                logger.info(
-                    f"Failed to enqueue download to slskd for "
-                    f"{artist_name} - {album_name} from {username}"
-                )
-            except Exception as e:
-                had_enqueue_failure = True
-                logger.warning(f"Exception enqueueing tracks: {e}")
-                logger.info(
-                    f"Exception enqueueing download to slskd for "
-                    f"{artist_name} - {album_name} from {username}"
-                )
+            had_enqueue_failure = True
+            logger.info(
+                f"Failed to enqueue download to slskd for "
+                f"{artist_name} - {album_name} from {username}"
+            )
+        except Exception as e:
+            had_enqueue_failure = True
+            logger.warning(f"Exception enqueueing tracks: {e}")
+            logger.info(
+                f"Exception enqueueing download to slskd for "
+                f"{artist_name} - {album_name} from {username}"
+            )
     logger.info(f"Failed to enqueue {artist_name} - {album_name}")
     return EnqueueAttempt(
         matched=False,
@@ -276,7 +398,13 @@ def try_multi_enqueue(
     allowed_filetype: str,
     ctx: CratediggerContext,
 ) -> EnqueueAttempt:
-    """Locate and enqueue a multi-disc album."""
+    """Locate and enqueue a multi-disc album.
+
+    Uses the same wave-based fan-out as ``try_enqueue``, applied per disc.
+    The folder cache populated by disc-1's waves carries into disc-2 (and
+    so on) — successive discs find their peers warm-cached and skip the
+    fan-out network round-trip.
+    """
     split_release: list[dict[str, Any]] = []
     for media in release.media:
         disk: dict[str, Any] = {}
@@ -294,39 +422,25 @@ def try_multi_enqueue(
     album = get_album_by_id(album_id, ctx)
     album_name = album.title
     artist_name = album.artist_name
-    denied_users = _get_denied_users(album_id, ctx)
+    eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
     accumulated: list[CandidateScore] = []
     for disk in split_release:
         ctx.negative_matches.clear()
-        for username in results:
-            if username in ctx.cooled_down_users:
-                logger.info(
-                    f"Skipping user '{username}' for album ID {album_id} "
-                    f"(multi-disc): on cooldown (recent download failures)"
-                )
-                continue
-            if username in denied_users:
-                logger.info(
-                    f"Skipping user '{username}' for album ID {album_id} "
-                    f"(multi-disc): denylisted (previously provided mislabeled quality)"
-                )
-                continue
-            file_dirs = _get_user_dirs(results[username], allowed_filetype)
-            if file_dirs is None:
-                continue
-            match_result = check_for_match(
-                disk["tracks"], allowed_filetype, file_dirs, username, ctx
-            )
-            accumulated.extend(match_result.candidates)
-            if match_result.matched:
-                directory = download_filter(
-                    allowed_filetype, match_result.directory, ctx.cfg,
-                )
-                disk["source"] = (username, directory, match_result.file_dir)
-                count_found += 1
-                break
-        else:
+        first_match = next(
+            _iter_wave_matches(
+                disk["tracks"], eligible, user_dirs, allowed_filetype, ctx,
+                accumulated,
+            ),
+            None,
+        )
+        if first_match is None:
             return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
+        username, match_result = first_match
+        directory = download_filter(
+            allowed_filetype, match_result.directory, ctx.cfg,
+        )
+        disk["source"] = (username, directory, match_result.file_dir)
+        count_found += 1
     if count_found == total:
         all_downloads = []
         enqueued = 0

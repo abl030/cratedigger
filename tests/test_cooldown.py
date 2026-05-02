@@ -1,9 +1,11 @@
 """Tests for global user cooldown system (issue #39)."""
 
+import configparser
 import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
+from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.quality import CooldownConfig, should_cooldown
 from cratedigger import TrackRecord
@@ -80,8 +82,12 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
             {"username": u} for u in (denied_users or [])
         ]
         source._get_db.return_value = db
+        # Use a real CratediggerConfig with defaults so wave-based enqueue
+        # (issue #198 U3) reads numeric values for browse_top_k /
+        # browse_cycle_budget_s rather than MagicMock proxies.
+        cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         ctx = CratediggerContext(
-            cfg=MagicMock(),
+            cfg=cfg,
             slskd=MagicMock(),
             pipeline_db_source=source,
             cooled_down_users=cooled_down_users or set(),

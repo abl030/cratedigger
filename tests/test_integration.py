@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -1083,9 +1084,15 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
     """Search logging should preserve telemetry semantics across failures."""
 
     def setUp(self):
+        # Use a real CratediggerConfig with defaults so wave-based enqueue
+        # (issue #198 U3) reads numeric values from cfg.browse_* fields.
+        # MagicMock-as-cfg silently swallowed missing fields and is the exact
+        # anti-pattern code-quality.md § "Decision Logic" warns against.
+        import configparser
+        from lib.config import CratediggerConfig
         self._orig_cfg = cratedigger.cfg
-        cratedigger.cfg = MagicMock()
-        cratedigger.cfg.parallel_searches = 1
+        cratedigger.cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+        cratedigger.cfg = replace(cratedigger.cfg, parallel_searches=1)
 
     def tearDown(self):
         cratedigger.cfg = self._orig_cfg
