@@ -156,6 +156,10 @@
     search_blacklist = ${concatStringsSep "," cfg.searchSettings.searchBlacklist}
     search_response_limit = ${toString cfg.searchSettings.searchResponseLimit}
     search_file_limit = ${toString cfg.searchSettings.searchFileLimit}
+    browse_top_k = ${toString cfg.searchSettings.browseTopK}
+    browse_wave_deadline_s = ${toString cfg.searchSettings.browseWaveDeadlineS}
+    browse_global_max_workers = ${toString cfg.searchSettings.browseGlobalMaxWorkers}
+    browse_cycle_budget_s = ${toString cfg.searchSettings.browseCycleBudgetS}
 
     [Download Settings]
     download_filtering = ${if cfg.downloadSettings.downloadFiltering then "True" else "False"}
@@ -597,6 +601,51 @@ in {
           seconds — possibly before the right peer responds. 50000 gives the
           matcher more peer diversity for albums where each peer holds 50+
           files (compilations, OSTs, multi-disc reissues).
+        '';
+      };
+      browseTopK = mkOption {
+        type = types.int;
+        default = 20;
+        description = ''
+          First wave size for parallel peer browse fan-out. After ranking
+          eligible peers by upload speed, the top K are browsed concurrently
+          and the cache is matched against them. If no match is found, the
+          tail is browsed in further chunks of K. Tune downward if first-match
+          rank is consistently low; tune upward only if browse budget allows.
+          See issue #198.
+        '';
+      };
+      browseWaveDeadlineS = mkOption {
+        type = types.float;
+        default = 20.0;
+        description = ''
+          Wall-clock deadline per fan-out wave, in seconds. Peers that have
+          not returned a directory listing by the deadline are abandoned for
+          the rest of this cycle (added to a per-cycle broken-user set).
+          Soulseek's per-peer TCP timeout is ~30–60s and is not configurable
+          per-call, so this client-side deadline is the only effective tail-
+          latency defense.
+        '';
+      };
+      browseGlobalMaxWorkers = mkOption {
+        type = types.int;
+        default = 32;
+        description = ''
+          Global cap on the ThreadPoolExecutor used by browse fan-out. Limits
+          simultaneous in-flight `users.directory()` calls across all users
+          and all dirs in a wave. Higher than browseTopK so a single user
+          contributing many candidate dirs still gets meaningful parallelism.
+          Watch slskd's own logs for serialisation if raised.
+        '';
+      };
+      browseCycleBudgetS = mkOption {
+        type = types.float;
+        default = 240.0;
+        description = ''
+          Per-cycle cumulative browse wall-time budget, in seconds. When
+          exceeded, remaining `wanted` records short-circuit (no further
+          browse waves) and stay queued for the next cycle. Defends against
+          multi-album-no-match cycles compounding into 50+ minute runs.
         '';
       };
       titleBlacklist = mkOption {

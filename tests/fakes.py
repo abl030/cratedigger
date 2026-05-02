@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -194,6 +195,10 @@ class FakeSlskdUsers:
         self.directory_error: Exception | None = None
         self._directories: dict[tuple[str, str], list[Any]] = {}
         self._directory_errors: dict[tuple[str, str], Exception] = {}
+        self._directory_delays: dict[tuple[str, str], float] = {}
+        # Optional concurrency probe — set to a callable taking a +/-1 delta to
+        # observe in-flight count (used by fan-out concurrency-cap tests).
+        self.in_flight_probe: Callable[[int], None] | None = None
 
     def set_directory(
         self,
@@ -211,14 +216,34 @@ class FakeSlskdUsers:
     ) -> None:
         self._directory_errors[(username, directory)] = error
 
+    def set_directory_delay(
+        self,
+        username: str,
+        directory: str,
+        seconds: float,
+    ) -> None:
+        """Sleep `seconds` inside `directory(...)` before returning the registered
+        result. Lets tests exercise fan-out wave deadlines and concurrency caps
+        without mocking time. Default is 0.0 (no sleep)."""
+        self._directory_delays[(username, directory)] = seconds
+
     def directory(self, username: str, directory: str) -> list[Any]:
         self.directory_calls.append((username, directory))
-        if self.directory_error is not None:
-            raise self.directory_error
-        directory_error = self._directory_errors.get((username, directory))
-        if directory_error is not None:
-            raise directory_error
-        return copy.deepcopy(self._directories.get((username, directory), []))
+        if self.in_flight_probe is not None:
+            self.in_flight_probe(1)
+        try:
+            delay = self._directory_delays.get((username, directory), 0.0)
+            if delay > 0:
+                time.sleep(delay)
+            if self.directory_error is not None:
+                raise self.directory_error
+            directory_error = self._directory_errors.get((username, directory))
+            if directory_error is not None:
+                raise directory_error
+            return copy.deepcopy(self._directories.get((username, directory), []))
+        finally:
+            if self.in_flight_probe is not None:
+                self.in_flight_probe(-1)
 
 
 @dataclass
