@@ -6,6 +6,8 @@ issue: 198
 
 # Browse Fan-Out and Pipeline Depth — Cycle Outlier Reduction
 
+> **Update 2026-05-02:** R6 (`browse_wave_deadline_s`) and R16 (`browse_cycle_budget_s`) were removed in production — both client-side caps were short-circuiting before legitimate peers responded and starving the pipeline. slskd's per-peer TCP read timeout is the only authority on hung peers now. The wave-based fan-out itself, the top-K knob, and the global worker cap remain.
+
 ## Problem Frame
 
 Cratedigger cycles routinely blow out to 27–70 minutes (worst observed: 70 min, 06:42 → 07:52 on 2026-05-01) against a 5-minute timer. The 5-min timer slips badly, downloads start later than they should, and the next cycle stacks on top of the previous one. Investigation in issue #198 traced ~16+ min of one cycle to the **browse phase** of search-and-enqueue, which iterates Soulseek peers serially even though `slskd.users.directory()` calls to **different** peers parallelize freely at the slskd and network layers.

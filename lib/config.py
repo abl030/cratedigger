@@ -87,12 +87,13 @@ class CratediggerConfig:
     search_escalation_threshold: int = 5
 
     # --- Browse fan-out (issue #198) ---
-    # Top-K + lazy-tail parallel browse across peers. See
+    # Top-K parallel browse across peers. See
     # docs/plans/2026-05-01-001-feat-browse-fanout-and-pipeline-depth-plan.md.
+    # The original wave_deadline / cycle_budget knobs were removed
+    # 2026-05-02 — they were starving the pipeline. slskd's per-peer TCP
+    # read timeout is the only authority on hung peers now.
     browse_top_k: int = 20
-    browse_wave_deadline_s: float = 20.0
     browse_global_max_workers: int = 32
-    browse_cycle_budget_s: float = 240.0
     # Pipeline depth for _search_and_queue_parallel — number of in-flight
     # search-collect futures. Submission stays sequential through the existing
     # 429-retry loop in _submit_search (slskd's SearchRequestLimiter is on POST
@@ -267,13 +268,11 @@ class CratediggerConfig:
             search_file_limit=getint("Search Settings", "search_file_limit", 50000),
             search_escalation_threshold=getint("Search Settings", "search_escalation_threshold", 5),
             # Clamp the parallel-browse / pipeline-depth knobs to safe minima.
-            # ThreadPoolExecutor(max_workers=0), range(0, n, 0), and a negative
-            # deadline all crash the cycle on the first album — reject them at
-            # parse time so a config typo doesn't take the whole timer down.
+            # ThreadPoolExecutor(max_workers=0) and range(0, n, 0) crash the
+            # cycle on the first album — reject them at parse time so a config
+            # typo doesn't take the whole timer down.
             browse_top_k=max(1, getint("Search Settings", "browse_top_k", 20)),
-            browse_wave_deadline_s=max(0.0, getfloat("Search Settings", "browse_wave_deadline_s", 20.0)),
             browse_global_max_workers=max(1, getint("Search Settings", "browse_global_max_workers", 32)),
-            browse_cycle_budget_s=max(0.0, getfloat("Search Settings", "browse_cycle_budget_s", 240.0)),
             search_max_inflight=max(1, getint("Search Settings", "search_max_inflight", 4)),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),

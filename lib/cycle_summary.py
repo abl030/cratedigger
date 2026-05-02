@@ -27,7 +27,6 @@ def format_cycle_summary(ctx: CratediggerContext, elapsed_s: float) -> str:
         f"cache_load_s={ctx.cache_load_s:.1f} "
         f"peers_browsed={ctx.peers_browsed} "
         f"peers_browsed_lazy={ctx.peers_browsed_lazy} "
-        f"peers_timed_out={ctx.peers_timed_out} "
         f"fanout_waves={ctx.fanout_waves} "
         f"cycle_total_s={elapsed_s:.1f}"
     )

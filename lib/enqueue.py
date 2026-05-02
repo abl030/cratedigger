@@ -252,39 +252,26 @@ def _iter_wave_matches(
     of ``cfg.browse_top_k``, runs ``_fanout_browse_users`` to populate
     ``ctx.folder_cache`` for the wave's uncached ``(user, dir)`` pairs in
     parallel, then iterates ``check_for_match`` against the warm cache in
-    upload-speed order. Honors ``cfg.browse_cycle_budget_s`` — short-circuits
-    before any wave (and between waves) once cumulative cycle browse time
-    exceeds the budget.
+    upload-speed order.
+
+    No client-side per-wave deadline or per-cycle budget — slskd's own
+    per-peer TCP read timeout bounds wave wall-time. The previous client
+    deadlines were starving the pipeline (see 2026-05-02 regression).
 
     Side effects: appends per-dir ``CandidateScore`` entries into
-    ``accumulated`` (caller-owned), bumps ``ctx.cycle_browse_time_s``,
-    ``ctx.fanout_waves``, ``ctx.peers_browsed``, ``ctx.peers_timed_out``;
-    extends ``ctx.broken_user`` with timed-out usernames (per-cycle scope —
-    a fresh ``CratediggerContext`` next cycle starts empty).
+    ``accumulated`` (caller-owned), bumps ``ctx.fanout_waves`` and
+    ``ctx.peers_browsed``.
 
     Caller is responsible for stopping iteration (``break``) once a match is
     enqueued; the generator stops fan-out work as soon as iteration stops.
     """
     cfg = ctx.cfg
-    if ctx.cycle_browse_time_s >= cfg.browse_cycle_budget_s:
-        logger.info(
-            f"cycle_browse_budget_exhausted: skipping wave (budget="
-            f"{cfg.browse_cycle_budget_s:.0f}s, used="
-            f"{ctx.cycle_browse_time_s:.1f}s)"
-        )
-        return
-
     K = cfg.browse_top_k
     for wave_start in range(0, len(eligible_users), K):
         wave = eligible_users[wave_start:wave_start + K]
 
         work: list[tuple[str, str]] = []
         for username in wave:
-            # Skip users that already timed out in a previous wave (or in
-            # disc-1's waves when called per-disc from try_multi_enqueue).
-            # Re-submitting them re-pays browse_wave_deadline_s on known-dead
-            # peers — the match loop already skips them, but the work-list
-            # builder needs the same guard to keep waves cheap.
             if username in ctx.broken_user:
                 continue
             cached = ctx.folder_cache.get(username, {})
@@ -294,25 +281,19 @@ def _iter_wave_matches(
 
         if work:
             t0 = time.monotonic()
-            timed_out = _fanout_browse_users(
+            _fanout_browse_users(
                 work, ctx.slskd, ctx,
                 max_workers=cfg.browse_global_max_workers,
-                deadline_s=cfg.browse_wave_deadline_s,
             )
             elapsed = time.monotonic() - t0
-            ctx.cycle_browse_time_s += elapsed
             ctx.fanout_waves += 1
             ctx.peers_browsed += len(work)
-            ctx.peers_timed_out += len(timed_out)
-            for username in timed_out:
-                if username not in ctx.broken_user:
-                    ctx.broken_user.append(username)
             n_returned = sum(
                 1 for (u, d) in work if d in ctx.folder_cache.get(u, {})
             )
             logger.info(
                 f"wave: K={K} n_uncached={len(work)} n_returned={n_returned} "
-                f"n_timed_out={len(timed_out)} elapsed_s={elapsed:.1f}"
+                f"elapsed_s={elapsed:.1f}"
             )
 
         for username in wave:
@@ -327,14 +308,6 @@ def _iter_wave_matches(
             accumulated.extend(match_result.candidates)
             if match_result.matched:
                 yield username, match_result
-
-        if ctx.cycle_browse_time_s >= cfg.browse_cycle_budget_s:
-            logger.info(
-                f"cycle_browse_budget_exhausted: stopping waves (budget="
-                f"{cfg.browse_cycle_budget_s:.0f}s, used="
-                f"{ctx.cycle_browse_time_s:.1f}s)"
-            )
-            return
 
 
 def try_enqueue(

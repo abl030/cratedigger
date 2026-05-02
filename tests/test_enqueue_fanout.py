@@ -4,7 +4,7 @@ The refactor replaces the sequential per-user iteration in `try_enqueue` and
 `try_multi_enqueue` with: (1) chunk eligible users into waves of
 `cfg.browse_top_k`, (2) parallel browse via `_fanout_browse_users`, (3) match
 in upload-speed order against the now-warm folder cache, (4) exit on first
-successful enqueue. A per-cycle browse budget short-circuits remaining work.
+successful enqueue.
 
 These tests pin:
   * top-K hit → only first wave fans out
@@ -13,10 +13,6 @@ These tests pin:
   * 0 eligible (cooldown/denylist) → no fan-out
   * fewer than K eligible → single short wave
   * cached entries skipped from the work list
-  * cycle budget short-circuit between albums and between waves
-  * wave deadline trips → users land in broken_user
-  * match-rate regression (high-rank user wins when low-rank users timed out)
-  * per-cycle scope of broken_user
   * had_enqueue_failure tracking when enqueue raises
   * try_multi_enqueue: per-disc wave loop reuses populated cache
 """
@@ -43,11 +39,9 @@ from lib.matching import MatchResult
 def _make_cfg(
     *,
     browse_top_k: int = 20,
-    browse_wave_deadline_s: float = 20.0,
     browse_global_max_workers: int = 32,
-    browse_cycle_budget_s: float = 240.0,
 ) -> CratediggerConfig:
-    """Build a CratediggerConfig with the four U2 fan-out knobs configurable."""
+    """Build a CratediggerConfig with the fan-out knobs configurable."""
     ini = configparser.ConfigParser()
     ini["Search Settings"] = {
         "minimum_filename_match_ratio": "0.5",
@@ -55,9 +49,7 @@ def _make_cfg(
         "allowed_filetypes": "flac,mp3",
         "browse_parallelism": "4",
         "browse_top_k": str(browse_top_k),
-        "browse_wave_deadline_s": str(browse_wave_deadline_s),
         "browse_global_max_workers": str(browse_global_max_workers),
-        "browse_cycle_budget_s": str(browse_cycle_budget_s),
     }
     return CratediggerConfig.from_ini(ini)
 
@@ -68,7 +60,6 @@ def _make_ctx(
     user_upload_speed: dict[str, int] | None = None,
     cooled_down_users: set[str] | None = None,
     denied_users: list[str] | None = None,
-    cycle_browse_time_s: float = 0.0,
 ) -> CratediggerContext:
     """Build a context with controllable cooldowns and denylist."""
     source = MagicMock()
@@ -83,7 +74,6 @@ def _make_ctx(
         pipeline_db_source=source,
         user_upload_speed=user_upload_speed or {},
         cooled_down_users=cooled_down_users or set(),
-        cycle_browse_time_s=cycle_browse_time_s,
     )
     ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
     return ctx
@@ -257,148 +247,11 @@ class TestWaveShape(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Cycle budget short-circuit
+# Per-cycle scope of broken_user
 # ---------------------------------------------------------------------------
 
 
-class TestCycleBudget(unittest.TestCase):
-    def test_budget_exhausted_inter_album_skips_fanout(self):
-        """If ctx.cycle_browse_time_s already > budget at entry, no fan-out."""
-        cfg = _make_cfg(browse_cycle_budget_s=1.0)
-        users = _ranked_users(5)
-        ctx = _make_ctx(
-            cfg,
-            user_upload_speed=_upload_speeds(users),
-            cycle_browse_time_s=2.0,  # already over budget
-        )
-        results = _make_results(users)
-
-        with patch("lib.enqueue._fanout_browse_users") as m_fan, \
-             patch("lib.enqueue.check_for_match") as m_match:
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
-
-        self.assertFalse(attempt.matched)
-        self.assertFalse(attempt.enqueue_failed)
-        m_fan.assert_not_called()
-        m_match.assert_not_called()
-
-    def test_budget_exhausted_inter_wave_stops_subsequent_waves(self):
-        """First wave inflates cycle_browse_time_s above budget → no second wave."""
-        cfg = _make_cfg(browse_top_k=20, browse_cycle_budget_s=1.0)
-        users = _ranked_users(40)  # would normally take 2 waves
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-
-        # Side effect: bump cycle_browse_time_s past budget on the first call.
-        def bump_budget(*args, **kwargs):
-            ctx.cycle_browse_time_s += 1.5
-            return set()
-
-        with patch("lib.enqueue._fanout_browse_users", side_effect=bump_budget) as m_fan, \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
-
-        self.assertFalse(attempt.matched)
-        self.assertEqual(m_fan.call_count, 1, "second wave must be short-circuited")
-
-
-# ---------------------------------------------------------------------------
-# Wave deadline → broken_user updates
-# ---------------------------------------------------------------------------
-
-
-class TestWaveDeadline(unittest.TestCase):
-    def test_timed_out_users_added_to_broken_user(self):
-        cfg = _make_cfg(browse_top_k=20)
-        users = _ranked_users(5)
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-
-        # First two users time out.
-        slow_users = {users[0], users[1]}
-
-        def fake_fanout(work, slskd, ctx, max_workers, deadline_s):
-            return slow_users
-
-        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()) as m_match:
-            try_enqueue(_make_tracks(), results, "flac", ctx)
-
-        for u in slow_users:
-            self.assertIn(u, ctx.broken_user)
-        # Match was not invoked for the timed-out users (they were skipped).
-        match_users = {call.args[3] for call in m_match.call_args_list}
-        self.assertTrue(slow_users.isdisjoint(match_users))
-
-    def test_broken_users_excluded_from_subsequent_wave_work_list(self):
-        """Wave-1 timeouts must NOT be re-submitted in wave-2's work plan.
-
-        Regression for the #198 code-review finding: the match loop already
-        skips broken users, but the work-list builder didn't — paying another
-        browse_wave_deadline_s to re-confirm dead peers each wave. With a
-        2-wave album where wave-1 times out users, wave-2's submitted work
-        must contain ZERO of those usernames.
-        """
-        cfg = _make_cfg(browse_top_k=20)
-        users = _ranked_users(40)
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-        wave1_users = set(users[:20])
-
-        call_history: list[set[str]] = []
-
-        def fake_fanout(work, slskd, ctx, max_workers, deadline_s):
-            wave_users = {u for (u, _d) in work}
-            call_history.append(wave_users)
-            # Wave 1: every user times out. Wave 2: nobody times out.
-            if wave_users <= wave1_users:
-                return wave_users
-            return set()
-
-        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
-
-        self.assertEqual(len(call_history), 2, "expected 2 waves")
-        wave2_users = call_history[1]
-        self.assertTrue(
-            wave2_users.isdisjoint(wave1_users),
-            f"wave-2 must not re-submit wave-1's timed-out users; "
-            f"overlap was {wave2_users & wave1_users}",
-        )
-        # And wave-2 should contain the actual rank 20-39 users.
-        self.assertEqual(wave2_users, set(users[20:40]))
-
-    def test_match_rate_regression_high_rank_user_wins(self):
-        """Wave-1 users all time out, wave-2 user X is the only true match."""
-        cfg = _make_cfg(browse_top_k=20)
-        users = _ranked_users(40)
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-        winner = users[25]
-
-        # Wave 1 (top-20): everyone times out.
-        # Wave 2 (next 20): no timeouts.
-        def fake_fanout(work, slskd, ctx, max_workers, deadline_s):
-            wave_users = {u for (u, _d) in work}
-            if wave_users <= set(users[:20]):
-                return wave_users
-            return set()
-
-        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
-            if username == winner:
-                return _match_for(winner, f"Music\\{winner}\\Album")
-            return _nomatch()
-
-        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
-             patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
-
-        self.assertTrue(attempt.matched)
-        for u in users[:20]:
-            self.assertIn(u, ctx.broken_user, f"wave-1 user {u} should be broken")
-
+class TestBrokenUserPerCycle(unittest.TestCase):
     def test_broken_user_is_per_cycle_not_persistent(self):
         """A fresh CratediggerContext starts with empty broken_user."""
         cfg = _make_cfg()
@@ -500,7 +353,7 @@ class TestMultiDiscFanout(unittest.TestCase):
         # submitted across calls so the test can assert no duplicates.
         seen_work: list[tuple[str, str]] = []
 
-        def fake_fanout(work, slskd, ctx, max_workers, deadline_s):
+        def fake_fanout(work, slskd, ctx, max_workers):
             for u, d in work:
                 seen_work.append((u, d))
                 ctx.folder_cache.setdefault(u, {})[d] = {"directory": d, "files": []}

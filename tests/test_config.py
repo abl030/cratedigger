@@ -710,26 +710,14 @@ class TestFanoutConfigClamping(unittest.TestCase):
         cfg = self._parse(search_max_inflight=0)
         self.assertEqual(cfg.search_max_inflight, 1)
 
-    def test_browse_wave_deadline_negative_clamps_to_zero(self):
-        cfg = self._parse(browse_wave_deadline_s=-1.0)
-        self.assertEqual(cfg.browse_wave_deadline_s, 0.0)
-
-    def test_browse_cycle_budget_negative_clamps_to_zero(self):
-        cfg = self._parse(browse_cycle_budget_s=-100.0)
-        self.assertEqual(cfg.browse_cycle_budget_s, 0.0)
-
     def test_valid_values_pass_through_unchanged(self):
         cfg = self._parse(
             browse_top_k=15,
-            browse_wave_deadline_s=10.0,
             browse_global_max_workers=64,
-            browse_cycle_budget_s=300.0,
             search_max_inflight=2,
         )
         self.assertEqual(cfg.browse_top_k, 15)
-        self.assertEqual(cfg.browse_wave_deadline_s, 10.0)
         self.assertEqual(cfg.browse_global_max_workers, 64)
-        self.assertEqual(cfg.browse_cycle_budget_s, 300.0)
         self.assertEqual(cfg.search_max_inflight, 2)
 
 

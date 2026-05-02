@@ -9,6 +9,8 @@ origin: docs/brainstorms/browse-fanout-and-pipeline-depth-requirements.md
 
 # Browse Fan-Out and Pipeline Depth — Cycle Outlier Reduction
 
+> **Update 2026-05-02:** R6 (`browse_wave_deadline_s`) and R16 (`browse_cycle_budget_s`) were rolled back in production — both client-side caps were short-circuiting before legitimate peers responded and starving the pipeline (search timeout rate jumped from ~1% to ~35%, found rate dropped from 13.7% to 2.2% within 24h of deploy). slskd's per-peer TCP read timeout is the sole authority on hung peers now. The wave-based fan-out, top-K, and global worker cap (R5/R7) remain. The unrelated search poll timeout in `cratedigger.py` was also dropped at the same time for the same reason.
+
 ## Overview
 
 Cratedigger cycles routinely overflow the 5-minute timer (worst observed: 70 min on 2026-05-01). The single biggest contributor is the per-album browse phase, which iterates Soulseek peers serially even though `slskd.users.directory()` parallelizes freely at the slskd and network layers. This plan introduces bounded parallel browse fan-out (top-K + lazy tail with per-wave deadlines), raises pipeline depth so search submission isn't gated by post-collection work, and lands instrumentation first so we have numerical "before" data to validate the fix against.

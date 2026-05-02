@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import concurrent.futures.thread as _futures_thread
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -137,42 +135,26 @@ def _fanout_browse_users(
     slskd_client: Any,
     ctx: CratediggerContext,
     max_workers: int,
-    deadline_s: float,
-) -> set[str]:
+) -> None:
     """Bounded parallel browse fan-out across (user, dir) pairs.
 
-    Submits each `(username, file_dir)` browse to a single bounded
+    Submits each `(username, file_dir)` browse to a bounded
     ThreadPoolExecutor and writes successful results into
     `ctx.folder_cache[user][dir]` and `ctx._folder_cache_ts[user][dir]`.
 
-    The wave deadline is enforced via `as_completed(timeout=...)` plus manual
-    executor lifetime + `shutdown(wait=False, cancel_futures=True)` so a
-    single hung peer cannot stretch the wave to its TCP timeout.
+    No client-side wave deadline — slskd's per-peer TCP read timeout
+    (~30–60 s) is the only authority on when a hung peer is abandoned.
+    The previous wave deadline + cycle budget were short-circuiting before
+    real peers had a chance to respond and were starving the pipeline (see
+    2026-05-02 regression).
 
     Thread-safety: workers only return tuples — the calling thread is the
     sole writer to `ctx.folder_cache`. The Step 1 pre-create is therefore
     not a race fix; it makes "all dirs failed for this user" observable to
-    callers (the inner dict exists but is empty). Without it, the regression
-    test couldn't distinguish "tried, every browse raised" from "user was
-    never in the work plan."
-
-    Orphan-thread cost: futures whose results are abandoned past the wave
-    deadline keep running until their own TCP timeout (~30–60s). Plain
-    `ThreadPoolExecutor` workers are non-daemon and tracked in
-    `concurrent.futures.thread._threads_queues`; on interpreter exit, an
-    atexit handler joins every entry — even after `shutdown(wait=False,
-    cancel_futures=True)`. For a 5-min oneshot, that lets orphan TCP timeouts
-    bleed past the cycle boundary and delay the next systemd-timer fire. We
-    detach the pool's workers from the registry so atexit doesn't wait on
-    them; they still finish their network calls naturally, we just don't
-    block the process exit on them.
-
-    Returns the set of usernames whose futures had not completed by the
-    deadline (any one outstanding `(user, dir)` future puts that user in
-    the set; the caller treats them as broken-for-this-cycle).
+    callers (the inner dict exists but is empty).
     """
     if not work_items:
-        return set()
+        return
 
     # Step 1: pre-create user buckets so callers can observe "every dir
     # failed for this user" via an empty inner dict.
@@ -180,57 +162,14 @@ def _fanout_browse_users(
         ctx.folder_cache.setdefault(user, {})
         ctx._folder_cache_ts.setdefault(user, {})
 
-    timed_out_users: set[str] = set()
-    pool = ThreadPoolExecutor(max_workers=max_workers)
-    try:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_browse_one, user, file_dir, slskd_client): (user, file_dir)
             for (user, file_dir) in work_items
         }
-        try:
-            for fut in as_completed(futures, timeout=deadline_s):
-                user, file_dir = futures[fut]
-                _file_dir, result = fut.result()
-                if result is not None:
-                    ctx.folder_cache[user][file_dir] = result
-                    ctx._folder_cache_ts[user][file_dir] = time.time()
-        except FuturesTimeoutError:
-            for fut, (user, _file_dir) in futures.items():
-                if not fut.done():
-                    timed_out_users.add(user)
-    finally:
-        # cancel_futures=True (Python 3.9+) cancels queued, not-yet-started
-        # tasks. Running tasks keep running but their results are abandoned.
-        # This is what makes the wave deadline actually bound wall-clock.
-        pool.shutdown(wait=False, cancel_futures=True)
-        _detach_workers_from_atexit(pool)
-
-    return timed_out_users
-
-
-def _detach_workers_from_atexit(pool: ThreadPoolExecutor) -> None:
-    """Remove `pool`'s workers from concurrent.futures' atexit registry.
-
-    `ThreadPoolExecutor` registers each worker thread in the module-level
-    `_threads_queues` dict; an atexit handler joins every entry on
-    interpreter shutdown — even after `shutdown(wait=False, cancel_futures=
-    True)`. For an orphaned worker stuck on a 30–60 s slskd TCP timeout,
-    that means the cratedigger oneshot cannot exit until the timeout
-    elapses, defeating the wave deadline at the *process* boundary.
-
-    Popping the workers from `_threads_queues` detaches them from the join
-    — the threads still finish their network calls naturally and any
-    pending I/O completes; we just don't make the process wait for them.
-
-    Uses a private CPython attribute. Wrapped in try/except so a future
-    Python release that renames or removes the registry degrades to the
-    pre-existing behavior (slow-but-correct exit) rather than crashing.
-    """
-    try:
-        # `pool._threads` is a set of Thread objects; remove each from the
-        # global registry. Iterate a copy to keep the dict mutation safe.
-        registry: dict[Any, Any] = _futures_thread._threads_queues  # type: ignore[assignment]
-        for thread in list(getattr(pool, "_threads", []) or []):
-            registry.pop(thread, None)
-    except Exception:
-        logger.debug("Could not detach fan-out workers from atexit registry", exc_info=True)
+        for fut in as_completed(futures):
+            user, file_dir = futures[fut]
+            _file_dir, result = fut.result()
+            if result is not None:
+                ctx.folder_cache[user][file_dir] = result
+                ctx._folder_cache_ts[user][file_dir] = time.time()

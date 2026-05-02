@@ -83,8 +83,8 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         ]
         source._get_db.return_value = db
         # Use a real CratediggerConfig with defaults so wave-based enqueue
-        # (issue #198 U3) reads numeric values for browse_top_k /
-        # browse_cycle_budget_s rather than MagicMock proxies.
+        # (issue #198 U3) reads numeric values for browse_top_k rather
+        # than MagicMock proxies.
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         ctx = CratediggerContext(
             cfg=cfg,

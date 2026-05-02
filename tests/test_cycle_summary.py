@@ -71,9 +71,8 @@ class TestContextAccumulators(unittest.TestCase):
         self.assertEqual(ctx.browse_time_s, 0.0)
         self.assertEqual(ctx.match_time_s, 0.0)
         self.assertEqual(ctx.cache_load_s, 0.0)
-        self.assertEqual(ctx.cycle_browse_time_s, 0.0)
         self.assertEqual(ctx.peers_browsed, 0)
-        self.assertEqual(ctx.peers_timed_out, 0)
+        self.assertEqual(ctx.peers_browsed_lazy, 0)
         self.assertEqual(ctx.fanout_waves, 0)
 
 
@@ -150,7 +149,6 @@ class TestFormatCycleSummary(unittest.TestCase):
         "cache_load_s=",
         "peers_browsed=",
         "peers_browsed_lazy=",
-        "peers_timed_out=",
         "fanout_waves=",
         "cycle_total_s=",
     )
@@ -168,7 +166,6 @@ class TestFormatCycleSummary(unittest.TestCase):
         ctx.cache_load_s = 6.7
         ctx.peers_browsed = 42
         ctx.peers_browsed_lazy = 5
-        ctx.peers_timed_out = 3
         ctx.fanout_waves = 2
         line = format_cycle_summary(ctx, elapsed_s=99.9)
         self.assertIn("browse_time_s=12.3", line)
@@ -176,7 +173,6 @@ class TestFormatCycleSummary(unittest.TestCase):
         self.assertIn("cache_load_s=6.7", line)
         self.assertIn("peers_browsed=42", line)
         self.assertIn("peers_browsed_lazy=5", line)
-        self.assertIn("peers_timed_out=3", line)
         self.assertIn("fanout_waves=2", line)
         self.assertIn("cycle_total_s=99.9", line)
 
