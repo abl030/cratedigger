@@ -3,6 +3,8 @@
 import math
 import os
 import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -328,6 +330,109 @@ class TestSpectralIntegration(unittest.TestCase):
         result = analyze_album(_fixture("09_fake_flac_128"))
         self.assertIsNotNone(result.estimated_bitrate_kbps,
                              "Album-level estimated bitrate should be set for transcodes")
+
+
+class TestDecodeFailureNotGenuine(unittest.TestCase):
+    """A sox decode failure must NOT be silently graded as genuine.
+
+    Bug discovered 2026-05-03: sox in the dev shell has no handler for
+    .m4a/.aac/.alac. Calling `sox file.m4a -n stat` exits non-zero with
+    stderr "FAIL formats: no handler for file extension `m4a'" and emits
+    no "RMS amplitude:" line. parse_rms_from_stat returned None for every
+    band, the early-out at analyze_track returned grade='genuine' with
+    hf_deficit_db=0.0 on every track, and ALAC files were silently
+    classified as verified-lossless without ever being measured.
+    """
+
+    @patch("lib.spectral_check.subprocess.run")
+    def test_decode_failure_grades_error_not_genuine(self, mock_run):
+        from lib.spectral_check import analyze_track
+        # Real sox stderr when handed an undecodable file:
+        mock_run.return_value = MagicMock(
+            stderr="sox FAIL formats: no handler for file extension `m4a'\n",
+            returncode=2,
+        )
+        result = analyze_track("/fake/path.m4a")
+        # Currently returns 'genuine' (the bug). The fix must return 'error'.
+        self.assertEqual(
+            result.grade, "error",
+            "Decode failure (no RMS line in sox stderr) must grade 'error', "
+            "not silently fall through the silent-track early-out as 'genuine'.",
+        )
+
+    @patch("lib.spectral_check.subprocess.run")
+    def test_silent_track_still_grades_genuine(self, mock_run):
+        """Guard that the failure-vs-silent fix doesn't over-broaden.
+
+        A real silent track (sox decoded fine, RMS legitimately ~0) should
+        still hit the silent-track early-out and grade 'genuine'.
+        """
+        from lib.spectral_check import analyze_track
+        mock_run.return_value = MagicMock(
+            stderr="RMS     amplitude:     0.0000001\n",
+            returncode=0,
+        )
+        result = analyze_track("/fake/silent.flac")
+        self.assertEqual(result.grade, "genuine")
+        self.assertEqual(result.hf_deficit_db, 0.0)
+
+
+HAS_FFMPEG = shutil.which("ffmpeg") is not None
+
+
+@unittest.skipUnless(HAS_SOX and HAS_FFMPEG, "needs sox + ffmpeg")
+class TestM4aFallback(unittest.TestCase):
+    """Real ALAC .m4a file must produce a real spectral measurement.
+
+    Drives the ffmpeg pipe fallback: sox can't decode m4a natively, so
+    spectral_check must route the file through `ffmpeg -i in -f wav -` and
+    feed sox via stdin. After the fix, a synthetic 1kHz tone in ALAC must
+    grade somewhere meaningful (not the all-zero default), and a fake-FLAC
+    pattern (steep cliff at 16kHz) in ALAC must be detectable.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_m4a_test_")
+        # Pure 1kHz tone, encoded as ALAC inside an .m4a container.
+        # Sox can't decode this; the fallback must.
+        cls.tone_m4a = os.path.join(cls.tmpdir, "tone.m4a")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "sine=frequency=1000:duration=35",
+             "-c:a", "alac", cls.tone_m4a],
+            capture_output=True, check=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_m4a_alac_actually_analyzed(self):
+        from lib.spectral_check import analyze_track
+        result = analyze_track(self.tone_m4a, trim_seconds=30)
+        # A pure 1kHz tone has effectively zero energy at 18-20kHz, so the
+        # measured HF deficit will be enormous (well above HF_DEFICIT_SUSPECT).
+        # The point is that we get a REAL measurement, not the default 0.0.
+        self.assertNotEqual(
+            result.grade, "error",
+            "ffmpeg fallback should let sox decode the m4a — saw error",
+        )
+        # Either we measured a real deficit (suspect) OR the tone hit some
+        # other genuine path; what we MUST NOT see is the default-0.0 grade.
+        # The default-0.0 case is grade='genuine' with hf_deficit_db == 0.0
+        # AND cliff_freq_hz is None — that's the bug fingerprint.
+        is_default_zero = (
+            result.grade == "genuine"
+            and result.hf_deficit_db == 0.0
+            and result.cliff_freq_hz is None
+        )
+        self.assertFalse(
+            is_default_zero,
+            f"m4a hit the silent-track default (grade={result.grade}, "
+            f"hf_deficit_db={result.hf_deficit_db}, cliff={result.cliff_freq_hz}) "
+            "— ffmpeg fallback is not wired up.",
+        )
 
 
 if __name__ == "__main__":
