@@ -100,6 +100,13 @@ class CratediggerConfig:
     # only). Raised from the legacy hard-coded 2 to keep the search-collection
     # thread fed once browse stops being the dominant cost.
     search_max_inflight: int = 4
+    # Soft per-cycle wall-clock ceiling (seconds). When exceeded, the search
+    # phase stops submitting new searches; in-flight work continues to
+    # completion. Albums not yet submitted stay `wanted` and the next cycle
+    # picks them up. <= 0 disables the cap (preserves the 2026-05-02 rollback
+    # behaviour where slskd is the sole authority — kept as an emergency
+    # opt-out). See issue #198.
+    cycle_max_runtime_s: int = 600
 
     # --- Release ---
     use_most_common_tracknum: bool = True
@@ -274,6 +281,10 @@ class CratediggerConfig:
             browse_top_k=max(1, getint("Search Settings", "browse_top_k", 20)),
             browse_global_max_workers=max(1, getint("Search Settings", "browse_global_max_workers", 32)),
             search_max_inflight=max(1, getint("Search Settings", "search_max_inflight", 4)),
+            # cycle_max_runtime_s is *not* clamped to a minimum: 0 / negative
+            # is the documented opt-out. See `compute_cycle_deadline` in
+            # lib/context.py for the gate logic.
+            cycle_max_runtime_s=getint("Search Settings", "cycle_max_runtime_s", 600),
             # Release
             use_most_common_tracknum=getbool("Release Settings", "use_most_common_tracknum", True),
             allow_multi_disc=getbool("Release Settings", "allow_multi_disc", True),
