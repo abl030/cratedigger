@@ -2241,10 +2241,13 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
         return False
     if post_conversion_min_bitrate is None:
         return False
-    # When spectral data is available, it's authoritative
+    # When spectral data is available, it's authoritative.
+    # 'error' is inconclusive (decoder failed on every track — usually a
+    # missing codec or hostile input). Fail closed: treat as transcode so
+    # determine_verified_lossless can't pass it without V0 corroboration.
     if spectral_grade is not None:
-        # Cliff detected = transcode regardless of bitrate
-        if spectral_grade in ("suspect", "likely_transcode"):
+        # Cliff detected, suspect, or analysis failed = treat as transcode
+        if spectral_grade in ("suspect", "likely_transcode", "error"):
             return True
         # No cliff = not a transcode (lo-fi lossless produces low V0 bitrates)
         return False

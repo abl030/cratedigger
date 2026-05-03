@@ -435,5 +435,110 @@ class TestM4aFallback(unittest.TestCase):
         )
 
 
+class TestArgvFlagConfusion(unittest.TestCase):
+    """Peer-controlled filenames starting with '-' must not be parsed as
+    sox/ffmpeg flags. Soulseek peers can name files arbitrarily; the
+    pipeline must treat the filename as data, not argv."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_dash_test_")
+        # Real FLAC tone with a leading-dash filename — what a hostile peer
+        # could ship via Soulseek. Sox CAN decode FLAC natively, so any
+        # failure here proves argv-flag confusion (not a decode failure).
+        cls.dash_flac = os.path.join(cls.tmpdir, "-evil.flac")
+        if HAS_SOX:
+            subprocess.run(
+                ["sox", "-n", "-r", "44100", "-c", "2",
+                 cls.dash_flac, "synth", "2", "sin", "1000", "vol", "0.5"],
+                check=True, capture_output=True,
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    @unittest.skipUnless(HAS_SOX, "sox not available")
+    def test_leading_dash_filename_does_not_get_parsed_as_flag(self):
+        """A real FLAC named '-evil.flac' must analyze normally, not be
+        parsed as a sox flag and abort."""
+        from lib.spectral_check import analyze_track
+        result = analyze_track(self.dash_flac, trim_seconds=2)
+        self.assertNotEqual(
+            result.grade, "error",
+            f"sox parsed '-evil.flac' as a flag instead of as a path "
+            f"(error={result.error}). Need to prefix relative paths with './'.",
+        )
+
+
+class TestAlbumLevelSilentGenuineCollapse(unittest.TestCase):
+    """When every track in an album errors out, analyze_album must NOT
+    return grade='genuine'. The pre-existing behavior (drop error tracks
+    from track_results, then classify the empty list as genuine) is the
+    same bug class the codec fix targets — at the album level instead of
+    the track level. Surfaced by ce-adversarial-reviewer 2026-05-03."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_album_err_")
+        # Two undecodable files with audio extensions so analyze_album
+        # finds them but analyze_track errors on each.
+        for name in ("01-track.m4a", "02-track.m4a"):
+            with open(os.path.join(cls.tmpdir, name), "wb") as f:
+                f.write(b"not real audio")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    @unittest.skipUnless(HAS_SOX and HAS_FFMPEG, "needs sox + ffmpeg")
+    def test_all_tracks_error_grades_album_error_not_genuine(self):
+        """If every track in a non-empty album errors, the album grade
+        must be 'error', not the silent-default 'genuine'."""
+        from lib.spectral_check import analyze_album
+        result = analyze_album(self.tmpdir, trim_seconds=2)
+        self.assertEqual(
+            result.grade, "error",
+            f"All-error album silently graded {result.grade!r} — same "
+            "silent-genuine bug class the codec fix was meant to close. "
+            "Empty track_results from a non-empty file list must fail closed.",
+        )
+
+
+class TestRcZeroNoRmsLineNoLongerSilent(unittest.TestCase):
+    """Sox returncode==0 with no 'RMS amplitude:' line in stderr was the
+    'legacy permissive path' the codec PR's docstring acknowledged. After
+    review, that path is closed: any missing RMS line now surfaces as a
+    decode failure regardless of return code. Same failure-shape contract
+    as the rc!=0 path."""
+
+    @patch("lib.spectral_check.subprocess.run")
+    def test_clean_exit_no_rms_line_grades_error(self, mock_run):
+        from lib.spectral_check import analyze_track
+        mock_run.return_value = MagicMock(
+            stderr="some warning that has no RMS line\n",
+            returncode=0,
+        )
+        result = analyze_track("/fake/path.flac")
+        self.assertEqual(
+            result.grade, "error",
+            "sox returning rc=0 with no RMS line must grade 'error', not "
+            "fall through the silent-track early-out as 'genuine'.",
+        )
+
+
+class TestNaNRmsGuard(unittest.TestCase):
+    """parse_rms_from_stat must reject NaN/inf to avoid silent-genuine
+    via NaN comparisons (NaN >= 60 is False everywhere → 'genuine')."""
+
+    def test_nan_rms_returns_none(self):
+        from lib.spectral_check import parse_rms_from_stat
+        self.assertIsNone(parse_rms_from_stat("RMS     amplitude:     nan\n"))
+
+    def test_inf_rms_returns_none(self):
+        from lib.spectral_check import parse_rms_from_stat
+        self.assertIsNone(parse_rms_from_stat("RMS     amplitude:     inf\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
