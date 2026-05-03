@@ -332,6 +332,15 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
             v0_probe=None,
         ))
 
+    def test_v0_override_partial_probe_data_stays_unverified(self):
+        """V0 probe with avg high but min=None → override does not fire.
+        Partial probe data must not pass the floor check by accident."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=241, min=None, median=239),
+        ))
+
     def test_v0_override_applies_to_lossless_on_disk_path(self):
         """target_format='flac' + spectral=suspect + high V0 → override
         flips verified to True for the keep-on-disk path too. A genuine
