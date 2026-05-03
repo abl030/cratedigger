@@ -2264,11 +2264,42 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
 _LOSSLESS_EXTS = {"flac", "m4a", "wav", "alac"}
 
 
+# V0-avg trust override thresholds. A lossless_source_v0 probe with avg
+# AND min at-or-above these levels is strong evidence the source carried
+# enough HF complexity that LAME couldn't strip it — i.e. a real lossless
+# master, not a fake-FLAC of a lossy intermediate. Below either bar we
+# defer to spectral as before. Tuned against Bill Hicks 1990 "Dangerous"
+# (avg=241/min=219, spoken-word lossless that spectral false-positives as
+# suspect because speech has no HF energy for the music-tuned thresholds
+# to measure against).
+V0_OVERRIDE_AVG_KBPS: int = 230
+V0_OVERRIDE_MIN_KBPS: int = 200
+
+
+def v0_probe_overrides_spectral(probe: "V0ProbeEvidence | None") -> bool:
+    """Decide whether a V0 probe is strong enough to override a suspect
+    spectral grade and certify the source as genuine lossless.
+
+    Only ``lossless_source_v0`` probes are eligible — research probes
+    (``native_lossy_research_v0``, ``on_disk_research_v0``) carry no
+    policy weight here.
+    """
+    if not is_comparable_lossless_source_probe(probe):
+        return False
+    assert probe is not None  # narrowed by the helper above
+    avg = probe.avg_bitrate_kbps
+    mn = probe.min_bitrate_kbps
+    if avg is None or mn is None:
+        return False
+    return avg >= V0_OVERRIDE_AVG_KBPS and mn >= V0_OVERRIDE_MIN_KBPS
+
+
 def determine_verified_lossless(
     target_format: Optional[str],
     spectral_grade: Optional[str],
     converted_count: int,
     is_transcode: bool,
+    v0_probe: "V0ProbeEvidence | None" = None,
 ) -> bool:
     """Single source of truth for verified lossless status (pure).
 
@@ -2278,10 +2309,22 @@ def determine_verified_lossless(
        The lossless source IS on disk — no conversion needed to prove it.
     2. Default (lossless→V0/target): verified if we actually converted
        lossless files AND spectral didn't flag them as transcodes.
+
+    V0-avg trust override (issue #205-style — Bill Hicks): in either path,
+    when spectral disagrees with V0 evidence (suspect grade but a
+    ``lossless_source_v0`` probe at avg≥230kbps AND min≥200kbps), trust
+    the V0 probe and certify as verified. The override is monotonic — it
+    only flips False→True, never True→False.
     """
     if target_format in ("flac", "lossless"):
-        return spectral_grade in ("genuine", "marginal", None)
-    return converted_count > 0 and not is_transcode
+        if spectral_grade in ("genuine", "marginal", None):
+            return True
+        return v0_probe_overrides_spectral(v0_probe)
+    if converted_count > 0 and not is_transcode:
+        return True
+    if converted_count > 0 and v0_probe_overrides_spectral(v0_probe):
+        return True
+    return False
 
 
 OPUS_DELETE_SKIP_REASON_SPECTRAL = "spectral_suspect"
@@ -3254,9 +3297,10 @@ def full_pipeline_decision(
     cfg: "QualityRankConfig | None" = None,
     *,
     candidate_v0_probe_avg: int | None = None,
+    candidate_v0_probe_min: int | None = None,
     existing_v0_probe_avg: int | None = None,
-    candidate_v0_probe_kind: str | None = None,
     existing_v0_probe_kind: str | None = None,
+    candidate_v0_probe_kind: str | None = None,
     supported_lossless_source: bool | None = None,
 ):
     """Run the full decision chain and return the final outcome.
@@ -3460,8 +3504,18 @@ def full_pipeline_decision(
             return result
         result["imported"] = True
 
-        # Genuine FLAC on disk is verified lossless (for quality gate)
-        if spectral_grade in ("genuine", "marginal", None):
+        # Genuine FLAC on disk is verified lossless (for quality gate). Route
+        # through determine_verified_lossless so the V0-avg trust override is
+        # consulted and the simulator stays in lockstep with import_one.py.
+        candidate_probe_full = V0ProbeEvidence(
+            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+            avg_bitrate_kbps=candidate_v0_probe_avg,
+            min_bitrate_kbps=candidate_v0_probe_min,
+        ) if candidate_v0_probe_avg is not None else None
+        if determine_verified_lossless(
+                target_format, spectral_grade,
+                converted_count=0, is_transcode=False,
+                v0_probe=candidate_probe_full):
             verified_lossless = True
             result["verified_lossless"] = True
 
@@ -3549,9 +3603,20 @@ def full_pipeline_decision(
         else:
             result["imported"] = True
 
-        # For genuine FLAC→V0, set verified_lossless
-        if (converted_count > 0 and not is_transcode and
-                spectral_grade in ("genuine", "marginal", None)):
+        # Genuine FLAC→V0 sets verified_lossless. Routed through
+        # determine_verified_lossless so the V0-avg trust override (Bill
+        # Hicks shape — spectral=suspect on spoken-word with high V0
+        # evidence) flips False→True consistently with import_one.py.
+        candidate_probe_full = V0ProbeEvidence(
+            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+            avg_bitrate_kbps=candidate_v0_probe_avg,
+            min_bitrate_kbps=candidate_v0_probe_min,
+        ) if candidate_v0_probe_avg is not None else None
+        if determine_verified_lossless(
+                target_format, spectral_grade,
+                converted_count=converted_count,
+                is_transcode=is_transcode,
+                v0_probe=candidate_probe_full):
             verified_lossless = True
             result["verified_lossless"] = True
 

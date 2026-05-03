@@ -195,10 +195,11 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
     """Single source of truth for verified lossless derivation."""
 
     def _dvl(self, target_format=None, spectral_grade=None,
-             converted_count=0, is_transcode=False):
+             converted_count=0, is_transcode=False, v0_probe=None):
         from lib.quality import determine_verified_lossless
         return determine_verified_lossless(
-            target_format, spectral_grade, converted_count, is_transcode)
+            target_format, spectral_grade, converted_count, is_transcode,
+            v0_probe=v0_probe)
 
     # --- FLAC-on-disk path ---
 
@@ -250,6 +251,105 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
 
     def test_lossless_suspect_is_not_verified(self):
         self.assertFalse(self._dvl(target_format="lossless", spectral_grade="suspect"))
+
+    # --- V0-avg trust override ---
+    # When spectral disagrees with V0 evidence (the spoken-word and
+    # sparse-HF-music false-positive case — Bill Hicks 1990 "Dangerous"
+    # being the canonical example), trust the V0 probe. A
+    # ``lossless_source_v0`` probe with avg ≥ 230kbps AND min ≥ 200kbps is
+    # strong evidence the source carried genuine HF complexity that LAME
+    # couldn't throw away — i.e. a real lossless master, not a fake-FLAC.
+    # Below those thresholds, we defer to spectral as before.
+
+    def _v0(self, kind="lossless_source_v0", avg=None, min=None, median=None):
+        from lib.quality import V0ProbeEvidence
+        return V0ProbeEvidence(
+            kind=kind, avg_bitrate_kbps=avg, min_bitrate_kbps=min,
+            median_bitrate_kbps=median,
+        )
+
+    def test_v0_override_bill_hicks_shape_verifies_despite_suspect(self):
+        """Real case: ALAC of Bill Hicks comedy. spectral=suspect (speech has
+        no HF), V0 probe avg=241/min=219 (genuine lossless source).
+        is_transcode=True (set by transcode_detection seeing 'suspect').
+        Expect: V0 override flips verified_lossless to True."""
+        self.assertTrue(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=241, min=219, median=239),
+        ))
+
+    def test_v0_override_fake_flac_shape_stays_unverified(self):
+        """Fake-FLAC of 128k MP3 source: V0 probe avg=190/min=180. Below
+        either threshold → override does NOT fire → stays unverified."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=190, min=180, median=185),
+        ))
+
+    def test_v0_override_min_below_floor_stays_unverified(self):
+        """Mixed album: 9 great tracks + 1 transcoded track. avg=240 passes
+        but min=110 fails the floor. One bad track must not whitelist the
+        whole album."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=240, min=110, median=235),
+        ))
+
+    def test_v0_override_boundary_inclusive(self):
+        """Thresholds are inclusive: avg=230 AND min=200 must pass."""
+        self.assertTrue(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=230, min=200, median=215),
+        ))
+
+    def test_v0_override_avg_just_below_threshold(self):
+        """avg=229 (below 230) → override does not fire."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(avg=229, min=210, median=220),
+        ))
+
+    def test_v0_override_wrong_probe_kind_ignored(self):
+        """Only lossless_source_v0 probes count. native_lossy_research_v0
+        and on_disk_research_v0 are research evidence, not policy input."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=self._v0(kind="native_lossy_research_v0",
+                              avg=241, min=219, median=239),
+        ))
+
+    def test_v0_override_no_probe_falls_back_to_legacy(self):
+        """No V0 probe → behaves exactly as before. is_transcode wins."""
+        self.assertFalse(self._dvl(
+            converted_count=10, is_transcode=True,
+            spectral_grade="suspect",
+            v0_probe=None,
+        ))
+
+    def test_v0_override_applies_to_lossless_on_disk_path(self):
+        """target_format='flac' + spectral=suspect + high V0 → override
+        flips verified to True for the keep-on-disk path too. A genuine
+        spoken-word FLAC kept on disk should be verified the same way."""
+        self.assertTrue(self._dvl(
+            target_format="flac", spectral_grade="suspect",
+            v0_probe=self._v0(avg=241, min=219, median=239),
+        ))
+
+    def test_v0_override_does_not_unfire_when_already_verified(self):
+        """Override is monotonic — it can only flip False→True. A normal
+        verified import (is_transcode=False) stays verified regardless of
+        V0 probe shape (even when V0 is missing or low)."""
+        self.assertTrue(self._dvl(
+            converted_count=10, is_transcode=False,
+            spectral_grade="genuine",
+            v0_probe=self._v0(avg=180, min=170, median=175),
+        ))
 
 
 # ============================================================================
