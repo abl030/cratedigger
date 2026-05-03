@@ -1,14 +1,17 @@
 """Spectral quality verification for audio files.
 
 Detects transcoded/upsampled audio using sox bandpass filtering and
-spectral gradient analysis. Works on FLAC and MP3 files.
+spectral gradient analysis. Works on FLAC, MP3, OGG, Opus, and WAV
+natively; AAC/M4A/ALAC/WMA are decoded through ffmpeg first because
+sox in our nix shell has no handler for those containers.
 
-Requires: sox in PATH.
+Requires: sox in PATH (always); ffmpeg in PATH (for AAC/ALAC/WMA).
 """
 
 import math
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -181,25 +184,85 @@ def classify_album(track_results):
 
 # --- Sox interaction ---
 
+# Extensions sox can decode natively in our nix shell (see `sox --help`).
+# Anything outside this set must be transcoded via ffmpeg first or sox will
+# emit "FAIL formats: no handler for file extension X" and produce no RMS.
+_SOX_NATIVE_EXTS: frozenset[str] = frozenset({
+    ".mp3", ".flac", ".ogg", ".opus", ".wav", ".aif", ".aiff", ".au",
+})
+
+
+class _DecodeFailedError(Exception):
+    """sox/ffmpeg failed to decode the file — distinct from genuine silence.
+
+    Raised by ``_get_band_rms`` when sox exits non-zero with no RMS line in
+    its stderr (e.g. "FAIL formats: no handler for file extension `m4a'"),
+    or by ``_ffmpeg_to_wav`` when ffmpeg can't open the source. The caller
+    must surface this as ``grade='error'`` rather than letting the missing
+    measurement fall through the silent-track early-out as ``'genuine'``.
+    """
+
+
 def _get_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
-    """Get RMS amplitude of audio filtered to a frequency band via sox."""
+    """Get RMS amplitude of audio filtered to a frequency band via sox.
+
+    Returns the measured RMS (float, possibly ~0 for silent input), or None
+    if sox returned no RMS line but exited cleanly (legacy permissive path).
+    Raises ``_DecodeFailedError`` when sox exited non-zero — in that case
+    the file is undecodable and the caller MUST NOT treat the missing
+    measurement as a clean spectrum.
+    """
     cmd = ["sox", filepath, "-n"]
     if trim_seconds:
         cmd.extend(["trim", "0", str(trim_seconds)])
     cmd.extend(["sinc", "%d-%d" % (lo_hz, hi_hz), "stat"])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    return parse_rms_from_stat(result.stderr)
+    rms = parse_rms_from_stat(result.stderr)
+    if rms is None and result.returncode != 0:
+        last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"sox exit {result.returncode}"
+        raise _DecodeFailedError(last_line)
+    return rms
+
+
+def _ffmpeg_to_wav(src, dst, trim_seconds=30):
+    """Decode src to WAV at dst (already trimmed to trim_seconds).
+
+    One ffmpeg call per file replaces 17 ffmpeg calls (one per sox band)
+    when AAC/ALAC/WMA inputs reach analyze_track. Raises
+    ``_DecodeFailedError`` if ffmpeg can't decode.
+    """
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src]
+    if trim_seconds:
+        cmd.extend(["-t", str(trim_seconds)])
+    cmd.extend(["-f", "wav", "-bitexact", dst])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"ffmpeg exit {result.returncode}"
+        raise _DecodeFailedError(f"ffmpeg: {last_line}")
 
 
 def analyze_track(filepath, trim_seconds=30):
     """Analyze a single audio file for spectral quality.
 
-    Runs 17 sox commands (1 reference band + 16 test slices).
+    Runs 17 sox commands (1 reference band + 16 test slices). Non-sox
+    formats (.m4a/.aac/.alac/.wma) are decoded once to a temp WAV first.
     Returns a TrackResult.
     """
+    tmp_wav = None
     try:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in _SOX_NATIVE_EXTS:
+            fd, tmp_wav = tempfile.mkstemp(suffix=".wav", prefix="spectral_")
+            os.close(fd)
+            _ffmpeg_to_wav(filepath, tmp_wav, trim_seconds=trim_seconds)
+            sox_input = tmp_wav
+            sox_trim = 0  # already trimmed by ffmpeg
+        else:
+            sox_input = filepath
+            sox_trim = trim_seconds
+
         # Reference band: 1-4kHz
-        ref_rms = _get_band_rms(filepath, 1000, 4000, trim_seconds)
+        ref_rms = _get_band_rms(sox_input, 1000, 4000, sox_trim)
         if ref_rms is None or ref_rms < 0.000001:
             return TrackResult(grade="genuine", hf_deficit_db=0.0)
 
@@ -208,7 +271,7 @@ def analyze_track(filepath, trim_seconds=30):
         # 16 test slices from 12-20kHz
         slices = []
         for freq in SLICE_FREQS:
-            rms = _get_band_rms(filepath, freq, freq + SLICE_WIDTH, trim_seconds)
+            rms = _get_band_rms(sox_input, freq, freq + SLICE_WIDTH, sox_trim)
             db = rms_to_db(rms) if rms is not None else DB_FLOOR
             slices.append({"freq": freq, "db": db})
 
@@ -222,12 +285,20 @@ def analyze_track(filepath, trim_seconds=30):
 
         return classify_track(hf_deficit, cliff_freq)
 
-    except FileNotFoundError:
-        return TrackResult(grade="error", error="sox not found")
+    except _DecodeFailedError as e:
+        return TrackResult(grade="error", error=f"decode failed: {e}")
+    except FileNotFoundError as e:
+        return TrackResult(grade="error", error=f"binary not found: {e}")
     except subprocess.TimeoutExpired:
-        return TrackResult(grade="error", error="sox timeout")
+        return TrackResult(grade="error", error="sox/ffmpeg timeout")
     except Exception as e:
         return TrackResult(grade="error", error=str(e))
+    finally:
+        if tmp_wav and os.path.exists(tmp_wav):
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
 
 
 def analyze_album(folder_path, trim_seconds=30):
