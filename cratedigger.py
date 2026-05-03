@@ -578,7 +578,20 @@ def search_and_queue(albums, ctx):
     failed_grab = []
     failed_search = []
     total = len(albums)
+    deadline = ctx.cycle_deadline
     for i, album in enumerate(albums, 1):
+        # Cycle deadline gate (issue #198): once the wall-clock cap is
+        # exceeded, stop submitting new searches. The remaining albums
+        # stay `wanted` for the next cycle — they are NOT marked failed,
+        # so no cascade of forensic rows or wasted retries.
+        if deadline is not None and time.time() > deadline:
+            remaining = total - (i - 1)
+            ctx.cycle_deadline_skipped = remaining
+            logger.info(
+                f"cycle deadline reached: deferring {remaining} album(s) "
+                f"to next cycle (cycle_max_runtime_s={cfg.cycle_max_runtime_s})"
+            )
+            break
         logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
         result = search_for_album(album, ctx)
         if result.success:
@@ -632,8 +645,27 @@ def _search_and_queue_parallel(albums, ctx):
         access to the chosen ``variant.tag`` so the persisted forensic row
         always records which variant was attempted (findings #9 and #18 in
         ce-code-review run 20260430-051904-682683b5).
+
+        Cycle deadline gate (issue #198): once `time.time()` is past
+        `ctx.cycle_deadline`, this stops popping. Albums still on the
+        queue stay `wanted` for the next cycle — never written as
+        `failed_search`, never logged as a `timeout` outcome. In-flight
+        futures continue to completion; only entry of *new* work is
+        gated. See the 2026-05-02 rollback comment on issue #198 for
+        why mid-call termination and cascading skips are forbidden.
         """
         from lib.search import SearchResult
+
+        if (ctx.cycle_deadline is not None
+                and time.time() > ctx.cycle_deadline
+                and album_queue):
+            ctx.cycle_deadline_skipped += len(album_queue)
+            logger.info(
+                f"cycle deadline reached: deferring {len(album_queue)} album(s) "
+                f"to next cycle (cycle_max_runtime_s={cfg.cycle_max_runtime_s})"
+            )
+            album_queue.clear()
+            return None
 
         while album_queue:
             album = album_queue.pop(0)
@@ -884,6 +916,13 @@ def main():
             logger.warning(f"Failed to load user cooldowns: {e}")
 
         cycle_start = time.time()
+        # Cycle deadline (issue #198): None disables the cap (opt-out via
+        # cfg.cycle_max_runtime_s <= 0). The search-phase entry gates in
+        # search_and_queue / _submit_next consult this to stop submitting
+        # *new* searches once exceeded; in-flight work always completes.
+        from lib.context import compute_cycle_deadline
+        _module_ctx.cycle_deadline = compute_cycle_deadline(cfg, now=cycle_start)
+        _module_ctx.cycle_deadline_skipped = 0
 
         # --- Phase 1 + Phase 2 run concurrently ---
         # Phase 1 (poll downloads) operates on status='downloading' rows.
