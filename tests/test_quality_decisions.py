@@ -926,7 +926,8 @@ EXPECTED_PARAMS = {
     "verified_lossless", "verified_lossless_target",
     "target_format",
     "new_format", "cfg",
-    "candidate_v0_probe_avg", "existing_v0_probe_avg",
+    "candidate_v0_probe_avg", "candidate_v0_probe_min",
+    "existing_v0_probe_avg",
     "candidate_v0_probe_kind", "existing_v0_probe_kind",
     "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the

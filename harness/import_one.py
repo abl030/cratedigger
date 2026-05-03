@@ -60,7 +60,8 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          build_existing_quality_measurement,
                          comparison_format_hint, determine_verified_lossless,
                          measured_import_decision,
-                         provisional_lossless_decision, transcode_detection)
+                         provisional_lossless_decision, transcode_detection,
+                         v0_probe_overrides_spectral)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
@@ -1320,9 +1321,22 @@ def main():
     if new_avg_br is not None:
         _log(f"  new_avg_bitrate={new_avg_br}")
 
-    # Verified lossless: single source of truth in quality.py
+    # Verified lossless: single source of truth in quality.py. r.v0_probe is
+    # populated above (lossless source path) and lets the V0-avg trust
+    # override flip a spectral-suspect spoken-word/sparse-HF lossless source
+    # to verified when the V0 evidence corroborates a genuine master.
     will_be_verified_lossless = determine_verified_lossless(
-        args.target_format, spectral_grade, converted, is_transcode)
+        args.target_format, spectral_grade, converted, is_transcode,
+        v0_probe=r.v0_probe)
+    if (will_be_verified_lossless and is_transcode
+            and v0_probe_overrides_spectral(r.v0_probe)):
+        # Audit log: the V0 probe overrode the spectral-derived transcode
+        # signal. Operators chasing a counter-intuitive verified_lossless
+        # decision in download_log JSONB should see this in stderr too.
+        _log(f"[V0_OVERRIDE] spectral={spectral_grade} but lossless_source_v0 "
+             f"avg={r.v0_probe.avg_bitrate_kbps if r.v0_probe else '?'}kbps / "
+             f"min={r.v0_probe.min_bitrate_kbps if r.v0_probe else '?'}kbps "
+             "→ verified_lossless=True")
 
     # Final format label for the NEW measurement. Compute conv_target early
     # (originally it was computed after the quality decision — hoisted for

@@ -862,6 +862,18 @@ def cmd_quality(db, args):
             is_flac=True, min_bitrate=245, is_cbr=False,
             spectral_grade="suspect", converted_count=12,
             post_conversion_min_bitrate=245)),
+        # Bill Hicks 1990 "Dangerous" shape: spoken-word lossless that
+        # spectral_check false-positives as suspect (high HF deficit
+        # against music-tuned thresholds), but the lossless_source_v0
+        # probe corroborates a genuine master. The V0-avg trust override
+        # in determine_verified_lossless flips this to verified.
+        ("Suspect FLAC + lossless_source_v0 avg=241/min=219 (V0 override)", dict(
+            is_flac=True, min_bitrate=219, is_cbr=False,
+            spectral_grade="suspect", converted_count=10,
+            post_conversion_min_bitrate=219,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0")),
         # --- MP3 VBR downloads ---
         # avg_bitrate drives the new preimport spectral gate (issue #93):
         # VBR with avg >= cfg.mp3_vbr.excellent skips spectral entirely,
