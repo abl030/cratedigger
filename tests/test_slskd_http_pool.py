@@ -23,6 +23,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.adapters: dict[str, requests.adapters.HTTPAdapter] = {}
         self.mounted: list[tuple[str, requests.adapters.HTTPAdapter]] = []
+        self.hooks = {"response": lambda response, *args, **kwargs: response.raise_for_status()}
 
     def mount(self, prefix: str, adapter: requests.adapters.HTTPAdapter) -> None:
         self.adapters[prefix] = adapter
@@ -133,6 +134,31 @@ class TestSlskdHttpPoolSizing(unittest.TestCase):
             timeout=SLSKD_HTTP_TIMEOUT_S,
         )
         configure.assert_called_once_with(client, cfg)
+
+    def test_http_error_response_hook_closes_response_before_reraising(self):
+        class SentinelHttpError(Exception):
+            pass
+
+        client = FakeSlskdClient()
+        configure_slskd_http_pool(client, _cfg())
+        response = Mock()
+        error = SentinelHttpError("boom")
+        response.raise_for_status.side_effect = error
+
+        with self.assertRaises(SentinelHttpError):
+            client._session.hooks["response"](response)
+
+        response.close.assert_called_once_with()
+
+    def test_successful_response_hook_does_not_close_response(self):
+        client = FakeSlskdClient()
+        configure_slskd_http_pool(client, _cfg())
+        response = Mock()
+        response.raise_for_status.return_value = None
+
+        client._session.hooks["response"](response)
+
+        response.close.assert_not_called()
 
 
 if __name__ == "__main__":

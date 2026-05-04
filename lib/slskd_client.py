@@ -78,6 +78,47 @@ def _adapter_for_pool(
         return HTTPAdapter(**kwargs)
 
 
+def _pool_safe_response_hook(hook: Any) -> Any:
+    if getattr(hook, "_cratedigger_pool_safe", False):
+        return hook
+
+    def wrapped(response: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return hook(response, *args, **kwargs)
+        except Exception:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            raise
+
+    wrapped._cratedigger_pool_safe = True  # type: ignore[attr-defined]
+    return wrapped
+
+
+def _make_response_hooks_pool_safe(session: Any) -> None:
+    """Close HTTP error responses so pool_block=True cannot leak slots.
+
+    slskd-api installs a response hook that calls ``raise_for_status()``. In
+    requests, response hooks run before the body is consumed; if the hook raises
+    on a 500 response, urllib3 never gets the connection back. With
+    ``pool_block=True`` that eventually parks every worker in ``_get_conn``.
+    """
+    hooks = getattr(session, "hooks", None)
+    if not isinstance(hooks, dict):
+        return
+    response_hooks = hooks.get("response")
+    if response_hooks is None:
+        return
+    if callable(response_hooks):
+        hooks["response"] = _pool_safe_response_hook(response_hooks)
+        return
+    if isinstance(response_hooks, list):
+        hooks["response"] = [
+            _pool_safe_response_hook(hook) if callable(hook) else hook
+            for hook in response_hooks
+        ]
+
+
 def configure_slskd_http_pool(
     slskd_client: Any,
     cfg: CratediggerConfig,
@@ -104,6 +145,7 @@ def configure_slskd_http_pool(
         )
 
     for session in sessions:
+        _make_response_hooks_pool_safe(session)
         for prefix in ("http://", "https://"):
             existing = session.adapters.get(prefix)
             session.mount(prefix, _adapter_for_pool(existing, pool_size))
