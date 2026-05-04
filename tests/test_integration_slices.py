@@ -3565,5 +3565,64 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         )
 
 
+class TestSearchWatchdogSlice(unittest.TestCase):
+    """End-to-end slice for issue #212: parallel-search-executor's
+    `_collect_search_results` against the full ``FakeSlskdAPI`` with a
+    stuck search. The slice pins the integration seam: `stop()` is
+    called, `watchdog_fired=True` propagates onto the ``SearchResult``,
+    the harvest path runs with a real outcome (not the rolled-back
+    ``timeout``), and the post-collection ``delete()`` cleanup still
+    fires when ``delete_searches=True``.
+    """
+
+    def test_stuck_search_fires_watchdog_through_full_collect(self):
+        import configparser
+        import cratedigger
+        from dataclasses import replace
+        from lib.config import CratediggerConfig
+        from tests.fakes import FakeSlskdAPI
+
+        cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+        cfg = replace(cfg, delete_searches=True)
+        slskd = FakeSlskdAPI()
+        slskd.searches.add_search(
+            search_id="abc-123",
+            state="InProgress",
+            responses=[],
+            response_count=0,
+            post_stop_state="Completed | Cancelled",
+            post_stop_responses=[],
+        )
+
+        # Drive the watchdog: advance the injected clock past 90s on the
+        # second poll. Real `time.sleep` is a no-op so the test runs in
+        # microseconds.
+        clock_t = {"v": 0.0}
+        original_state = slskd.searches.state
+        n = {"i": 0}
+        def _state(sid, include):
+            n["i"] += 1
+            if n["i"] == 2:
+                clock_t["v"] += 91.0
+            return original_state(sid, include)
+        slskd.searches.state = _state  # type: ignore[method-assign]
+
+        with patch.object(cratedigger.time, "sleep", lambda _s: None):
+            result = cratedigger._collect_search_results(
+                "abc-123", "stuck query", album_id=99,
+                search_cfg=cfg, slskd_client=slskd,
+                clock_fn=lambda: clock_t["v"],
+            )
+
+        self.assertTrue(result.watchdog_fired,
+                        "watchdog must propagate onto SearchResult")
+        self.assertEqual(slskd.searches.stop_calls, ["abc-123"])
+        self.assertEqual(result.outcome, "no_results",
+                         "harvest classifies empty result set; no 'timeout'")
+        self.assertNotEqual(result.outcome, "timeout")
+        # delete_searches=True still fires after the watchdog branch
+        self.assertEqual(slskd.searches.delete_calls, ["abc-123"])
+
+
 if __name__ == "__main__":
     unittest.main()

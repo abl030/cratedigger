@@ -159,7 +159,6 @@
     browse_top_k = ${toString cfg.searchSettings.browseTopK}
     browse_global_max_workers = ${toString cfg.searchSettings.browseGlobalMaxWorkers}
     search_max_inflight = ${toString cfg.searchSettings.searchMaxInflight}
-    cycle_max_runtime_s = ${toString cfg.searchSettings.cycleMaxRuntimeS}
 
     [Download Settings]
     download_filtering = ${if cfg.downloadSettings.downloadFiltering then "True" else "False"}
@@ -638,27 +637,6 @@ in {
           browse fan-out (issue #198) stops being the dominant cost.
         '';
       };
-      cycleMaxRuntimeS = mkOption {
-        type = types.int;
-        default = 600;
-        description = ''
-          Soft per-cycle wall-clock ceiling (seconds). Once exceeded, the
-          search phase stops submitting new searches; in-flight work runs
-          to completion and albums not yet submitted stay `wanted` for the
-          next cycle. Worst-case cycle wall is therefore
-          `cycleMaxRuntimeS + longest_in_flight_search`, not unbounded.
-
-          `<= 0` disables the cap and restores the 2026-05-02 rollback
-          behaviour where slskd's own timeouts are the sole authority
-          (kept as an emergency opt-out — see issue #198 for the cure
-          for the 8h hung-cycle failure mode this gate addresses).
-
-          Unlike the rolled-back `browseWaveDeadlineS` and
-          `browseCycleBudgetS`, this gate never terminates work mid-call
-          and never cascades skips to subsequent albums in the same
-          cycle: deferred albums simply roll over.
-        '';
-      };
       titleBlacklist = mkOption {
         type = types.listOf types.str;
         default = [];
@@ -814,6 +792,15 @@ in {
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
+        # Defense-in-depth (issue #212 R13): if anything escapes the
+        # in-band 90s per-search progress watchdog (clock-injection bug,
+        # TCP socket hang inside the watchdog itself, etc.), systemd
+        # SIGTERMs the process at 60 min. Healthy cycles run well under
+        # 60 min so this never fires; the systemd timer simply schedules
+        # the next cycle. Cycle-boundary checkpointing already tolerates
+        # a forced kill — the importer service owns beets writes
+        # independently and is unaffected.
+        RuntimeMaxSec = "1h";
       };
     };
 

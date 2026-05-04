@@ -274,12 +274,24 @@ class FakeSlskdSearches:
         self.state_calls: list[tuple[Any, bool]] = []
         self.responses_calls: list[Any] = []
         self.delete_calls: list[Any] = []
+        self.stop_calls: list[Any] = []
         self.search_text_error: Exception | None = None
+        # Per-search override: id -> Exception. Raised from stop() / state()
+        # for that search id. Used to drive the "stop() raises" / "state()
+        # raises" branches without poisoning every search.
+        self._stop_errors: dict[Any, Exception] = {}
+        self._stop_returns: dict[Any, bool] = {}
         # Each call returns the next id from this list; falls back to a
         # monotonically incrementing counter once the list is exhausted.
         self.search_text_id_sequence: list[Any] = []
         self._next_auto_id = 1
-        # search_id -> {"state": str, "responses": list[dict]}
+        # search_id -> {
+        #   "state": str,
+        #   "responses": list[dict],
+        #   "response_count": int,
+        #   "post_stop_state": str | None,
+        #   "post_stop_responses": list[dict] | None,
+        # }
         self._searches: dict[Any, dict[str, Any]] = {}
 
     def add_search(
@@ -288,12 +300,56 @@ class FakeSlskdSearches:
         search_id: Any,
         state: str = "Completed",
         responses: list[dict[str, Any]] | None = None,
+        response_count: int | None = None,
+        post_stop_state: str | None = None,
+        post_stop_responses: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Pre-register a canned response set for a search id."""
+        """Pre-register a canned response set for a search id.
+
+        The watchdog reads ``state_resp["responseCount"]`` to track
+        no-progress. When ``response_count`` is omitted it defaults to
+        ``len(responses)``. Tests that need to simulate a stuck search with
+        non-zero starting responses but no further progress can pass
+        ``response_count`` explicitly.
+
+        ``post_stop_state`` / ``post_stop_responses`` simulate slskd's async
+        cleanup after ``stop()``: the next ``state()`` call after ``stop()``
+        flips the state and ``search_responses()`` flips the responses.
+        Leave both unset to model "slskd hung at cleanup" — state stays
+        InProgress until the watchdog gives up.
+        """
         self._searches[search_id] = {
             "state": state,
             "responses": copy.deepcopy(responses or []),
+            "response_count": response_count if response_count is not None
+                              else len(responses or []),
+            "post_stop_state": post_stop_state,
+            "post_stop_responses": (
+                copy.deepcopy(post_stop_responses)
+                if post_stop_responses is not None else None
+            ),
+            "_stopped": False,
         }
+
+    def set_response_count(self, search_id: Any, count: int) -> None:
+        """Mutate the responseCount of an already-seeded search.
+
+        Tests model "responses arrive over time" by stepping the count
+        between calls to advance the watchdog clock.
+        """
+        if search_id in self._searches:
+            self._searches[search_id]["response_count"] = count
+
+    def set_state(self, search_id: Any, state: str) -> None:
+        """Mutate the state of an already-seeded search."""
+        if search_id in self._searches:
+            self._searches[search_id]["state"] = state
+
+    def set_stop_error(self, search_id: Any, err: Exception) -> None:
+        self._stop_errors[search_id] = err
+
+    def set_stop_return(self, search_id: Any, value: bool) -> None:
+        self._stop_returns[search_id] = value
 
     def search_text(self, **kwargs: Any) -> dict[str, Any]:
         text = kwargs.pop("searchText", "")
@@ -316,17 +372,50 @@ class FakeSlskdSearches:
 
     def state(self, search_id: Any, _include_responses: bool = False) -> dict[str, Any]:
         self.state_calls.append((search_id, _include_responses))
-        cfg = self._searches.get(search_id, {"state": "Completed", "responses": []})
+        cfg = self._searches.get(search_id)
+        if cfg is None:
+            return {
+                "id": search_id,
+                "state": "Completed",
+                "isComplete": True,
+                "responseCount": 0,
+            }
+        # If stop() ran and a post-stop state was configured, flip on
+        # the FIRST state() poll after stop(). This models slskd's async
+        # cleanup landing within one poll tick.
+        if cfg.get("_stopped") and cfg.get("post_stop_state") is not None:
+            cfg["state"] = cfg["post_stop_state"]
+            cfg["post_stop_state"] = None  # only flip once
+            if cfg.get("post_stop_responses") is not None:
+                cfg["responses"] = cfg["post_stop_responses"]
+                cfg["response_count"] = len(cfg["responses"])
+                cfg["post_stop_responses"] = None
         return {
             "id": search_id,
             "state": cfg["state"],
             "isComplete": True,
+            "responseCount": cfg.get("response_count", 0),
         }
 
     def search_responses(self, search_id: Any) -> list[dict[str, Any]]:
         self.responses_calls.append(search_id)
         cfg = self._searches.get(search_id)
         return copy.deepcopy(cfg["responses"]) if cfg else []
+
+    def stop(self, search_id: Any) -> bool:
+        self.stop_calls.append(search_id)
+        # Mark _stopped FIRST. This models slskd's real behaviour: even
+        # when the wrapper call raises (e.g., transport error mid-PUT),
+        # the server may have already received the cancel and started its
+        # async cleanup. Tests that simulate stop() errors still need the
+        # post_stop_state flip to fire so the post-cancel wait can exit
+        # without spinning the deadline budget down to zero.
+        cfg = self._searches.get(search_id)
+        if cfg is not None:
+            cfg["_stopped"] = True
+        if search_id in self._stop_errors:
+            raise self._stop_errors[search_id]
+        return self._stop_returns.get(search_id, True)
 
     def delete(self, search_id: Any) -> None:
         self.delete_calls.append(search_id)
