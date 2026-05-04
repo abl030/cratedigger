@@ -502,6 +502,61 @@ def _log_post_move_resume_blocked(
     )
 
 
+def _import_subprocess_already_started(
+    db: Any,
+    request_id: int | None,
+) -> bool:
+    """Did a previous attempt actually launch ``import_one.py`` for this row?
+
+    The auto-import resume guard blocks retries when files live at the
+    request-scoped staged path because a prior subprocess may have
+    started writing to beets. That guard is correct only when a
+    subprocess actually started — files-at-staged is a necessary but not
+    sufficient signal. The 2026-05-04 wedge accumulated 5788 failed
+    importer jobs because the guard fired even when the subprocess had
+    never launched (crash window between staged-move and subprocess
+    spawn). See ``docs/advisory-locks.md``.
+
+    With the ``import_subprocess_started_at`` flag set in
+    ``ActiveDownloadState`` immediately before ``run_import_one(...)``,
+    this helper returns ``True`` only when the flag is set: the
+    necessary AND sufficient evidence that the subprocess could have
+    written to beets.
+
+    Returns ``True`` (block) if state is unreachable — fail safe; the
+    operator can still recover manually. Returns ``False`` (permit
+    retry) only on positive evidence the subprocess never launched.
+    """
+    if request_id is None or db is None:
+        return True
+    try:
+        row = db.get_request(request_id)
+    except Exception:
+        logger.debug(
+            "Failed to read active_download_state for resume guard",
+            exc_info=True,
+        )
+        return True
+    if not row:
+        return True
+    raw_state = row.get("active_download_state")
+    if not raw_state:
+        return False
+    try:
+        state = (
+            ActiveDownloadState.from_dict(raw_state)
+            if isinstance(raw_state, dict)
+            else ActiveDownloadState.from_json(str(raw_state))
+        )
+    except Exception:
+        logger.debug(
+            "Failed to parse active_download_state for resume guard",
+            exc_info=True,
+        )
+        return True
+    return state.import_subprocess_started_at is not None
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -539,8 +594,13 @@ def _materialize_processing_dir(
     )
 
     if current_path_location.kind != "canonical":
+        subprocess_started = _import_subprocess_already_started(
+            db, request_id)
         if not os.path.isdir(staged_album.current_path):
-            if current_path_location.blocks_post_move_retry:
+            if (
+                current_path_location.blocks_post_move_retry
+                and subprocess_started
+            ):
                 _log_post_move_resume_blocked(
                     album_data,
                     current_path=staged_album.current_path,
@@ -563,7 +623,10 @@ def _materialize_processing_dir(
             if not os.path.isfile(import_path):
                 missing_paths.append(import_path)
         if missing_paths:
-            if current_path_location.blocks_post_move_retry:
+            if (
+                current_path_location.blocks_post_move_retry
+                and subprocess_started
+            ):
                 _log_post_move_resume_blocked(
                     album_data,
                     current_path=staged_album.current_path,
@@ -580,7 +643,10 @@ def _materialize_processing_dir(
                 ", ".join(missing_paths),
             )
             return False
-        if current_path_location.blocks_auto_import_dispatch:
+        if (
+            current_path_location.blocks_auto_import_dispatch
+            and _import_subprocess_already_started(db, request_id)
+        ):
             detail = (
                 "already lives at the request-scoped auto-import staged "
                 "path. Automatic retry is disabled to avoid duplicate "
@@ -968,6 +1034,12 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
     if (
         will_auto_import
         and current_path_location.blocks_auto_import_dispatch
+        and _import_subprocess_already_started(
+            ctx.pipeline_db_source._get_db()
+            if ctx.pipeline_db_source is not None
+            else None,
+            request_id,
+        )
     ):
         _log_post_move_resume_blocked(
             album_data,
@@ -1175,12 +1247,17 @@ def build_active_download_state(
     enqueued_at: str | None = None,
     last_progress_at: str | None = None,
     processing_started_at: str | None = None,
+    import_subprocess_started_at: str | None = None,
     current_path: str | None = None,
 ) -> ActiveDownloadState:
     """Build an ActiveDownloadState from a GrabListEntry.
 
     Callers can pass the original enqueued_at/processing_started_at when
-    persisting updated retry state across polling cycles.
+    persisting updated retry state across polling cycles. The
+    ``import_subprocess_started_at`` flag is preserved through state
+    rebuilds so cycle-based retry persistence cannot accidentally clear
+    the resume guard's witness — only ``clear_download_state`` (terminal
+    transitions) wipes it. See ``docs/advisory-locks.md``.
     """
     enqueued_at_value = enqueued_at or datetime.now(timezone.utc).isoformat()
     files = [
@@ -1203,6 +1280,7 @@ def build_active_download_state(
         last_progress_at=last_progress_at or enqueued_at_value,
         files=files,
         processing_started_at=processing_started_at,
+        import_subprocess_started_at=import_subprocess_started_at,
         current_path=(
             current_path
             if current_path is not None
@@ -1444,6 +1522,9 @@ def _persist_updated_download_state(
             enqueued_at=state.enqueued_at,
             last_progress_at=state.last_progress_at,
             processing_started_at=state.processing_started_at,
+            import_subprocess_started_at=(
+                state.import_subprocess_started_at
+            ),
             current_path=entry.import_folder,
         ).to_json(),
     )
@@ -1637,12 +1718,13 @@ def _processing_path_ready_for_importer(
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
     )
+    subprocess_started = state.import_subprocess_started_at is not None
     if not os.path.isdir(state.current_path):
         # The canonical processing folder may not exist yet. The importer
         # materializes it from the completed slskd files as its first step.
         if current_path_location.kind == "canonical":
             return True
-        if current_path_location.blocks_post_move_retry:
+        if current_path_location.blocks_post_move_retry and subprocess_started:
             _log_post_move_resume_blocked(
                 entry,
                 current_path=state.current_path,
@@ -1676,7 +1758,7 @@ def _processing_path_ready_for_importer(
     if not missing_paths:
         return True
 
-    if current_path_location.blocks_post_move_retry:
+    if current_path_location.blocks_post_move_retry and subprocess_started:
         _log_post_move_resume_blocked(
             entry,
             current_path=state.current_path,

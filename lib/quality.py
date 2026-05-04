@@ -570,6 +570,13 @@ class ActiveDownloadState:
     files: list[ActiveDownloadFileState]
     last_progress_at: str | None = None
     processing_started_at: str | None = None
+    # Set immediately before ``run_import_one(...)`` is invoked on the
+    # auto-import path. Distinguishes "files moved to staged path but
+    # subprocess never launched" (None — safe to retry) from "subprocess
+    # may already have written to beets" (set — manual recovery required).
+    # See ``docs/advisory-locks.md`` and the resume-block guards in
+    # ``lib/download.py::_log_post_move_resume_blocked``.
+    import_subprocess_started_at: str | None = None
     current_path: str | None = None
 
     def to_json(self) -> str:
@@ -582,6 +589,10 @@ class ActiveDownloadState:
             data["last_progress_at"] = self.last_progress_at
         if self.processing_started_at is not None:
             data["processing_started_at"] = self.processing_started_at
+        if self.import_subprocess_started_at is not None:
+            data["import_subprocess_started_at"] = (
+                self.import_subprocess_started_at
+            )
         if self.current_path is not None:
             data["current_path"] = self.current_path
         return json.dumps(data)
@@ -602,6 +613,11 @@ class ActiveDownloadState:
             processing_started_at=(
                 str(d["processing_started_at"])
                 if d.get("processing_started_at") is not None
+                else None
+            ),
+            import_subprocess_started_at=(
+                str(d["import_subprocess_started_at"])
+                if d.get("import_subprocess_started_at") is not None
                 else None
             ),
             current_path=(

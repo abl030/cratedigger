@@ -1291,6 +1291,7 @@ class TestActiveDownloadState(unittest.TestCase):
             enqueued_at="2026-04-03T12:00:00+00:00",
             last_progress_at="2026-04-03T12:01:00+00:00",
             processing_started_at="2026-04-03T12:02:00+00:00",
+            import_subprocess_started_at="2026-04-03T12:04:00+00:00",
             current_path="/tmp/staged/user1/Album",
             files=[
                 ActiveDownloadFileState(
@@ -1306,6 +1307,8 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(restored.enqueued_at, original.enqueued_at)
         self.assertEqual(restored.last_progress_at, original.last_progress_at)
         self.assertEqual(restored.processing_started_at, original.processing_started_at)
+        self.assertEqual(restored.import_subprocess_started_at,
+                         original.import_subprocess_started_at)
         self.assertEqual(restored.current_path, original.current_path)
         self.assertEqual(len(restored.files), 1)
         self.assertEqual(restored.files[0].username, "user1")
@@ -1314,6 +1317,32 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(restored.files[0].retry_count, 5)
         self.assertEqual(restored.files[0].bytes_transferred, 8192)
         self.assertEqual(restored.files[0].last_state, "InProgress")
+
+    def test_active_download_state_import_subprocess_started_at_optional(self):
+        """The new flag is optional and absent by default — legacy DB rows
+        whose JSONB predates the field round-trip cleanly with the field
+        as None. This is the load-bearing property that makes the
+        2026-05-04 wedged-row recovery work: rows wedged before this fix
+        have ``import_subprocess_started_at`` absent, so the resume guard
+        permits retry. See ``lib/download.py::_log_post_move_resume_blocked``
+        callers and ``docs/advisory-locks.md``.
+        """
+        from lib.quality import ActiveDownloadState
+        legacy_raw = json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-27T13:36:28+00:00",
+            "processing_started_at": "2026-04-27T14:00:38+00:00",
+            "current_path": (
+                "/mnt/virtio/Music/Incoming/auto-import/MxPx/"
+                "Plans Within Plans [request-1984]"
+            ),
+            "files": [],
+        })
+        state = ActiveDownloadState.from_json(legacy_raw)
+        self.assertIsNone(state.import_subprocess_started_at)
+        # And re-serialising an unset flag must not introduce a null
+        # field that would diverge JSONB equality with legacy rows.
+        self.assertNotIn("import_subprocess_started_at", state.to_json())
 
     def test_active_download_file_state_fields(self):
         """Verify per-file fields present."""

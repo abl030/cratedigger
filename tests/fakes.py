@@ -446,6 +446,7 @@ class FakePipelineDB:
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.update_download_state_current_path_calls: list[tuple[int, str | None]] = []
+        self.mark_import_subprocess_started_calls: list[tuple[int, str]] = []
         self.clear_download_state_calls: list[int] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self.closed = False
@@ -1141,6 +1142,33 @@ class FakePipelineDB:
             state["current_path"] = current_path
             row["active_download_state"] = state
             row["updated_at"] = _utcnow()
+
+    def mark_import_subprocess_started(
+        self,
+        request_id: int,
+        timestamp: str,
+    ) -> None:
+        """Stamp ``import_subprocess_started_at`` on the active download
+        state. No-op when the row has no ``active_download_state``
+        (force/manual paths). See ``docs/advisory-locks.md``.
+        """
+        self.mark_import_subprocess_started_calls.append(
+            (request_id, timestamp),
+        )
+        row = self._requests.get(request_id)
+        if not row or row.get("active_download_state") is None:
+            return
+        state = row.get("active_download_state")
+        if isinstance(state, str):
+            try:
+                state = json.loads(state)
+            except json.JSONDecodeError:
+                return
+        if not isinstance(state, dict):
+            return
+        state["import_subprocess_started_at"] = timestamp
+        row["active_download_state"] = state
+        row["updated_at"] = _utcnow()
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,

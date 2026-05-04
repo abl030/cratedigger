@@ -3107,7 +3107,13 @@ class TestPollActiveDownloads(unittest.TestCase):
             )
 
     def test_poll_post_move_staged_path_with_missing_file_leaves_row_downloading(self):
-        """Missing files under a staged current_path must block, not requeue."""
+        """Missing files under a staged current_path must block, not requeue —
+        but only when the prior attempt actually launched the import
+        subprocess (``import_subprocess_started_at`` is set). If the
+        subprocess never started, the staged-but-missing-files state is
+        a stale crash residue and resetting to ``wanted`` for re-search
+        is safe. See ``docs/advisory-locks.md``.
+        """
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -3126,6 +3132,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
                 "current_path": resumed_path,
                 "files": [
                     {"username": "user1", "filename": "user1\\Music\\01.flac",
@@ -3148,7 +3155,11 @@ class TestPollActiveDownloads(unittest.TestCase):
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
     def test_poll_post_move_auto_import_path_with_missing_dir_leaves_row_downloading(self):
-        """Missing auto-import staging dirs must block, not requeue."""
+        """Missing auto-import staging dir must block when subprocess
+        already started (beets may have consumed the dir). When
+        ``import_subprocess_started_at`` is None, the dir vanishing is
+        treated as a normal crash residue — reset to ``wanted``.
+        """
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -3166,6 +3177,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
                 "current_path": resumed_path,
                 "files": [
                     {"username": "user1", "filename": "user1\\Music\\01.flac",
@@ -3186,6 +3198,51 @@ class TestPollActiveDownloads(unittest.TestCase):
                 resumed_path,
             )
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
+
+    def test_poll_post_move_staged_missing_file_resets_when_subprocess_never_started(self):
+        """Counterpart: when ``import_subprocess_started_at`` is None,
+        a missing file at the staged path is just stale residue from a
+        crash before subprocess launch. Reset to ``wanted`` so the
+        request can be re-searched. This is the recovery path the
+        2026-05-04 wedge was missing.
+        """
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+            # No file present at the bound import path — file is missing.
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                # NO ``import_subprocess_started_at`` — subprocess
+                # never launched. This is the legacy wedge shape.
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(
+                fake_db.request(1)["status"], "wanted",
+                "Subprocess never launched + missing files = stale "
+                "crash residue; must reset to wanted, not block forever.",
+            )
 
     def test_poll_no_redownload_window(self):
         """Album stays 'downloading' while queued for importer."""
