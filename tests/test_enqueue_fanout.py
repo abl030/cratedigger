@@ -479,5 +479,148 @@ class TestMultiDiscFanout(unittest.TestCase):
         )
 
 
+class TestAlbumBrowseLogContract(unittest.TestCase):
+    """Contract test for the per-album `album_browse:` instrumentation line.
+
+    The line is the data source for #198 wave-cap / peer-ranking analysis;
+    its field set and shape are part of the operational interface.
+    """
+
+    REQUIRED_FIELDS = (
+        "artist=",
+        "album=",
+        "filetype=",
+        "kind=",
+        "matched=",
+        "match_wave=",
+        "eligible=",
+        "peers=",
+        "waves=",
+    )
+
+    def _capture_album_browse(self, log_records: list[str]) -> list[str]:
+        return [r for r in log_records if "album_browse:" in r]
+
+    def test_match_in_first_wave_logs_match_wave_zero(self):
+        """Top-K match → match_wave=0, peers/waves are this album's deltas."""
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(30)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        winner = users[3]
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            if username == winner:
+                return _match_for(winner, file_dirs[0])
+            return _nomatch()
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        lines = self._capture_album_browse(log_ctx.output)
+        self.assertEqual(len(lines), 1, f"expected one album_browse line, got {lines!r}")
+        line = lines[0]
+        for field in self.REQUIRED_FIELDS:
+            self.assertIn(field, line, f"missing {field!r} in album_browse: {line}")
+        self.assertIn("matched=True", line)
+        self.assertIn("match_wave=0", line)
+        self.assertIn("kind=single", line)
+        self.assertIn("eligible=30", line)
+
+    def test_match_in_second_wave_logs_match_wave_one(self):
+        """Lazy-tail match at rank 35, K=20 → match_wave=1."""
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(50)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        winner = users[35]
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            if username == winner:
+                return _match_for(winner, file_dirs[0])
+            return _nomatch()
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        line = self._capture_album_browse(log_ctx.output)[0]
+        self.assertIn("matched=True", line)
+        self.assertIn("match_wave=1", line)
+
+    def test_no_match_logs_match_wave_none(self):
+        """All peers miss → matched=False, match_wave=None."""
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(30)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=_nomatch()), \
+             patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        line = self._capture_album_browse(log_ctx.output)[0]
+        self.assertIn("matched=False", line)
+        self.assertIn("match_wave=None", line)
+
+    def test_multi_disc_logs_one_line_per_disc(self):
+        """try_multi_enqueue emits one album_browse line per disc with kind=multi-disc<n>."""
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(5)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+
+        release = MagicMock()
+        release.media = [
+            MagicMock(medium_number=1),
+            MagicMock(medium_number=2),
+        ]
+        all_tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track 1", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track 1", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_fanout(work, slskd, ctx, max_workers):
+            for u, d in work:
+                ctx.folder_cache.setdefault(u, {})[d] = {"directory": d, "files": []}
+            return set()
+
+        disc1_winner = users[2]
+        disc2_winner = users[4]
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == disc1_winner:
+                return _match_for(disc1_winner, file_dirs[0])
+            if disc_no == 2 and username == disc2_winner:
+                return _match_for(disc2_winner, file_dirs[0])
+            return _nomatch()
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]), \
+             patch("lib.enqueue.cancel_and_delete"):
+            try_multi_enqueue(release, all_tracks, results, "flac", ctx)
+
+        lines = self._capture_album_browse(log_ctx.output)
+        self.assertEqual(len(lines), 2, f"expected 2 disc lines, got {lines!r}")
+        self.assertIn("kind=multi-disc1", lines[0])
+        self.assertIn("kind=multi-disc2", lines[1])
+        self.assertIn("matched=True", lines[0])
+        self.assertIn("matched=True", lines[1])
+
+
 if __name__ == "__main__":
     unittest.main()

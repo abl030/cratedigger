@@ -361,6 +361,33 @@ def _eligible_user_dirs(
     return ordered, user_dirs
 
 
+def _log_album_browse(
+    artist_name: str,
+    album_name: str,
+    allowed_filetype: str,
+    kind: str,
+    *,
+    matched: bool,
+    match_wave: int | None,
+    eligible: int,
+    peers: int,
+    waves: int,
+) -> None:
+    """Emit a per-album browse-cost summary for #198 instrumentation.
+
+    One line per try_enqueue call (and per disc in try_multi_enqueue).
+    Fields chosen so we can answer two open questions: in which wave do
+    matches land (validates wave-cap), and how many peers per album
+    (validates peer-ranking / negative-cache).
+    """
+    logger.info(
+        f"album_browse: artist={artist_name!r} album={album_name!r} "
+        f"filetype={allowed_filetype} kind={kind} matched={matched} "
+        f"match_wave={match_wave} eligible={eligible} peers={peers} "
+        f"waves={waves}"
+    )
+
+
 def _iter_wave_matches(
     tracks: Sequence[TrackRecord],
     eligible_users: list[str],
@@ -368,8 +395,13 @@ def _iter_wave_matches(
     allowed_filetype: str,
     ctx: CratediggerContext,
     accumulated: list[CandidateScore],
-) -> Iterator[tuple[str, MatchResult]]:
-    """Yield ``(username, match_result)`` for every dir that matches strictly.
+) -> Iterator[tuple[str, MatchResult, int]]:
+    """Yield ``(username, match_result, wave_index)`` for every dir match.
+
+    ``wave_index`` is 0-based and identifies which fan-out wave produced
+    the match. Used by callers for per-album browse instrumentation
+    (``album_browse:`` log line) so we can validate wave-cap and
+    peer-ranking strategies against real data — see #198.
 
     Wave-based fan-out (issue #198 U3): chunks ``eligible_users`` into waves
     of ``cfg.browse_top_k``, runs ``_fanout_browse_users`` to populate
@@ -390,7 +422,7 @@ def _iter_wave_matches(
     """
     cfg = ctx.cfg
     K = cfg.browse_top_k
-    for wave_start in range(0, len(eligible_users), K):
+    for wave_idx, wave_start in enumerate(range(0, len(eligible_users), K)):
         wave = eligible_users[wave_start:wave_start + K]
 
         work: list[tuple[str, str]] = []
@@ -433,7 +465,7 @@ def _iter_wave_matches(
             )
             accumulated.extend(match_result.candidates)
             if match_result.matched:
-                yield username, match_result
+                yield username, match_result, wave_idx
 
 
 def try_enqueue(
@@ -456,12 +488,17 @@ def try_enqueue(
     artist_name = album.artist_name
 
     eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
+    peers_before = ctx.peers_browsed
+    waves_before = ctx.fanout_waves
 
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
-    for username, match_result in _iter_wave_matches(
+    match_wave: int | None = None
+    for username, match_result, wave_idx in _iter_wave_matches(
         all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
     ):
+        if match_wave is None:
+            match_wave = wave_idx
         directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
         files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
         try:
@@ -472,6 +509,13 @@ def try_enqueue(
                 ctx=ctx,
             )
             if downloads is not None:
+                _log_album_browse(
+                    artist_name, album_name, allowed_filetype, "single",
+                    matched=True, match_wave=match_wave,
+                    eligible=len(eligible),
+                    peers=ctx.peers_browsed - peers_before,
+                    waves=ctx.fanout_waves - waves_before,
+                )
                 return EnqueueAttempt(
                     matched=True,
                     downloads=downloads,
@@ -490,6 +534,13 @@ def try_enqueue(
                 f"{artist_name} - {album_name} from {username}"
             )
     logger.info(f"Failed to enqueue {artist_name} - {album_name}")
+    _log_album_browse(
+        artist_name, album_name, allowed_filetype, "single",
+        matched=False, match_wave=match_wave,
+        eligible=len(eligible),
+        peers=ctx.peers_browsed - peers_before,
+        waves=ctx.fanout_waves - waves_before,
+    )
     return EnqueueAttempt(
         matched=False,
         enqueue_failed=had_enqueue_failure,
@@ -532,6 +583,8 @@ def try_multi_enqueue(
     accumulated: list[CandidateScore] = []
     for disk in split_release:
         ctx.negative_matches.clear()
+        peers_before = ctx.peers_browsed
+        waves_before = ctx.fanout_waves
         first_match = next(
             _iter_wave_matches(
                 disk["tracks"], eligible, user_dirs, allowed_filetype, ctx,
@@ -540,8 +593,24 @@ def try_multi_enqueue(
             None,
         )
         if first_match is None:
+            _log_album_browse(
+                artist_name, album_name, allowed_filetype,
+                f"multi-disc{disk['disk_no']}",
+                matched=False, match_wave=None,
+                eligible=len(eligible),
+                peers=ctx.peers_browsed - peers_before,
+                waves=ctx.fanout_waves - waves_before,
+            )
             return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
-        username, match_result = first_match
+        username, match_result, match_wave = first_match
+        _log_album_browse(
+            artist_name, album_name, allowed_filetype,
+            f"multi-disc{disk['disk_no']}",
+            matched=True, match_wave=match_wave,
+            eligible=len(eligible),
+            peers=ctx.peers_browsed - peers_before,
+            waves=ctx.fanout_waves - waves_before,
+        )
         directory = download_filter(
             allowed_filetype, match_result.directory, ctx.cfg,
         )
