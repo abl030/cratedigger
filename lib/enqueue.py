@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast
 
-from lib.browse import _fanout_browse_users, download_filter
+from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
 from lib.download import cancel_and_delete, slskd_do_enqueue
 from lib.grab_list import GrabListEntry
 from lib.matching import MatchResult, check_for_match, get_album_by_id
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from cratedigger import SlskdDirectory, TrackRecord
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
+    from lib.search import SearchResult
 
 
 logger = logging.getLogger("cratedigger")
@@ -39,6 +41,25 @@ class EnqueueAttempt:
 
 
 @dataclass(frozen=True)
+class FindDownloadMetrics:
+    browse_time_s: float = 0.0
+    match_time_s: float = 0.0
+    peers_browsed: int = 0
+    peers_browsed_lazy: int = 0
+    fanout_waves: int = 0
+
+    @classmethod
+    def from_context(cls, ctx: CratediggerContext) -> "FindDownloadMetrics":
+        return cls(
+            browse_time_s=ctx.browse_time_s,
+            match_time_s=ctx.match_time_s,
+            peers_browsed=ctx.peers_browsed,
+            peers_browsed_lazy=ctx.peers_browsed_lazy,
+            fanout_waves=ctx.fanout_waves,
+        )
+
+
+@dataclass(frozen=True)
 class FindDownloadResult:
     """Final outcome of matching + enqueue for one album.
 
@@ -50,7 +71,105 @@ class FindDownloadResult:
     """
 
     outcome: Literal["found", "no_match", "enqueue_failed"]
+    grab_entry: GrabListEntry | None = None
     candidates: tuple[CandidateScore, ...] = ()
+    metrics: FindDownloadMetrics | None = None
+
+
+class _WorkerPipelineDBSource:
+    """Sentinel DB source for worker contexts.
+
+    Track and denylist data must be prefetched before worker execution. If a
+    worker reaches this source, the caller forgot to snapshot an input.
+    """
+
+    def _get_db(self) -> None:
+        raise AssertionError("find_download worker attempted owner DB access")
+
+    def get_tracks(self, album: Any) -> list[Any]:
+        raise AssertionError("find_download worker attempted owner DB access")
+
+
+class FindDownloadOwnerPathError(RuntimeError):
+    """Owner-thread orchestration failed after find_download work was queued."""
+
+
+def prepare_find_download_context(
+    album: Any,
+    ctx: CratediggerContext,
+    search_result: "SearchResult | None" = None,
+) -> CratediggerContext:
+    """Build a worker-local context for one album's find_download run."""
+    album_id = album.id
+    request_id = abs(album_id)
+    tracks = get_album_tracks(album, ctx)
+    denied_users = _get_denied_users(album_id, ctx)
+    coordinator = get_browse_coordinator(
+        ctx, ctx.cfg.browse_global_max_workers,
+    )
+    search_cache = copy.deepcopy(
+        search_result.cache_entries
+        if search_result is not None
+        else ctx.search_cache.get(album_id, {})
+    )
+    users = set(search_cache)
+    user_upload_speed = {
+        user: speed
+        for user, speed in (
+            getattr(search_result, "upload_speeds", None) or ctx.user_upload_speed
+        ).items()
+        if user in users
+    }
+    dir_count_source = (
+        getattr(search_result, "dir_audio_counts", None)
+        or ctx.search_dir_audio_count
+    )
+    search_dir_audio_count: dict[str, dict[str, int]] = {}
+    for user, filetypes in search_cache.items():
+        source_counts = dir_count_source.get(user, {})
+        wanted_dirs = {
+            file_dir
+            for dirs in filetypes.values()
+            for file_dir in dirs
+        }
+        selected = {
+            file_dir: source_counts[file_dir]
+            for file_dir in wanted_dirs
+            if file_dir in source_counts
+        }
+        if selected:
+            search_dir_audio_count[user] = selected
+
+    from lib.context import CratediggerContext
+
+    return CratediggerContext(
+        cfg=ctx.cfg,
+        slskd=ctx.slskd,
+        pipeline_db_source=cast(Any, _WorkerPipelineDBSource()),
+        search_cache={album_id: search_cache},
+        folder_cache=ctx.folder_cache,
+        user_upload_speed=user_upload_speed,
+        search_dir_audio_count=search_dir_audio_count,
+        current_album_cache={album_id: album},
+        denied_users_cache={request_id: set(denied_users)},
+        cooled_down_users=set(ctx.cooled_down_users),
+        _folder_cache_ts=ctx._folder_cache_ts,
+        prefetched_album_tracks={album_id: list(tracks)},
+        browse_coordinator=coordinator,
+        browse_coordinator_lock=ctx.browse_coordinator_lock,
+    )
+
+
+def _with_metrics(
+    result: FindDownloadResult,
+    ctx: CratediggerContext,
+) -> FindDownloadResult:
+    return FindDownloadResult(
+        outcome=result.outcome,
+        grab_entry=result.grab_entry,
+        candidates=result.candidates,
+        metrics=FindDownloadMetrics.from_context(ctx),
+    )
 
 
 def release_trackcount_mode(releases: list[Any]) -> Any:
@@ -153,6 +272,8 @@ def _get_denied_users(album_id: int, ctx: CratediggerContext) -> set[str]:
     try:
         db = ctx.pipeline_db_source._get_db()
         denied.update(e["username"] for e in db.get_denylisted_users(request_id))
+    except AssertionError:
+        raise
     except Exception:
         pass
     ctx.denied_users_cache[request_id] = denied
@@ -191,6 +312,8 @@ def _prefixed_directory_files(
 
 def get_album_tracks(album: Any, ctx: CratediggerContext) -> list[TrackRecord]:
     """Get tracks for an album from the pipeline DB source."""
+    if album.id in ctx.prefetched_album_tracks:
+        return cast("list[TrackRecord]", ctx.prefetched_album_tracks[album.id])
     return cast("list[TrackRecord]", ctx.pipeline_db_source.get_tracks(album))
 
 
@@ -259,8 +382,8 @@ def _iter_wave_matches(
     deadlines were starving the pipeline (see 2026-05-02 regression).
 
     Side effects: appends per-dir ``CandidateScore`` entries into
-    ``accumulated`` (caller-owned), bumps ``ctx.fanout_waves`` and
-    ``ctx.peers_browsed``.
+    ``accumulated`` (caller-owned), bumps primary fan-out browse timing and
+    ``ctx.fanout_waves`` / ``ctx.peers_browsed``.
 
     Caller is responsible for stopping iteration (``break``) once a match is
     enqueued; the generator stops fan-out work as soon as iteration stops.
@@ -281,11 +404,14 @@ def _iter_wave_matches(
 
         if work:
             t0 = time.monotonic()
-            _fanout_browse_users(
-                work, ctx.slskd, ctx,
-                max_workers=cfg.browse_global_max_workers,
-            )
-            elapsed = time.monotonic() - t0
+            try:
+                _fanout_browse_users(
+                    work, ctx.slskd, ctx,
+                    max_workers=cfg.browse_global_max_workers,
+                )
+            finally:
+                elapsed = time.monotonic() - t0
+                ctx.browse_time_s += elapsed
             ctx.fanout_waves += 1
             ctx.peers_browsed += len(work)
             n_returned = sum(
@@ -486,7 +612,6 @@ def _try_filetype(
     album: Any,
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
-    grab_list: dict[int, GrabListEntry],
     ctx: CratediggerContext,
 ) -> FindDownloadResult:
     """Try to match and enqueue an album at a specific filetype quality."""
@@ -520,7 +645,7 @@ def _try_filetype(
 
         if attempt.matched:
             assert attempt.downloads is not None
-            grab_list[album_id] = GrabListEntry(
+            grab_entry = GrabListEntry(
                 album_id=album_id,
                 files=attempt.downloads,
                 filetype=allowed_filetype,
@@ -534,7 +659,9 @@ def _try_filetype(
                 db_target_format=album.db_target_format,
             )
             return FindDownloadResult(
-                outcome="found", candidates=tuple(accumulated),
+                outcome="found",
+                grab_entry=grab_entry,
+                candidates=tuple(accumulated),
             )
 
         if attempt.enqueue_failed:
@@ -558,7 +685,6 @@ def _try_filetype(
 
 def find_download(
     album: Any,
-    grab_list: dict[int, GrabListEntry],
     ctx: CratediggerContext,
 ) -> FindDownloadResult:
     """Walk search results and enqueue the best matching download."""
@@ -585,12 +711,14 @@ def find_download(
     accumulated: list[CandidateScore] = []
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
-        result = _try_filetype(album, results, allowed_filetype, grab_list, ctx)
+        result = _try_filetype(album, results, allowed_filetype, ctx)
         accumulated.extend(result.candidates)
         if result.outcome == "found":
-            return FindDownloadResult(
-                outcome="found", candidates=tuple(accumulated),
-            )
+            return _with_metrics(FindDownloadResult(
+                outcome="found",
+                grab_entry=result.grab_entry,
+                candidates=tuple(accumulated),
+            ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 
@@ -602,16 +730,18 @@ def find_download(
             f"No match at preferred quality for {artist_name} - {album.title}, "
             f"trying catch-all (any audio format)"
         )
-        result = _try_filetype(album, results, "*", grab_list, ctx)
+        result = _try_filetype(album, results, "*", ctx)
         accumulated.extend(result.candidates)
         if result.outcome == "found":
-            return FindDownloadResult(
-                outcome="found", candidates=tuple(accumulated),
-            )
+            return _with_metrics(FindDownloadResult(
+                outcome="found",
+                grab_entry=result.grab_entry,
+                candidates=tuple(accumulated),
+            ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
 
-    return FindDownloadResult(
+    return _with_metrics(FindDownloadResult(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
-    )
+    ), ctx)

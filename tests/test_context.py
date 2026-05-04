@@ -26,6 +26,7 @@ class TestCratediggerContext(unittest.TestCase):
         self.assertIsInstance(ctx.folder_cache, dict)
         self.assertIsInstance(ctx.user_upload_speed, dict)
         self.assertIsInstance(ctx.broken_user, list)
+        self.assertIsNotNone(ctx.browse_coordinator_lock)
         self.assertEqual(len(ctx.search_cache), 0)
         self.assertEqual(len(ctx.broken_user), 0)
 
@@ -54,6 +55,7 @@ class TestCratediggerContext(unittest.TestCase):
         self.assertEqual(len(ctx2.search_cache), 0)
         self.assertEqual(len(ctx2.broken_user), 0)
         self.assertEqual(len(ctx2.user_upload_speed), 0)
+        self.assertIsNot(ctx1.browse_coordinator_lock, ctx2.browse_coordinator_lock)
 
 
 if __name__ == "__main__":

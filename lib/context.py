@@ -8,6 +8,7 @@ as their first parameter instead of reading globals.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ class CratediggerContext:
     current_album_cache: dict[int, Any] = field(default_factory=dict)
     denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
     cooled_down_users: set[str] = field(default_factory=set)
+    prefetched_album_tracks: dict[int, list[Any]] = field(default_factory=dict)
 
     # --- Cache timestamps (epoch floats, for per-entry TTL eviction) ---
     _folder_cache_ts: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -64,3 +66,15 @@ class CratediggerContext:
     # `cycle_max_runtime_s` cycle-entry gate. Healthy steady-state is 0–1
     # per cycle; >3 sustained warrants investigation.
     cycle_searches_watchdog_killed: int = 0
+
+    # --- Per-cycle find_download pipeline counters (issue #217). ---
+    find_download_queued: int = 0
+    find_download_completed: int = 0
+    find_download_drain_time_s: float = 0.0
+
+    # --- Shared browse boundary ---
+    # Lazily initialised by lib.browse so tests that directly pass max_workers
+    # to the fan-out primitive keep their local cap. Worker contexts share this
+    # object with the owner context to make browse_global_max_workers global.
+    browse_coordinator: Any = None
+    browse_coordinator_lock: threading.Lock = field(default_factory=threading.Lock)

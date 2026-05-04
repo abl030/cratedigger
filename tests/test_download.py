@@ -512,8 +512,8 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         # Should have polled twice
         self.assertEqual(len(slskd.transfers.get_all_downloads_calls), 2)
 
-    def test_enqueue_timeout_returns_partial(self):
-        """Transfer IDs never appear — should return whatever we have after timeout."""
+    def test_enqueue_timeout_tracks_files_without_transfer_ids(self):
+        """Transfer IDs never appear — accepted enqueue is tracked for re-derivation."""
         from lib.download import slskd_do_enqueue
         # Never returns the transfer ID
         slskd = FakeSlskdAPI(downloads=[{
@@ -524,10 +524,38 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         files = [{"filename": "track.mp3", "size": 5000000}]
         with patch("time.sleep"):
             result = slskd_do_enqueue("user1", files, "user1\\Music", ctx)
-        # Should return empty list (no files matched), not None
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(len(result), 0)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].filename, "track.mp3")
+        self.assertEqual(result[0].id, "")
+
+    def test_enqueue_partial_transfer_reconciliation_tracks_every_file(self):
+        """Accepted enqueue with partial IDs still tracks every requested file."""
+        from lib.download import slskd_do_enqueue
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [{"filename": "track1.mp3", "id": "new-id"}],
+            }],
+        }])
+        ctx = _make_ctx(slskd=slskd)
+        files = [
+            {"filename": "track1.mp3", "size": 5000000},
+            {"filename": "track2.mp3", "size": 5000000},
+        ]
+        with patch("time.sleep"):
+            result = slskd_do_enqueue("user1", files, "user1\\Music", ctx)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual([download.filename for download in result], [
+            "track1.mp3",
+            "track2.mp3",
+        ])
+        self.assertEqual([download.id for download in result], ["new-id", ""])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
 
 class TestGrabMostWanted(unittest.TestCase):

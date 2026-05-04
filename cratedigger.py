@@ -10,6 +10,7 @@ import time
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
 
 import slskd_api
+from lib.slskd_client import SLSKD_HTTP_TIMEOUT_S, configure_slskd_http_pool
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
@@ -77,13 +78,28 @@ pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set i
 # All matching/search functions receive ctx explicitly.
 _module_ctx: Any = None  # CratediggerContext — set in main()
 
+
+def _create_slskd_client(client_cfg: CratediggerConfig) -> slskd_api.SlskdClient:
+    """Create the slskd client and configure its HTTP connection pool."""
+    client = slskd_api.SlskdClient(
+        host=client_cfg.slskd_host_url,
+        api_key=client_cfg.resolved_slskd_api_key(),
+        url_base=client_cfg.slskd_url_base,
+        timeout=SLSKD_HTTP_TIMEOUT_S,
+    )
+    configure_slskd_http_pool(client, client_cfg)
+    return client
+
 from lib.browse import (
     _browse_directories,
     _browse_one,
     download_filter,
     rank_candidate_dirs,
+    shutdown_browse_coordinator,
 )
 from lib.enqueue import (
+    FindDownloadResult,
+    FindDownloadOwnerPathError,
     _get_denied_users,
     _get_user_dirs,
     _prefixed_directory_files,
@@ -91,6 +107,7 @@ from lib.enqueue import (
     choose_release,
     find_download,
     get_album_tracks,
+    prepare_find_download_context,
     release_trackcount_mode,
     try_enqueue,
     try_multi_enqueue,
@@ -639,62 +656,83 @@ def _log_search_result(album, result, ctx) -> None:
         db.reset_search_attempts(request_id)
 
 
-def _apply_find_download_result(album, result, find_result, failed_grab) -> None:
+def _apply_find_download_result(
+    album,
+    result,
+    find_result,
+    failed_grab,
+    grab_list=None,
+    ctx=None,
+) -> None:
     """Translate matching/enqueue outcome into search_log telemetry."""
     # Forensic capture: copy the per-(user, dir, filetype) score list off the
     # find_download result onto the SearchResult so `_log_search_result` can
     # persist the top-20 to `search_log.candidates`.
     result.candidates = tuple(find_result.candidates)
+    if ctx is not None and getattr(find_result, "metrics", None) is not None:
+        metrics = find_result.metrics
+        ctx.browse_time_s += metrics.browse_time_s
+        ctx.match_time_s += metrics.match_time_s
+        ctx.peers_browsed += metrics.peers_browsed
+        ctx.peers_browsed_lazy += metrics.peers_browsed_lazy
+        ctx.fanout_waves += metrics.fanout_waves
+    elif getattr(find_result, "metrics", None) is not None:
+        raise AssertionError("find_download metrics require owner context merge")
     if find_result.outcome == "found":
         result.outcome = "found"
+        if grab_list is None:
+            raise AssertionError("found find_download result requires grab_list merge")
+        if find_result.grab_entry is None:
+            raise AssertionError("found find_download result requires grab entry")
+        grab_list[find_result.grab_entry.album_id] = find_result.grab_entry
         return
     result.outcome = "error" if find_result.outcome == "enqueue_failed" else "no_match"
     failed_grab.append(album)
 
 
 def search_and_queue(albums, ctx):
-    if cfg.parallel_searches > 1 and len(albums) > 1:
+    if ctx.cfg.parallel_searches > 1 and len(albums) > 1:
         return _search_and_queue_parallel(albums, ctx)
     grab_list = {}
     failed_grab = []
     failed_search = []
     total = len(albums)
-    for i, album in enumerate(albums, 1):
-        logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
-        result = search_for_album(album, ctx)
-        if result.success:
-            find_result = find_download(album, grab_list, ctx)
-            _apply_find_download_result(album, result, find_result, failed_grab)
-        else:
-            failed_search.append(album)
-        _log_search_result(album, result, ctx)
-    return grab_list, failed_search, failed_grab
+    try:
+        for i, album in enumerate(albums, 1):
+            logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
+            result = search_for_album(album, ctx)
+            if result.success:
+                find_ctx = prepare_find_download_context(album, ctx, result)
+                find_result = find_download(album, find_ctx)
+                _apply_find_download_result(
+                    album, result, find_result, failed_grab, grab_list, ctx,
+                )
+            else:
+                failed_search.append(album)
+            _log_search_result(album, result, ctx)
+        return grab_list, failed_search, failed_grab
+    finally:
+        shutdown_browse_coordinator(ctx)
 
 
 def _search_and_queue_parallel(albums, ctx):
-    """Pipeline searches with result processing: always 2 searches in flight.
+    """Pipeline searches and hand successful results to find_download workers.
 
     slskd constraints (from source code):
     - SemaphoreSlim(1,1) on POST /searches: one submission at a time
     - maximumConcurrentSearches=2 in Soulseek.NET: only 2 active on network
 
-    We keep 2 searches running on the network at all times. When one completes,
-    we process its results (browse dirs, match tracks, enqueue) AND submit the
-    next search — so network wait and result processing overlap.
-
-    Timeline:
-      search_1 ─────────> process_1    search_5 ──────> process_5 ...
-      search_2 ─────────> process_2    search_6 ──────> ...
-        search_3 ─────────> process_3
-        search_4 ─────────> process_4
+    Completed searches queue find_download work and immediately refill the
+    search slot, so browse/match/enqueue no longer blocks search collection.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 
     # Pipeline depth — number of search-collection futures in flight at once.
     # Configurable via cfg.search_max_inflight (issue #198 U4). Submission
     # stays sequential through the existing 429-retry loop; only the
     # collect-side concurrency increases.
-    max_inflight = ctx.cfg.search_max_inflight
+    search_cfg = ctx.cfg
+    max_inflight = search_cfg.search_max_inflight
 
     grab_list: dict[Any, Any] = {}
     failed_grab: list[Any] = []
@@ -724,7 +762,7 @@ def _search_and_queue_parallel(albums, ctx):
         while album_queue:
             album = album_queue.pop(0)
             db = ctx.pipeline_db_source._get_db()
-            variant, base_query = _select_variant_for_album(album, cfg, db)
+            variant, base_query = _select_variant_for_album(album, search_cfg, db)
 
             if variant.kind == "exhausted":
                 # Variant ladder exhausted — emit a SearchResult inline, no
@@ -756,7 +794,7 @@ def _search_and_queue_parallel(albums, ctx):
                 failed_search.append(album)
                 continue
 
-            submit_result = _submit_search(album, variant, cfg, slskd)
+            submit_result = _submit_search(album, variant, search_cfg, ctx.slskd)
             if submit_result is None:
                 # slskd round-trip failed — preserve variant_tag in the log.
                 sr = SearchResult(
@@ -771,63 +809,178 @@ def _search_and_queue_parallel(albums, ctx):
 
             search_id, query, album_id, variant_tag = submit_result
             future = pool.submit(
-                _collect_search_results, search_id, query, album_id, cfg, slskd,
+                _collect_search_results, search_id, query, album_id, search_cfg, ctx.slskd,
                 variant_tag,
             )
             return (future, album)
         return None
 
-    with ThreadPoolExecutor(max_workers=max_inflight) as pool:
-        # Seed the pipeline with initial searches
-        inflight: dict[Any, Any] = {}
-        for _ in range(min(max_inflight, len(album_queue))):
-            submitted = _submit_next()
-            if submitted:
-                future, album = submitted
-                inflight[future] = album
+    find_pool: ThreadPoolExecutor | None = None
+    find_inflight: dict[Any, tuple[Any, Any]] = {}
+    find_merge_time_s = 0.0
 
-        # Process completions and refill the pipeline
-        while inflight:
-            for future in as_completed(inflight):
-                album = inflight.pop(future)
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.exception(f"Search collection crashed for {album.title}")
-                    from lib.search import SearchResult
-                    sr = SearchResult(album_id=album.id, success=False, outcome="error")
-                    _log_search_result(album, sr, ctx)
-                    failed_search.append(album)
-                else:
-                    done_count = len(grab_list) + len(failed_grab) + len(failed_search)
-                    logger.info(
-                        f"Search {done_count + 1}/{total} done: {result.query} "
-                        f"({result.result_count if result.result_count is not None else 'n/a'} results, "
-                        f"{result.elapsed_s:.1f}s)"
-                    )
-                    if result.success:
-                        _merge_search_result(result, ctx)
-                        find_result = find_download(album, grab_list, ctx)
-                        _apply_find_download_result(album, result, find_result, failed_grab)
-                    else:
-                        failed_search.append(album)
-                    _log_search_result(album, result, ctx)
+    def _submit_find_download(album, result) -> None:
+        nonlocal find_pool
+        if find_pool is None:
+            find_pool = ThreadPoolExecutor(
+                max_workers=max(1, total),
+                thread_name_prefix="find-download",
+            )
+        find_ctx = prepare_find_download_context(album, ctx, result)
+        future = find_pool.submit(find_download, album, find_ctx)
+        find_inflight[future] = (album, result)
+        ctx.find_download_queued += 1
 
-                # Refill: submit next search to keep pipeline full
+    def _apply_find_future(future, *, log_search: bool = True) -> None:
+        album, result = find_inflight.pop(future)
+        try:
+            find_result = future.result()
+        except Exception:
+            logger.exception(f"find_download crashed for {album.title}")
+            find_result = FindDownloadResult(outcome="enqueue_failed")
+        _apply_find_download_result(
+            album, result, find_result, failed_grab, grab_list, ctx,
+        )
+        ctx.find_download_completed += 1
+        if log_search:
+            try:
+                _log_search_result(album, result, ctx)
+            except Exception:
+                logger.exception(
+                    "Failed to log search result after find_download for %s",
+                    getattr(album, "title", album),
+                )
+
+    def _drain_completed_find() -> None:
+        nonlocal find_merge_time_s
+        if not find_inflight:
+            return
+        done, _pending = wait(
+            list(find_inflight),
+            timeout=0,
+            return_when=FIRST_COMPLETED,
+        )
+        if not done:
+            return
+        drain_start = time.time()
+        for future in done:
+            _apply_find_future(future)
+        elapsed = time.time() - drain_start
+        find_merge_time_s += elapsed
+        ctx.find_download_drain_time_s += elapsed
+
+    def _drain_find_after_owner_exception() -> None:
+        nonlocal find_pool, find_merge_time_s
+        logger.exception(
+            "Search pipeline owner path crashed; draining submitted "
+            "find_download work before returning partial results"
+        )
+        if find_pool is not None:
+            find_pool.shutdown(wait=True, cancel_futures=True)
+            find_pool = None
+        if not find_inflight:
+            return
+        drain_start = time.time()
+        for future in as_completed(list(find_inflight)):
+            try:
+                _apply_find_future(future, log_search=False)
+            except Exception:
+                logger.exception("Failed to merge find_download result after owner crash")
+        elapsed = time.time() - drain_start
+        find_merge_time_s += elapsed
+        ctx.find_download_drain_time_s += elapsed
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_inflight) as pool:
+            # Seed the pipeline with initial searches
+            inflight: dict[Any, Any] = {}
+            for _ in range(min(max_inflight, len(album_queue))):
                 submitted = _submit_next()
                 if submitted:
-                    new_future, new_album = submitted
-                    inflight[new_future] = new_album
+                    future, album = submitted
+                    inflight[future] = album
 
-                # Break out of the as_completed loop to re-enter with updated dict
-                break
+            # Process completions and refill the pipeline
+            while inflight:
+                for future in as_completed(inflight):
+                    album = inflight.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception:
+                        logger.exception(f"Search collection crashed for {album.title}")
+                        from lib.search import SearchResult
+                        sr = SearchResult(album_id=album.id, success=False, outcome="error")
+                        _log_search_result(album, sr, ctx)
+                        failed_search.append(album)
+                    else:
+                        done_count = (
+                            len(grab_list)
+                            + len(failed_grab)
+                            + len(failed_search)
+                            + len(find_inflight)
+                        )
+                        logger.info(
+                            f"Search {done_count + 1}/{total} done: {result.query} "
+                            f"({result.result_count if result.result_count is not None else 'n/a'} results, "
+                            f"{result.elapsed_s:.1f}s)"
+                        )
+                        if result.success:
+                            _merge_search_result(result, ctx)
+                            try:
+                                _submit_find_download(album, result)
+                            except Exception:
+                                logger.exception(
+                                    f"find_download submission failed for {album.title}"
+                                )
+                                find_result = FindDownloadResult(outcome="enqueue_failed")
+                                _apply_find_download_result(
+                                    album, result, find_result, failed_grab, grab_list, ctx,
+                                )
+                                _log_search_result(album, result, ctx)
+                        else:
+                            failed_search.append(album)
+                            _log_search_result(album, result, ctx)
+
+                    # Refill: submit next search to keep pipeline full before
+                    # doing any opportunistic find-result merge work.
+                    submitted = _submit_next()
+                    if submitted:
+                        new_future, new_album = submitted
+                        inflight[new_future] = new_album
+                    _drain_completed_find()
+
+                    # Break out of the as_completed loop to re-enter with updated dict
+                    break
+    except Exception:
+        owner_exc = sys.exception()
+        _drain_find_after_owner_exception()
+        shutdown_browse_coordinator(ctx, wait=True, cancel_futures=True)
+        raise FindDownloadOwnerPathError(
+            "Search pipeline owner path failed after find_download work was queued; "
+            "submitted side effects were drained before aborting the cycle"
+        ) from owner_exc
 
     wall_elapsed = time.time() - wall_start
     # U1 instrumentation (issue #198 R13): credit the search phase wall time
     # to the per-cycle accumulator so the cycle summary can split it from
     # browse/match. Includes both submit (network round-trip) and collect
     # (poll + result merge) since both are gated by slskd's pipeline depth.
-    ctx.search_time_s += wall_elapsed
+    ctx.search_time_s += max(0.0, wall_elapsed - find_merge_time_s)
+
+    try:
+        if find_inflight:
+            find_drain_start = time.time()
+            for future in as_completed(list(find_inflight)):
+                try:
+                    _apply_find_future(future)
+                except Exception:
+                    logger.exception("Failed to merge find_download result")
+            ctx.find_download_drain_time_s += time.time() - find_drain_start
+    finally:
+        if find_pool is not None:
+            find_pool.shutdown(wait=True)
+        shutdown_browse_coordinator(ctx)
+
     logger.info(f"Pipelined search complete: {total} albums in {wall_elapsed:.1f}s "
                 f"(found={len(grab_list)}, no_match={len(failed_grab)}, "
                 f"no_results={len(failed_search)})")
@@ -949,7 +1102,7 @@ def main():
         if cfg.meelo_url:
             logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
 
-        slskd = slskd_api.SlskdClient(host=cfg.slskd_host_url, api_key=cfg.resolved_slskd_api_key(), url_base=cfg.slskd_url_base)
+        slskd = _create_slskd_client(cfg)
 
         # Build context with fresh caches for this cycle
         from lib.context import CratediggerContext

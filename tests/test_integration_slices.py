@@ -2634,9 +2634,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             result = self._cratedigger.search_for_album(album, ctx)
             grab_list: dict[Any, Any] = {}
             from lib.enqueue import find_download
-            find_result = find_download(album, grab_list, ctx)
+            find_result = find_download(album, ctx)
+            self.assertEqual(grab_list, {})
             self._cratedigger._apply_find_download_result(
-                album, result, find_result, [])
+                album, result, find_result, [], grab_list, ctx)
+            self.assertIn(album.id, grab_list)
             self._cratedigger._log_search_result(album, result, ctx)
 
         # responseLimit was forwarded to slskd at the wire boundary.
@@ -2890,9 +2892,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         grab_list: dict[Any, Any] = {}
         from lib.enqueue import find_download
         with patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            find_result = find_download(album, grab_list, ctx)
+            find_result = find_download(album, ctx)
         self._cratedigger._apply_find_download_result(
-            album, result, find_result, [])
+            album, result, find_result, [], grab_list, ctx)
         self._cratedigger._log_search_result(album, result, ctx)
 
         # Same blob shape regardless of MB-vs-Discogs origin.
