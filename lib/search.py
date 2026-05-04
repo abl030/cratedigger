@@ -61,6 +61,11 @@ class SearchResult:
     candidates: tuple[CandidateScore, ...] = ()
     variant_tag: str | None = None
     final_state: str | None = None
+    # True when `_collect_search_results` cancelled the search via slskd's
+    # PUT /api/v0/searches/{id} after 90s of no new peer responses (issue
+    # #212). Diagnostic only — outcome classification still reflects what
+    # was harvested, not the watchdog.
+    watchdog_fired: bool = False
 
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.

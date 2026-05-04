@@ -49,6 +49,26 @@ cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
 slskd: slskd_api.SlskdClient = None  # type: ignore[assignment]  # Set in main()
 logger = logging.getLogger("cratedigger")
 
+# === Per-search progress watchdog (issue #212) ===
+# Hardcoded constants — not exposed via config.ini or the NixOS module
+# (R12). If empirical data argues for a different value, that is a
+# code-level edit + deploy, not a runtime tunable.
+#
+# SEARCH_WATCHDOG_DEADLINE_S — a search whose responseCount has not
+#   advanced for this many seconds (and is still InProgress / Queued)
+#   trips the watchdog. 90s catches the 8h-hang failure mode while
+#   leaving slow-but-receiving searches alone.
+# SEARCH_CANCEL_WAIT_DEADLINE_S — after stop(), wait at most this long
+#   for slskd's async response-persistence cleanup to complete. Reading
+#   `search_responses` before slskd flushes the response list silently
+#   degrades the harvest to no_results.
+# SEARCH_CANCEL_WAIT_POLL_S — inner poll cadence during the post-cancel
+#   wait. 200ms keeps end-to-end latency tight in the typical fast-
+#   cleanup case.
+SEARCH_WATCHDOG_DEADLINE_S = 90.0
+SEARCH_CANCEL_WAIT_DEADLINE_S = 5.0
+SEARCH_CANCEL_WAIT_POLL_S = 0.2
+
 # === API client instances (set in main()) ===
 pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
 
@@ -411,13 +431,25 @@ def _submit_search(album, variant, search_cfg, slskd_client):
 
 
 def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client,
-                            variant_tag=None):
+                            variant_tag=None, clock_fn=time.monotonic):
     """Wait for a submitted search to complete and collect results.
 
     This is the part that can run in parallel — it's just polling + reading.
     `variant_tag` is the persisted tag chosen by `_submit_search` and is
     plumbed onto the returned ``SearchResult`` so `_log_search_result` can
     persist it without re-running variant selection.
+
+    The poll loop is bounded by a per-search **progress watchdog** (issue
+    #212): if `state_resp["responseCount"]` does not advance for
+    ``SEARCH_WATCHDOG_DEADLINE_S`` seconds while the search is still
+    InProgress / Queued, cratedigger calls slskd's PUT cancel endpoint
+    best-effort, waits up to ``SEARCH_CANCEL_WAIT_DEADLINE_S`` seconds for
+    slskd's async response-persistence cleanup, then runs the existing
+    harvest path unchanged. The deadline measures *progress*, not
+    wall-time-from-submission — slow-but-receiving searches keep going.
+
+    `clock_fn` is injected for test determinism; production callers omit
+    it (defaults to `time.monotonic`).
     """
     from lib.search import SearchResult
 
@@ -426,21 +458,63 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
     # Wait for search to complete. slskd search states:
     #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
     # We must wait while state is Queued OR InProgress. slskd's
-    # searchTimeout (param on submit) drives the move to a terminal state;
-    # we trust that and do not impose our own poll cap. The previous cap
-    # was firing on legitimately slow searches and starving the pipeline
-    # — see 2026-05-02 regression.
+    # searchTimeout (param on submit) drives the move to a terminal state.
+    # The watchdog below catches the failure mode where slskd's own state
+    # transition does not fire (issue #212; the 8h53m hung-cycle case).
     final_state: str | None = None
+    watchdog_fired = False
+    prev_count = 0
+    last_progress_at = clock_fn()
     while True:
         try:
             state_resp = slskd_client.searches.state(search_id, False)
             state = state_resp["state"]
             final_state = state
+            count = state_resp.get("responseCount", 0)
+            if count > prev_count:
+                prev_count = count
+                last_progress_at = clock_fn()
+            # State-transition exit MUST be checked BEFORE the watchdog
+            # deadline so a search that completes on the 90th-second poll
+            # exits naturally and never calls stop().
             if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
                 break
         except Exception:
             logger.warning(f"Failed to poll search state for {query}")
             break
+
+        if clock_fn() - last_progress_at >= SEARCH_WATCHDOG_DEADLINE_S:
+            logger.info(
+                f"watchdog firing for search_id={search_id} "
+                f"after {SEARCH_WATCHDOG_DEADLINE_S}s of no progress: {query}"
+            )
+            try:
+                slskd_client.searches.stop(search_id)
+            except Exception:
+                logger.info(
+                    f"searches.stop({search_id}) failed; "
+                    f"proceeding with harvest anyway"
+                )
+            watchdog_fired = True
+            # Post-cancel state-transition wait. slskd populates
+            # `Search.Responses` in an async Task.Run cleanup AFTER the
+            # cancel propagates and state transitions to Completed |
+            # Cancelled. Reading responses before that cleanup runs
+            # returns an empty list. Bounded at ~5s to keep us out of a
+            # doubly-broken-slskd hang.
+            cancel_deadline = clock_fn() + SEARCH_CANCEL_WAIT_DEADLINE_S
+            while clock_fn() < cancel_deadline:
+                try:
+                    state_resp = slskd_client.searches.state(search_id, False)
+                    post_state = state_resp["state"]
+                    final_state = post_state
+                    if isinstance(post_state, str) and "Completed" in post_state:
+                        break
+                except Exception:
+                    break
+                time.sleep(SEARCH_CANCEL_WAIT_POLL_S)
+            break
+
         time.sleep(1)
 
     search_results = slskd_client.searches.search_responses(search_id)
@@ -454,6 +528,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
             album_id=album_id, success=False, query=query,
             result_count=0, elapsed_s=elapsed, outcome="no_results",
             variant_tag=variant_tag, final_state=final_state,
+            watchdog_fired=watchdog_fired,
         )
 
     filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
@@ -472,6 +547,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         elapsed_s=elapsed,
         variant_tag=variant_tag,
         final_state=final_state,
+        watchdog_fired=watchdog_fired,
     )
 
 
@@ -510,6 +586,11 @@ def _merge_search_result(result, ctx):
 
 def _log_search_result(album, result, ctx) -> None:
     """Persist search outcome to search_log and record_attempt on failure."""
+    # Per-cycle watchdog instrumentation (issue #212). Every SearchResult
+    # passes through here, so this is the single increment site for both
+    # the parallel pipeline and the serial fallback.
+    if getattr(result, "watchdog_fired", False):
+        ctx.cycle_searches_watchdog_killed += 1
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
         return
@@ -578,20 +659,7 @@ def search_and_queue(albums, ctx):
     failed_grab = []
     failed_search = []
     total = len(albums)
-    deadline = ctx.cycle_deadline
     for i, album in enumerate(albums, 1):
-        # Cycle deadline gate (issue #198): once the wall-clock cap is
-        # exceeded, stop submitting new searches. The remaining albums
-        # stay `wanted` for the next cycle — they are NOT marked failed,
-        # so no cascade of forensic rows or wasted retries.
-        if deadline is not None and time.time() > deadline:
-            remaining = total - (i - 1)
-            ctx.cycle_deadline_skipped = remaining
-            logger.info(
-                f"cycle deadline reached: deferring {remaining} album(s) "
-                f"to next cycle (cycle_max_runtime_s={cfg.cycle_max_runtime_s})"
-            )
-            break
         logger.info(f"Album {i}/{total}: {album.artist_name} - {album.title}")
         result = search_for_album(album, ctx)
         if result.success:
@@ -646,26 +714,12 @@ def _search_and_queue_parallel(albums, ctx):
         always records which variant was attempted (findings #9 and #18 in
         ce-code-review run 20260430-051904-682683b5).
 
-        Cycle deadline gate (issue #198): once `time.time()` is past
-        `ctx.cycle_deadline`, this stops popping. Albums still on the
-        queue stay `wanted` for the next cycle — never written as
-        `failed_search`, never logged as a `timeout` outcome. In-flight
-        futures continue to completion; only entry of *new* work is
-        gated. See the 2026-05-02 rollback comment on issue #198 for
-        why mid-call termination and cascading skips are forbidden.
+        Issue #212 removed the cycle-entry deadline gate. Bounded runtime
+        comes from two layers now: the per-search progress watchdog inside
+        `_collect_search_results` (90s no-progress kill) and the systemd
+        unit's `RuntimeMaxSec=1h` defense-in-depth.
         """
         from lib.search import SearchResult
-
-        if (ctx.cycle_deadline is not None
-                and time.time() > ctx.cycle_deadline
-                and album_queue):
-            ctx.cycle_deadline_skipped += len(album_queue)
-            logger.info(
-                f"cycle deadline reached: deferring {len(album_queue)} album(s) "
-                f"to next cycle (cycle_max_runtime_s={cfg.cycle_max_runtime_s})"
-            )
-            album_queue.clear()
-            return None
 
         while album_queue:
             album = album_queue.pop(0)
@@ -916,13 +970,10 @@ def main():
             logger.warning(f"Failed to load user cooldowns: {e}")
 
         cycle_start = time.time()
-        # Cycle deadline (issue #198): None disables the cap (opt-out via
-        # cfg.cycle_max_runtime_s <= 0). The search-phase entry gates in
-        # search_and_queue / _submit_next consult this to stop submitting
-        # *new* searches once exceeded; in-flight work always completes.
-        from lib.context import compute_cycle_deadline
-        _module_ctx.cycle_deadline = compute_cycle_deadline(cfg, now=cycle_start)
-        _module_ctx.cycle_deadline_skipped = 0
+        # Per-cycle watchdog counter (issue #212). Reset at cycle start;
+        # incremented by `_log_search_result` for every SearchResult whose
+        # `watchdog_fired=True`.
+        _module_ctx.cycle_searches_watchdog_killed = 0
 
         # --- Phase 1 + Phase 2 run concurrently ---
         # Phase 1 (poll downloads) operates on status='downloading' rows.

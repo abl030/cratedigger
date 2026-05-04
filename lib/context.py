@@ -58,23 +58,9 @@ class CratediggerContext:
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
 
-    # --- Cycle deadline (issue #198 follow-up to the 2026-05-02 rollback).
-    # Absolute epoch seconds; None means "no client-side cap" (the rollback
-    # default). Set in main() at cycle_start from cfg.cycle_max_runtime_s.
-    # Search-phase entry gates check `time.time() > cycle_deadline` and
-    # stop submitting *new* work — in-flight searches always finish.
-    cycle_deadline: float | None = None
-    cycle_deadline_skipped: int = 0
-
-
-def compute_cycle_deadline(cfg, now: float) -> float | None:
-    """Return the absolute deadline for this cycle, or None if disabled.
-
-    `cfg.cycle_max_runtime_s <= 0` means the cap is opted out — keeping the
-    2026-05-02 rollback behaviour where slskd's own timeouts are the sole
-    authority. Anything positive becomes `now + cap`.
-    """
-    cap = getattr(cfg, "cycle_max_runtime_s", 0)
-    if cap <= 0:
-        return None
-    return now + cap
+    # --- Per-cycle search-watchdog firing count (issue #212).
+    # Incremented once per `SearchResult` whose `watchdog_fired=True`.
+    # Replaces the `cycle_deadline_skipped` counter that fed the rolled-back
+    # `cycle_max_runtime_s` cycle-entry gate. Healthy steady-state is 0–1
+    # per cycle; >3 sustained warrants investigation.
+    cycle_searches_watchdog_killed: int = 0
