@@ -165,6 +165,53 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertIn("Failed to start harness", result.error)
 
     @patch("lib.beets.sp.Popen")
+    def test_long_stderr_logged_in_full(self, mock_popen):
+        """A multi-frame Python traceback in harness stderr must be logged
+        in full, not silently truncated. Without the full text, operators
+        cannot diagnose ``library.Library()`` crashes (or any other harness
+        startup failure) from journald — this is the exact condition that
+        hid the 2026-05-04 Psilodump crash root cause.
+        """
+        # Real-world traceback from harness library.Library() crash is
+        # 1500-2500 chars. Any truncation below this hides the actual
+        # cause, which appears in the deepest frames.
+        long_stderr = (
+            "Traceback (most recent call last):\n"
+            + "\n".join(
+                f'  File "/nix/store/abc{i:04d}-python3-3.13.12-env/lib/'
+                f'python3.13/site-packages/beets/library.py", line {i}, '
+                f'in __init__\n    self._connect()  # frame {i}'
+                for i in range(20)
+            )
+            + "\nsqlite3.OperationalError: database is locked\n"
+        )
+        self.assertGreater(len(long_stderr), 500,
+                           "test fixture must exceed the old [:500] slice")
+
+        mbid = "12345678-1234-1234-1234-123456789abc"
+        proc = MagicMock()
+        proc.stdout = iter([])  # harness crashed before sending any JSON
+        proc.stderr.read.return_value = long_stderr
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 1
+        mock_popen.return_value = proc
+
+        with self.assertLogs("cratedigger", level="WARNING") as cm:
+            beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
+
+        stderr_logs = [r for r in cm.output if "stderr" in r]
+        self.assertTrue(stderr_logs,
+                        "no stderr log line was emitted")
+        joined = "\n".join(stderr_logs)
+        # The deepest frames carry the actual cause; assert the FULL
+        # traceback is present, not just the first ~500 chars.
+        self.assertIn("frame 19", joined,
+                      "deep stack frame missing — stderr was truncated")
+        self.assertIn("sqlite3.OperationalError: database is locked",
+                      joined,
+                      "the actual exception line was truncated away")
+
+    @patch("lib.beets.sp.Popen")
     def test_launches_harness_with_beets_subprocess_env(self, mock_popen):
         """Regression guard: the harness subprocess MUST receive the beets
         env (HOME override). When cratedigger runs as the systemd service (root,

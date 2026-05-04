@@ -159,7 +159,11 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
             proc.kill()
 
     if stderr_out:
-        logger.warning(f"BEETS_VALIDATE: stderr: {stderr_out[:500]}")
+        # Log the full stderr — truncating loses the actual exception line
+        # at the bottom of a Python traceback. The 2026-05-04 Psilodump
+        # ``library.Library()`` crash had its root cause hidden behind a
+        # 500-char slice. journald handles multi-line records fine.
+        logger.warning("BEETS_VALIDATE: stderr:\n%s", stderr_out)
     if not got_choose_match:
         logger.warning(f"BEETS_VALIDATE: harness never sent choose_match!")
 
