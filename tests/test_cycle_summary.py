@@ -150,6 +150,9 @@ class TestFormatCycleSummary(unittest.TestCase):
         "peers_browsed=",
         "peers_browsed_lazy=",
         "fanout_waves=",
+        "find_download_queued=",
+        "find_download_completed=",
+        "find_download_drain_time_s=",
         "cycle_total_s=",
     )
 
@@ -167,6 +170,9 @@ class TestFormatCycleSummary(unittest.TestCase):
         ctx.peers_browsed = 42
         ctx.peers_browsed_lazy = 5
         ctx.fanout_waves = 2
+        ctx.find_download_queued = 3
+        ctx.find_download_completed = 2
+        ctx.find_download_drain_time_s = 8.9
         line = format_cycle_summary(ctx, elapsed_s=99.9)
         self.assertIn("browse_time_s=12.3", line)
         self.assertIn("match_time_s=4.5", line)
@@ -174,6 +180,9 @@ class TestFormatCycleSummary(unittest.TestCase):
         self.assertIn("peers_browsed=42", line)
         self.assertIn("peers_browsed_lazy=5", line)
         self.assertIn("fanout_waves=2", line)
+        self.assertIn("find_download_queued=3", line)
+        self.assertIn("find_download_completed=2", line)
+        self.assertIn("find_download_drain_time_s=8.9", line)
         self.assertIn("cycle_total_s=99.9", line)
 
     def test_summary_is_single_line(self):

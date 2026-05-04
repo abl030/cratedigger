@@ -27,7 +27,13 @@ from unittest.mock import MagicMock, patch
 from cratedigger import TrackRecord
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
-from lib.enqueue import try_enqueue, try_multi_enqueue
+from lib.enqueue import (
+    _WorkerPipelineDBSource,
+    get_album_tracks,
+    prepare_find_download_context,
+    try_enqueue,
+    try_multi_enqueue,
+)
 from lib.matching import MatchResult
 
 
@@ -245,6 +251,30 @@ class TestWaveShape(unittest.TestCase):
         work_users = {u for (u, _d) in work}
         self.assertEqual(work_users, set(users[2:]))
 
+    def test_primary_fanout_browse_time_is_recorded(self):
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(2)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+
+        def fake_fanout(work, slskd, ctx, max_workers):
+            import time
+
+            time.sleep(0.001)
+            for user, file_dir in work:
+                ctx.folder_cache.setdefault(user, {})[file_dir] = {
+                    "directory": file_dir,
+                    "files": [],
+                }
+
+        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
+             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertGreater(ctx.browse_time_s, 0.0)
+        self.assertEqual(ctx.fanout_waves, 1)
+        self.assertEqual(ctx.peers_browsed, 2)
+
 
 # ---------------------------------------------------------------------------
 # Per-cycle scope of broken_user
@@ -257,6 +287,69 @@ class TestBrokenUserPerCycle(unittest.TestCase):
         cfg = _make_cfg()
         ctx = CratediggerContext(cfg=cfg, slskd=MagicMock(), pipeline_db_source=MagicMock())
         self.assertEqual(ctx.broken_user, [])
+
+
+class TestFindDownloadWorkerContext(unittest.TestCase):
+    def test_worker_context_snapshots_inputs_and_prefetches_db_data(self):
+        cfg = _make_cfg()
+        source = MagicMock()
+        db = MagicMock()
+        db.get_denylisted_users.return_value = [{"username": "blocked"}]
+        source._get_db.return_value = db
+        source.get_tracks.return_value = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
+        ctx = CratediggerContext(
+            cfg=cfg,
+            slskd=MagicMock(),
+            pipeline_db_source=source,
+            search_cache={1: {"fast": {"flac": ["dirA"]}}},
+            user_upload_speed={"fast": 100},
+            search_dir_audio_count={"fast": {"dirA": 1}},
+            cooled_down_users={"cooled"},
+        )
+        album = MagicMock(id=1, db_request_id=1)
+
+        search_result = MagicMock(
+            cache_entries={"fast": {"flac": ["dirA"]}},
+            upload_speeds={"fast": 100},
+            dir_audio_counts={"fast": {"dirA": 1}},
+        )
+
+        worker_ctx = prepare_find_download_context(album, ctx, search_result)
+
+        ctx.search_cache[1]["fast"]["flac"].append("dirB")
+        ctx.user_upload_speed["fast"] = 1
+        ctx.search_dir_audio_count["fast"]["dirA"] = 99
+        ctx.cooled_down_users.add("late")
+
+        self.assertEqual(worker_ctx.search_cache[1]["fast"]["flac"], ["dirA"])
+        self.assertEqual(worker_ctx.user_upload_speed["fast"], 100)
+        self.assertEqual(worker_ctx.search_dir_audio_count["fast"]["dirA"], 1)
+        self.assertEqual(worker_ctx.cooled_down_users, {"cooled"})
+        self.assertEqual(worker_ctx.denied_users_cache[1], {"blocked"})
+        self.assertIs(worker_ctx.folder_cache, ctx.folder_cache)
+        self.assertIs(worker_ctx.browse_coordinator, ctx.browse_coordinator)
+
+        source.get_tracks.reset_mock()
+        self.assertEqual(get_album_tracks(album, worker_ctx), [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ])
+        source.get_tracks.assert_not_called()
+        with self.assertRaises(AssertionError):
+            worker_ctx.pipeline_db_source._get_db()
+
+    def test_worker_db_sentinel_is_not_swallowed_by_denylist_lookup(self):
+        from lib.enqueue import _get_denied_users
+
+        ctx = CratediggerContext(
+            cfg=_make_cfg(),
+            slskd=MagicMock(),
+            pipeline_db_source=_WorkerPipelineDBSource(),  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(AssertionError):
+            _get_denied_users(1, ctx)
 
 
 # ---------------------------------------------------------------------------

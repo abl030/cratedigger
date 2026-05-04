@@ -428,24 +428,34 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
         ):
             break
 
-    if download_list is None:
-        return None
-
     downloads: list[DownloadFile] = []
     for file in files:
-        transfer_id = match_transfer_id(
-            download_list,
-            file["filename"],
-            username=username,
-        )
-        if transfer_id is not None:
-            downloads.append(DownloadFile(
-                filename=file["filename"],
-                id=transfer_id,
-                file_dir=file_dir,
+        transfer_id = (
+            match_transfer_id(
+                download_list,
+                file["filename"],
                 username=username,
-                size=file["size"],
-            ))
+            )
+            if download_list is not None
+            else None
+        )
+        downloads.append(DownloadFile(
+            filename=file["filename"],
+            id=transfer_id or "",
+            file_dir=file_dir,
+            username=username,
+            size=file["size"],
+        ))
+
+    reconciled = sum(1 for download in downloads if download.id)
+    if reconciled != len(downloads):
+        logger.warning(
+            "slskd accepted enqueue for %s but only reconciled %s/%s "
+            "transfer IDs; tracking filenames for next-cycle rederivation",
+            username,
+            reconciled,
+            len(downloads),
+        )
     return downloads
 
 

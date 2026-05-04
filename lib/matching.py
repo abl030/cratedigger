@@ -8,9 +8,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence, TYPE_CHECKING
 
-from lib.browse import _browse_directories, rank_candidate_dirs
+from lib.browse import (
+    _browse_directories_for_ctx,
+    cache_browsed_directory,
+    ensure_cache_user,
+    rank_candidate_dirs,
+)
 from lib.quality import CandidateScore
 from lib.util import _track_titles_cross_check
+
+_browse_directories = _browse_directories_for_ctx
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -294,8 +301,7 @@ def check_for_match(
     if not dirs_to_try:
         return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
 
-    if username not in ctx.folder_cache:
-        ctx.folder_cache[username] = {}
+    ensure_cache_user(ctx, username)
 
     uncached = [d for d in dirs_to_try if d not in ctx.folder_cache[username]]
     if uncached:
@@ -312,8 +318,8 @@ def check_for_match(
             browsed = _browse_directories(
                 uncached,
                 username,
-                ctx.slskd,
-                ctx.cfg.browse_parallelism,
+                ctx,
+                ctx.cfg.browse_global_max_workers,
             )
         finally:
             ctx.browse_time_s += time.monotonic() - browse_t0
@@ -324,8 +330,7 @@ def check_for_match(
             # distinguish primary fan-out load from residual lazy retries.
             ctx.peers_browsed_lazy += len(uncached)
         for d, result in browsed.items():
-            ctx.folder_cache[username][d] = result
-            ctx._folder_cache_ts.setdefault(username, {})[d] = time.time()
+            cache_browsed_directory(ctx, username, d, result)
 
         if not browsed and len(uncached) == len(dirs_to_try):
             ctx.broken_user.append(username)

@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
 
-from lib.browse import _fanout_browse_users
+from lib.browse import _fanout_browse_users, get_browse_coordinator
 from lib.context import CratediggerContext
 from tests.fakes import FakeSlskdAPI
 
@@ -140,6 +141,81 @@ class TestFanoutBrowseConcurrencyCap(unittest.TestCase):
         self.assertLessEqual(peak, 4, f"max_workers=4 cap was violated; peak={peak}")
         # All 50 work items completed (no client deadline anymore).
         self.assertEqual(len(ctx.folder_cache), 50)
+
+    def test_cap_is_global_across_concurrent_fanout_callers(self):
+        slskd = FakeSlskdAPI()
+        peak = 0
+        in_flight = 0
+        lock = threading.Lock()
+
+        def probe(delta: int) -> None:
+            nonlocal peak, in_flight
+            with lock:
+                in_flight += delta
+                peak = max(peak, in_flight)
+
+        slskd.users.in_flight_probe = probe
+        work_a = []
+        work_b = []
+        for i in range(20):
+            user = f"u{i}"
+            directory = f"d{i}"
+            slskd.users.set_directory(user, directory, [_make_directory(directory)])
+            slskd.users.set_directory_delay(user, directory, 0.05)
+            (work_a if i % 2 == 0 else work_b).append((user, directory))
+
+        ctx = _make_ctx(slskd)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(_fanout_browse_users, work_a, slskd, ctx, 4)
+            second = pool.submit(_fanout_browse_users, work_b, slskd, ctx, 4)
+            first.result()
+            second.result()
+
+        self.assertLessEqual(peak, 4, f"global browse cap was violated; peak={peak}")
+        self.assertEqual(len(slskd.users.directory_calls), 20)
+
+    def test_duplicate_cold_directory_is_single_flighted(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory("user1", "Album", [_make_directory("Album")])
+        slskd.users.set_directory_delay("user1", "Album", 0.05)
+        ctx = _make_ctx(slskd)
+        work = [("user1", "Album")]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(_fanout_browse_users, work, slskd, ctx, 4)
+            second = pool.submit(_fanout_browse_users, work, slskd, ctx, 4)
+            first.result()
+            second.result()
+
+        self.assertEqual(slskd.users.directory_calls, [("user1", "Album")])
+        self.assertIn("Album", ctx.folder_cache["user1"])
+
+    def test_reusing_coordinator_with_different_capacity_fails_loudly(self):
+        slskd = FakeSlskdAPI()
+        ctx = _make_ctx(slskd)
+
+        get_browse_coordinator(ctx, 4)
+
+        with self.assertRaises(ValueError):
+            get_browse_coordinator(ctx, 8)
+
+    def test_first_time_coordinator_creation_is_single(self):
+        slskd = FakeSlskdAPI()
+        ctx = _make_ctx(slskd)
+        coordinators = []
+
+        def get_one():
+            coordinators.append(get_browse_coordinator(ctx, 4))
+
+        threads = [threading.Thread(target=get_one) for _ in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual({id(coordinator) for coordinator in coordinators}, {
+            id(ctx.browse_coordinator),
+        })
 
 
 class TestFanoutBrowseRaceRegression(unittest.TestCase):
