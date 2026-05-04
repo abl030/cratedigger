@@ -800,7 +800,14 @@ in {
         # the next cycle. Cycle-boundary checkpointing already tolerates
         # a forced kill — the importer service owns beets writes
         # independently and is unaffected.
-        RuntimeMaxSec = "1h";
+        #
+        # `RuntimeMaxSec` does NOT apply to Type=oneshot — systemd warns
+        # `RuntimeMaxSec= has no effect in combination with Type=oneshot.
+        # Ignoring.` and the defense-in-depth silently disappears. For a
+        # oneshot, the entire service runtime IS the start phase, so
+        # `TimeoutStartSec` is the right knob. It SIGTERMs (then SIGKILLs
+        # after `TimeoutStopSec`) the ExecStart process at the cap.
+        TimeoutStartSec = "1h";
       };
     };
 
