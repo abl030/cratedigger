@@ -315,10 +315,10 @@ in {
         default = "5min";
         description = "Delay after boot before first timer fire.";
       };
-      onUnitActiveSec = mkOption {
+      onUnitInactiveSec = mkOption {
         type = types.str;
-        default = "5min";
-        description = "Interval between cycles.";
+        default = "1s";
+        description = "Delay after each completed cycle before starting the next one.";
       };
     };
 
@@ -816,7 +816,7 @@ in {
       wantedBy = ["timers.target"];
       timerConfig = {
         OnBootSec = cfg.timer.onBootSec;
-        OnUnitActiveSec = cfg.timer.onUnitActiveSec;
+        OnUnitInactiveSec = cfg.timer.onUnitInactiveSec;
         Persistent = true;
       };
     };

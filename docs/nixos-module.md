@@ -29,7 +29,7 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See README § "Tuning the quality rank model". |
-| `timer.{enable,onBootSec,onUnitActiveSec}` | every 5 min | Cycle frequency. |
+| `timer.{enable,onBootSec,onUnitInactiveSec}` | 1s after exit | Cycle frequency. |
 | `importer.enable` | `true` | Long-lived serial importer that drains queued import work. |
 | `importer.preview.enable` | `false` | Enable the async preview gate. When disabled, new import jobs are marked importable immediately for backward-compatible draining. |
 | `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.preview.enable = true`. Must be at least 1. |
@@ -58,7 +58,8 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 
 - `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The app units `requires` it, so they cannot start against an un-migrated DB.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
-- `cratedigger.timer` — fires every 5 minutes (configurable via `timer.onUnitActiveSec`).
+- `cratedigger.timer` — starts the next cycle after the previous oneshot exits
+  (configurable via `timer.onUnitInactiveSec`).
 - `cratedigger-importer.service` — long-running serial beets import worker. It only claims queued import jobs after async preview marks them `would_import`.
 - `cratedigger-import-preview-worker.service` — optional long-running async preview worker. It starts after DB migrations when `importer.preview.enable = true`, defaults to two worker loops, and runs validation/spectral/measurement preview outside the beets mutation lane.
 - `cratedigger-web.service` — long-running web UI for music.ablz.au.

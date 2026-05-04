@@ -456,7 +456,8 @@ Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) bu
 
 - `cratedigger-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
 - `cratedigger.service` — oneshot pipeline run, triggered by `cratedigger.timer`. Runs healthcheck → prestart (renders `config.ini`) → `cratedigger.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
-- `cratedigger.timer` — fires every 5 minutes by default (`services.cratedigger.timer.onUnitActiveSec`).
+- `cratedigger.timer` — starts the next cycle 1 second after the previous
+  oneshot exits by default (`services.cratedigger.timer.onUnitInactiveSec`).
 - `cratedigger-importer.service` — long-running serial importer that drains `import_jobs` whose async preview stage marked them importable. When the async preview gate is disabled, newly queued jobs are marked importable immediately.
 - `cratedigger-import-preview-worker.service` — optional long-running async preview worker enabled by `services.cratedigger.importer.preview.enable = true`. It defaults to `services.cratedigger.importer.previewWorkers = 2`, claims queued preview work, and runs validation/spectral/measurement preview before the importer sees the job.
 - `cratedigger-web.service` — long-running web UI bound to `services.cratedigger.web.port` (default 8085).
