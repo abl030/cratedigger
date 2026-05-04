@@ -717,7 +717,7 @@ def _search_and_queue_parallel(albums, ctx):
         Issue #212 removed the cycle-entry deadline gate. Bounded runtime
         comes from two layers now: the per-search progress watchdog inside
         `_collect_search_results` (90s no-progress kill) and the systemd
-        unit's `RuntimeMaxSec=1h` defense-in-depth.
+        unit's `TimeoutStartSec=1h` defense-in-depth.
         """
         from lib.search import SearchResult
 
