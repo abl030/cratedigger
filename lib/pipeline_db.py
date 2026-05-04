@@ -1130,6 +1130,37 @@ class PipelineDB:
         """, (current_path, now, request_id))
         self.conn.commit()
 
+    def mark_import_subprocess_started(
+        self,
+        request_id: int,
+        timestamp: str,
+    ) -> None:
+        """Stamp ``active_download_state.import_subprocess_started_at``.
+
+        Called immediately before launching ``import_one.py`` on the
+        auto-import path so the resume guard can later distinguish
+        "subprocess never launched" (safe to retry) from "subprocess
+        may have written to beets" (manual recovery required). No-op
+        when ``active_download_state`` is NULL — force/manual paths
+        operate on a different ownership boundary
+        (``failed_imports/...``) and don't carry this state.
+        See ``docs/advisory-locks.md``.
+        """
+        now = datetime.now(timezone.utc)
+        self._execute("""
+            UPDATE album_requests
+            SET active_download_state = jsonb_set(
+                    active_download_state,
+                    '{import_subprocess_started_at}',
+                    to_jsonb(%s::text),
+                    true
+                ),
+                updated_at = %s
+            WHERE id = %s
+              AND active_download_state IS NOT NULL
+        """, (timestamp, now, request_id))
+        self.conn.commit()
+
     def get_downloading(self) -> list[dict[str, Any]]:
         """Get all albums currently being downloaded."""
         cur = self._execute(

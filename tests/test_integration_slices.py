@@ -3218,5 +3218,352 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         self.assertIn(rid, wanted_ids)
 
 
+class TestImportSubprocessStartedFlag(unittest.TestCase):
+    """``dispatch_import_core`` must mark
+    ``ActiveDownloadState.import_subprocess_started_at`` immediately
+    before launching ``run_import_one`` on the auto-import path. The
+    flag is the witness the resume guard checks to decide whether the
+    subprocess might have written to beets — without setting it here,
+    the guard never blocks a real recovery situation, and the wedge
+    fix becomes a one-way ratchet that loses the safety property.
+    """
+
+    def test_flag_set_before_subprocess_launch_on_auto_import(self):
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import ActiveDownloadState
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            mb_release_id="mbid-123",
+        ))
+        # Seed the state the auto path would have produced before
+        # reaching this dispatch call.
+        existing = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-05-04T10:00:00+00:00",
+            files=[],
+            processing_started_at="2026-05-04T10:01:00+00:00",
+            current_path="/tmp/staged/Test/Album",
+        )
+        db.update_download_state(42, existing.to_json())
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
+            is_cbr=True, album_path="/Beets/Test")
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        dl_info = DownloadInfo(username="user1")
+        stdout = _make_stdout(ir)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+
+                # Capture the persisted state at the moment
+                # ``run_import_one`` (= ``ext.run``) is invoked.
+                captured: dict[str, ActiveDownloadState | None] = {
+                    "at_subprocess": None,
+                }
+
+                def _record_state(*_args: Any, **_kwargs: Any):
+                    raw = db.request(42)["active_download_state"]
+                    if raw is None:
+                        captured["at_subprocess"] = None
+                    else:
+                        captured["at_subprocess"] = (
+                            ActiveDownloadState.from_dict(raw)
+                            if isinstance(raw, dict)
+                            else ActiveDownloadState.from_json(str(raw))
+                        )
+                    return MagicMock(returncode=0, stdout=stdout, stderr="")
+
+                ext.run.side_effect = _record_state
+
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="auto_import",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                )
+
+        state_at_subprocess = captured["at_subprocess"]
+        self.assertIsNotNone(
+            state_at_subprocess,
+            "active_download_state was None when subprocess launched — "
+            "the auto path must preserve state through dispatch.",
+        )
+        assert state_at_subprocess is not None
+        self.assertIsNotNone(
+            state_at_subprocess.import_subprocess_started_at,
+            "import_subprocess_started_at must be set BEFORE "
+            "run_import_one launches; otherwise a crash mid-subprocess "
+            "would leave the resume guard unable to distinguish "
+            "'subprocess never ran' from 'subprocess wrote to beets'.",
+        )
+
+    def test_flag_not_touched_on_force_import_path(self):
+        """Force/manual paths operate on ``failed_imports/...`` and do
+        not own ``active_download_state``. Mutating the flag here would
+        be cross-cutting state corruption — the request row that
+        eventually owns ``active_download_state`` for the same MBID
+        must not be polluted by an unrelated force-import.
+        """
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality import ActiveDownloadState
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="manual",
+            mb_release_id="mbid-123",
+        ))
+        existing = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-05-04T10:00:00+00:00",
+            files=[],
+            processing_started_at=None,
+            import_subprocess_started_at=None,
+        )
+        db.update_download_state(42, existing.to_json())
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
+            is_cbr=True, album_path="/Beets/Test")
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        dl_info = DownloadInfo(username="user1")
+        stdout = _make_stdout(ir)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    force=True,
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario="force_import",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                )
+
+        raw = db.request(42)["active_download_state"]
+        if raw is None:
+            return  # Force/manual cleared the state — also acceptable.
+        state = (
+            ActiveDownloadState.from_dict(raw)
+            if isinstance(raw, dict)
+            else ActiveDownloadState.from_json(str(raw))
+        )
+        self.assertIsNone(
+            state.import_subprocess_started_at,
+            "Force-import path must not flip the auto-path resume flag.",
+        )
+
+
+class TestPostMoveResumeBlockGuard(unittest.TestCase):
+    """The wedge from 2026-05-04: requests stuck in ``downloading`` for
+    a week because a previous attempt left files at the request-scoped
+    auto-import staged path but never launched ``import_one.py``. The
+    resume guard couldn't distinguish "subprocess never ran" from
+    "subprocess may have started" and blocked retry forever — every
+    cycle requeued an importer job that failed in <50ms with
+    ``POST-MOVE RESUME BLOCKED``. 5788 failed jobs accumulated.
+
+    Fix: ``ActiveDownloadState.import_subprocess_started_at`` flag is
+    set immediately before ``run_import_one(...)`` on the auto path. The
+    resume guard now permits retry when the flag is None (subprocess
+    never launched, safe) and blocks when set (subprocess may have
+    written to beets, manual recovery required).
+
+    Tests pin the relaxed guard so future refactors can't reintroduce
+    the trap.
+    """
+
+    def _make_state(self, *, current_path: str,
+                    import_subprocess_started_at: str | None):
+        from lib.quality import ActiveDownloadState
+        return ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-04-27T13:36:28+00:00",
+            files=[],
+            last_progress_at="2026-04-27T14:00:38+00:00",
+            processing_started_at="2026-04-27T14:00:38+00:00",
+            import_subprocess_started_at=import_subprocess_started_at,
+            current_path=current_path,
+        )
+
+    def _setup_wedged_request(self, tmpdir: str, *,
+                              import_subprocess_started_at: str | None):
+        """Build a wedge-shaped state: files at the auto-import staged
+        path, ``processing_started_at`` set. Caller decides whether the
+        ``import_subprocess_started_at`` flag is set (block) or not (retry).
+        """
+        from lib.processing_paths import stage_to_ai_path
+        from tests.helpers import (
+            make_ctx_with_fake_db,
+            make_download_file,
+            make_grab_list_entry,
+        )
+
+        request_id = 1984
+        artist = "MxPx"
+        title = "Plans Within Plans"
+        staging_dir = os.path.join(tmpdir, "staging")
+        slskd_dir = os.path.join(tmpdir, "slskd")
+        os.makedirs(staging_dir)
+        os.makedirs(slskd_dir)
+        staged_path = stage_to_ai_path(
+            artist=artist,
+            title=title,
+            staging_dir=staging_dir,
+            request_id=request_id,
+            auto_import=True,
+        )
+        os.makedirs(staged_path)
+        # The wedge requires both: dir present AND tracked files present
+        # at their bind-target locations. Otherwise the guard at line
+        # 1644-1690 (missing dir / missing files) fires for a different
+        # reason. We construct a single tracked file so the test
+        # confirms the dispatch guard, not the missing-files guard.
+        track_path = os.path.join(staged_path, "01 - Aces Up.flac")
+        with open(track_path, "w") as fp:
+            fp.write("fake audio")
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_validation_enabled=True,
+            beets_distance_threshold=0.15,
+            beets_staging_dir=staging_dir,
+            slskd_download_dir=slskd_dir,
+            beets_tracking_file=os.path.join(tmpdir, "beets-tracking.jsonl"),
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="downloading",
+            artist_name=artist,
+            album_title=title,
+            year=2012,
+            mb_release_id="2c5a5a0b-095d-434b-af15-b23e6fbc5ad9",
+        ))
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+        entry = make_grab_list_entry(
+            album_id=request_id,
+            files=[make_download_file(
+                filename="user1\\Music\\01 - Aces Up.flac",
+                file_dir="user1\\Music",
+            )],
+            artist=artist,
+            title=title,
+            year="2012",
+            mb_release_id="2c5a5a0b-095d-434b-af15-b23e6fbc5ad9",
+            db_source="request",
+            db_request_id=request_id,
+        )
+        # Bind the import paths so the file actually lives where
+        # `_processing_path_ready_for_importer` will look for it.
+        from lib.staged_album import StagedAlbum
+        sa = StagedAlbum.from_entry(entry, default_path=staged_path)
+        sa.bind_import_paths(entry.files)
+        # Ensure the bound destination exists.
+        for file in entry.files:
+            dst = file.import_path
+            assert dst is not None
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if not os.path.exists(dst):
+                with open(dst, "w") as fp:
+                    fp.write("fake audio")
+        state = self._make_state(
+            current_path=staged_path,
+            import_subprocess_started_at=import_subprocess_started_at,
+        )
+        # Persist state into the FakePipelineDB so guards that read
+        # back via ``db.get_request`` see the same flag the test built.
+        db.update_download_state(request_id, state.to_json())
+        return entry, request_id, state, db, ctx, staged_path
+
+    def test_legacy_wedge_permits_retry(self):
+        """Legacy state (``processing_started_at`` set, no
+        ``import_subprocess_started_at``): the wedge guard MUST permit
+        retry. This is the recovery path for the 3 albums wedged on
+        2026-05-04 — the fix unwedges them automatically on the next
+        cycle.
+
+        Exercises ``_materialize_processing_dir`` (the actual fire site
+        seen in production logs at ``lib/download.py:583``).
+        """
+        from lib.download import _materialize_processing_dir
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entry, _, _, _, ctx, staged_path = self._setup_wedged_request(
+                tmpdir, import_subprocess_started_at=None)
+            staged_album = StagedAlbum.from_entry(
+                entry, default_path=staged_path)
+            result = _materialize_processing_dir(
+                entry, staged_album, ctx)
+
+        self.assertIs(
+            result, True,
+            "Legacy wedged row (subprocess never launched) must "
+            "materialize the existing files for retry. Returning None "
+            "perpetuates the 2026-05-04 wedge: every cycle requeues a "
+            "job that fails in <50ms with POST-MOVE RESUME BLOCKED.",
+        )
+        # And ``import_folder`` must be wired to the staged path so the
+        # downstream tag-write/beets-validate sequence picks the files up.
+        self.assertEqual(entry.import_folder, staged_path)
+
+    def test_subprocess_started_blocks_retry(self):
+        """Once ``import_subprocess_started_at`` is set, the wedge guard
+        MUST still block: the subprocess may have written to beets, so
+        retry is unsafe and operator recovery is required. This is the
+        original safety property the structural fix preserves.
+        """
+        from lib.download import _materialize_processing_dir
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entry, _, _, _, ctx, staged_path = self._setup_wedged_request(
+                tmpdir,
+                import_subprocess_started_at="2026-04-27T14:00:39+00:00")
+            staged_album = StagedAlbum.from_entry(
+                entry, default_path=staged_path)
+            result = _materialize_processing_dir(
+                entry, staged_album, ctx)
+
+        self.assertIsNone(
+            result,
+            "Subprocess-started wedge must be blocked — beets may have "
+            "started writing; an auto retry would risk a double-import.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

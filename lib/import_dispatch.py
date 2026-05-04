@@ -12,6 +12,7 @@ import shutil
 import subprocess as sp
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
 
 from lib import transitions
@@ -897,6 +898,29 @@ def dispatch_import_core(
                 request_row = None
             existing_v0_probe = _current_lossless_v0_probe_from_request(
                 request_row)
+            # Mark the subprocess as launching on the auto-import path
+            # so the resume guard can distinguish "never started" from
+            # "may have written to beets" if this process crashes
+            # before recording the result. The DB-side method is a
+            # no-op when ``active_download_state`` is NULL (force /
+            # manual paths), so calling unconditionally would also be
+            # safe — we still gate to make the intent explicit.
+            # See ``docs/advisory-locks.md`` and
+            # ``lib/download.py::_import_subprocess_already_started``.
+            if scenario not in FORCE_MANUAL_SCENARIOS:
+                try:
+                    db.mark_import_subprocess_started(
+                        request_id,
+                        datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to stamp import_subprocess_started_at "
+                        "for request %s; continuing with subprocess "
+                        "launch (resume guard may fail-open until "
+                        "completion)",
+                        request_id,
+                    )
             # Force/manual import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on

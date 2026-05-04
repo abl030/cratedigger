@@ -175,13 +175,32 @@ expects them and the next cycle simply re-enters with the same
 
 If the process dies after moving into `beets_staging_dir`, the persisted
 staging root tells the next poll whether the row is on the
-`auto-import/` or `post-validation/` branch. `auto-import/` retries are
-blocked for manual recovery because an import subprocess may already
-have started; `post-validation/` retries re-enter normally because
+`auto-import/` or `post-validation/` branch. The
+`active_download_state.import_subprocess_started_at` flag distinguishes
+two cases for `auto-import/` retries:
+
+- **Flag is `None`** — files were moved to the staged path but
+  `import_one.py` was never launched. Beets has not been touched. The
+  resume guard permits retry: the next cycle re-enters
+  `process_completed_album`, runs `beets_validate` against the staged
+  files, and dispatches as normal.
+- **Flag is set** — `dispatch_import_core` set this stamp immediately
+  before launching `run_import_one(...)`. The subprocess may have
+  written to beets before crashing, so retry is unsafe and would risk
+  a double-import. The guard blocks; manual recovery is required.
+
+`post-validation/` retries re-enter normally regardless because
 `StagedAlbum.move_to(...)` is idempotent when the album is already at
-the staged destination. For blocked auto-import rows,
+the staged destination. For blocked auto-import rows (flag set),
 operator recovery should inspect the staged path and either finish the
 import manually or reset the request explicitly.
+
+The 2026-05-04 wedge (5788 failed import_jobs, 3 albums stuck in
+`downloading` since Apr 27) was caused by the absence of this flag:
+the original guard fired regardless of whether the subprocess had
+launched, trapping rows after a crash that occurred between the staged
+move and the subprocess spawn. The flag is the necessary witness that
+makes the guard precise.
 
 To list candidate blocked rows, query for `status='downloading'` entries
 whose persisted `current_path` already points at your staging root:
