@@ -312,16 +312,19 @@ def _current_lossless_v0_probe_from_request(
     """Build the current comparable source-probe evidence from album_requests."""
     if not row:
         return None
-    avg = row.get("current_lossless_source_v0_probe_avg_bitrate")
+    def optional_int(value: object | None) -> int | None:
+        return value if isinstance(value, int) else None
+
+    avg = optional_int(row.get("current_lossless_source_v0_probe_avg_bitrate"))
     if avg is None:
         return None
     return V0ProbeEvidence(
         kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=row.get(
-            "current_lossless_source_v0_probe_min_bitrate"),
+        min_bitrate_kbps=optional_int(row.get(
+            "current_lossless_source_v0_probe_min_bitrate")),
         avg_bitrate_kbps=avg,
-        median_bitrate_kbps=row.get(
-            "current_lossless_source_v0_probe_median_bitrate"),
+        median_bitrate_kbps=optional_int(row.get(
+            "current_lossless_source_v0_probe_median_bitrate")),
     )
 
 
@@ -1205,7 +1208,12 @@ def dispatch_import_core(
                                 cooled_down_users.add(username)
                     logger.info(f"  Denylisted {usernames} for request {request_id}")
 
-                if action.requeue and (requeue_on_failure or not action.record_rejection):
+                # Rejected auto-imports are already requeued by
+                # _record_rejection_and_maybe_requeue(), which preserves retry
+                # counters and records the validation attempt. This second
+                # requeue is only for successful imports that intentionally go
+                # back to wanted to keep searching for a better source.
+                if action.requeue and action.mark_done:
                     requeue_fields: dict[str, object] = {
                         "search_filetype_override": QUALITY_UPGRADE_TIERS,
                     }

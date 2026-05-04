@@ -528,6 +528,8 @@ class TestDispatchImport(unittest.TestCase):
         row = r["db"].request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 171)
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
         self.assertEqual(r["db"].download_logs[0].beets_scenario,
                          "suspect_lossless_downgrade")
@@ -558,6 +560,8 @@ class TestDispatchImport(unittest.TestCase):
         row = r["db"].request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 171)
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
         self.assertEqual(r["db"].download_logs[0].beets_scenario,
                          "suspect_lossless_probe_missing")
