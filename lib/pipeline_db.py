@@ -953,12 +953,23 @@ class PipelineDB:
         )
         self.conn.commit()
 
-    def reset_to_wanted(self, request_id: int, **fields: Any) -> None:
-        """Reset to wanted, clearing retry counters.
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        clear_retry_counters: bool = True,
+        **fields: Any,
+    ) -> None:
+        """Reset to wanted.
 
         Only fields explicitly passed are updated — omitted fields are
         preserved.  Pass ``search_filetype_override=None`` to clear the column;
         omitting it leaves the existing value untouched.
+
+        ``clear_retry_counters`` is for operator/manual requeues that should get
+        a clean slate. Automatic downloading → wanted failure paths preserve the
+        counters so backoff can keep growing and the picker does not treat the
+        row as brand new.
 
         Always clears ``manual_reason`` — re-queueing past a manual flip
         means the operator wants a clean slate. Per U6: every re-queue path
@@ -968,16 +979,19 @@ class PipelineDB:
         now = datetime.now(timezone.utc)
         sets = [
             "status = 'wanted'",
-            "search_attempts = 0",
-            "download_attempts = 0",
-            "validation_attempts = 0",
-            "next_retry_after = NULL",
-            "last_attempt_at = NULL",
             "active_download_state = NULL",
             "manual_reason = NULL",
             "updated_at = %s",
         ]
         params: list[object] = [now]
+        if clear_retry_counters:
+            sets.extend([
+                "search_attempts = 0",
+                "download_attempts = 0",
+                "validation_attempts = 0",
+                "next_retry_after = NULL",
+                "last_attempt_at = NULL",
+            ])
         if "search_filetype_override" in fields:
             sets.append("search_filetype_override = %s")
             params.append(fields["search_filetype_override"])
@@ -1184,15 +1198,22 @@ class PipelineDB:
 
     def get_wanted(self, limit=None):
         now = datetime.now(timezone.utc)
-        # New/re-queued albums (0 search attempts) go first, then random.
+        # New/manual-requeued albums go first, then random.
         # This ensures freshly added or upgrade-requeued albums get picked
-        # up on the next cycle instead of waiting for random selection.
+        # up on the next cycle instead of waiting for random selection, while
+        # automatic failed-download requeues stay in the normal random pool.
         sql = """
             SELECT * FROM album_requests
             WHERE status = 'wanted'
               AND (next_retry_after IS NULL OR next_retry_after <= %s)
             ORDER BY
-              CASE WHEN search_attempts = 0 THEN 0 ELSE 1 END,
+              CASE
+                WHEN COALESCE(search_attempts, 0) = 0
+                 AND COALESCE(download_attempts, 0) = 0
+                 AND COALESCE(validation_attempts, 0) = 0
+                THEN 0
+                ELSE 1
+              END,
               RANDOM()
         """
         if limit:

@@ -161,7 +161,7 @@ class TestApplyTransition(unittest.TestCase):
         apply_transition(db, 1, "wanted", from_status="downloading",
                          search_filetype_override="flac", attempt_type="download")
         db.reset_to_wanted.assert_called_once_with(
-            1, search_filetype_override="flac")
+            1, clear_retry_counters=False, search_filetype_override="flac")
         db.record_attempt.assert_called_once_with(1, "download")
 
     def test_imported_to_wanted_calls_reset(self):

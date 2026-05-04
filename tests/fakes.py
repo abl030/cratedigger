@@ -1125,17 +1125,24 @@ class FakePipelineDB:
                 updated += 1
         return updated
 
-    def reset_to_wanted(self, request_id: int, **fields: Any) -> None:
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        clear_retry_counters: bool = True,
+        **fields: Any,
+    ) -> None:
         row = self._requests.get(request_id)
         if row is None:
             return
         now = _utcnow()
         row["status"] = "wanted"
-        row["search_attempts"] = 0
-        row["download_attempts"] = 0
-        row["validation_attempts"] = 0
-        row["next_retry_after"] = None
-        row["last_attempt_at"] = None
+        if clear_retry_counters:
+            row["search_attempts"] = 0
+            row["download_attempts"] = 0
+            row["validation_attempts"] = 0
+            row["next_retry_after"] = None
+            row["last_attempt_at"] = None
         row["active_download_state"] = None
         row["manual_reason"] = None
         row["updated_at"] = now
@@ -1588,14 +1595,13 @@ class FakePipelineDB:
             e for e in self.denylist if e.request_id != request_id]
 
     def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """Return wanted requests past their retry gate, new ones first.
+        """Return wanted requests past their retry gate, fresh/manual rows first.
 
-        Mirrors the real ORDER BY (``search_attempts=0`` ahead of the
-        rest) but breaks ties in insertion order rather than with
-        ``RANDOM()`` so tests are deterministic. Callers that care
-        about specific rows within a priority bucket should assert on
-        set membership rather than list order — the real DB randomises
-        ties every cycle.
+        Mirrors the real ORDER BY (no search/download/validation attempts ahead
+        of the rest) but breaks ties in insertion order rather than with
+        ``RANDOM()`` so tests are deterministic. Callers that care about
+        specific rows within a priority bucket should assert on set membership
+        rather than list order — the real DB randomises ties every cycle.
         """
         now = _utcnow()
         eligible = [
@@ -1605,7 +1611,13 @@ class FakePipelineDB:
                  or r["next_retry_after"] <= now)
         ]
         eligible.sort(
-            key=lambda r: 0 if (r.get("search_attempts") or 0) == 0 else 1)
+            key=lambda r: (
+                0 if (
+                    (r.get("search_attempts") or 0) == 0
+                    and (r.get("download_attempts") or 0) == 0
+                    and (r.get("validation_attempts") or 0) == 0
+                ) else 1
+            ))
         if limit is not None:
             eligible = eligible[:int(limit)]
         return [copy.deepcopy(r) for r in eligible]

@@ -99,9 +99,11 @@ That means a repeatedly failing request is retried at roughly:
 `t0`, `t0+30m`, `t0+1h30m`, `t0+3h30m`, `t0+7h30m`, then every 6 hours after
 the cap kicks in.
 
-Some transitions go back to `wanted` without backoff. `reset_to_wanted()`
-clears all three counters and nulls `next_retry_after`, so upgrade/requeue
-paths from already-imported albums become eligible again immediately.
+Operator requeues go back to `wanted` without backoff. `reset_to_wanted()`
+clears all three counters and nulls `next_retry_after` by default, so
+upgrade/requeue paths from already-imported albums become eligible again
+immediately. Automatic download failures preserve the existing counters and
+record the failed attempt, so backoff continues to grow.
 
 This is separate from **user cooldowns**. Backoff is per album request; user
 cooldowns are global per Soulseek user.

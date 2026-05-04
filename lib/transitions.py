@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, TYPE_CHECKING
+from typing import Any, Literal, Mapping, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -432,14 +432,19 @@ def apply_transition(
 
     # → wanted with counter reset: use reset_to_wanted
     if to_status == "wanted" and fx.clear_retry_counters:
-        db.reset_to_wanted(request_id, **transition_fields)
+        cast(Any, db.reset_to_wanted)(request_id, **transition_fields)
         if fx.record_attempt and attempt_type:
             db.record_attempt(request_id, attempt_type)
         return
 
-    # downloading → wanted: reset + record attempt
+    # downloading → wanted: clear active download state, preserve retry counters,
+    # then record the failed automatic attempt so backoff can continue growing.
     if from_status == "downloading" and to_status == "wanted":
-        db.reset_to_wanted(request_id, **transition_fields)
+        cast(Any, db.reset_to_wanted)(
+            request_id,
+            clear_retry_counters=False,
+            **transition_fields,
+        )
         if attempt_type:
             db.record_attempt(request_id, attempt_type)
         return

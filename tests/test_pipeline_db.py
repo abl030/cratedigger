@@ -1309,6 +1309,58 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["download_attempts"], 0)
         self.assertEqual(req["validation_attempts"], 0)
 
+    def test_reset_to_wanted_can_preserve_retry_counters(self):
+        req_id = self._make_request("preserve-counters")
+        self.db.record_attempt(req_id, "search")
+        self.db.record_attempt(req_id, "download")
+        self.db.record_attempt(req_id, "validation")
+        before = self.db.get_request(req_id)
+        assert before is not None
+        before_retry = before["next_retry_after"]
+
+        self.db.reset_to_wanted(req_id, clear_retry_counters=False)
+
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["search_attempts"], 1)
+        self.assertEqual(req["download_attempts"], 1)
+        self.assertEqual(req["validation_attempts"], 1)
+        self.assertEqual(req["next_retry_after"], before_retry)
+
+    def test_get_wanted_prioritizes_only_never_attempted_rows(self):
+        fresh_ids = {
+            self.db.add_request(
+                mb_release_id=f"fresh-{idx}",
+                artist_name="Fresh",
+                album_title=str(idx),
+                source="request",
+            )
+            for idx in range(3)
+        }
+        for idx in range(40):
+            req_id = self.db.add_request(
+                mb_release_id=f"auto-requeued-{idx}",
+                artist_name="Auto",
+                album_title=str(idx),
+                source="request",
+            )
+            self.db._execute(
+                """
+                UPDATE album_requests
+                SET search_attempts = 0,
+                    validation_attempts = 1,
+                    next_retry_after = %s
+                WHERE id = %s
+                """,
+                (datetime.now(timezone.utc) - timedelta(minutes=1), req_id),
+            )
+        self.db.conn.commit()
+
+        wanted = self.db.get_wanted(limit=3)
+
+        self.assertEqual({row["id"] for row in wanted}, fresh_ids)
+
     def test_preserves_search_filetype_override_when_omitted(self):
         req_id = self._make_request("preserve-qo")
         self.db.update_request_fields(req_id, search_filetype_override="flac,mp3 v0")
