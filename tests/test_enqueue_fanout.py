@@ -20,6 +20,7 @@ These tests pin:
 from __future__ import annotations
 
 import configparser
+import json
 import unittest
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -35,7 +36,12 @@ from lib.enqueue import (
     try_enqueue,
     try_multi_enqueue,
 )
+from lib.download import SlskdEnqueueOutcome
+from lib.download_ownership import DownloadOwnershipWriter
+from lib.grab_list import DownloadFile
 from lib.matching import MatchResult
+from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.helpers import make_request_row
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +102,33 @@ def _make_tracks() -> list[TrackRecord]:
         "list[TrackRecord]",
         [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
     )
+
+
+def _album_with_request(request_id: int = 1) -> MagicMock:
+    return MagicMock(
+        id=request_id,
+        db_request_id=request_id,
+        title="Album",
+        artist_name="Artist",
+        release_date="2024-01-01T00:00:00Z",
+        db_mb_release_id=f"mbid-{request_id}",
+        db_source="request",
+        db_search_filetype_override=None,
+        db_target_format=None,
+    )
+
+
+def _ctx_with_download_ownership(
+    *,
+    cfg: CratediggerConfig,
+    db: FakePipelineDB,
+    slskd: FakeSlskdAPI | None = None,
+) -> CratediggerContext:
+    ctx = _make_ctx(cfg, user_upload_speed={"u00": 10_000, "u01": 9_999})
+    ctx.slskd = slskd if slskd is not None else FakeSlskdAPI()
+    ctx.current_album_cache[1] = _album_with_request(1)
+    ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+    return ctx
 
 
 def _ranked_users(n: int) -> list[str]:
@@ -435,6 +468,581 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
+
+
+class TestDownloadOwnershipPreclaim(unittest.TestCase):
+    def test_claims_downloading_before_slskd_enqueue(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        def fake_enqueue(*, username, files, file_dir, ctx):
+            row = db.request(1)
+            self.assertEqual(row["status"], "downloading")
+            state = json.loads(row["active_download_state"])
+            self.assertEqual(state["filetype"], "flac")
+            self.assertEqual(state["files"][0]["username"], "u00")
+            self.assertEqual(
+                state["files"][0]["filename"],
+                "Music\\u00\\Album\\01.flac",
+            )
+            self.assertIn("current_path", state)
+            self.assertIsNone(state["current_path"])
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.status_history, [(1, "downloading")])
+        self.assertEqual(db.request(1)["status"], "downloading")
+
+    def test_process_death_after_claim_leaves_planned_state_owned(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        row = db.request(1)
+        self.assertEqual(row["status"], "downloading")
+        state = json.loads(row["active_download_state"])
+        self.assertEqual(state["files"][0]["filename"], "Music\\u00\\Album\\01.flac")
+
+    def test_verified_no_acceptance_resets_to_wanted(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(
+            cfg=cfg,
+            db=db,
+            slskd=FakeSlskdAPI(downloads=[]),
+        )
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.status_history, [(1, "downloading"), (1, "wanted")])
+        self.assertEqual(db.recorded_attempts, [(1, "download")])
+        self.assertIsNotNone(db.request(1)["next_retry_after"])
+
+    def test_rejected_enqueue_with_visible_transfer_stays_downloading(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\u00\\Album"
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{"directory": file_dir, "files": [
+                {"filename": "Music\\u00\\Album\\01.flac", "id": "transfer-1"},
+            ]}],
+        }])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        state_raw = db.request(1)["active_download_state"]
+        state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
+        self.assertEqual(state["files"][0]["username"], "u00")
+        self.assertEqual(state["files"][0]["filename"], "Music\\u00\\Album\\01.flac")
+        self.assertEqual(db.status_history, [(1, "downloading")])
+        self.assertEqual(slskd.transfers.get_all_downloads_calls, [True])
+
+    def test_rejected_enqueue_snapshot_failure_stays_downloading(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        slskd.transfers.get_all_downloads_error = RuntimeError("snapshot down")
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertEqual(db.status_history, [(1, "downloading")])
+
+    def test_ambiguous_enqueue_failure_stays_downloading_for_poll_recovery(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="unknown"),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        state_raw = db.request(1)["active_download_state"]
+        state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
+        self.assertEqual(state["files"][0]["username"], "u00")
+
+    def test_multi_disc_claim_contains_all_discs_before_first_enqueue(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            return _nomatch()
+
+        enqueue_calls = 0
+
+        def fake_enqueue(*, username, files, file_dir, ctx):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 1:
+                state = json.loads(db.request(1)["active_download_state"])
+                self.assertEqual(len(state["files"]), 2)
+                self.assertEqual(
+                    [(f["username"], f["disk_no"], f["disk_count"])
+                     for f in state["files"]],
+                    [("u00", 1, 2), ("u01", 2, 2)],
+                )
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id=f"transfer-{enqueue_calls}",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.status_history, [(1, "downloading")])
+
+    def test_multi_disc_partial_failure_resets_after_verified_cancel(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            return _nomatch()
+
+        enqueue_calls = 0
+
+        def fake_enqueue(*, username, files, file_dir, ctx):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="rejected")
+            slskd.add_transfer(
+                username=username,
+                directory=file_dir,
+                filename=files[0]["filename"],
+                id="transfer-1",
+            )
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertEqual(db.status_history, [(1, "downloading"), (1, "wanted")])
+        self.assertEqual(
+            [(call.username, call.id) for call in slskd.transfers.cancel_download_calls],
+            [("u00", "transfer-1")],
+        )
+
+    def test_multi_disc_first_rejected_with_visible_transfer_stays_owned(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\u00\\Album"
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{"directory": file_dir, "files": [
+                {"filename": "Music\\u00\\Album\\d1.flac", "id": "transfer-1"},
+            ]}],
+        }])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [{"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1}],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            return MatchResult(
+                matched=True,
+                directory={
+                    "directory": file_dir,
+                    "files": [{"filename": "d1.flac", "size": 111}],
+                },
+                file_dir=file_dir,
+                candidates=[],
+            )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertEqual(db.status_history, [(1, "downloading")])
+
+    def test_multi_disc_partial_failure_cancel_false_stays_owned(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        slskd.transfers.cancel_download_result = False
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            return _nomatch()
+
+        enqueue_calls = 0
+
+        def fake_enqueue(*, username, files, file_dir, ctx):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="rejected")
+            slskd.add_transfer(
+                username=username,
+                directory=file_dir,
+                filename=files[0]["filename"],
+                id="transfer-1",
+            )
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertEqual(db.status_history, [(1, "downloading")])
+        self.assertEqual(
+            [(call.username, call.id) for call in slskd.transfers.cancel_download_calls],
+            [("u00", "transfer-1")],
+        )
+
+    def test_multi_disc_partial_failure_without_transfer_ids_stays_owned(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                file_dir = file_dirs[0]
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": file_dir,
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir=file_dir,
+                    candidates=[],
+                )
+            return _nomatch()
+
+        enqueue_calls = 0
+
+        def fake_enqueue(*, username, files, file_dir, ctx):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="rejected")
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        state_raw = db.request(1)["active_download_state"]
+        state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
+        self.assertEqual(len(state["files"]), 2)
+        self.assertEqual(db.status_history, [(1, "downloading")])
 
 
 # ---------------------------------------------------------------------------

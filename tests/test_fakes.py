@@ -64,6 +64,49 @@ class TestFakePipelineDB(unittest.TestCase):
             [(42, '{"filetype":"flac"}')],
         )
 
+    def test_update_download_state_if_downloading_guards_status(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=43,
+            status="wanted",
+            active_download_state={"filetype": "old"},
+        ))
+
+        updated = db.update_download_state_if_downloading(
+            42,
+            '{"filetype":"flac"}',
+        )
+        blocked = db.update_download_state_if_downloading(
+            43,
+            '{"filetype":"mp3"}',
+        )
+
+        self.assertTrue(updated)
+        self.assertFalse(blocked)
+        self.assertEqual(db.request(42)["active_download_state"], {"filetype": "flac"})
+        self.assertEqual(db.request(43)["active_download_state"], {"filetype": "old"})
+
+    def test_reset_downloading_to_wanted_guards_status_and_preserves_counters(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"filetype": "flac"},
+            download_attempts=3,
+        ))
+        db.seed_request(make_request_row(id=43, status="wanted"))
+
+        reset = db.reset_downloading_to_wanted(42)
+        blocked = db.reset_downloading_to_wanted(43)
+
+        self.assertTrue(reset)
+        self.assertFalse(blocked)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["active_download_state"])
+        self.assertEqual(db.request(42)["download_attempts"], 3)
+        self.assertEqual(db.status_history, [(42, "wanted")])
+
     def test_update_download_state_current_path_rewrites_nested_path(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(

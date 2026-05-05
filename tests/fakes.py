@@ -153,6 +153,7 @@ class FakeSlskdTransfers:
         self.get_all_downloads_error: Exception | None = None
         self.get_download_error: Exception | None = None
         self.cancel_download_error: Exception | None = None
+        self.cancel_download_result = True
 
     def enqueue(self, username: str, files: list[dict[str, Any]]) -> bool:
         self.enqueue_calls.append(EnqueueCall(username, copy.deepcopy(files)))
@@ -184,6 +185,9 @@ class FakeSlskdTransfers:
         self.cancel_download_calls.append(CancelDownloadCall(username, id))
         if self.cancel_download_error is not None:
             raise self.cancel_download_error
+        if not self.cancel_download_result:
+            return False
+        self._api.remove_transfer(username=username, id=id)
         return True
 
 
@@ -483,6 +487,16 @@ class FakeSlskdAPI:
                     if transfer.get("id") == transfer_id:
                         return copy.deepcopy(transfer)
         return None
+
+    def remove_transfer(self, *, username: str, id: str) -> None:
+        for group in self._downloads:
+            if group.get("username") not in (None, "", username):
+                continue
+            for directory in group.get("directories", []):
+                directory["files"] = [
+                    transfer for transfer in directory.get("files", [])
+                    if transfer.get("id") != id
+                ]
 
     def _find_or_create_group(self, username: str) -> dict[str, Any]:
         for group in self._downloads:
@@ -1155,6 +1169,29 @@ class FakePipelineDB:
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))
 
+    def reset_downloading_to_wanted(
+        self,
+        request_id: int,
+        **fields: Any,
+    ) -> bool:
+        row = self._requests.get(request_id)
+        if row is None or row["status"] != "downloading":
+            return False
+        now = _utcnow()
+        row["status"] = "wanted"
+        row["active_download_state"] = None
+        row["manual_reason"] = None
+        row["updated_at"] = now
+        if "search_filetype_override" in fields:
+            row["search_filetype_override"] = fields["search_filetype_override"]
+        if "min_bitrate" in fields:
+            current_min_bitrate = row.get("min_bitrate")
+            if current_min_bitrate is not None:
+                row["prev_min_bitrate"] = current_min_bitrate
+            row["min_bitrate"] = fields["min_bitrate"]
+        self.status_history.append((request_id, "wanted"))
+        return True
+
     def set_manual(
         self,
         request_id: int,
@@ -1212,6 +1249,17 @@ class FakePipelineDB:
             except json.JSONDecodeError:
                 row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+    ) -> bool:
+        row = self._requests.get(request_id)
+        if row is None or row["status"] != "downloading":
+            return False
+        self.update_download_state(request_id, state_json)
+        return True
 
     def update_download_state_current_path(
         self,

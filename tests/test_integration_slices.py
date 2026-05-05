@@ -9,6 +9,7 @@ and _check_quality_gate_core run for real, not patched.
 """
 
 import os
+import configparser
 from contextlib import contextmanager
 import tempfile
 from typing import Any, cast
@@ -28,8 +29,9 @@ from lib.quality import (
     ImportResult,
     PostflightInfo,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
+    make_ctx_with_fake_db,
     make_import_result,
     make_request_row,
     patch_dispatch_externals,
@@ -37,6 +39,25 @@ from tests.helpers import (
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _download_ownership_cfg() -> CratediggerConfig:
+    ini = configparser.ConfigParser()
+    ini["Search Settings"] = {
+        "minimum_filename_match_ratio": "0.5",
+        "ignored_users": "",
+        "allowed_filetypes": "flac",
+        "browse_parallelism": "4",
+        "browse_top_k": "20",
+        "browse_global_max_workers": "4",
+    }
+    ini["Slskd"] = {
+        "download_dir": "/tmp/test_downloads",
+    }
+    ini["Beets Validation"] = {
+        "staging_dir": "/tmp/staging",
+    }
+    return CratediggerConfig.from_ini(ini)
 
 
 def _make_stdout(ir: ImportResult) -> str:
@@ -52,6 +73,101 @@ def _mock_beets_db(beets_info):
     mock_cls.return_value.__enter__ = MagicMock(return_value=mock_beets_instance)
     mock_cls.return_value.__exit__ = MagicMock(return_value=False)
     return mock_cls
+
+
+class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
+    """Cross-boundary slice for enqueue preclaim -> fresh poll recovery."""
+
+    def test_preclaimed_missing_transfer_id_recovers_in_fresh_poll_context(self):
+        from lib.download import SlskdEnqueueOutcome, poll_active_downloads
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.enqueue import try_enqueue
+        from lib.grab_list import DownloadFile
+        from lib.matching import MatchResult
+
+        cfg = _download_ownership_cfg()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            artist_name="Artist",
+            album_title="Album",
+            mb_release_id="mbid-1",
+        ))
+        album = SimpleNamespace(
+            id=1,
+            db_request_id=1,
+            title="Album",
+            artist_name="Artist",
+            release_date="2024-01-01T00:00:00Z",
+            db_mb_release_id="mbid-1",
+            db_source="request",
+            db_search_filetype_override=None,
+            db_target_format=None,
+        )
+        enqueue_ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=FakeSlskdAPI())
+        enqueue_ctx.current_album_cache[1] = album
+        enqueue_ctx.user_upload_speed = {"u00": 1000}
+        enqueue_ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: db,
+        )
+        file_dir = "Music\\u00\\Album"
+        tracks = cast(
+            Any,
+            [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
+        )
+        results = {"u00": {"flac": [file_dir]}}
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        def accepted_without_id(*, username, files, file_dir, ctx):
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 side_effect=accepted_without_id,
+             ):
+            attempt = try_enqueue(tracks, results, "flac", enqueue_ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        planned_state = db.request(1)["active_download_state"]
+        self.assertIsNone(planned_state["current_path"])
+
+        poll_slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{"directory": file_dir, "files": [{
+                "filename": "Music\\u00\\Album\\01.flac",
+                "id": "transfer-1",
+                "state": "InProgress",
+                "bytesTransferred": 10,
+            }]}],
+        }])
+        poll_ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=poll_slskd)
+
+        poll_active_downloads(poll_ctx)
+
+        self.assertEqual(db.request(1)["status"], "downloading")
+        recovered_state = db.request(1)["active_download_state"]
+        self.assertEqual(recovered_state["files"][0]["bytes_transferred"], 10)
+        self.assertEqual(poll_slskd.transfers.get_all_downloads_calls, [True])
 
 
 class TestDispatchThroughQualityGate(unittest.TestCase):

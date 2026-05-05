@@ -2101,6 +2101,89 @@ class TestDownloadingStatus(unittest.TestCase):
         assert ads is not None
         self.assertEqual(ads["processing_started_at"], "2026-04-03T12:05:00+00:00")
 
+    def test_update_download_state_if_downloading_success_and_guard(self):
+        req_id = self.db.add_request(
+            mb_release_id="udsifd-ok",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        blocked_id = self.db.add_request(
+            mb_release_id="udsifd-blocked",
+            artist_name="C",
+            album_title="D",
+            source="request",
+        )
+        original_state = json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [],
+        })
+        self.db.set_downloading(req_id, original_state)
+        self.db.set_downloading(blocked_id, original_state)
+        self.db.update_status(blocked_id, "imported")
+
+        updated = self.db.update_download_state_if_downloading(
+            req_id,
+            json.dumps({
+                "filetype": "mp3 v0",
+                "enqueued_at": "2026-04-03T12:01:00+00:00",
+                "files": [],
+            }),
+        )
+        blocked = self.db.update_download_state_if_downloading(
+            blocked_id,
+            json.dumps({
+                "filetype": "mp3 320",
+                "enqueued_at": "2026-04-03T12:02:00+00:00",
+                "files": [],
+            }),
+        )
+
+        self.assertTrue(updated)
+        self.assertFalse(blocked)
+        req = self.db.get_request(req_id)
+        blocked_req = self.db.get_request(blocked_id)
+        assert req is not None
+        assert blocked_req is not None
+        self.assertEqual(req["active_download_state"]["filetype"], "mp3 v0")
+        self.assertIsNone(blocked_req["active_download_state"])
+
+    def test_reset_downloading_to_wanted_success_and_guard(self):
+        req_id = self.db.add_request(
+            mb_release_id="rdtw-ok",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        blocked_id = self.db.add_request(
+            mb_release_id="rdtw-blocked",
+            artist_name="C",
+            album_title="D",
+            source="request",
+        )
+        state_json = json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [],
+        })
+        self.db.set_downloading(req_id, state_json)
+        self.db.record_attempt(req_id, "download")
+
+        reset = self.db.reset_downloading_to_wanted(req_id)
+        blocked = self.db.reset_downloading_to_wanted(blocked_id)
+
+        self.assertTrue(reset)
+        self.assertFalse(blocked)
+        req = self.db.get_request(req_id)
+        blocked_req = self.db.get_request(blocked_id)
+        assert req is not None
+        assert blocked_req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertIsNone(req["active_download_state"])
+        self.assertEqual(req["download_attempts"], 1)
+        self.assertEqual(blocked_req["status"], "wanted")
+
     def test_update_download_state_current_path(self):
         """update_download_state_current_path() rewrites only the path field."""
         req_id = self.db.add_request(

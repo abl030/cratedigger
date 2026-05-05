@@ -934,6 +934,47 @@ class TestRederiveTransferIds(unittest.TestCase):
         assert status is not None
         self.assertEqual(status["state"], "Completed, Succeeded")
 
+    def test_not_before_ignores_stale_terminal_transfer(self):
+        from lib.download import rederive_transfer_ids
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1,
+            files=[
+                DownloadFile(
+                    filename="user1\\Album\\01.flac",
+                    id="",
+                    file_dir="user1\\Album",
+                    username="user1",
+                    size=1000,
+                ),
+            ],
+            filetype="flac",
+            title="T",
+            artist="A",
+            year="2020",
+            mb_release_id="mbid",
+        )
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Album", "files": [
+                {
+                    "filename": "user1\\Album\\01.flac",
+                    "id": "old-completed",
+                    "state": "Completed, Succeeded",
+                    "endedAt": "2026-05-05T01:00:00+00:00",
+                },
+            ]}],
+        }])
+
+        rederive_transfer_ids(
+            entry,
+            slskd,
+            not_before="2026-05-05T02:00:00+00:00",
+        )
+
+        self.assertEqual(entry.files[0].id, "")
+        self.assertIsNone(entry.files[0].status)
+
 
 class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     """Test process_completed_album return ownership."""
@@ -2387,7 +2428,16 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_active_transfer_vanished_all(self):
         """slskd returns no matching transfers → treat as timeout."""
         from lib.download import poll_active_downloads
-        row = self._make_downloading_row()
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": (
+                datetime.now(timezone.utc) - timedelta(minutes=2)
+            ).isoformat(),
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ],
+        })
         ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
@@ -2401,10 +2451,34 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
 
+    def test_poll_active_fresh_preclaim_with_empty_snapshot_stays_downloading(self):
+        """A same-cycle preclaim should not be reset before slskd registers transfers."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": []}],
+            }],
+        )
+
+        poll_active_downloads(ctx)
+
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+
     def test_poll_active_completed_removed_transfer_uses_snapshot_status(self):
         """Completed transfers from includeRemoved=true should enqueue, not timeout."""
         from lib.download import poll_active_downloads
-        row = self._make_downloading_row()
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T20:00:00+00:00",
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ],
+        })
         ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
@@ -2428,6 +2502,39 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs()), 1)
+
+    def test_poll_ignores_stale_terminal_transfer_before_claim(self):
+        """A new claim must not bind to an older includeRemoved terminal transfer."""
+        from lib.download import poll_active_downloads
+        now = datetime.now(timezone.utc)
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": (now - timedelta(minutes=2)).isoformat(),
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ],
+        })
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "old-done-id",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                    "endedAt": (now - timedelta(hours=1)).isoformat(),
+                }]}],
+            }],
+        )
+
+        with patch("lib.download.cancel_and_delete"):
+            poll_active_downloads(ctx)
+
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
+        self.assertEqual(fake_db.list_import_jobs(), [])
 
     def test_poll_active_in_progress(self):
         """Files still downloading with fresh state transition → persist progress snapshot."""

@@ -294,7 +294,7 @@ def finalize_request(
     db: "PipelineDB",
     request_id: int,
     transition: RequestTransition,
-) -> None:
+) -> bool:
     """Apply one validated request-state transition command."""
 
     _validate_transition_fields(transition.target_status, transition.fields)
@@ -305,7 +305,7 @@ def finalize_request(
     if transition.attempt_type is not None:
         transition_kwargs["attempt_type"] = transition.attempt_type
 
-    apply_transition(
+    return apply_transition(
         db,
         request_id,
         transition.target_status,
@@ -375,7 +375,7 @@ def apply_transition(
     request_id: int,
     to_status: str,
     **extra: Any,
-) -> None:
+) -> bool:
     """Execute a validated state transition.
 
     This is the single entry point for all album_requests status mutations.
@@ -406,7 +406,7 @@ def apply_transition(
         row = db.get_request(request_id)
         if row is None:
             logger.warning(f"apply_transition: request {request_id} not found")
-            return
+            return False
         current = row["status"]
         assert isinstance(current, str)
         from_status = current
@@ -428,28 +428,40 @@ def apply_transition(
             logger.warning(
                 f"apply_transition: status guard prevented {from_status!r} -> "
                 f"'downloading' for request {request_id} (album no longer wanted)")
-        return
+            return False
+        return True
 
     # → wanted with counter reset: use reset_to_wanted
     if to_status == "wanted" and fx.clear_retry_counters:
         cast(Any, db.reset_to_wanted)(request_id, **transition_fields)
         if fx.record_attempt and attempt_type:
             db.record_attempt(request_id, attempt_type)
-        return
+        return True
 
     # downloading → wanted: clear active download state, preserve retry counters,
     # then record the failed automatic attempt so backoff can continue growing.
     if from_status == "downloading" and to_status == "wanted":
-        cast(Any, db.reset_to_wanted)(
-            request_id,
-            clear_retry_counters=False,
-            **transition_fields,
-        )
+        reset = getattr(db, "reset_downloading_to_wanted", None)
+        if reset is None:
+            cast(Any, db.reset_to_wanted)(
+                request_id,
+                clear_retry_counters=False,
+                **transition_fields,
+            )
+            reset_ok = True
+        else:
+            reset_ok = bool(reset(request_id, **transition_fields))
+        if not reset_ok:
+            logger.warning(
+                f"apply_transition: status guard prevented 'downloading' -> "
+                f"'wanted' for request {request_id}")
+            return False
         if attempt_type:
             db.record_attempt(request_id, attempt_type)
-        return
+        return True
 
     # All other transitions: use update_status
     all_extra: dict[str, object] = dict(extra)
     all_extra.update(transition_fields)
     db.update_status(request_id, to_status, **all_extra)
+    return True

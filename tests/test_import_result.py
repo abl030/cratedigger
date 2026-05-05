@@ -1374,6 +1374,7 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(state.filetype, "flac")
         self.assertEqual(state.enqueued_at, "2026-04-03T12:00:00+00:00")
         self.assertEqual(state.files, [])
+        self.assertIsNone(json.loads(state.to_json())["current_path"])
 
     def test_active_download_state_enqueued_at_iso(self):
         """Verify ISO8601 datetime format."""

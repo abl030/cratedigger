@@ -1152,7 +1152,13 @@ def main():
 
         # Build context with fresh caches for this cycle
         from lib.context import CratediggerContext
-        _module_ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
+        from lib.download_ownership import DownloadOwnershipWriter
+        _module_ctx = CratediggerContext(
+            cfg=cfg,
+            slskd=slskd,
+            pipeline_db_source=pipeline_db_source,
+            download_ownership=DownloadOwnershipWriter(cfg.pipeline_db_dsn),
+        )
         from lib.peer_cache import connect_from_config
         _module_ctx.peer_cache = connect_from_config(cfg)
 
