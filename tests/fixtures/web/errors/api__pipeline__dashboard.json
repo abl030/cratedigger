@@ -1,0 +1,88 @@
+{
+  "generated_at": "2026-05-05T11:30:00+00:00",
+  "redis": {
+    "enabled": true,
+    "status": "error",
+    "error": "connection refused"
+  },
+  "searches": {
+    "windows": [
+      {
+        "label": "24h",
+        "hours": 24,
+        "searches": 144,
+        "distinct_requests": 9,
+        "searches_per_hour": 6,
+        "avg_elapsed_s": 72,
+        "median_elapsed_s": 65,
+        "p95_elapsed_s": 140,
+        "max_elapsed_s": 240,
+        "outcomes": {
+          "found": 0,
+          "no_match": 68,
+          "no_results": 51,
+          "exhausted": 14,
+          "errors": 11
+        }
+      }
+    ]
+  },
+  "cycles": {
+    "windows": [
+      {
+        "label": "24h",
+        "hours": 24,
+        "cycles": 5,
+        "avg_cycle_s": 840,
+        "median_cycle_s": 810,
+        "p95_cycle_s": 1220,
+        "max_cycle_s": 1300,
+        "median_search_s": 760,
+        "watchdog_kills": 4,
+        "find_download_queued": 0,
+        "find_download_completed": 0,
+        "cache_errors": 6,
+        "cache_write_errors": 2,
+        "cache_fuse_tripped": 1,
+        "peers_browsed": 8800,
+        "peers_browsed_lazy": 630,
+        "fanout_waves": 144
+      }
+    ],
+    "recent": [],
+    "outliers": []
+  },
+  "coverage": {
+    "wanted_total": 9,
+    "wanted_searched_24h": 5,
+    "wanted_searched_6h": 2,
+    "wanted_unsearched_24h": 4,
+    "wanted_unsearched_6h": 7,
+    "wanted_never_searched": 2,
+    "active_wanted_searches_24h": 144,
+    "active_wanted_searches_6h": 34,
+    "oldest_last_search_at": "2026-05-04T04:00:00+00:00",
+    "top_10_share_24h": 0.91,
+    "top_loop_suspects": [],
+    "stale_wanted": []
+  },
+  "peer_dirs": {
+    "days": [
+      {
+        "date": "2026-05-05",
+        "new_combos": 8800,
+        "new_peers": 901,
+        "new_dirs": 8540
+      }
+    ],
+    "totals": {
+      "known_combos": 8800,
+      "known_peers": 901,
+      "known_dirs": 8540,
+      "new_24h": 8800,
+      "cold_seen_24h": 9430,
+      "days_with_new": 1,
+      "tracked_since": "2026-05-05T11:30:00+00:00"
+    }
+  }
+}

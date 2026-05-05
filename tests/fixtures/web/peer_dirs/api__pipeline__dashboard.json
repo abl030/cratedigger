@@ -1,0 +1,145 @@
+{
+  "generated_at": "2026-05-05T11:05:00+00:00",
+  "redis": {
+    "enabled": true,
+    "status": "ok",
+    "error": null,
+    "used_memory_bytes": 229000000,
+    "maxmemory_bytes": 0,
+    "used_memory_dataset_bytes": 210000000,
+    "memory_utilization": null,
+    "key_count": 228000,
+    "expires_count": 228000,
+    "avg_ttl_ms": 23800000,
+    "fragmentation_ratio": 1.08
+  },
+  "searches": {
+    "windows": [
+      {
+        "label": "24h",
+        "hours": 24,
+        "searches": 2482,
+        "distinct_requests": 623,
+        "searches_per_hour": 103.4166666667,
+        "avg_elapsed_s": 65.19,
+        "median_elapsed_s": 65.15,
+        "p95_elapsed_s": 90.19,
+        "max_elapsed_s": 142.36,
+        "outcomes": {
+          "found": 128,
+          "no_match": 1640,
+          "no_results": 693,
+          "exhausted": 16,
+          "errors": 5
+        }
+      },
+      {
+        "label": "6h",
+        "hours": 6,
+        "searches": 866,
+        "distinct_requests": 586,
+        "searches_per_hour": 144.3333333333,
+        "avg_elapsed_s": 66.86,
+        "median_elapsed_s": 65.19,
+        "p95_elapsed_s": 91.21,
+        "max_elapsed_s": 142.36,
+        "outcomes": {
+          "found": 27,
+          "no_match": 586,
+          "no_results": 251,
+          "exhausted": 0,
+          "errors": 2
+        }
+      }
+    ]
+  },
+  "cycles": {
+    "windows": [
+      {
+        "label": "24h",
+        "hours": 24,
+        "cycles": 26,
+        "avg_cycle_s": 392.35,
+        "median_cycle_s": 338.43,
+        "p95_cycle_s": 761.42,
+        "max_cycle_s": 830.79,
+        "median_search_s": 296.1,
+        "watchdog_kills": 0,
+        "find_download_queued": 303,
+        "find_download_completed": 303,
+        "cache_errors": 0,
+        "cache_write_errors": 0,
+        "cache_fuse_tripped": 0,
+        "peers_browsed": 15568,
+        "peers_browsed_lazy": 103,
+        "fanout_waves": 1746
+      },
+      {
+        "label": "6h",
+        "hours": 6,
+        "cycles": 26,
+        "avg_cycle_s": 392.35,
+        "median_cycle_s": 338.43,
+        "p95_cycle_s": 761.42,
+        "max_cycle_s": 830.79,
+        "median_search_s": 296.1,
+        "watchdog_kills": 0,
+        "find_download_queued": 303,
+        "find_download_completed": 303,
+        "cache_errors": 0,
+        "cache_write_errors": 0,
+        "cache_fuse_tripped": 0,
+        "peers_browsed": 15568,
+        "peers_browsed_lazy": 103,
+        "fanout_waves": 1746
+      }
+    ],
+    "recent": [],
+    "outliers": []
+  },
+  "coverage": {
+    "wanted_total": 16,
+    "wanted_searched_24h": 16,
+    "wanted_searched_6h": 16,
+    "wanted_unsearched_24h": 0,
+    "wanted_unsearched_6h": 0,
+    "wanted_never_searched": 0,
+    "active_wanted_searches_24h": 143,
+    "active_wanted_searches_6h": 143,
+    "oldest_last_search_at": "2026-05-05T10:20:00+00:00",
+    "top_10_share_24h": 0.43,
+    "top_loop_suspects": [],
+    "stale_wanted": []
+  },
+  "peer_dirs": {
+    "days": [
+      {
+        "date": "2026-05-05",
+        "new_combos": 1621,
+        "new_peers": 316,
+        "new_dirs": 1621
+      },
+      {
+        "date": "2026-05-04",
+        "new_combos": 0,
+        "new_peers": 0,
+        "new_dirs": 0
+      },
+      {
+        "date": "2026-05-03",
+        "new_combos": 0,
+        "new_peers": 0,
+        "new_dirs": 0
+      }
+    ],
+    "totals": {
+      "known_combos": 1621,
+      "known_peers": 316,
+      "known_dirs": 1621,
+      "new_24h": 1621,
+      "cold_seen_24h": 1621,
+      "days_with_new": 1,
+      "tracked_since": "2026-05-05T11:02:19.295439+00:00"
+    }
+  }
+}

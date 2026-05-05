@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-05-05T00:00:00+00:00",
+  "redis": {
+    "enabled": false,
+    "status": "disabled",
+    "error": null
+  },
+  "searches": {
+    "windows": []
+  },
+  "cycles": {
+    "windows": [],
+    "recent": [],
+    "outliers": []
+  },
+  "coverage": {
+    "wanted_total": 0,
+    "wanted_searched_24h": 0,
+    "wanted_searched_6h": 0,
+    "wanted_unsearched_24h": 0,
+    "wanted_unsearched_6h": 0,
+    "wanted_never_searched": 0,
+    "active_wanted_searches_24h": 0,
+    "active_wanted_searches_6h": 0,
+    "oldest_last_search_at": null,
+    "top_10_share_24h": 0,
+    "top_loop_suspects": [],
+    "stale_wanted": []
+  },
+  "peer_dirs": {
+    "days": [],
+    "totals": {
+      "known_combos": 0,
+      "known_peers": 0,
+      "known_dirs": 0,
+      "new_24h": 0,
+      "cold_seen_24h": 0,
+      "days_with_new": 0,
+      "tracked_since": null
+    }
+  }
+}

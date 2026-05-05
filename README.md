@@ -441,6 +441,30 @@ nix-shell --run "bash scripts/run_tests.sh"    # full suite, saves to /tmp/crate
 nix-shell --run "python3 -m unittest tests.<module> -v"  # single module
 ```
 
+## Frontend development server
+
+Use the local live-reload server when iterating on `web/index.html` or
+`web/js/*.js`. It serves the checked-out frontend files and backs `/api/*`
+from one of three read-only data sources:
+
+```bash
+# Deterministic fixture data, no network or DB required
+nix-shell --run "python3 scripts/web_dev_server.py --data fixture --scenario peer_dirs --port 8096"
+
+# Local frontend files against production API JSON
+nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --port 8096"
+
+# Local frontend files plus local route code against a live DB session
+PIPELINE_DB_DSN=postgresql://cratedigger@192.168.100.11:5432/cratedigger \
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --port 8096"
+```
+
+Open <http://127.0.0.1:8096>. For access from another machine on the LAN, pass
+`--host 0.0.0.0` and open <http://doc1:8096>. The page gets a small dev badge
+and reloads automatically when `web/index.html`, `web/js/*.js`, or the active
+fixture JSON changes. Mutating API requests are blocked in all modes; `live-db`
+also sets the PostgreSQL session to `default_transaction_read_only=on`.
+
 The test layer follows a 4-category taxonomy documented in `.claude/rules/code-quality.md`:
 
 - **Pure function tests** — direct input → output, exhaustive subTest tables for decision matrices
