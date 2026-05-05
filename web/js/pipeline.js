@@ -139,11 +139,15 @@ export function renderPipeline() {
 }
 
 function renderPipelineNav() {
+  const refreshAction = state.pipelineView === 'dashboard'
+    ? 'window.loadPipelineDashboard()'
+    : 'window.loadPipeline()';
+
   return `
     <div class="pipeline-subtabs">
       <button class="p-btn ${state.pipelineView === 'queue' ? 'active-status' : ''}" onclick="window.setPipelineView('queue')">Queue</button>
       <button class="p-btn ${state.pipelineView === 'dashboard' ? 'active-status' : ''}" onclick="window.setPipelineView('dashboard')">Dashboard</button>
-      ${state.pipelineView === 'dashboard' ? '<button class="p-btn dashboard-refresh" onclick="window.loadPipelineDashboard()">Refresh</button>' : ''}
+      <button class="p-btn subtab-refresh" onclick="${refreshAction}">Refresh</button>
     </div>
   `;
 }
@@ -687,3 +691,7 @@ export async function updateStatus(id, newStatus) {
     }
   } catch (e) { toast('Update failed', true); }
 }
+
+export const __test__ = {
+  renderPipelineNav,
+};

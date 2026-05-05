@@ -4,6 +4,7 @@
  */
 
 import { __test__ } from '../web/js/recents.js';
+import { state } from '../web/js/state.js';
 
 let passed = 0;
 let failed = 0;
@@ -43,6 +44,17 @@ console.log('renderImportQueueItems() shows importable next row and preview deta
   assertContains(html, 'next import', 'first importable row is marked next');
   assertContains(html, 'preview: would_import', 'preview state rendered');
   assertContains(html, 'stage2_import:import', 'stage chain rendered');
+}
+
+console.log('renderRecentsSubnav() refreshes the active recents subtab');
+{
+  state.recentsSub = 'downloading';
+  const html = __test__.renderRecentsSubnav();
+  assertContains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
+  assertContains(html, 'window.setRecentsSub(\'downloading\')', 'downloading tab rendered');
+  assertContains(html, 'window.setRecentsSub(\'queue\')', 'queue tab rendered');
+  assertContains(html, 'window.loadRecents()', 'refresh reloads current recents subtab');
+  assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
 
 console.log('renderImportQueueItems() shows uncertain preview failures without next styling');

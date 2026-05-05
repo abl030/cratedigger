@@ -22,10 +22,11 @@ export function setRecentsSub(sub) {
 }
 
 function renderRecentsSubnav() {
-  return `<div style="display:flex;gap:2px;margin-bottom:12px;">
+  return `<div class="pipeline-subtabs">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
     <button class="p-btn ${state.recentsSub === 'downloading' ? 'active-status' : ''}" onclick="window.setRecentsSub('downloading')">Downloading</button>
     <button class="p-btn ${state.recentsSub === 'queue' ? 'active-status' : ''}" onclick="window.setRecentsSub('queue')">Queue</button>
+    <button class="p-btn subtab-refresh" onclick="window.loadRecents()">Refresh</button>
   </div>`;
 }
 
@@ -294,6 +295,7 @@ export async function loadRecents() {
 export const __test__ = {
   renderDownloadingItems,
   renderImportQueueItems,
+  renderRecentsSubnav,
   renderRecentsItems,
   setRecentsSub,
 };
