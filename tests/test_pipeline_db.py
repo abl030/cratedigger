@@ -1266,6 +1266,15 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             set(coverage["match_rate_series_24h"][0]),
             {"bucket_start", "matches", "matches_per_hour"},
         )
+        self.assertEqual(len(coverage["match_rate_series_28d"]), 28)
+        self.assertEqual(
+            sum(point["matches"] for point in coverage["match_rate_series_28d"]),
+            1,
+        )
+        self.assertEqual(
+            set(coverage["match_rate_series_28d"][0]),
+            {"bucket_start", "matches", "matches_per_day"},
+        )
         self.assertEqual(coverage["top_loop_suspects"][0]["request_id"], self.req1)
         self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 4)
         self.assertEqual(coverage["top_loop_suspects"][0]["reset_24h"], 1)

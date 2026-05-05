@@ -342,6 +342,18 @@ def _make_server():
                     "matches_per_hour": 2,
                 },
             ],
+            "match_rate_series_28d": [
+                {
+                    "bucket_start": "2026-05-04T00:00:00+00:00",
+                    "matches": 1,
+                    "matches_per_day": 1,
+                },
+                {
+                    "bucket_start": "2026-05-05T00:00:00+00:00",
+                    "matches": 2,
+                    "matches_per_day": 2,
+                },
+            ],
             "top_10_share_24h": 0.75,
             "top_loop_suspects": [
                 {
@@ -1010,11 +1022,15 @@ class TestPipelineRouteContracts(_WebServerCase):
         "wanted_never_searched", "active_wanted_searches_24h",
         "active_wanted_searches_6h", "oldest_last_search_at",
         "matches_24h", "matches_6h", "matches_per_hour_24h",
-        "matches_per_hour_6h", "match_rate_series_24h", "top_10_share_24h",
-        "top_loop_suspects", "stale_wanted",
+        "matches_per_hour_6h", "match_rate_series_24h",
+        "match_rate_series_28d", "top_10_share_24h", "top_loop_suspects",
+        "stale_wanted",
     }
     DASHBOARD_MATCH_RATE_POINT_FIELDS = {
         "bucket_start", "matches", "matches_per_hour",
+    }
+    DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS = {
+        "bucket_start", "matches", "matches_per_day",
     }
     DASHBOARD_PEER_DIR_FIELDS = {"totals", "days"}
     DASHBOARD_PEER_DIR_TOTAL_FIELDS = {
@@ -1150,11 +1166,18 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
         self.assertIsInstance(data["coverage"]["match_rate_series_24h"], list)
+        self.assertIsInstance(data["coverage"]["match_rate_series_28d"], list)
         _assert_required_fields(
             self,
             data["coverage"]["match_rate_series_24h"][0],
             self.DASHBOARD_MATCH_RATE_POINT_FIELDS,
             "pipeline dashboard match rate point",
+        )
+        _assert_required_fields(
+            self,
+            data["coverage"]["match_rate_series_28d"][0],
+            self.DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS,
+            "pipeline dashboard daily match rate point",
         )
         _assert_required_fields(
             self,

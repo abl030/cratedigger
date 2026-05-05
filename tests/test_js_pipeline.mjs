@@ -49,6 +49,8 @@ console.log('renderPipelineNav() refreshes the dashboard subtab');
 console.log('renderCoverageCard() shows found-enqueue match rates');
 {
   state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = false;
+  state.pipelineDailyMatchGraphOpen = false;
   const html = __test__.renderCoverageCard({
     wanted_total: 10,
     wanted_searched_24h: 8,
@@ -65,13 +67,16 @@ console.log('renderCoverageCard() shows found-enqueue match rates');
   assertContains(html, '>1.50</strong>', '6h match rate rendered');
   assertContains(html, 'Match/hr 24h', '24h match-rate label rendered');
   assertContains(html, '>1.00</strong>', '24h match rate rendered');
-  assertContains(html, 'window.toggleCoverageMatchGraph()', '24h match rate toggles graph');
+  assertContains(html, "window.toggleCoverageMatchGraph('hourly')", '6h match rate toggles hourly graph');
+  assertContains(html, "window.toggleCoverageMatchGraph('daily')", '24h match rate toggles daily graph');
   assertExcludes(html, 'match-rate-chart', 'chart stays collapsed by default');
 }
 
-console.log('renderCoverageCard() expands a 24h match-rate chart');
+console.log('renderCoverageCard() expands an hourly match-rate chart under the 6h row');
 {
-  state.pipelineMatchGraphOpen = true;
+  state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = true;
+  state.pipelineDailyMatchGraphOpen = false;
   const html = __test__.renderCoverageCard({
     wanted_total: 10,
     wanted_searched_24h: 8,
@@ -94,6 +99,34 @@ console.log('renderCoverageCard() expands a 24h match-rate chart');
   assertContains(html, 'peak 3.00/hr', 'chart peak rendered');
   assertContains(html, 'match-rate-bar active', 'nonzero bars are highlighted');
   state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = false;
+}
+
+console.log('renderCoverageCard() expands a daily match-rate chart under the 24h row');
+{
+  state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = false;
+  state.pipelineDailyMatchGraphOpen = true;
+  const html = __test__.renderCoverageCard({
+    wanted_total: 10,
+    wanted_searched_24h: 8,
+    wanted_searched_6h: 5,
+    wanted_unsearched_24h: 2,
+    wanted_never_searched: 1,
+    matches_24h: 3,
+    matches_6h: 1,
+    matches_per_hour_24h: 0.125,
+    matches_per_hour_6h: 0.1666666667,
+    match_rate_series_28d: [
+      {bucket_start: '2026-05-04T00:00:00+00:00', matches: 2, matches_per_day: 2},
+      {bucket_start: '2026-05-05T00:00:00+00:00', matches: 8, matches_per_day: 8},
+    ],
+    top_10_share_24h: 0.25,
+  });
+  assertContains(html, 'Last 28 days', 'daily chart label rendered');
+  assertContains(html, 'peak 8/day', 'daily chart peak rendered');
+  assertContains(html, 'match-rate-bar active', 'daily nonzero bars are highlighted');
+  state.pipelineDailyMatchGraphOpen = false;
 }
 
 console.log('withCoverageMatchRates() falls back to search window found counts');

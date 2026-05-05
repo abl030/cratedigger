@@ -68,6 +68,7 @@
     "matches_per_hour_24h": 0,
     "matches_per_hour_6h": 0,
     "match_rate_series_24h": [],
+    "match_rate_series_28d": [],
     "top_10_share_24h": 0.91,
     "top_loop_suspects": [],
     "stale_wanted": []

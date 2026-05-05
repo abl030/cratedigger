@@ -2099,6 +2099,7 @@ class PipelineDB:
         return {
             **summary,
             "match_rate_series_24h": self._dashboard_match_rate_series(24),
+            "match_rate_series_28d": self._dashboard_daily_match_rate_series(28),
             "top_10_share_24h": top_10_share,
             "top_loop_suspects": top_suspects,
             "stale_wanted": self._dashboard_stale_wanted(),
@@ -2137,6 +2138,43 @@ class PipelineDB:
                 "bucket_start": _isoformat_or_none(row["bucket_start"]),
                 "matches": int(row["matches"] or 0),
                 "matches_per_hour": int(row["matches"] or 0),
+            }
+            for row in cur.fetchall()
+        ]
+
+    def _dashboard_daily_match_rate_series(self, days: int) -> list[dict[str, Any]]:
+        clamped_days = max(1, min(int(days), 90))
+        cur = self._execute("""
+            WITH buckets AS (
+                SELECT generate_series(
+                    date_trunc('day', NOW())
+                        - ((%s::int - 1) * INTERVAL '1 day'),
+                    date_trunc('day', NOW()),
+                    INTERVAL '1 day'
+                ) AS bucket_start
+            ),
+            found AS (
+                SELECT
+                    date_trunc('day', created_at) AS bucket_start,
+                    COUNT(*)::int AS matches
+                FROM search_log
+                WHERE outcome = 'found'
+                  AND created_at >= date_trunc('day', NOW())
+                    - ((%s::int - 1) * INTERVAL '1 day')
+                GROUP BY 1
+            )
+            SELECT
+                buckets.bucket_start,
+                COALESCE(found.matches, 0)::int AS matches
+            FROM buckets
+            LEFT JOIN found ON found.bucket_start = buckets.bucket_start
+            ORDER BY buckets.bucket_start
+        """, (clamped_days, clamped_days))
+        return [
+            {
+                "bucket_start": _isoformat_or_none(row["bucket_start"]),
+                "matches": int(row["matches"] or 0),
+                "matches_per_day": int(row["matches"] or 0),
             }
             for row in cur.fetchall()
         ]

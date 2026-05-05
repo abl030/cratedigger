@@ -121,6 +121,14 @@
       {"bucket_start": "2026-05-04T15:00:00+00:00", "matches": 6, "matches_per_hour": 6},
       {"bucket_start": "2026-05-04T16:00:00+00:00", "matches": 9, "matches_per_hour": 9}
     ],
+    "match_rate_series_28d": [
+      {"bucket_start": "2026-04-30T00:00:00+00:00", "matches": 42, "matches_per_day": 42},
+      {"bucket_start": "2026-05-01T00:00:00+00:00", "matches": 51, "matches_per_day": 51},
+      {"bucket_start": "2026-05-02T00:00:00+00:00", "matches": 39, "matches_per_day": 39},
+      {"bucket_start": "2026-05-03T00:00:00+00:00", "matches": 64, "matches_per_day": 64},
+      {"bucket_start": "2026-05-04T00:00:00+00:00", "matches": 128, "matches_per_day": 128},
+      {"bucket_start": "2026-05-05T00:00:00+00:00", "matches": 27, "matches_per_day": 27}
+    ],
     "top_10_share_24h": 0.43,
     "top_loop_suspects": [],
     "stale_wanted": []
