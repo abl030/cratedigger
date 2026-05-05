@@ -36,6 +36,7 @@ from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                 CLIFF_THRESHOLD_DB_PER_KHZ)
 from web import mb as mb_api
 from web import discogs as discogs_api
+from web import cache as cache_api
 
 
 def _server():
@@ -197,6 +198,14 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
             items.append(item)
         all_data[status] = items
     h._json(all_data)
+
+
+def get_pipeline_dashboard(h, params: dict[str, list[str]]) -> None:
+    """Return operational metrics for the Pipeline dashboard subtab."""
+    s = _server()
+    data = s._db().get_pipeline_dashboard_metrics()
+    data["redis"] = cache_api.redis_metrics()
+    h._json(data)
 
 
 def _runtime_rank_config():
@@ -1094,6 +1103,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/status": get_pipeline_status,
     "/api/pipeline/recent": get_pipeline_recent,
     "/api/pipeline/all": get_pipeline_all,
+    "/api/pipeline/dashboard": get_pipeline_dashboard,
     "/api/pipeline/constants": get_pipeline_constants,
     "/api/pipeline/simulate": get_pipeline_simulate,
     "/api/import-jobs": get_import_jobs,

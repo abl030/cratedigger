@@ -44,11 +44,26 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 6  # 6 hours
+DASHBOARD_WINDOWS: tuple[tuple[str, int], ...] = (("24h", 24), ("6h", 6))
 
 
 def _escape_like_pattern(value: str) -> str:
     """Escape SQL LIKE wildcards for ``... LIKE %s ESCAPE '\'``."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _isoformat_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 # Advisory-lock namespaces. Every lock in this codebase is
 # session-scoped, non-blocking (``pg_try_advisory_lock``), and
@@ -1706,6 +1721,409 @@ class PipelineDB:
                 result[rid] = []
             result[rid].append(r)
         return result
+
+    # -- Pipeline dashboard telemetry ----------------------------------------
+
+    def record_cycle_metrics(
+        self,
+        *,
+        cycle_total_s: float,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        browse_time_s: float = 0.0,
+        match_time_s: float = 0.0,
+        search_time_s: float = 0.0,
+        cache_pos_hits: int = 0,
+        cache_neg_hits: int = 0,
+        cache_misses: int = 0,
+        cache_errors: int = 0,
+        cache_fuse_tripped: int = 0,
+        cache_write_errors: int = 0,
+        peers_browsed: int = 0,
+        peers_browsed_lazy: int = 0,
+        fanout_waves: int = 0,
+        cycle_searches_watchdog_killed: int = 0,
+        find_download_queued: int = 0,
+        find_download_completed: int = 0,
+        find_download_drain_time_s: float = 0.0,
+    ) -> int:
+        """Persist one completed cratedigger cycle's runtime counters."""
+        completed = completed_at or datetime.now(timezone.utc)
+        cur = self._execute("""
+            INSERT INTO cycle_metrics (
+                started_at, created_at, cycle_total_s, browse_time_s,
+                match_time_s, search_time_s, cache_pos_hits, cache_neg_hits,
+                cache_misses, cache_errors, cache_fuse_tripped,
+                cache_write_errors, peers_browsed, peers_browsed_lazy,
+                fanout_waves, cycle_searches_watchdog_killed,
+                find_download_queued, find_download_completed,
+                find_download_drain_time_s
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
+            )
+            RETURNING id
+        """, (
+            started_at, completed, cycle_total_s, browse_time_s,
+            match_time_s, search_time_s, cache_pos_hits, cache_neg_hits,
+            cache_misses, cache_errors, cache_fuse_tripped,
+            cache_write_errors, peers_browsed, peers_browsed_lazy,
+            fanout_waves, cycle_searches_watchdog_killed,
+            find_download_queued, find_download_completed,
+            find_download_drain_time_s,
+        ))
+        row = cur.fetchone()
+        self.conn.commit()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
+
+    def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
+        """Return DB-derived metrics for the Pipeline dashboard.
+
+        Redis status is owned by the web cache layer; this method intentionally
+        covers only persisted Postgres state: searches, cycles, and active
+        request coverage.
+        """
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "searches": {
+                "windows": [self._dashboard_search_window(label, hours)
+                            for label, hours in DASHBOARD_WINDOWS],
+            },
+            "cycles": {
+                "windows": [self._dashboard_cycle_window(label, hours)
+                            for label, hours in DASHBOARD_WINDOWS],
+                "recent": self._dashboard_cycle_rows(
+                    order_by="created_at DESC",
+                    limit=12,
+                ),
+                "outliers": self._dashboard_cycle_rows(
+                    where="created_at >= NOW() - %s::interval",
+                    params=("24 hours",),
+                    order_by="cycle_total_s DESC",
+                    limit=8,
+                ),
+            },
+            "coverage": self._dashboard_coverage(),
+        }
+
+    def _dashboard_search_window(self, label: str, hours: int) -> dict[str, Any]:
+        cur = self._execute("""
+            SELECT
+                COUNT(*)::int AS searches,
+                COUNT(DISTINCT request_id)::int AS distinct_requests,
+                AVG(elapsed_s)::double precision AS avg_elapsed_s,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_s)
+                    FILTER (WHERE elapsed_s IS NOT NULL))::double precision AS median_elapsed_s,
+                (percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_s)
+                    FILTER (WHERE elapsed_s IS NOT NULL))::double precision AS p95_elapsed_s,
+                MAX(elapsed_s)::double precision AS max_elapsed_s,
+                COUNT(*) FILTER (WHERE outcome = 'found')::int AS found,
+                COUNT(*) FILTER (WHERE outcome = 'no_match')::int AS no_match,
+                COUNT(*) FILTER (WHERE outcome = 'no_results')::int AS no_results,
+                COUNT(*) FILTER (WHERE outcome = 'exhausted')::int AS exhausted,
+                COUNT(*) FILTER (WHERE outcome IN ('timeout', 'error', 'empty_query'))::int AS errors
+            FROM search_log
+            WHERE created_at >= NOW() - %s::interval
+        """, (f"{hours} hours",))
+        row = cur.fetchone() or {}
+        searches = int(row.get("searches") or 0)
+        return {
+            "label": label,
+            "hours": hours,
+            "searches": searches,
+            "distinct_requests": int(row.get("distinct_requests") or 0),
+            "searches_per_hour": searches / hours if hours else 0,
+            "avg_elapsed_s": _float_or_none(row.get("avg_elapsed_s")),
+            "median_elapsed_s": _float_or_none(row.get("median_elapsed_s")),
+            "p95_elapsed_s": _float_or_none(row.get("p95_elapsed_s")),
+            "max_elapsed_s": _float_or_none(row.get("max_elapsed_s")),
+            "outcomes": {
+                "found": int(row.get("found") or 0),
+                "no_match": int(row.get("no_match") or 0),
+                "no_results": int(row.get("no_results") or 0),
+                "exhausted": int(row.get("exhausted") or 0),
+                "errors": int(row.get("errors") or 0),
+            },
+        }
+
+    def _dashboard_cycle_window(self, label: str, hours: int) -> dict[str, Any]:
+        cur = self._execute("""
+            SELECT
+                COUNT(*)::int AS cycles,
+                AVG(cycle_total_s)::double precision AS avg_cycle_s,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_total_s)
+                    FILTER (WHERE cycle_total_s IS NOT NULL))::double precision AS median_cycle_s,
+                (percentile_cont(0.95) WITHIN GROUP (ORDER BY cycle_total_s)
+                    FILTER (WHERE cycle_total_s IS NOT NULL))::double precision AS p95_cycle_s,
+                MAX(cycle_total_s)::double precision AS max_cycle_s,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY search_time_s)
+                    FILTER (WHERE search_time_s IS NOT NULL))::double precision AS median_search_s,
+                SUM(cycle_searches_watchdog_killed)::int AS watchdog_kills,
+                SUM(find_download_queued)::int AS find_download_queued,
+                SUM(find_download_completed)::int AS find_download_completed,
+                SUM(cache_errors)::int AS cache_errors,
+                SUM(cache_write_errors)::int AS cache_write_errors,
+                SUM(cache_fuse_tripped)::int AS cache_fuse_tripped,
+                SUM(peers_browsed)::int AS peers_browsed,
+                SUM(peers_browsed_lazy)::int AS peers_browsed_lazy,
+                SUM(fanout_waves)::int AS fanout_waves
+            FROM cycle_metrics
+            WHERE created_at >= NOW() - %s::interval
+        """, (f"{hours} hours",))
+        row = cur.fetchone() or {}
+        return {
+            "label": label,
+            "hours": hours,
+            "cycles": int(row.get("cycles") or 0),
+            "avg_cycle_s": _float_or_none(row.get("avg_cycle_s")),
+            "median_cycle_s": _float_or_none(row.get("median_cycle_s")),
+            "p95_cycle_s": _float_or_none(row.get("p95_cycle_s")),
+            "max_cycle_s": _float_or_none(row.get("max_cycle_s")),
+            "median_search_s": _float_or_none(row.get("median_search_s")),
+            "watchdog_kills": int(row.get("watchdog_kills") or 0),
+            "find_download_queued": int(row.get("find_download_queued") or 0),
+            "find_download_completed": int(row.get("find_download_completed") or 0),
+            "cache_errors": int(row.get("cache_errors") or 0),
+            "cache_write_errors": int(row.get("cache_write_errors") or 0),
+            "cache_fuse_tripped": int(row.get("cache_fuse_tripped") or 0),
+            "peers_browsed": int(row.get("peers_browsed") or 0),
+            "peers_browsed_lazy": int(row.get("peers_browsed_lazy") or 0),
+            "fanout_waves": int(row.get("fanout_waves") or 0),
+        }
+
+    def _dashboard_cycle_rows(
+        self,
+        *,
+        order_by: str,
+        limit: int,
+        where: str | None = None,
+        params: tuple[object, ...] = (),
+    ) -> list[dict[str, Any]]:
+        filter_sql = f"WHERE {where}" if where else ""
+        cur = self._execute(f"""
+            SELECT
+                id, started_at, created_at, cycle_total_s, browse_time_s,
+                match_time_s, search_time_s, cycle_searches_watchdog_killed,
+                find_download_queued, find_download_completed,
+                find_download_drain_time_s, cache_errors, cache_write_errors,
+                cache_fuse_tripped, peers_browsed, peers_browsed_lazy,
+                fanout_waves
+            FROM cycle_metrics
+            {filter_sql}
+            ORDER BY {order_by}
+            LIMIT %s
+        """, (*params, limit))
+        return [self._serialize_dashboard_cycle_row(dict(row))
+                for row in cur.fetchall()]
+
+    def _serialize_dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "started_at": _isoformat_or_none(row.get("started_at")),
+            "created_at": _isoformat_or_none(row.get("created_at")),
+            "cycle_total_s": float(row["cycle_total_s"]),
+            "browse_time_s": float(row["browse_time_s"]),
+            "match_time_s": float(row["match_time_s"]),
+            "search_time_s": float(row["search_time_s"]),
+            "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
+            "find_download_queued": int(row["find_download_queued"]),
+            "find_download_completed": int(row["find_download_completed"]),
+            "find_download_drain_time_s": float(row["find_download_drain_time_s"]),
+            "cache_errors": int(row["cache_errors"]),
+            "cache_write_errors": int(row["cache_write_errors"]),
+            "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
+            "peers_browsed": int(row["peers_browsed"]),
+            "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
+            "fanout_waves": int(row["fanout_waves"]),
+        }
+
+    def _dashboard_coverage(self) -> dict[str, Any]:
+        summary = self._dashboard_coverage_summary()
+        top_suspects = self._dashboard_loop_suspects()
+        active_searches_24h = int(summary.get("active_wanted_searches_24h") or 0)
+        top_10_searches = sum(int(r["searches_24h"]) for r in top_suspects[:10])
+        top_10_share = (
+            top_10_searches / active_searches_24h if active_searches_24h else 0
+        )
+        return {
+            **summary,
+            "top_10_share_24h": top_10_share,
+            "top_loop_suspects": top_suspects,
+            "stale_wanted": self._dashboard_stale_wanted(),
+        }
+
+    def _dashboard_coverage_summary(self) -> dict[str, Any]:
+        cur = self._execute("""
+            WITH wanted AS (
+                SELECT id
+                FROM album_requests
+                WHERE status = 'wanted'
+            ),
+            per_request AS (
+                SELECT
+                    request_id,
+                    MAX(created_at) AS last_search_at,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                    )::int AS searches_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '6 hours'
+                    )::int AS searches_6h
+                FROM search_log
+                GROUP BY request_id
+            )
+            SELECT
+                COUNT(*)::int AS wanted_total,
+                COUNT(*) FILTER (
+                    WHERE pr.last_search_at >= NOW() - INTERVAL '24 hours'
+                )::int AS wanted_searched_24h,
+                COUNT(*) FILTER (
+                    WHERE pr.last_search_at >= NOW() - INTERVAL '6 hours'
+                )::int AS wanted_searched_6h,
+                COUNT(*) FILTER (WHERE pr.last_search_at IS NULL)::int
+                    AS wanted_never_searched,
+                COALESCE(SUM(pr.searches_24h), 0)::int
+                    AS active_wanted_searches_24h,
+                COALESCE(SUM(pr.searches_6h), 0)::int
+                    AS active_wanted_searches_6h,
+                MIN(pr.last_search_at) FILTER (WHERE pr.last_search_at IS NOT NULL)
+                    AS oldest_last_search_at
+            FROM wanted w
+            LEFT JOIN per_request pr ON pr.request_id = w.id
+        """)
+        row = cur.fetchone() or {}
+        wanted_total = int(row.get("wanted_total") or 0)
+        searched_24h = int(row.get("wanted_searched_24h") or 0)
+        searched_6h = int(row.get("wanted_searched_6h") or 0)
+        return {
+            "wanted_total": wanted_total,
+            "wanted_searched_24h": searched_24h,
+            "wanted_searched_6h": searched_6h,
+            "wanted_unsearched_24h": max(wanted_total - searched_24h, 0),
+            "wanted_unsearched_6h": max(wanted_total - searched_6h, 0),
+            "wanted_never_searched": int(row.get("wanted_never_searched") or 0),
+            "active_wanted_searches_24h": int(
+                row.get("active_wanted_searches_24h") or 0
+            ),
+            "active_wanted_searches_6h": int(
+                row.get("active_wanted_searches_6h") or 0
+            ),
+            "oldest_last_search_at": _isoformat_or_none(
+                row.get("oldest_last_search_at")
+            ),
+        }
+
+    def _dashboard_loop_suspects(self) -> list[dict[str, Any]]:
+        cur = self._execute("""
+            WITH wanted AS (
+                SELECT id, artist_name, album_title, status
+                FROM album_requests
+                WHERE status = 'wanted'
+            ),
+            per_request AS (
+                SELECT
+                    request_id,
+                    MAX(created_at) AS last_search_at,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                    )::int AS searches_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '6 hours'
+                    )::int AS searches_6h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                          AND outcome = 'found'
+                    )::int AS found_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                          AND outcome = 'no_match'
+                    )::int AS no_match_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                          AND outcome = 'no_results'
+                    )::int AS no_results_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                          AND outcome IN ('timeout', 'error', 'empty_query', 'exhausted')
+                    )::int AS problem_24h
+                FROM search_log
+                GROUP BY request_id
+            )
+            SELECT
+                w.id AS request_id, w.artist_name, w.album_title, w.status,
+                pr.last_search_at,
+                COALESCE(pr.searches_24h, 0)::int AS searches_24h,
+                COALESCE(pr.searches_6h, 0)::int AS searches_6h,
+                COALESCE(pr.found_24h, 0)::int AS found_24h,
+                COALESCE(pr.no_match_24h, 0)::int AS no_match_24h,
+                COALESCE(pr.no_results_24h, 0)::int AS no_results_24h,
+                COALESCE(pr.problem_24h, 0)::int AS problem_24h
+            FROM wanted w
+            JOIN per_request pr ON pr.request_id = w.id
+            WHERE COALESCE(pr.searches_24h, 0) > 0
+            ORDER BY pr.searches_24h DESC, pr.searches_6h DESC, w.id ASC
+            LIMIT 12
+        """)
+        return [self._serialize_dashboard_request_row(dict(row))
+                for row in cur.fetchall()]
+
+    def _dashboard_stale_wanted(self) -> list[dict[str, Any]]:
+        cur = self._execute("""
+            WITH wanted AS (
+                SELECT id, artist_name, album_title, status, created_at
+                FROM album_requests
+                WHERE status = 'wanted'
+            ),
+            per_request AS (
+                SELECT
+                    request_id,
+                    MAX(created_at) AS last_search_at,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                    )::int AS searches_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '6 hours'
+                    )::int AS searches_6h
+                FROM search_log
+                GROUP BY request_id
+            )
+            SELECT
+                w.id AS request_id, w.artist_name, w.album_title, w.status,
+                pr.last_search_at,
+                CASE
+                    WHEN pr.last_search_at IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM (NOW() - pr.last_search_at)) / 3600.0
+                END AS hours_since_search,
+                COALESCE(pr.searches_24h, 0)::int AS searches_24h,
+                COALESCE(pr.searches_6h, 0)::int AS searches_6h
+            FROM wanted w
+            LEFT JOIN per_request pr ON pr.request_id = w.id
+            ORDER BY pr.last_search_at ASC NULLS FIRST, w.created_at ASC, w.id ASC
+            LIMIT 12
+        """)
+        rows = []
+        for row in cur.fetchall():
+            item = self._serialize_dashboard_request_row(dict(row))
+            item["hours_since_search"] = _float_or_none(row["hours_since_search"])
+            rows.append(item)
+        return rows
+
+    def _serialize_dashboard_request_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "request_id": int(row["request_id"]),
+            "artist_name": row["artist_name"],
+            "album_title": row["album_title"],
+            "status": row["status"],
+            "last_search_at": _isoformat_or_none(row.get("last_search_at")),
+            "searches_24h": int(row.get("searches_24h") or 0),
+            "searches_6h": int(row.get("searches_6h") or 0),
+            "found_24h": int(row.get("found_24h") or 0),
+            "no_match_24h": int(row.get("no_match_24h") or 0),
+            "no_results_24h": int(row.get("no_results_24h") or 0),
+            "problem_24h": int(row.get("problem_24h") or 0),
+        }
 
     # -- Track counts --------------------------------------------------------
 

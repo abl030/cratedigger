@@ -9,14 +9,53 @@ import { renderBadRipButton } from './release_actions.js';
  * @returns {Promise<void>}
  */
 export async function loadPipeline() {
+  if (state.pipelineView === 'dashboard') {
+    await loadPipelineDashboard();
+    return;
+  }
   const el = document.getElementById('pipeline-content');
-  el.innerHTML = '<div class="loading">Loading...</div>';
+  el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
   try {
     const r = await fetch(`${API}/api/pipeline/all`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state.pipelineData = await r.json();
     renderPipeline();
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load pipeline</div>'; }
+  } catch (e) { el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load pipeline</div>`; }
+}
+
+/**
+ * Switch between the queue and dashboard Pipeline subtabs.
+ * @param {string} view
+ * @returns {void}
+ */
+export function setPipelineView(view) {
+  state.pipelineView = view === 'dashboard' ? 'dashboard' : 'queue';
+  if (state.pipelineView === 'dashboard') {
+    loadPipelineDashboard();
+    return;
+  }
+  if (state.pipelineData) {
+    renderPipeline();
+  } else {
+    loadPipeline();
+  }
+}
+
+/**
+ * Load dashboard metrics from the API and render them.
+ * @returns {Promise<void>}
+ */
+export async function loadPipelineDashboard() {
+  const el = document.getElementById('pipeline-content');
+  el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
+  try {
+    const r = await fetch(`${API}/api/pipeline/dashboard`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    state.pipelineDashboardData = await r.json();
+    renderPipelineDashboard();
+  } catch (e) {
+    el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load dashboard</div>`;
+  }
 }
 
 /**
@@ -33,6 +72,10 @@ export function setFilter(f) {
  */
 export function renderPipeline() {
   const el = document.getElementById('pipeline-content');
+  if (state.pipelineView === 'dashboard') {
+    renderPipelineDashboard();
+    return;
+  }
   const data = state.pipelineData;
   if (!data) return;
   const counts = data.counts || {};
@@ -66,6 +109,7 @@ export function renderPipeline() {
   // of wanted. The status badge on each row keeps them visually distinct.
   const wantedTotal = (counts.wanted || 0) + (counts.downloading || 0);
   el.innerHTML = `
+    ${renderPipelineNav()}
     <div class="status-card">
       <div class="status-counts">
         <div class="count ${state.pipelineFilter === 'wanted' ? 'active' : ''}" onclick="window.setFilter('wanted')">
@@ -92,6 +136,271 @@ export function renderPipeline() {
     `).join('')}
     ${artists.length === 0 ? '<div class="loading">No items</div>' : ''}
   `;
+}
+
+function renderPipelineNav() {
+  return `
+    <div class="pipeline-subtabs">
+      <button class="p-btn ${state.pipelineView === 'queue' ? 'active-status' : ''}" onclick="window.setPipelineView('queue')">Queue</button>
+      <button class="p-btn ${state.pipelineView === 'dashboard' ? 'active-status' : ''}" onclick="window.setPipelineView('dashboard')">Dashboard</button>
+      ${state.pipelineView === 'dashboard' ? '<button class="p-btn dashboard-refresh" onclick="window.loadPipelineDashboard()">Refresh</button>' : ''}
+    </div>
+  `;
+}
+
+function renderPipelineDashboard() {
+  const el = document.getElementById('pipeline-content');
+  const data = state.pipelineDashboardData;
+  if (!data) {
+    el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
+    return;
+  }
+  const searches = /** @type {any[]} */ (data.searches?.windows || []);
+  const cycles = /** @type {any[]} */ (data.cycles?.windows || []);
+  const coverage = /** @type {any} */ (data.coverage || {});
+  const redis = /** @type {any} */ (data.redis || {});
+  const generated = data.generated_at ? awstDateTime(data.generated_at) : '';
+  el.innerHTML = `
+    ${renderPipelineNav()}
+    <div class="dashboard-header">
+      <div class="dashboard-title">Pipeline Dashboard</div>
+      <div class="dashboard-updated">${generated}</div>
+    </div>
+    <div class="dashboard-grid">
+      ${renderRedisCard(redis)}
+      ${renderCoverageCard(coverage)}
+      ${renderSearchCard(searches)}
+      ${renderCycleCard(cycles)}
+      ${renderCycleOutliers(data.cycles?.outliers || [])}
+      ${renderLoopSuspects(coverage.top_loop_suspects || [])}
+      ${renderStaleWanted(coverage.stale_wanted || [])}
+    </div>
+  `;
+}
+
+function renderRedisCard(redis) {
+  const statusClass = redis.status === 'ok' ? 'metric-good'
+    : redis.status === 'disabled' ? 'metric-muted' : 'metric-bad';
+  const max = redis.maxmemory_bytes ? formatBytes(redis.maxmemory_bytes) : 'unlimited';
+  const used = redis.used_memory_bytes ? formatBytes(redis.used_memory_bytes) : 'n/a';
+  const dataset = redis.used_memory_dataset_bytes ? formatBytes(redis.used_memory_dataset_bytes) : 'n/a';
+  return `
+    <div class="dashboard-card">
+      <div class="dashboard-card-title">Redis</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Status</span><strong class="${statusClass}">${esc(redis.status || 'unknown')}</strong></div>
+        <div class="metric-row"><span>Memory</span><strong>${used} / ${max}</strong></div>
+        <div class="metric-row"><span>Utilization</span><strong>${formatPercent(redis.memory_utilization)}</strong></div>
+        <div class="metric-row"><span>Dataset</span><strong>${dataset}</strong></div>
+        <div class="metric-row"><span>Keys</span><strong>${formatCount(redis.key_count)}</strong></div>
+        <div class="metric-row"><span>Expires</span><strong>${formatCount(redis.expires_count)}</strong></div>
+        <div class="metric-row"><span>Avg TTL</span><strong>${formatHoursFromMs(redis.avg_ttl_ms)}</strong></div>
+        <div class="metric-row"><span>Frag</span><strong>${formatDecimal(redis.fragmentation_ratio)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCoverageCard(coverage) {
+  const wanted = coverage.wanted_total || 0;
+  const searched24 = coverage.wanted_searched_24h || 0;
+  const searched6 = coverage.wanted_searched_6h || 0;
+  const stale24 = coverage.wanted_unsearched_24h || 0;
+  const never = coverage.wanted_never_searched || 0;
+  const searchedPct = wanted ? searched24 / wanted : 1;
+  const coverageClass = stale24 === 0 ? 'metric-good' : never > 0 ? 'metric-bad' : 'metric-warn';
+  return `
+    <div class="dashboard-card">
+      <div class="dashboard-card-title">Wanted Coverage</div>
+      <div class="coverage-bar"><span style="width:${Math.max(0, Math.min(100, searchedPct * 100)).toFixed(1)}%;"></span></div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Wanted</span><strong>${formatCount(wanted)}</strong></div>
+        <div class="metric-row"><span>Searched 24h</span><strong class="${coverageClass}">${formatCount(searched24)}</strong></div>
+        <div class="metric-row"><span>Searched 6h</span><strong>${formatCount(searched6)}</strong></div>
+        <div class="metric-row"><span>Stale 24h</span><strong class="${stale24 ? 'metric-warn' : 'metric-good'}">${formatCount(stale24)}</strong></div>
+        <div class="metric-row"><span>Never</span><strong class="${never ? 'metric-bad' : 'metric-good'}">${formatCount(never)}</strong></div>
+        <div class="metric-row"><span>Top 10 share</span><strong>${formatPercent(coverage.top_10_share_24h)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderSearchCard(windows) {
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Search Throughput</div>
+      <table class="dashboard-table">
+        <thead><tr><th>Window</th><th>Searches</th><th>Requests</th><th>/hr</th><th>Median</th><th>P95</th><th>Found</th><th>No match</th><th>Empty</th><th>Errors</th></tr></thead>
+        <tbody>
+          ${windows.map(w => `
+            <tr>
+              <td>${esc(w.label)}</td>
+              <td>${formatCount(w.searches)}</td>
+              <td>${formatCount(w.distinct_requests)}</td>
+              <td>${formatDecimal(w.searches_per_hour)}</td>
+              <td>${formatDuration(w.median_elapsed_s)}</td>
+              <td>${formatDuration(w.p95_elapsed_s)}</td>
+              <td>${formatCount(w.outcomes?.found)}</td>
+              <td>${formatCount(w.outcomes?.no_match)}</td>
+              <td>${formatCount(w.outcomes?.no_results)}</td>
+              <td class="${w.outcomes?.errors ? 'metric-warn' : ''}">${formatCount(w.outcomes?.errors)}</td>
+            </tr>
+          `).join('')}
+          ${windows.length === 0 ? '<tr><td colspan="10">No search metrics</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderCycleCard(windows) {
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Cycle Times</div>
+      <table class="dashboard-table">
+        <thead><tr><th>Window</th><th>Cycles</th><th>Median</th><th>P95</th><th>Max</th><th>Search median</th><th>Watchdog</th><th>Queued</th><th>Done</th><th>Cache errs</th></tr></thead>
+        <tbody>
+          ${windows.map(w => `
+            <tr>
+              <td>${esc(w.label)}</td>
+              <td>${formatCount(w.cycles)}</td>
+              <td>${formatDuration(w.median_cycle_s)}</td>
+              <td>${formatDuration(w.p95_cycle_s)}</td>
+              <td>${formatDuration(w.max_cycle_s)}</td>
+              <td>${formatDuration(w.median_search_s)}</td>
+              <td class="${w.watchdog_kills ? 'metric-warn' : ''}">${formatCount(w.watchdog_kills)}</td>
+              <td>${formatCount(w.find_download_queued)}</td>
+              <td>${formatCount(w.find_download_completed)}</td>
+              <td class="${w.cache_errors || w.cache_write_errors || w.cache_fuse_tripped ? 'metric-bad' : ''}">${formatCount((w.cache_errors || 0) + (w.cache_write_errors || 0) + (w.cache_fuse_tripped || 0))}</td>
+            </tr>
+          `).join('')}
+          ${windows.length === 0 ? '<tr><td colspan="10">No cycle metrics</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderCycleOutliers(rows) {
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Cycle Outliers</div>
+      <table class="dashboard-table">
+        <thead><tr><th>Completed</th><th>Total</th><th>Search</th><th>Browse</th><th>Match</th><th>Watchdog</th><th>Peers</th><th>Waves</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>${awstDateTime(r.created_at || '')}</td>
+              <td>${formatDuration(r.cycle_total_s)}</td>
+              <td>${formatDuration(r.search_time_s)}</td>
+              <td>${formatDuration(r.browse_time_s)}</td>
+              <td>${formatDuration(r.match_time_s)}</td>
+              <td class="${r.watchdog_kills ? 'metric-warn' : ''}">${formatCount(r.watchdog_kills)}</td>
+              <td>${formatCount((r.peers_browsed || 0) + (r.peers_browsed_lazy || 0))}</td>
+              <td>${formatCount(r.fanout_waves)}</td>
+            </tr>
+          `).join('')}
+          ${rows.length === 0 ? '<tr><td colspan="8">No cycle rows yet</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderLoopSuspects(rows) {
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Loop Suspects</div>
+      <table class="dashboard-table">
+        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>24h</th><th>6h</th><th>Found</th><th>No match</th><th>No results</th><th>Problems</th><th>Last</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>#${r.request_id}</td>
+              <td>${esc(r.artist_name || '')}</td>
+              <td>${esc(r.album_title || '')}</td>
+              <td class="${r.searches_24h > 3 ? 'metric-warn' : ''}">${formatCount(r.searches_24h)}</td>
+              <td>${formatCount(r.searches_6h)}</td>
+              <td>${formatCount(r.found_24h)}</td>
+              <td>${formatCount(r.no_match_24h)}</td>
+              <td>${formatCount(r.no_results_24h)}</td>
+              <td class="${r.problem_24h ? 'metric-warn' : ''}">${formatCount(r.problem_24h)}</td>
+              <td>${r.last_search_at ? awstDateTime(r.last_search_at) : 'never'}</td>
+            </tr>
+          `).join('')}
+          ${rows.length === 0 ? '<tr><td colspan="10">No repeated wanted searches in 24h</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderStaleWanted(rows) {
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Stale Wanted</div>
+      <table class="dashboard-table">
+        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>Last search</th><th>Age</th><th>24h</th><th>6h</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>#${r.request_id}</td>
+              <td>${esc(r.artist_name || '')}</td>
+              <td>${esc(r.album_title || '')}</td>
+              <td>${r.last_search_at ? awstDateTime(r.last_search_at) : 'never'}</td>
+              <td>${r.hours_since_search == null ? 'n/a' : `${formatDecimal(r.hours_since_search)}h`}</td>
+              <td>${formatCount(r.searches_24h)}</td>
+              <td>${formatCount(r.searches_6h)}</td>
+            </tr>
+          `).join('')}
+          ${rows.length === 0 ? '<tr><td colspan="7">No wanted rows</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function formatCount(value) {
+  if (value == null || Number.isNaN(Number(value))) return '0';
+  return Number(value).toLocaleString();
+}
+
+function formatDecimal(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  const n = Number(value);
+  return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+}
+
+function formatDuration(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  const seconds = Number(value);
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes}m ${String(rest).padStart(2, '0')}s`;
+}
+
+function formatBytes(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  const bytes = Number(value);
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let n = bytes;
+  let unit = units[0];
+  for (let i = 1; i < units.length && n >= 1024; i += 1) {
+    n /= 1024;
+    unit = units[i];
+  }
+  return `${n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit}`;
+}
+
+function formatHoursFromMs(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  return `${(Number(value) / 3600000).toFixed(1)}h`;
+}
+
+function formatPercent(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
 /**

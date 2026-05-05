@@ -37,7 +37,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -60,6 +60,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("source_denylist", table_names)
         self.assertIn("user_cooldowns", table_names)
         self.assertIn("import_jobs", table_names)
+        self.assertIn("cycle_metrics", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
@@ -1147,6 +1148,101 @@ class TestSearchLog(unittest.TestCase):
         }]
         with self.assertRaises(msgspec.ValidationError):
             msgspec.convert(wrong, type=list[CandidateScore])
+
+
+@requires_postgres
+class TestPipelineDashboardMetrics(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+        self.req1 = self.db.add_request(
+            mb_release_id="dash-1",
+            artist_name="Dashboard Artist",
+            album_title="Loop Candidate",
+            source="request",
+        )
+        self.req2 = self.db.add_request(
+            mb_release_id="dash-2",
+            artist_name="Dashboard Artist",
+            album_title="Healthy Candidate",
+            source="request",
+        )
+        self.req3 = self.db.add_request(
+            mb_release_id="dash-3",
+            artist_name="Dashboard Artist",
+            album_title="Never Searched",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_record_cycle_metrics_and_dashboard_summary(self):
+        now = datetime.now(timezone.utc)
+        self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=1, seconds=100),
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=100.0,
+            search_time_s=80.0,
+            cycle_searches_watchdog_killed=0,
+            find_download_queued=5,
+            find_download_completed=5,
+        )
+        self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=2, seconds=300),
+            completed_at=now - timedelta(hours=2),
+            cycle_total_s=300.0,
+            search_time_s=240.0,
+            cycle_searches_watchdog_killed=1,
+            find_download_queued=3,
+            find_download_completed=2,
+        )
+        self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=10, seconds=900),
+            completed_at=now - timedelta(hours=10),
+            cycle_total_s=900.0,
+            search_time_s=700.0,
+            cache_errors=2,
+        )
+
+        self.db.log_search(
+            self.req1, query="loop a", elapsed_s=2.0, outcome="no_results"
+        )
+        self.db.log_search(
+            self.req1, query="loop b", elapsed_s=4.0, outcome="no_match"
+        )
+        self.db.log_search(
+            self.req2, query="healthy", elapsed_s=6.0, outcome="found"
+        )
+
+        metrics = self.db.get_pipeline_dashboard_metrics()
+
+        searches_24h = metrics["searches"]["windows"][0]
+        self.assertEqual(searches_24h["label"], "24h")
+        self.assertEqual(searches_24h["searches"], 3)
+        self.assertEqual(searches_24h["distinct_requests"], 2)
+        self.assertEqual(searches_24h["outcomes"]["found"], 1)
+        self.assertEqual(searches_24h["outcomes"]["no_match"], 1)
+        self.assertEqual(searches_24h["outcomes"]["no_results"], 1)
+
+        cycles_6h = metrics["cycles"]["windows"][1]
+        self.assertEqual(cycles_6h["label"], "6h")
+        self.assertEqual(cycles_6h["cycles"], 2)
+        self.assertAlmostEqual(cycles_6h["median_cycle_s"], 200.0)
+        self.assertEqual(cycles_6h["max_cycle_s"], 300.0)
+        self.assertEqual(cycles_6h["watchdog_kills"], 1)
+        self.assertEqual(cycles_6h["find_download_queued"], 8)
+        self.assertEqual(cycles_6h["find_download_completed"], 7)
+
+        coverage = metrics["coverage"]
+        self.assertEqual(coverage["wanted_total"], 3)
+        self.assertEqual(coverage["wanted_searched_24h"], 2)
+        self.assertEqual(coverage["wanted_unsearched_24h"], 1)
+        self.assertEqual(coverage["wanted_never_searched"], 1)
+        self.assertEqual(coverage["active_wanted_searches_24h"], 3)
+        self.assertEqual(coverage["top_loop_suspects"][0]["request_id"], self.req1)
+        self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 2)
+        self.assertEqual(coverage["stale_wanted"][0]["request_id"], self.req3)
+        self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
 
 @requires_postgres

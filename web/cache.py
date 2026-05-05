@@ -54,6 +54,24 @@ _GROUP_PATTERNS: dict[str, list[str]] = {
 _redis: object | None = None
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def init(host: str, port: int = 6379) -> None:
     """Connect to Redis. Call once at startup."""
     global _redis
@@ -66,6 +84,51 @@ def init(host: str, port: int = 6379) -> None:
     except Exception as e:
         log.warning("Redis unavailable (%s), running without cache", e)
         _redis = None
+
+
+def redis_metrics() -> dict[str, Any]:
+    """Return live Redis memory/key metrics for the pipeline dashboard.
+
+    Missing Redis or a command failure reports status in-band. The dashboard is
+    diagnostic; Redis problems must not break unrelated web UI routes.
+    """
+    if _redis is None:
+        return {"enabled": False, "status": "disabled", "error": None}
+    try:
+        memory = _redis.info("memory")  # type: ignore[union-attr]
+        keyspace = _redis.info("keyspace")  # type: ignore[union-attr]
+        clients = _redis.info("clients")  # type: ignore[union-attr]
+        dbsize = _redis.dbsize()  # type: ignore[union-attr]
+        db0 = keyspace.get("db0", {}) if isinstance(keyspace, dict) else {}
+        if not isinstance(db0, dict):
+            db0 = {}
+        used_memory = _int_or_none(memory.get("used_memory"))
+        maxmemory = _int_or_none(memory.get("maxmemory"))
+        return {
+            "enabled": True,
+            "status": "ok",
+            "error": None,
+            "used_memory_bytes": used_memory,
+            "used_memory_human": memory.get("used_memory_human"),
+            "used_memory_peak_bytes": _int_or_none(memory.get("used_memory_peak")),
+            "used_memory_dataset_bytes": _int_or_none(
+                memory.get("used_memory_dataset")
+            ),
+            "maxmemory_bytes": maxmemory,
+            "memory_utilization": (
+                used_memory / maxmemory if used_memory is not None and maxmemory else None
+            ),
+            "maxmemory_policy": memory.get("maxmemory_policy"),
+            "fragmentation_ratio": _float_or_none(
+                memory.get("mem_fragmentation_ratio")
+            ),
+            "key_count": _int_or_none(dbsize),
+            "expires_count": _int_or_none(db0.get("expires")),
+            "avg_ttl_ms": _int_or_none(db0.get("avg_ttl")),
+            "connected_clients": _int_or_none(clients.get("connected_clients")),
+        }
+    except Exception as e:
+        return {"enabled": True, "status": "error", "error": str(e)}
 
 
 # ── Routing-level cache (legacy `web:` namespace) ─────────────────────

@@ -138,6 +138,35 @@
   .p-group-header:hover { color: #8cb; }
   .p-group-body { }
   .p-group-body.collapsed { display: none; }
+  .pipeline-subtabs { display: flex; gap: 6px; margin-bottom: 12px; align-items: center; }
+  .pipeline-subtabs .dashboard-refresh { margin-left: auto; }
+  .dashboard-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; gap: 12px; }
+  .dashboard-title { font-size: 1.05em; font-weight: 600; color: #bbb; }
+  .dashboard-updated { color: #666; font-size: 0.78em; text-align: right; }
+  .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .dashboard-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; min-width: 0; }
+  .dashboard-wide { grid-column: 1 / -1; }
+  .dashboard-card-title { color: #6a9; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .metric-list { display: flex; flex-direction: column; gap: 4px; }
+  .metric-row { display: flex; justify-content: space-between; gap: 12px; color: #888; font-size: 0.82em; }
+  .metric-row strong { color: #ddd; font-weight: 600; text-align: right; }
+  .metric-good { color: #6d6 !important; }
+  .metric-warn { color: #da6 !important; }
+  .metric-bad { color: #d66 !important; }
+  .metric-muted { color: #777 !important; }
+  .coverage-bar { height: 7px; background: #262626; border-radius: 4px; margin-bottom: 8px; overflow: hidden; }
+  .coverage-bar span { display: block; height: 100%; background: #6a9; }
+  .dashboard-table { width: 100%; border-collapse: collapse; font-size: 0.78em; }
+  .dashboard-table th { color: #666; font-weight: 600; text-align: left; padding: 3px 8px 4px 0; white-space: nowrap; border-bottom: 1px solid #292929; }
+  .dashboard-table td { color: #aaa; padding: 4px 8px 4px 0; border-bottom: 1px solid #222; vertical-align: top; }
+  .dashboard-table tr:last-child td { border-bottom: none; }
+  .dashboard-table td:nth-child(2), .dashboard-table td:nth-child(n+4) { white-space: nowrap; }
+  @media (max-width: 640px) {
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .dashboard-header { display: block; }
+    .dashboard-updated { text-align: left; margin-top: 2px; }
+    .dashboard-card { overflow-x: auto; }
+  }
   .r-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #1a4a2a; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
   .r-item:hover { background: #252525; }
   .r-item.beets-missing { border-left-color: #a33; }

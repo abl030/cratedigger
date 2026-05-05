@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
 
 import slskd_api
@@ -1172,6 +1173,7 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to load user cooldowns: {e}")
 
+        cycle_started_at = datetime.now(timezone.utc)
         cycle_start = time.time()
         # Per-cycle watchdog counter (issue #212). Reset at cycle start;
         # incremented by `_log_search_result` for every SearchResult whose
@@ -1240,6 +1242,33 @@ def main():
         elapsed = time.time() - cycle_start
         from lib.cycle_summary import format_cycle_summary
         logger.info(format_cycle_summary(_module_ctx, elapsed))
+        try:
+            db = pipeline_db_source._get_db()
+            db.record_cycle_metrics(
+                started_at=cycle_started_at,
+                completed_at=datetime.now(timezone.utc),
+                cycle_total_s=elapsed,
+                browse_time_s=_module_ctx.browse_time_s,
+                match_time_s=_module_ctx.match_time_s,
+                search_time_s=_module_ctx.search_time_s,
+                cache_pos_hits=_module_ctx.cache_pos_hits,
+                cache_neg_hits=_module_ctx.cache_neg_hits,
+                cache_misses=_module_ctx.cache_misses,
+                cache_errors=_module_ctx.cache_errors,
+                cache_fuse_tripped=_module_ctx.cache_fuse_tripped,
+                cache_write_errors=_module_ctx.cache_write_errors,
+                peers_browsed=_module_ctx.peers_browsed,
+                peers_browsed_lazy=_module_ctx.peers_browsed_lazy,
+                fanout_waves=_module_ctx.fanout_waves,
+                cycle_searches_watchdog_killed=(
+                    _module_ctx.cycle_searches_watchdog_killed
+                ),
+                find_download_queued=_module_ctx.find_download_queued,
+                find_download_completed=_module_ctx.find_download_completed,
+                find_download_drain_time_s=_module_ctx.find_download_drain_time_s,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist cycle metrics: {e}")
 
     finally:
         # Bust web UI cache so freshly imported albums appear immediately

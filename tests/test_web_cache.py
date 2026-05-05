@@ -57,6 +57,38 @@ class FakeRedis:
                 n += 1
         return n
 
+    def dbsize(self) -> int:
+        return len(self._store)
+
+    def info(self, section: str | None = None) -> dict[str, Any]:
+        if section == "memory":
+            return {
+                "used_memory": 1024,
+                "used_memory_human": "1.00K",
+                "used_memory_peak": 2048,
+                "used_memory_dataset": 900,
+                "maxmemory": 4096,
+                "maxmemory_policy": "allkeys-lru",
+                "mem_fragmentation_ratio": 1.1,
+            }
+        if section == "clients":
+            return {"connected_clients": 3}
+        if section == "keyspace":
+            now = time.time()
+            ttls = [
+                int((expires - now) * 1000)
+                for _value, expires in self._store.values()
+                if expires is not None and expires > now
+            ]
+            return {
+                "db0": {
+                    "keys": len(self._store),
+                    "expires": len(ttls),
+                    "avg_ttl": int(sum(ttls) / len(ttls)) if ttls else 0,
+                }
+            }
+        return {}
+
     def scan(self, cursor: int = 0, match: str | None = None,
              count: int = 100) -> tuple[int, list[str]]:
         import fnmatch
@@ -239,6 +271,31 @@ class TestMemoizeMetaFresh(_CacheTestBase):
         self.assertEqual(third, {"title": "Corrected Title"})
         self.assertEqual(calls, [1, 2],
                          "cache must have been repopulated by fresh=True")
+
+
+class TestRedisMetrics(_CacheTestBase):
+    def test_redis_metrics_returns_memory_and_key_counts(self) -> None:
+        self.cache.cache_set("web:/api/search?q=x", {"ok": True}, ttl=60)
+
+        metrics = self.cache.redis_metrics()
+
+        self.assertEqual(metrics["status"], "ok")
+        self.assertEqual(metrics["used_memory_bytes"], 1024)
+        self.assertEqual(metrics["maxmemory_bytes"], 4096)
+        self.assertEqual(metrics["memory_utilization"], 0.25)
+        self.assertEqual(metrics["key_count"], 1)
+        self.assertEqual(metrics["expires_count"], 1)
+
+    def test_redis_metrics_disabled_without_client(self) -> None:
+        self.cache._redis = None
+
+        metrics = self.cache.redis_metrics()
+
+        self.assertEqual(metrics, {
+            "enabled": False,
+            "status": "disabled",
+            "error": None,
+        })
 
 
 class TestMetaIsolatedFromGroupInvalidation(_CacheTestBase):

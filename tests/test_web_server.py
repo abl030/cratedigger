@@ -184,6 +184,176 @@ def _make_server():
     ]
 
     mock_db.get_search_history.return_value = []
+    mock_db.get_pipeline_dashboard_metrics.return_value = {
+        "generated_at": "2026-05-05T00:00:00+00:00",
+        "searches": {
+            "windows": [
+                {
+                    "label": "24h",
+                    "hours": 24,
+                    "searches": 12,
+                    "distinct_requests": 8,
+                    "searches_per_hour": 0.5,
+                    "avg_elapsed_s": 4.2,
+                    "median_elapsed_s": 3.1,
+                    "p95_elapsed_s": 9.9,
+                    "max_elapsed_s": 11.0,
+                    "outcomes": {
+                        "found": 2,
+                        "no_match": 4,
+                        "no_results": 5,
+                        "exhausted": 0,
+                        "errors": 1,
+                    },
+                },
+                {
+                    "label": "6h",
+                    "hours": 6,
+                    "searches": 5,
+                    "distinct_requests": 5,
+                    "searches_per_hour": 0.8333333333,
+                    "avg_elapsed_s": 3.0,
+                    "median_elapsed_s": 2.8,
+                    "p95_elapsed_s": 5.0,
+                    "max_elapsed_s": 5.5,
+                    "outcomes": {
+                        "found": 1,
+                        "no_match": 1,
+                        "no_results": 3,
+                        "exhausted": 0,
+                        "errors": 0,
+                    },
+                },
+            ],
+        },
+        "cycles": {
+            "windows": [
+                {
+                    "label": "24h",
+                    "hours": 24,
+                    "cycles": 10,
+                    "avg_cycle_s": 320.0,
+                    "median_cycle_s": 300.0,
+                    "p95_cycle_s": 700.0,
+                    "max_cycle_s": 900.0,
+                    "median_search_s": 250.0,
+                    "watchdog_kills": 1,
+                    "find_download_queued": 30,
+                    "find_download_completed": 28,
+                    "cache_errors": 0,
+                    "cache_write_errors": 0,
+                    "cache_fuse_tripped": 0,
+                    "peers_browsed": 100,
+                    "peers_browsed_lazy": 2,
+                    "fanout_waves": 20,
+                },
+                {
+                    "label": "6h",
+                    "hours": 6,
+                    "cycles": 3,
+                    "avg_cycle_s": 290.0,
+                    "median_cycle_s": 280.0,
+                    "p95_cycle_s": 360.0,
+                    "max_cycle_s": 380.0,
+                    "median_search_s": 220.0,
+                    "watchdog_kills": 0,
+                    "find_download_queued": 8,
+                    "find_download_completed": 8,
+                    "cache_errors": 0,
+                    "cache_write_errors": 0,
+                    "cache_fuse_tripped": 0,
+                    "peers_browsed": 25,
+                    "peers_browsed_lazy": 0,
+                    "fanout_waves": 6,
+                },
+            ],
+            "recent": [
+                {
+                    "id": 1,
+                    "started_at": "2026-05-05T00:00:00+00:00",
+                    "created_at": "2026-05-05T00:05:00+00:00",
+                    "cycle_total_s": 300.0,
+                    "browse_time_s": 20.0,
+                    "match_time_s": 10.0,
+                    "search_time_s": 240.0,
+                    "watchdog_kills": 0,
+                    "find_download_queued": 4,
+                    "find_download_completed": 4,
+                    "find_download_drain_time_s": 1.0,
+                    "cache_errors": 0,
+                    "cache_write_errors": 0,
+                    "cache_fuse_tripped": 0,
+                    "peers_browsed": 8,
+                    "peers_browsed_lazy": 0,
+                    "fanout_waves": 2,
+                },
+            ],
+            "outliers": [
+                {
+                    "id": 2,
+                    "started_at": "2026-05-04T00:00:00+00:00",
+                    "created_at": "2026-05-04T00:15:00+00:00",
+                    "cycle_total_s": 900.0,
+                    "browse_time_s": 80.0,
+                    "match_time_s": 30.0,
+                    "search_time_s": 760.0,
+                    "watchdog_kills": 1,
+                    "find_download_queued": 2,
+                    "find_download_completed": 1,
+                    "find_download_drain_time_s": 5.0,
+                    "cache_errors": 0,
+                    "cache_write_errors": 0,
+                    "cache_fuse_tripped": 0,
+                    "peers_browsed": 22,
+                    "peers_browsed_lazy": 1,
+                    "fanout_waves": 5,
+                },
+            ],
+        },
+        "coverage": {
+            "wanted_total": 10,
+            "wanted_searched_24h": 8,
+            "wanted_searched_6h": 5,
+            "wanted_unsearched_24h": 2,
+            "wanted_unsearched_6h": 5,
+            "wanted_never_searched": 1,
+            "active_wanted_searches_24h": 12,
+            "active_wanted_searches_6h": 5,
+            "oldest_last_search_at": "2026-05-04T00:00:00+00:00",
+            "top_10_share_24h": 0.75,
+            "top_loop_suspects": [
+                {
+                    "request_id": 100,
+                    "artist_name": "Test Artist",
+                    "album_title": "Loop Album",
+                    "status": "wanted",
+                    "last_search_at": "2026-05-05T00:00:00+00:00",
+                    "searches_24h": 4,
+                    "searches_6h": 2,
+                    "found_24h": 0,
+                    "no_match_24h": 2,
+                    "no_results_24h": 2,
+                    "problem_24h": 0,
+                },
+            ],
+            "stale_wanted": [
+                {
+                    "request_id": 101,
+                    "artist_name": "Test Artist",
+                    "album_title": "Stale Album",
+                    "status": "wanted",
+                    "last_search_at": None,
+                    "hours_since_search": None,
+                    "searches_24h": 0,
+                    "searches_6h": 0,
+                    "found_24h": 0,
+                    "no_match_24h": 0,
+                    "no_results_24h": 0,
+                    "problem_24h": 0,
+                },
+            ],
+        },
+    }
     mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
     mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
     mock_db.clear_wrong_match_path.return_value = True
@@ -625,6 +795,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/status",
         "/api/pipeline/recent",
         "/api/pipeline/all",
+        "/api/pipeline/dashboard",
         "/api/pipeline/constants",
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
@@ -739,6 +910,28 @@ class TestPipelineRouteContracts(_WebServerCase):
         "preview_attempts", "preview_worker_id", "preview_started_at",
         "preview_heartbeat_at", "preview_completed_at", "importable_at",
     }
+    DASHBOARD_REQUIRED_FIELDS = {
+        "generated_at", "redis", "searches", "cycles", "coverage",
+    }
+    DASHBOARD_SEARCH_WINDOW_FIELDS = {
+        "label", "hours", "searches", "distinct_requests",
+        "searches_per_hour", "avg_elapsed_s", "median_elapsed_s",
+        "p95_elapsed_s", "max_elapsed_s", "outcomes",
+    }
+    DASHBOARD_CYCLE_WINDOW_FIELDS = {
+        "label", "hours", "cycles", "avg_cycle_s", "median_cycle_s",
+        "p95_cycle_s", "max_cycle_s", "median_search_s", "watchdog_kills",
+        "find_download_queued", "find_download_completed", "cache_errors",
+        "cache_write_errors", "cache_fuse_tripped", "peers_browsed",
+        "peers_browsed_lazy", "fanout_waves",
+    }
+    DASHBOARD_COVERAGE_FIELDS = {
+        "wanted_total", "wanted_searched_24h", "wanted_searched_6h",
+        "wanted_unsearched_24h", "wanted_unsearched_6h",
+        "wanted_never_searched", "active_wanted_searches_24h",
+        "active_wanted_searches_6h", "oldest_last_search_at",
+        "top_10_share_24h", "top_loop_suspects", "stale_wanted",
+    }
 
     def setUp(self) -> None:
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
@@ -824,6 +1017,29 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline all response")
         _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline all item")
+
+    def test_pipeline_dashboard_contract(self):
+        status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.DASHBOARD_REQUIRED_FIELDS,
+                                "pipeline dashboard response")
+        _assert_required_fields(self, data["redis"], {"enabled", "status", "error"},
+                                "pipeline dashboard redis")
+        _assert_required_fields(self, data["searches"]["windows"][0],
+                                self.DASHBOARD_SEARCH_WINDOW_FIELDS,
+                                "pipeline dashboard search window")
+        _assert_required_fields(self, data["searches"]["windows"][0]["outcomes"],
+                                {"found", "no_match", "no_results", "exhausted", "errors"},
+                                "pipeline dashboard search outcomes")
+        _assert_required_fields(self, data["cycles"]["windows"][0],
+                                self.DASHBOARD_CYCLE_WINDOW_FIELDS,
+                                "pipeline dashboard cycle window")
+        _assert_required_fields(self, data["coverage"],
+                                self.DASHBOARD_COVERAGE_FIELDS,
+                                "pipeline dashboard coverage")
+        self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
+        self.assertIsInstance(data["coverage"]["stale_wanted"], list)
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {
         "request", "history", "tracks", "manual_reason", "last_search",
@@ -5635,6 +5851,7 @@ class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
         "/api/pipeline/all",
         "/api/pipeline/log",
         "/api/pipeline/status",
+        "/api/pipeline/dashboard",
     )
 
     def test_forbidden_prefixes_are_not_in_routing_cache_ttls(self) -> None:

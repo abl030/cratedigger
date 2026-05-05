@@ -7,7 +7,7 @@
 
 import { normalizeReleaseId } from './util.js';
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, recentsCounts: {all:number, imported:number, rejected:number}, recentsFilter: string, recentsSub: string, dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, manualSub: string, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -18,6 +18,8 @@ export const state = {
   browseSubView: 'discography',
   browseCache: {},
   pipelineData: null,
+  pipelineDashboardData: null,
+  pipelineView: 'queue',
   pipelineFilter: 'wanted',
   recentsCounts: { all: 0, imported: 0, rejected: 0 },
   recentsFilter: 'all',
