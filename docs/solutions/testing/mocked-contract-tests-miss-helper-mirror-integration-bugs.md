@@ -94,6 +94,6 @@ The cheapest version of this defense is to write the Playwright prompt *with the
 
 For future features that touch helper-to-mirror or helper-to-subprocess boundaries, add a step to the pre-merge checklist:
 
-> If the plan's test scenarios include "(Playwright smoke)" or equivalent, run them against the deployed branch before the rebase-merge. If the work is on `feat/*`, this means: deploy to a staging or via temporary direct-push, smoke, then merge. If the work is on a hotfix small enough that staging round-trip isn't worth it, accept the post-merge smoke gate but be ready to revert on failure.
+> If the plan's test scenarios include "(Playwright smoke)" or equivalent, run them against the deployed branch before merging the PR. If the work is on `feat/*`, this means: deploy to a staging or via temporary direct-push, smoke, then merge. If the work is on a hotfix small enough that staging round-trip isn't worth it, accept the post-merge smoke gate but be ready to revert on failure.
 
 The smoke is cheap. The cost of skipping it is paid in production.

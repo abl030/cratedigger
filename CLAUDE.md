@@ -173,6 +173,14 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 `cratedigger.service` has `restartIfChanged = false` — deploys don't restart it. The 5-min timer picks up new code. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and restart on switch. Before deploying `nix/module.nix` changes, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`. Full flow + verification in `.claude/rules/deploy.md`; `/deploy` command runs the whole sequence.
 
+## GitHub PR merges
+
+Use GitHub **Create a merge commit** for this repo's PRs. Do not use
+**Rebase and merge** or **Squash and merge**.
+
+This keeps the PR attached to mainline history on GitHub while preserving the
+individual commits that landed in the PR.
+
 ## Database migrations
 
 Schema lives in `migrations/NNN_name.sql`. `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs on every `nixos-rebuild switch` BEFORE `cratedigger.service`, `cratedigger-web.service`, and `cratedigger-importer.service`. These services require the migrate unit, so a failed migration blocks the app from coming up.
