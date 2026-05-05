@@ -1006,6 +1006,41 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    def reset_downloading_to_wanted(
+        self,
+        request_id: int,
+        **fields: Any,
+    ) -> bool:
+        """Reset a still-downloading request to wanted.
+
+        This is the guarded automatic failure path: stale workers must not
+        requeue rows that an operator or another phase already moved elsewhere.
+        Retry counters are preserved so automatic backoff keeps growing.
+        """
+        now = datetime.now(timezone.utc)
+        sets = [
+            "status = 'wanted'",
+            "active_download_state = NULL",
+            "manual_reason = NULL",
+            "updated_at = %s",
+        ]
+        params: list[object] = [now]
+        if "search_filetype_override" in fields:
+            sets.append("search_filetype_override = %s")
+            params.append(fields["search_filetype_override"])
+        if "min_bitrate" in fields:
+            sets.append("prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate)")
+            sets.append("min_bitrate = %s")
+            params.append(fields["min_bitrate"])
+        params.append(request_id)
+        cur = self._execute(
+            f"UPDATE album_requests SET {', '.join(sets)} "
+            "WHERE id = %s AND status = 'downloading'",
+            params,
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def reset_search_attempts(self, request_id: int) -> None:
         """Reset ``search_attempts`` to 0; leave status/backoff/other counters alone.
 
@@ -1121,6 +1156,23 @@ class PipelineDB:
             WHERE id = %s
         """, (state_json, now, request_id))
         self.conn.commit()
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+    ) -> bool:
+        """Rewrite active_download_state only while the request is downloading."""
+        now = datetime.now(timezone.utc)
+        cur = self._execute("""
+            UPDATE album_requests
+            SET active_download_state = %s::jsonb,
+                updated_at = %s
+            WHERE id = %s
+              AND status = 'downloading'
+        """, (state_json, now, request_id))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def update_download_state_current_path(
         self,

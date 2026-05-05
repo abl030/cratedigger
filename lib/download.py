@@ -11,8 +11,9 @@ import os
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Literal, TYPE_CHECKING
 
 import music_tag
 
@@ -352,19 +353,39 @@ def _canonical_import_folder_path(
 
 # === slskd transfer helpers ===
 
-def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> None:
-    """Cancel downloads and remove their directories."""
+
+@dataclass(frozen=True)
+class SlskdEnqueueOutcome:
+    """Structured result for one slskd enqueue request."""
+
+    status: Literal["accepted", "rejected", "unknown"]
+    downloads: list[DownloadFile] | None = None
+
+def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
+    """Cancel downloads and remove their directories.
+
+    Returns whether every requested transfer had an ID and cancel call
+    completed. Callers that only need best-effort cleanup can ignore it.
+    """
+    ok = True
     for file in files:
         if not file.id:
+            ok = False
             continue  # Transfer vanished or never assigned — skip cancel
         try:
-            ctx.slskd.transfers.cancel_download(username=file.username, id=file.id)
+            if not ctx.slskd.transfers.cancel_download(
+                username=file.username,
+                id=file.id,
+            ):
+                ok = False
         except Exception:
+            ok = False
             logger.warning(f"Failed to cancel download {file.filename} for {file.username}",
                            exc_info=True)
         delete_dir = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
         if os.path.isdir(delete_dir):
             shutil.rmtree(delete_dir)
+    return ok
 
 
 def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
@@ -394,16 +415,20 @@ def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
     return ok
 
 
-def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
-                     file_dir: str, ctx: CratediggerContext) -> list[DownloadFile] | None:
-    """Enqueue files for download via slskd. Returns DownloadFile list or None."""
+def slskd_enqueue_with_outcome(
+    username: str,
+    files: list[dict[str, Any]],
+    file_dir: str,
+    ctx: CratediggerContext,
+) -> SlskdEnqueueOutcome:
+    """Enqueue files for download via slskd with an explicit outcome."""
     try:
         enqueue = ctx.slskd.transfers.enqueue(username=username, files=files)
     except Exception:
         logger.debug("Enqueue failed", exc_info=True)
-        return None
+        return SlskdEnqueueOutcome(status="unknown")
     if not enqueue:
-        return None
+        return SlskdEnqueueOutcome(status="rejected")
 
     # Poll for transfer IDs — slskd needs time to register the enqueue.
     # Typically resolves in 1-2s; max 10s before giving up.
@@ -456,7 +481,16 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
             reconciled,
             len(downloads),
         )
-    return downloads
+    return SlskdEnqueueOutcome(status="accepted", downloads=downloads)
+
+
+def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
+                     file_dir: str, ctx: CratediggerContext) -> list[DownloadFile] | None:
+    """Enqueue files for download via slskd. Returns DownloadFile list or None."""
+    outcome = slskd_enqueue_with_outcome(username, files, file_dir, ctx)
+    if outcome.status != "accepted":
+        return None
+    return outcome.downloads
 
 
 def downloads_all_done(downloads: list[Any]) -> tuple[bool, list[Any] | None, int]:
@@ -1335,6 +1369,15 @@ def _parse_transfer_timestamp(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _transfer_latest_timestamp(transfer: dict[str, Any]) -> datetime:
+    return max(
+        _parse_transfer_timestamp(transfer.get("endedAt")),
+        _parse_transfer_timestamp(transfer.get("startedAt")),
+        _parse_transfer_timestamp(transfer.get("enqueuedAt")),
+        _parse_transfer_timestamp(transfer.get("requestedAt")),
+    )
+
+
 def _transfer_priority(transfer: dict[str, Any]) -> tuple[int, int, datetime]:
     """Rank duplicate transfer snapshots for the same username+filename.
 
@@ -1345,13 +1388,24 @@ def _transfer_priority(transfer: dict[str, Any]) -> tuple[int, int, datetime]:
     state = str(transfer.get("state", ""))
     is_terminal = state.startswith("Completed,")
     is_success = state == "Completed, Succeeded"
-    latest_ts = max(
-        _parse_transfer_timestamp(transfer.get("endedAt")),
-        _parse_transfer_timestamp(transfer.get("startedAt")),
-        _parse_transfer_timestamp(transfer.get("enqueuedAt")),
-        _parse_transfer_timestamp(transfer.get("requestedAt")),
-    )
+    latest_ts = _transfer_latest_timestamp(transfer)
     return (0 if is_terminal else 1, 1 if is_success else 0, latest_ts)
+
+
+def _is_terminal_transfer_before(
+    transfer: dict[str, Any],
+    not_before: str | None,
+) -> bool:
+    if not_before is None:
+        return False
+    state = str(transfer.get("state", ""))
+    if not state.startswith("Completed,"):
+        return False
+    threshold = _parse_transfer_timestamp(not_before)
+    latest_ts = _transfer_latest_timestamp(transfer)
+    if latest_ts == datetime.min.replace(tzinfo=timezone.utc):
+        return False
+    return latest_ts < threshold
 
 
 def match_transfer(
@@ -1405,6 +1459,7 @@ def rederive_transfer_ids(
     slskd_client: Any,
     *,
     snapshot: list[dict[str, Any]] | None = None,
+    not_before: str | None = None,
 ) -> bool:
     """Re-derive slskd transfer IDs for all files in a GrabListEntry.
 
@@ -1423,6 +1478,11 @@ def rederive_transfer_ids(
 
     for f in entry.files:
         transfer = match_transfer(downloads, f.filename, username=f.username)
+        if transfer is not None and _is_terminal_transfer_before(
+            transfer,
+            not_before,
+        ):
+            transfer = None
         if transfer is not None:
             f.id = transfer.get("id", "")
             state = str(transfer.get("state", ""))
@@ -1918,14 +1978,32 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             continue
 
         # Re-derive transfer IDs from pre-fetched snapshot
-        if not rederive_transfer_ids(entry, ctx.slskd, snapshot=cycle_snapshot):
+        if not rederive_transfer_ids(
+            entry,
+            ctx.slskd,
+            snapshot=cycle_snapshot,
+            not_before=state.enqueued_at,
+        ):
             logger.warning(f"API error re-deriving transfers for {entry.artist} - {entry.title} "
                            f"— will retry next cycle")
             continue
 
+        enqueued_at = datetime.fromisoformat(state.enqueued_at)
+        if enqueued_at.tzinfo is None:
+            enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        elapsed_seconds = (now - enqueued_at).total_seconds()
+
         # Check if all transfers have vanished (slskd restart, user offline)
         all_vanished = all(f.id == "" for f in entry.files)
         if all_vanished:
+            if elapsed_seconds < 60:
+                logger.info(
+                    "Request %s has fresh planned ownership but no visible "
+                    "slskd transfers yet; deferring vanished-transfer reset",
+                    request_id,
+                )
+                continue
             _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
             continue
 
@@ -1935,10 +2013,6 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
                 f.status = {"state": "Completed, Errored"}
 
         # Track total album age separately from stall/progress timing.
-        enqueued_at = datetime.fromisoformat(state.enqueued_at)
-        now = datetime.now(timezone.utc)
-        elapsed_seconds = (now - enqueued_at).total_seconds()
-
         # Poll live status only for transfers that are still active in slskd.
         files_requiring_status = [
             f for f in entry.files
@@ -2055,9 +2129,11 @@ def grab_most_wanted(albums: list[Any],
         entry = grab_list[album_id]
         logger.info(f"Album: {entry.title} Artist: {entry.artist}")
 
-        # Persist download state to DB
+        # Legacy/test fallback: production find_download workers claim
+        # ownership before the slskd enqueue. Keep this only for callers that
+        # do not provide the worker-safe ownership collaborator.
         request_id = entry.db_request_id
-        if request_id:
+        if request_id and getattr(ctx, "download_ownership", None) is None:
             state = build_active_download_state(entry)
             db = ctx.pipeline_db_source._get_db()
             transitions.finalize_request(

@@ -24,6 +24,7 @@ class CratediggerContext:
     cfg: CratediggerConfig
     slskd: Any  # slskd_api.SlskdClient — Any to avoid import
     pipeline_db_source: DatabaseSource
+    download_ownership: Any = None
 
     # --- Runtime caches (reset each cycle) ---
     search_cache: dict[int, Any] = field(default_factory=dict)

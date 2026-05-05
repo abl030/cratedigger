@@ -593,8 +593,7 @@ class ActiveDownloadState:
             data["import_subprocess_started_at"] = (
                 self.import_subprocess_started_at
             )
-        if self.current_path is not None:
-            data["current_path"] = self.current_path
+        data["current_path"] = self.current_path
         return json.dumps(data)
 
     @staticmethod
@@ -2084,7 +2083,9 @@ def provisional_lossless_decision(
             stage_chain=[f"stage2_provisional:{decision}"],
         )
 
-    candidate_avg = candidate.candidate_probe.avg_bitrate_kbps
+    candidate_probe = candidate.candidate_probe
+    assert candidate_probe is not None
+    candidate_avg = candidate_probe.avg_bitrate_kbps
     assert candidate_avg is not None
     existing_probe = (
         candidate.existing_probe

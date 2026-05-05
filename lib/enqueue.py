@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
-from lib.download import cancel_and_delete, slskd_do_enqueue
-from lib.grab_list import GrabListEntry
+from lib.download import (
+    SlskdEnqueueOutcome,
+    build_active_download_state,
+    cancel_and_delete,
+    rederive_transfer_ids,
+    slskd_do_enqueue,
+    slskd_enqueue_with_outcome,
+)
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult, check_for_match, get_album_by_id
 from lib.quality import CandidateScore
 
@@ -163,6 +170,7 @@ def prepare_find_download_context(
         cooled_down_users=set(ctx.cooled_down_users),
         prefetched_album_tracks={album_id: list(tracks)},
         peer_cache=peer_cache,
+        download_ownership=ctx.download_ownership,
         browse_coordinator=coordinator,
         browse_coordinator_lock=ctx.browse_coordinator_lock,
     )
@@ -316,6 +324,329 @@ def _prefixed_directory_files(
         {**file, "filename": file_dir + "\\" + file["filename"]}
         for file in directory["files"]
     ]
+
+
+@dataclass(frozen=True)
+class DownloadOwnershipClaim:
+    entry: GrabListEntry
+    request_id: int | None
+    attempted: bool
+    claimed: bool
+    enqueued_at: str | None = None
+
+
+def _album_request_id(album: Any) -> int | None:
+    request_id = getattr(album, "db_request_id", None)
+    if isinstance(request_id, bool) or not isinstance(request_id, int):
+        return None
+    return request_id if request_id > 0 else None
+
+
+def _planned_downloads(
+    *,
+    username: str,
+    file_dir: str,
+    files: Sequence[dict[str, Any]],
+) -> list[DownloadFile]:
+    return [
+        DownloadFile(
+            filename=str(file["filename"]),
+            id="",
+            file_dir=file_dir,
+            username=username,
+            size=int(file.get("size") or 0),
+        )
+        for file in files
+    ]
+
+
+def _planned_grab_entry(
+    album: Any,
+    files: list[DownloadFile],
+    allowed_filetype: str,
+) -> GrabListEntry:
+    release_date = str(getattr(album, "release_date", "") or "")
+    return GrabListEntry(
+        album_id=int(getattr(album, "id", 0) or 0),
+        files=files,
+        filetype=allowed_filetype,
+        title=str(getattr(album, "title", "")),
+        artist=str(getattr(album, "artist_name", "")),
+        year=release_date[:4],
+        mb_release_id=str(getattr(album, "db_mb_release_id", "") or ""),
+        db_request_id=_album_request_id(album),
+        db_source=getattr(album, "db_source", None),
+        db_search_filetype_override=getattr(
+            album, "db_search_filetype_override", None),
+        db_target_format=getattr(album, "db_target_format", None),
+    )
+
+
+def _state_json_for_entry(
+    entry: GrabListEntry,
+    *,
+    enqueued_at: str | None = None,
+) -> str:
+    return build_active_download_state(
+        entry,
+        enqueued_at=enqueued_at,
+        last_progress_at=enqueued_at,
+    ).to_json()
+
+
+def _claim_initial_download_ownership(
+    album: Any,
+    files: list[DownloadFile],
+    allowed_filetype: str,
+    ctx: CratediggerContext,
+) -> DownloadOwnershipClaim:
+    entry = _planned_grab_entry(album, files, allowed_filetype)
+    request_id = entry.db_request_id
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None or request_id is None:
+        return DownloadOwnershipClaim(
+            entry=entry,
+            request_id=request_id,
+            attempted=False,
+            claimed=False,
+        )
+
+    state = build_active_download_state(entry)
+    claimed = bool(writer.claim_downloading(
+        request_id,
+        state.to_json(),
+    ))
+    if not claimed:
+        logger.info(
+            "Skipped slskd enqueue for request %s because ownership claim "
+            "was blocked; request is no longer wanted",
+            request_id,
+        )
+    return DownloadOwnershipClaim(
+        entry=entry,
+        request_id=request_id,
+        attempted=True,
+        claimed=claimed,
+        enqueued_at=state.enqueued_at,
+    )
+
+
+def _entry_with_files(
+    entry: GrabListEntry,
+    files: list[DownloadFile],
+) -> GrabListEntry:
+    return replace(entry, files=files)
+
+
+def _copy_download_observations(
+    planned: list[DownloadFile],
+    observed: Sequence[Any],
+) -> None:
+    by_key = {
+        (download.username, download.filename): download
+        for download in planned
+    }
+    for source in observed:
+        target = by_key.get((source.username, source.filename))
+        if target is None:
+            continue
+        target.id = source.id
+        target.status = getattr(source, "status", None)
+        target.retry = getattr(source, "retry", None)
+        target.bytes_transferred = getattr(source, "bytes_transferred", None)
+        target.last_state = getattr(source, "last_state", None)
+
+
+def _clear_download_observations(files: Sequence[DownloadFile]) -> None:
+    for file in files:
+        file.id = ""
+        file.status = None
+        file.retry = None
+        file.bytes_transferred = None
+        file.last_state = None
+
+
+def _visible_transfer_files(files: Sequence[DownloadFile]) -> list[DownloadFile]:
+    return [
+        file for file in files
+        if file.id or file.status is not None
+    ]
+
+
+def _visible_claim_transfers(
+    claim: DownloadOwnershipClaim,
+    ctx: CratediggerContext,
+) -> tuple[bool, list[DownloadFile]]:
+    verification_entry = copy.deepcopy(claim.entry)
+    _clear_download_observations(verification_entry.files)
+    snapshot_ok = rederive_transfer_ids(
+        verification_entry,
+        ctx.slskd,
+        not_before=claim.enqueued_at,
+    )
+    if not snapshot_ok:
+        return False, []
+
+    visible = _visible_transfer_files(verification_entry.files)
+    if visible:
+        _copy_download_observations(claim.entry.files, verification_entry.files)
+    return True, visible
+
+
+def _persist_claimed_download_state(
+    claim: DownloadOwnershipClaim,
+    files: list[DownloadFile],
+    ctx: CratediggerContext,
+) -> bool:
+    if not claim.claimed or claim.request_id is None:
+        return True
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        return True
+    entry = _entry_with_files(claim.entry, files)
+    updated = bool(writer.update_state_if_downloading(
+        claim.request_id,
+        _state_json_for_entry(entry, enqueued_at=claim.enqueued_at),
+    ))
+    if not updated:
+        logger.warning(
+            "Accepted slskd enqueue for request %s, but the guarded "
+            "active_download_state update was blocked; cancelling transfer",
+            claim.request_id,
+        )
+    return updated
+
+
+def _reset_claim_after_verified_no_acceptance(
+    claim: DownloadOwnershipClaim,
+    ctx: CratediggerContext,
+    *,
+    reason: str,
+) -> list[DownloadFile] | None:
+    if not claim.claimed or claim.request_id is None:
+        return None
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        return None
+
+    snapshot_ok, visible = _visible_claim_transfers(claim, ctx)
+    if snapshot_ok and not visible:
+        writer.reset_after_no_acceptance(claim.request_id)
+        return None
+
+    writer.update_state_if_downloading(
+        claim.request_id,
+        _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+    )
+    logger.warning(
+        "%s for request %s could not prove no slskd transfer exists; "
+        "leaving planned download ownership for recovery",
+        reason,
+        claim.request_id,
+    )
+    return claim.entry.files
+
+
+def _leave_claim_for_poll_recovery(
+    claim: DownloadOwnershipClaim,
+    ctx: CratediggerContext,
+    *,
+    reason: str,
+) -> list[DownloadFile] | None:
+    if not claim.claimed or claim.request_id is None:
+        return None
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is not None:
+        writer.update_state_if_downloading(
+            claim.request_id,
+            _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+        )
+
+    logger.warning(
+        "%s for request %s; "
+        "leaving planned download ownership for the next poll cycle",
+        reason,
+        claim.request_id,
+    )
+    return claim.entry.files
+
+
+def _handle_claimed_partial_failure(
+    claim: DownloadOwnershipClaim,
+    accepted: list[DownloadFile],
+    ctx: CratediggerContext,
+) -> list[DownloadFile] | None:
+    if not claim.claimed or claim.request_id is None:
+        return None
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        return None
+
+    _copy_download_observations(claim.entry.files, accepted)
+    _visible_claim_transfers(claim, ctx)
+    accepted_by_key = {
+        (download.username, download.filename)
+        for download in accepted
+    }
+    accepted_planned = [
+        download for download in claim.entry.files
+        if (download.username, download.filename) in accepted_by_key
+    ]
+    if any(not download.id for download in accepted_planned):
+        writer.update_state_if_downloading(
+            claim.request_id,
+            _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+        )
+        logger.warning(
+            "Partial multi-disc enqueue for request %s could not be verified "
+            "as cancelled because accepted transfers lack IDs; leaving "
+            "request downloading for recovery",
+            claim.request_id,
+        )
+        return claim.entry.files
+    files_to_cancel = [download for download in claim.entry.files if download.id]
+    cancelled = cancel_and_delete(files_to_cancel, ctx)
+    post_cancel_snapshot_ok, visible_after_cancel = _visible_claim_transfers(claim, ctx)
+    if cancelled and post_cancel_snapshot_ok and not visible_after_cancel:
+        writer.reset_after_no_acceptance(claim.request_id)
+        return None
+
+    writer.update_state_if_downloading(
+        claim.request_id,
+        _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+    )
+    logger.warning(
+        "Partial multi-disc enqueue for request %s could not be verified as "
+        "cancelled; leaving request downloading for recovery",
+        claim.request_id,
+    )
+    return claim.entry.files
+
+
+def _enqueue_with_claim_outcome(
+    *,
+    claim: DownloadOwnershipClaim,
+    username: str,
+    files: list[dict[str, Any]],
+    file_dir: str,
+    ctx: CratediggerContext,
+) -> SlskdEnqueueOutcome:
+    if claim.claimed:
+        return slskd_enqueue_with_outcome(
+            username=username,
+            files=files,
+            file_dir=file_dir,
+            ctx=ctx,
+        )
+    downloads = slskd_do_enqueue(
+        username=username,
+        files=files,
+        file_dir=file_dir,
+        ctx=ctx,
+    )
+    if downloads is None:
+        return SlskdEnqueueOutcome(status="unknown")
+    return SlskdEnqueueOutcome(status="accepted", downloads=downloads)
 
 
 def get_album_tracks(album: Any, ctx: CratediggerContext) -> list[TrackRecord]:
@@ -515,14 +846,33 @@ def try_enqueue(
             match_wave = wave_idx
         directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
         files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
+        claim = _claim_initial_download_ownership(
+            album,
+            _planned_downloads(
+                username=username,
+                file_dir=match_result.file_dir,
+                files=files_to_enqueue,
+            ),
+            allowed_filetype,
+            ctx,
+        )
+        if claim.attempted and not claim.claimed:
+            had_enqueue_failure = True
+            break
         try:
-            downloads = slskd_do_enqueue(
+            outcome = _enqueue_with_claim_outcome(
+                claim=claim,
                 username=username,
                 files=files_to_enqueue,
                 file_dir=match_result.file_dir,
                 ctx=ctx,
             )
-            if downloads is not None:
+            if outcome.status == "accepted" and outcome.downloads is not None:
+                downloads = outcome.downloads
+                if not _persist_claimed_download_state(claim, downloads, ctx):
+                    cancel_and_delete(downloads, ctx)
+                    had_enqueue_failure = True
+                    break
                 _log_album_browse(
                     artist_name, album_name, allowed_filetype, "single",
                     matched=True, match_wave=match_wave,
@@ -535,12 +885,67 @@ def try_enqueue(
                     downloads=downloads,
                     candidates=tuple(accumulated),
                 )
+            if outcome.status == "rejected":
+                owned = _reset_claim_after_verified_no_acceptance(
+                    claim,
+                    ctx,
+                    reason="slskd rejected enqueue",
+                )
+                if owned is not None:
+                    _log_album_browse(
+                        artist_name, album_name, allowed_filetype, "single",
+                        matched=True, match_wave=match_wave,
+                        eligible=len(eligible),
+                        peers=ctx.peers_browsed - peers_before,
+                        waves=ctx.fanout_waves - waves_before,
+                    )
+                    return EnqueueAttempt(
+                        matched=True,
+                        downloads=owned,
+                        candidates=tuple(accumulated),
+                    )
+            elif claim.claimed:
+                owned = _leave_claim_for_poll_recovery(
+                    claim,
+                    ctx,
+                    reason="slskd enqueue outcome was ambiguous",
+                )
+                _log_album_browse(
+                    artist_name, album_name, allowed_filetype, "single",
+                    matched=True, match_wave=match_wave,
+                    eligible=len(eligible),
+                    peers=ctx.peers_browsed - peers_before,
+                    waves=ctx.fanout_waves - waves_before,
+                )
+                return EnqueueAttempt(
+                    matched=True,
+                    downloads=owned,
+                    candidates=tuple(accumulated),
+                )
             had_enqueue_failure = True
             logger.info(
                 f"Failed to enqueue download to slskd for "
                 f"{artist_name} - {album_name} from {username}"
             )
         except Exception as e:
+            if claim.claimed:
+                owned = _leave_claim_for_poll_recovery(
+                    claim,
+                    ctx,
+                    reason="slskd enqueue raised after ownership claim",
+                )
+                _log_album_browse(
+                    artist_name, album_name, allowed_filetype, "single",
+                    matched=True, match_wave=match_wave,
+                    eligible=len(eligible),
+                    peers=ctx.peers_browsed - peers_before,
+                    waves=ctx.fanout_waves - waves_before,
+                )
+                return EnqueueAttempt(
+                    matched=True,
+                    downloads=owned,
+                    candidates=tuple(accumulated),
+                )
             had_enqueue_failure = True
             logger.warning(f"Exception enqueueing tracks: {e}")
             logger.info(
@@ -631,19 +1036,47 @@ def try_multi_enqueue(
         disk["source"] = (username, directory, match_result.file_dir)
         count_found += 1
     if count_found == total:
+        planned_downloads: list[DownloadFile] = []
+        for disk in split_release:
+            username, directory, file_dir = disk["source"]
+            files_to_enqueue = _prefixed_directory_files(directory, file_dir)
+            disk_planned = _planned_downloads(
+                username=username,
+                file_dir=file_dir,
+                files=files_to_enqueue,
+            )
+            for file in disk_planned:
+                file.disk_no = disk["disk_no"]
+                file.disk_count = disk["disk_count"]
+            planned_downloads.extend(disk_planned)
+        claim = _claim_initial_download_ownership(
+            album,
+            planned_downloads,
+            allowed_filetype,
+            ctx,
+        )
+        if claim.attempted and not claim.claimed:
+            return EnqueueAttempt(
+                matched=False,
+                enqueue_failed=True,
+                candidates=tuple(accumulated),
+            )
+
         all_downloads = []
         enqueued = 0
         for disk in split_release:
             username, directory, file_dir = disk["source"]
             files_to_enqueue = _prefixed_directory_files(directory, file_dir)
             try:
-                downloads = slskd_do_enqueue(
+                outcome = _enqueue_with_claim_outcome(
+                    claim=claim,
                     username=username,
                     files=files_to_enqueue,
                     file_dir=file_dir,
                     ctx=ctx,
                 )
-                if downloads is not None:
+                if outcome.status == "accepted" and outcome.downloads is not None:
+                    downloads = outcome.downloads
                     for file in downloads:
                         file.disk_no = disk["disk_no"]
                         file.disk_count = disk["disk_count"]
@@ -655,7 +1088,53 @@ def try_multi_enqueue(
                         f"{artist_name} - {album_name} from {username}"
                     )
                     if len(all_downloads) > 0:
-                        cancel_and_delete(all_downloads, ctx)
+                        if outcome.status == "rejected":
+                            recovered = _handle_claimed_partial_failure(
+                                claim, all_downloads, ctx,
+                            )
+                            if recovered is not None:
+                                return EnqueueAttempt(
+                                    matched=True,
+                                    downloads=recovered,
+                                    candidates=tuple(accumulated),
+                                )
+                        elif claim.claimed:
+                            owned = _leave_claim_for_poll_recovery(
+                                claim,
+                                ctx,
+                                reason="multi-disc enqueue outcome was ambiguous",
+                            )
+                            return EnqueueAttempt(
+                                matched=True,
+                                downloads=owned,
+                                candidates=tuple(accumulated),
+                            )
+                        if not claim.claimed:
+                            cancel_and_delete(all_downloads, ctx)
+                    else:
+                        if outcome.status == "rejected":
+                            owned = _reset_claim_after_verified_no_acceptance(
+                                claim,
+                                ctx,
+                                reason="slskd rejected first multi-disc enqueue",
+                            )
+                            if owned is not None:
+                                return EnqueueAttempt(
+                                    matched=True,
+                                    downloads=owned,
+                                    candidates=tuple(accumulated),
+                                )
+                        elif claim.claimed:
+                            owned = _leave_claim_for_poll_recovery(
+                                claim,
+                                ctx,
+                                reason="slskd enqueue outcome was ambiguous",
+                            )
+                            return EnqueueAttempt(
+                                matched=True,
+                                downloads=owned,
+                                candidates=tuple(accumulated),
+                            )
                     return EnqueueAttempt(
                         matched=False,
                         enqueue_failed=True,
@@ -668,20 +1147,59 @@ def try_multi_enqueue(
                     f"{artist_name} - {album_name} from {username}"
                 )
                 if len(all_downloads) > 0:
-                    cancel_and_delete(all_downloads, ctx)
+                    if claim.claimed:
+                        owned = _leave_claim_for_poll_recovery(
+                            claim,
+                            ctx,
+                            reason="multi-disc enqueue raised after ownership claim",
+                        )
+                        return EnqueueAttempt(
+                            matched=True,
+                            downloads=owned,
+                            candidates=tuple(accumulated),
+                        )
+                    if not claim.claimed:
+                        cancel_and_delete(all_downloads, ctx)
+                else:
+                    if claim.claimed:
+                        owned = _leave_claim_for_poll_recovery(
+                            claim,
+                            ctx,
+                            reason="slskd enqueue raised after ownership claim",
+                        )
+                        return EnqueueAttempt(
+                            matched=True,
+                            downloads=owned,
+                            candidates=tuple(accumulated),
+                        )
                 return EnqueueAttempt(
                     matched=False,
                     enqueue_failed=True,
                     candidates=tuple(accumulated),
                 )
         if enqueued == total:
+            if not _persist_claimed_download_state(claim, all_downloads, ctx):
+                cancel_and_delete(all_downloads, ctx)
+                return EnqueueAttempt(
+                    matched=False,
+                    enqueue_failed=True,
+                    candidates=tuple(accumulated),
+                )
             return EnqueueAttempt(
                 matched=True,
                 downloads=all_downloads,
                 candidates=tuple(accumulated),
             )
         if len(all_downloads) > 0:
-            cancel_and_delete(all_downloads, ctx)
+            recovered = _handle_claimed_partial_failure(claim, all_downloads, ctx)
+            if recovered is not None:
+                return EnqueueAttempt(
+                    matched=True,
+                    downloads=recovered,
+                    candidates=tuple(accumulated),
+                )
+            if not claim.claimed:
+                cancel_and_delete(all_downloads, ctx)
         return EnqueueAttempt(
             matched=False,
             enqueue_failed=True,
