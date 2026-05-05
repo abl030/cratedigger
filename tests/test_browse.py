@@ -195,6 +195,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         self.assertEqual(slskd.users.directory_calls, [])
         self.assertEqual(ctx.folder_cache["user1"]["A"], directory)
         self.assertEqual(result.browse_attempts, 0)
+        self.assertEqual(ctx.peer_dir_observations, set())
         self.assertEqual(result.negative_skips, set())
         self.assertEqual(ctx.cache_pos_hits, 1)
 
@@ -211,6 +212,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         self.assertEqual(slskd.users.directory_calls, [])
         self.assertEqual(ctx.folder_cache["user1"], {})
         self.assertEqual(result.browse_attempts, 0)
+        self.assertEqual(ctx.peer_dir_observations, set())
         self.assertEqual(result.negative_skips, {("user1", "A")})
         self.assertEqual(ctx.cache_neg_hits, 1)
 
@@ -224,6 +226,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(result.browse_attempts, 1)
+        self.assertEqual(ctx.peer_dir_observations, {("user1", "A")})
         self.assertIn("peer_dir_neg:user1:A", redis.store)
 
     def test_exception_browse_does_not_write_persistent_negative(self):
@@ -237,6 +240,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(result.browse_attempts, 1)
+        self.assertEqual(ctx.peer_dir_observations, {("user1", "A")})
         self.assertNotIn("peer_dir_neg:user1:A", redis.store)
 
     def test_pre_creates_user_buckets_for_every_work_item(self):
@@ -360,6 +364,7 @@ class TestFanoutBrowseConcurrencyCap(unittest.TestCase):
             second.result()
 
         self.assertEqual(slskd.users.directory_calls, [("user1", "Album")])
+        self.assertEqual(ctx.peer_dir_observations, {("user1", "Album")})
         self.assertIn("Album", ctx.folder_cache["user1"])
 
     def test_reusing_coordinator_with_different_capacity_fails_loudly(self):

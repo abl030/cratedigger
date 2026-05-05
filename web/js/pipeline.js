@@ -159,6 +159,7 @@ function renderPipelineDashboard() {
   const cycles = /** @type {any[]} */ (data.cycles?.windows || []);
   const coverage = /** @type {any} */ (data.coverage || {});
   const redis = /** @type {any} */ (data.redis || {});
+  const peerDirs = /** @type {any} */ (data.peer_dirs || {});
   const generated = data.generated_at ? awstDateTime(data.generated_at) : '';
   el.innerHTML = `
     ${renderPipelineNav()}
@@ -169,11 +170,42 @@ function renderPipelineDashboard() {
     <div class="dashboard-grid">
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverage)}
+      ${renderPeerDirCard(peerDirs)}
       ${renderSearchCard(searches)}
       ${renderCycleCard(cycles)}
       ${renderCycleOutliers(data.cycles?.outliers || [])}
       ${renderLoopSuspects(coverage.top_loop_suspects || [])}
       ${renderStaleWanted(coverage.stale_wanted || [])}
+    </div>
+  `;
+}
+
+function renderPeerDirCard(peerDirs) {
+  const totals = peerDirs.totals || {};
+  const days = /** @type {any[]} */ (peerDirs.days || []);
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Peer/Dir First Seen</div>
+      <div class="dashboard-metric-strip">
+        <div class="dashboard-metric"><span>Known combos</span><strong>${formatCount(totals.known_combos)}</strong></div>
+        <div class="dashboard-metric"><span>New 24h</span><strong>${formatCount(totals.new_24h)}</strong></div>
+        <div class="dashboard-metric"><span>Known peers</span><strong>${formatCount(totals.known_peers)}</strong></div>
+        <div class="dashboard-metric"><span>Tracked since</span><strong>${totals.tracked_since ? awstDate(totals.tracked_since) : 'n/a'}</strong></div>
+      </div>
+      <table class="dashboard-table">
+        <thead><tr><th>Day</th><th>Combos</th><th>Peers</th><th>Dirs</th></tr></thead>
+        <tbody>
+          ${days.map(d => `
+            <tr>
+              <td>${esc(d.date || '')}</td>
+              <td class="${d.new_combos ? 'metric-good' : ''}">${formatCount(d.new_combos)}</td>
+              <td>${formatCount(d.new_peers)}</td>
+              <td>${formatCount(d.new_dirs)}</td>
+            </tr>
+          `).join('')}
+          ${days.length === 0 ? '<tr><td colspan="4">No peer/dir observations yet</td></tr>' : ''}
+        </tbody>
+      </table>
     </div>
   `;
 }

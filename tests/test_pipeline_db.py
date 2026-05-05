@@ -37,7 +37,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["peer_dir_observations", "cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -61,6 +61,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("user_cooldowns", table_names)
         self.assertIn("import_jobs", table_names)
         self.assertIn("cycle_metrics", table_names)
+        self.assertIn("peer_dir_observations", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
@@ -1253,6 +1254,43 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["top_loop_suspects"][0]["problem_24h"], 1)
         self.assertEqual(coverage["stale_wanted"][0]["request_id"], self.req3)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
+
+    def test_peer_dir_observations_track_first_seen_counts(self):
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(days=2)
+
+        inserted = self.db.record_peer_dir_observations(
+            [("user1", "dirA"), ("user1", "dirA"), ("user2", "dirB")],
+            observed_at=old,
+        )
+        self.assertEqual(inserted, 2)
+
+        inserted = self.db.record_peer_dir_observations(
+            [("user1", "dirA"), ("user3", "dirC")],
+            observed_at=now,
+        )
+        self.assertEqual(inserted, 1)
+
+        stored = self.db._execute("""
+            SELECT
+                COUNT(*)::int AS rows,
+                SUM(seen_count)::int AS total_seen,
+                MAX(seen_count)::int AS max_seen
+            FROM peer_dir_observations
+        """).fetchone()
+        self.assertEqual(stored["rows"], 3)
+        self.assertEqual(stored["total_seen"], 4)
+        self.assertEqual(stored["max_seen"], 2)
+
+        peer_dirs = self.db.get_peer_dir_daily_metrics(days=14)
+        self.assertEqual(peer_dirs["totals"]["known_combos"], 3)
+        self.assertEqual(peer_dirs["totals"]["known_peers"], 3)
+        self.assertEqual(peer_dirs["totals"]["known_dirs"], 3)
+        self.assertEqual(peer_dirs["totals"]["new_24h"], 1)
+        self.assertEqual(
+            sum(day["new_combos"] for day in peer_dirs["days"]),
+            3,
+        )
 
 
 @requires_postgres

@@ -1242,11 +1242,12 @@ def main():
         elapsed = time.time() - cycle_start
         from lib.cycle_summary import format_cycle_summary
         logger.info(format_cycle_summary(_module_ctx, elapsed))
+        cycle_completed_at = datetime.now(timezone.utc)
         try:
             db = pipeline_db_source._get_db()
             db.record_cycle_metrics(
                 started_at=cycle_started_at,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=cycle_completed_at,
                 cycle_total_s=elapsed,
                 browse_time_s=_module_ctx.browse_time_s,
                 match_time_s=_module_ctx.match_time_s,
@@ -1269,6 +1270,20 @@ def main():
             )
         except Exception as e:
             logger.warning(f"Failed to persist cycle metrics: {e}")
+        try:
+            observations = getattr(_module_ctx, "peer_dir_observations", set())
+            if observations:
+                db = pipeline_db_source._get_db()
+                new_observations = db.record_peer_dir_observations(
+                    observations,
+                    observed_at=cycle_completed_at,
+                )
+                logger.info(
+                    "Peer-dir observations persisted: "
+                    f"observed={len(observations)} new={new_observations}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist peer-dir observations: {e}")
 
     finally:
         # Bust web UI cache so freshly imported albums appear immediately

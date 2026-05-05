@@ -10,13 +10,14 @@ Usage:
     db.add_request(mb_release_id="...", artist_name="...", album_title="...", source="redownload")
 """
 
-import os
+import hashlib
 import json
+import os
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -64,6 +65,27 @@ def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _stable_hash(label: str, *parts: str) -> str:
+    """Return a namespaced SHA-256 digest for privacy-preserving counters."""
+    digest = hashlib.sha256()
+    digest.update(f"cratedigger:{label}\0".encode("utf-8"))
+    for part in parts:
+        encoded = part.encode("utf-8")
+        digest.update(str(len(encoded)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(encoded)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _peer_dir_hashes(username: str, file_dir: str) -> tuple[str, str, str]:
+    return (
+        _stable_hash("peer-dir-combo", username, file_dir),
+        _stable_hash("peer-dir-user", username),
+        _stable_hash("peer-dir-dir", file_dir),
+    )
 
 # Advisory-lock namespaces. Every lock in this codebase is
 # session-scoped, non-blocking (``pg_try_advisory_lock``), and
@@ -1778,6 +1800,131 @@ class PipelineDB:
         assert row is not None, "INSERT RETURNING should always return a row"
         return int(row["id"])
 
+    def record_peer_dir_observations(
+        self,
+        observations: Iterable[tuple[str, str]],
+        *,
+        observed_at: datetime | None = None,
+    ) -> int:
+        """Persist hashed peer/directory observations and return new combos.
+
+        Each input pair represents one cold slskd browse submission that made
+        it past the hot context cache, Redis positive cache, Redis negative
+        cache, and the coordinator's duplicate in-flight join.
+        """
+        unique = {
+            (str(username), str(file_dir))
+            for username, file_dir in observations
+            if username and file_dir
+        }
+        if not unique:
+            return 0
+
+        observed = observed_at or datetime.now(timezone.utc)
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+
+        rows = [
+            (*_peer_dir_hashes(username, file_dir), observed, observed)
+            for username, file_dir in sorted(unique)
+        ]
+        combo_hashes = [row[0] for row in rows]
+        existing_cur = self._execute(
+            """
+            SELECT combo_hash
+            FROM peer_dir_observations
+            WHERE combo_hash = ANY(%s)
+            """,
+            (combo_hashes,),
+        )
+        existing = {row["combo_hash"] for row in existing_cur.fetchall()}
+
+        self._ensure_conn()
+        with self.conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO peer_dir_observations (
+                    combo_hash, username_hash, dir_hash,
+                    first_seen_at, last_seen_at
+                )
+                VALUES %s
+                ON CONFLICT (combo_hash) DO UPDATE
+                SET
+                    last_seen_at = GREATEST(
+                        peer_dir_observations.last_seen_at,
+                        EXCLUDED.last_seen_at
+                    ),
+                    seen_count = peer_dir_observations.seen_count + 1
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(set(combo_hashes) - existing)
+
+    def get_peer_dir_daily_metrics(self, days: int = 14) -> dict[str, Any]:
+        """Return first-seen peer/directory trend metrics for the dashboard."""
+        clamped_days = max(1, min(int(days), 90))
+        totals_cur = self._execute("""
+            SELECT
+                COUNT(*)::int AS known_combos,
+                COUNT(DISTINCT username_hash)::int AS known_peers,
+                COUNT(DISTINCT dir_hash)::int AS known_dirs,
+                COUNT(*) FILTER (
+                    WHERE first_seen_at >= NOW() - INTERVAL '24 hours'
+                )::int AS new_24h,
+                COUNT(*) FILTER (
+                    WHERE last_seen_at >= NOW() - INTERVAL '24 hours'
+                )::int AS cold_seen_24h,
+                MIN(first_seen_at) AS tracked_since,
+                COUNT(DISTINCT (first_seen_at AT TIME ZONE 'Australia/Perth')::date)::int
+                    AS days_with_new
+            FROM peer_dir_observations
+        """)
+        totals_row = totals_cur.fetchone() or {}
+
+        days_cur = self._execute("""
+            WITH day_series AS (
+                SELECT generate_series(
+                    (NOW() AT TIME ZONE 'Australia/Perth')::date - (%s::int - 1),
+                    (NOW() AT TIME ZONE 'Australia/Perth')::date,
+                    INTERVAL '1 day'
+                )::date AS day
+            ),
+            first_seen AS (
+                SELECT
+                    (first_seen_at AT TIME ZONE 'Australia/Perth')::date AS day,
+                    COUNT(*)::int AS new_combos,
+                    COUNT(DISTINCT username_hash)::int AS new_peers,
+                    COUNT(DISTINCT dir_hash)::int AS new_dirs
+                FROM peer_dir_observations
+                WHERE first_seen_at >= NOW() - %s::interval
+                GROUP BY 1
+            )
+            SELECT
+                to_char(day_series.day, 'YYYY-MM-DD') AS date,
+                COALESCE(first_seen.new_combos, 0)::int AS new_combos,
+                COALESCE(first_seen.new_peers, 0)::int AS new_peers,
+                COALESCE(first_seen.new_dirs, 0)::int AS new_dirs
+            FROM day_series
+            LEFT JOIN first_seen ON first_seen.day = day_series.day
+            ORDER BY day_series.day DESC
+        """, (clamped_days, f"{clamped_days + 1} days"))
+        return {
+            "days": [dict(row) for row in days_cur.fetchall()],
+            "totals": {
+                "known_combos": int(totals_row.get("known_combos") or 0),
+                "known_peers": int(totals_row.get("known_peers") or 0),
+                "known_dirs": int(totals_row.get("known_dirs") or 0),
+                "new_24h": int(totals_row.get("new_24h") or 0),
+                "cold_seen_24h": int(totals_row.get("cold_seen_24h") or 0),
+                "days_with_new": int(totals_row.get("days_with_new") or 0),
+                "tracked_since": _isoformat_or_none(
+                    totals_row.get("tracked_since")
+                ),
+            },
+        }
+
     def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
         """Return DB-derived metrics for the Pipeline dashboard.
 
@@ -1806,6 +1953,7 @@ class PipelineDB:
                 ),
             },
             "coverage": self._dashboard_coverage(),
+            "peer_dirs": self.get_peer_dir_daily_metrics(),
         }
 
     def _dashboard_search_window(self, label: str, hours: int) -> dict[str, Any]:

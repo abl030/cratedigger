@@ -74,6 +74,7 @@ class TestContextAccumulators(unittest.TestCase):
         self.assertEqual(ctx.peers_browsed, 0)
         self.assertEqual(ctx.peers_browsed_lazy, 0)
         self.assertEqual(ctx.fanout_waves, 0)
+        self.assertEqual(ctx.peer_dir_observations, set())
 
 
 class TestFormatCycleSummary(unittest.TestCase):

@@ -355,6 +355,25 @@ def _make_server():
                 },
             ],
         },
+        "peer_dirs": {
+            "totals": {
+                "known_combos": 1200,
+                "known_peers": 220,
+                "known_dirs": 980,
+                "new_24h": 80,
+                "cold_seen_24h": 95,
+                "days_with_new": 2,
+                "tracked_since": "2026-05-04T00:00:00+00:00",
+            },
+            "days": [
+                {
+                    "date": "2026-05-05",
+                    "new_combos": 80,
+                    "new_peers": 22,
+                    "new_dirs": 75,
+                },
+            ],
+        },
     }
     mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
     mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
@@ -914,6 +933,7 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
     DASHBOARD_REQUIRED_FIELDS = {
         "generated_at", "redis", "searches", "cycles", "coverage",
+        "peer_dirs",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
@@ -933,6 +953,14 @@ class TestPipelineRouteContracts(_WebServerCase):
         "wanted_never_searched", "active_wanted_searches_24h",
         "active_wanted_searches_6h", "oldest_last_search_at",
         "top_10_share_24h", "top_loop_suspects", "stale_wanted",
+    }
+    DASHBOARD_PEER_DIR_FIELDS = {"totals", "days"}
+    DASHBOARD_PEER_DIR_TOTAL_FIELDS = {
+        "known_combos", "known_peers", "known_dirs", "new_24h",
+        "cold_seen_24h", "days_with_new", "tracked_since",
+    }
+    DASHBOARD_PEER_DIR_DAY_FIELDS = {
+        "date", "new_combos", "new_peers", "new_dirs",
     }
 
     def setUp(self) -> None:
@@ -1040,6 +1068,15 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["coverage"],
                                 self.DASHBOARD_COVERAGE_FIELDS,
                                 "pipeline dashboard coverage")
+        _assert_required_fields(self, data["peer_dirs"],
+                                self.DASHBOARD_PEER_DIR_FIELDS,
+                                "pipeline dashboard peer dirs")
+        _assert_required_fields(self, data["peer_dirs"]["totals"],
+                                self.DASHBOARD_PEER_DIR_TOTAL_FIELDS,
+                                "pipeline dashboard peer dir totals")
+        _assert_required_fields(self, data["peer_dirs"]["days"][0],
+                                self.DASHBOARD_PEER_DIR_DAY_FIELDS,
+                                "pipeline dashboard peer dir day")
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
         _assert_required_fields(
