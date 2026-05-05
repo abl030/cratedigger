@@ -106,13 +106,14 @@ services.cratedigger.web = {
   port = mkOption { type = types.port; default = 8085; };
   beetsDb = mkOption { type = types.str; description = "Path to beets-library.db (read-only)"; };
   redis = {
-    host = mkOption { type = types.str; default = "127.0.0.1"; };  # the module does NOT enable redis
+    host = mkOption { type = types.str; default = "127.0.0.1"; };  # follows services.cratedigger.redis by default
     port = mkOption { type = types.port; default = 6379; };
   };
 };
+services.cratedigger.redis.enable = mkOption { type = types.bool; default = true; };
 ```
 
-Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (and the wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` provides the redis instance + reverse proxy entry):
+Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (the upstream module now owns `redis-cratedigger.service`; the homelab wrapper only supplies site-specific wiring such as reverse proxy defaults):
 
 ```nix
 # in hosts/doc2/configuration.nix — picks up the wrapper's defaults
@@ -128,7 +129,7 @@ What this creates on doc2:
   that prepares queued jobs for the serial importer when
   `services.cratedigger.importer.preview.enable = true`; defaults to two worker
   loops via `services.cratedigger.importer.previewWorkers`
-- `services.redis.servers.cratedigger` — provided by the homelab wrapper (not the upstream module)
+- `redis-cratedigger.service` — provided by the upstream module as `services.redis.servers.cratedigger`
 - `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
 - Cloudflare DNS + ACME cert auto-provisioned
 

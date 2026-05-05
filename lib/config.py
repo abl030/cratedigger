@@ -133,6 +133,14 @@ class CratediggerConfig:
     pipeline_db_enabled: bool = False
     pipeline_db_dsn: str = "postgresql://cratedigger@localhost/cratedigger"
 
+    # --- Peer Cache ---
+    peer_cache_redis_host: str = "127.0.0.1"
+    peer_cache_redis_port: int = 6379
+    peer_cache_ttl_seconds: int = 7 * 24 * 60 * 60
+    peer_cache_speed_ttl_seconds: int = 24 * 60 * 60
+    peer_cache_redis_connect_timeout_ms: int = 200
+    peer_cache_redis_operation_timeout_ms: int = 100
+
     # --- Meelo ---
     meelo_url: Optional[str] = None
     meelo_username: Optional[str] = None
@@ -301,6 +309,13 @@ class CratediggerConfig:
             # Pipeline DB
             pipeline_db_enabled=getbool("Pipeline DB", "enabled", False),
             pipeline_db_dsn=get("Pipeline DB", "dsn", "postgresql://cratedigger@localhost/cratedigger"),
+            # Peer Cache
+            peer_cache_redis_host=get("Peer Cache", "redis_host", "127.0.0.1"),
+            peer_cache_redis_port=max(1, min(65535, getint("Peer Cache", "redis_port", 6379))),
+            peer_cache_ttl_seconds=max(1, getint("Peer Cache", "ttl_seconds", 7 * 24 * 60 * 60)),
+            peer_cache_speed_ttl_seconds=max(1, getint("Peer Cache", "speed_ttl_seconds", 24 * 60 * 60)),
+            peer_cache_redis_connect_timeout_ms=max(1, getint("Peer Cache", "redis_connect_timeout_ms", 200)),
+            peer_cache_redis_operation_timeout_ms=max(1, getint("Peer Cache", "redis_operation_timeout_ms", 100)),
             # Meelo
             meelo_url=get("Meelo", "url") or None,
             meelo_username=get("Meelo", "username") or None,

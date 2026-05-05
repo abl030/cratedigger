@@ -25,7 +25,9 @@ from lib.matching import (
     album_match,
     check_for_match,
 )
+from lib.peer_cache import PeerCache
 from lib.quality import CandidateScore
+from tests.test_peer_cache import FakeRedis
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +379,39 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         )
         self.assertFalse(self._matched(result))
         self.assertEqual(self._candidates(result), [])
+
+    def test_redis_negative_skip_does_not_mark_user_broken(self) -> None:
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+        peer_cache.set_negative(self.username, "dirA")
+        self.ctx.peer_cache = peer_cache
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        self.assertEqual(self._candidates(result), [])
+        self.assertEqual(self.ctx.broken_user, [])
+        self.assertNotIn((self.username, "dirA", 3, "flac"), self.ctx.negative_matches)
+        self.assertEqual(self.ctx.peers_browsed_lazy, 0)
+        self.assertEqual(self.ctx.cache_neg_hits, 1)
+
+    def test_recorded_redis_negative_skip_avoids_second_lookup(self) -> None:
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+        peer_cache.set_negative(self.username, "dirA")
+        self.ctx.peer_cache = peer_cache
+        self.ctx.peer_cache_negative_skips.add((self.username, "dirA"))
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        self.assertEqual(redis.get_calls, 0)
+        self.assertEqual(self.ctx.cache_neg_hits, 0)
+        self.assertEqual(self.ctx.peers_browsed_lazy, 0)
 
     def test_partial_match_dir_records_partial_score(self) -> None:
         """Dir with full file_count but only 2 of 3 titles matching →

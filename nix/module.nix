@@ -13,7 +13,7 @@
   pkgs,
   ...
 }: let
-  inherit (lib) mkOption mkEnableOption mkIf optionalString types concatStringsSep;
+  inherit (lib) mkOption mkEnableOption mkIf optional optionalString types concatStringsSep;
 
   cfg = config.services.cratedigger;
   src = cfg.src;
@@ -35,12 +35,15 @@
     pkgs.sox
   ];
   importPreviewEnableEnv = if cfg.importer.preview.enable then "1" else "0";
+  redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";
 
   # CLI wrappers — the only place PYTHONPATH is set.
   cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
     export CRATEDIGGER_IMPORT_PREVIEW_ENABLE="${importPreviewEnableEnv}"
-    exec ${pythonEnv}/bin/python ${src}/cratedigger.py "$@"
+    exec ${pythonEnv}/bin/python ${src}/cratedigger.py \
+      --redis-host "${cfg.redis.host}" \
+      --redis-port ${toString cfg.redis.port} "$@"
   '';
 
   # PYTHONPATH carries ONLY the repo root. Adding ${src}/lib or ${src}/web
@@ -177,6 +180,14 @@
     [Pipeline DB]
     enabled = ${if cfg.pipelineDb.enable then "True" else "False"}
     dsn = ${cfg.pipelineDb.dsn}
+
+    [Peer Cache]
+    redis_host = ${cfg.redis.host}
+    redis_port = ${toString cfg.redis.port}
+    ttl_seconds = ${toString cfg.peerCache.ttlSeconds}
+    speed_ttl_seconds = ${toString cfg.peerCache.speedTtlSeconds}
+    redis_connect_timeout_ms = ${toString cfg.peerCache.redisConnectTimeoutMs}
+    redis_operation_timeout_ms = ${toString cfg.peerCache.redisOperationTimeoutMs}
 
     [Meelo]
     url = ${cfg.notifiers.meelo.url}
@@ -403,6 +414,51 @@ in {
       };
     };
 
+    redis = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Enable the local Redis server owned by cratedigger for peer-cache and web metadata caching.";
+      };
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Redis bind/client host used by the app-owned cratedigger Redis server.";
+      };
+      port = mkOption {
+        type = types.port;
+        default = 6379;
+      };
+      maxmemory = mkOption {
+        type = types.str;
+        default = "1gb";
+        description = "Redis maxmemory setting for the app-owned cratedigger server.";
+      };
+    };
+
+    peerCache = {
+      ttlSeconds = mkOption {
+        type = types.int;
+        default = 7 * 24 * 60 * 60;
+        description = "TTL in seconds for Redis peer_dir, peer_dir_neg, and peer_dir_count entries.";
+      };
+      speedTtlSeconds = mkOption {
+        type = types.int;
+        default = 24 * 60 * 60;
+        description = "TTL in seconds for Redis peer_speed entries.";
+      };
+      redisConnectTimeoutMs = mkOption {
+        type = types.int;
+        default = 200;
+        description = "Redis connect timeout for the pipeline peer cache, in milliseconds.";
+      };
+      redisOperationTimeoutMs = mkOption {
+        type = types.int;
+        default = 100;
+        description = "Redis command timeout for the pipeline peer cache, in milliseconds.";
+      };
+    };
+
     beetsValidation = {
       enable = mkOption {
         type = types.bool;
@@ -453,7 +509,7 @@ in {
         host = mkOption {
           type = types.str;
           default = "127.0.0.1";
-          description = "Redis host for caching. The module does NOT enable a redis server — provide one via services.redis.servers.* in your own config.";
+          description = "Redis host for web metadata caching. Defaults to the app-owned cratedigger Redis host.";
         };
         port = mkOption {
           type = types.port;
@@ -752,6 +808,19 @@ in {
       "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
     ];
 
+    services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
+    services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
+
+    services.redis.servers.cratedigger = {
+      enable = cfg.redis.enable;
+      bind = cfg.redis.host;
+      port = cfg.redis.port;
+      settings = {
+        maxmemory = cfg.redis.maxmemory;
+        "maxmemory-policy" = "allkeys-lru";
+      };
+    };
+
     # Schema migrator. RemainAfterExit=true so cratedigger / cratedigger-web can
     # require us without re-running on every cycle. Idempotent — fast no-op
     # when schema is already current.
@@ -771,7 +840,8 @@ in {
 
     systemd.services.cratedigger = {
       description = "Cratedigger — Soulseek download pipeline";
-      after = ["cratedigger-db-migrate.service"];
+      after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
+      wants = redisServiceUnits;
       requires = ["cratedigger-db-migrate.service"];
       restartIfChanged = false;
       # Deliberately exclude pythonEnv: it ships a `beet` binary (because
@@ -863,7 +933,8 @@ in {
 
     systemd.services.cratedigger-web = mkIf cfg.web.enable {
       description = "Cratedigger web UI";
-      after = ["cratedigger-db-migrate.service"];
+      after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
+      wants = redisServiceUnits;
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
       serviceConfig = {

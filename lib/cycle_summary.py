@@ -1,9 +1,4 @@
-"""Cycle-summary log line formatting.
-
-R13/R15 from issue #198: emit one grep-friendly key=value line at end of cycle
-attributing wall time to browse / match / cache-load / search phases plus
-fan-out wave counters. Pure function — testable without a real cycle.
-"""
+"""Cycle-summary log line formatting."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -24,7 +19,12 @@ def format_cycle_summary(ctx: CratediggerContext, elapsed_s: float) -> str:
         f"browse_time_s={ctx.browse_time_s:.1f} "
         f"match_time_s={ctx.match_time_s:.1f} "
         f"search_time_s={ctx.search_time_s:.1f} "
-        f"cache_load_s={ctx.cache_load_s:.1f} "
+        f"cache_pos_hits={ctx.cache_pos_hits} "
+        f"cache_neg_hits={ctx.cache_neg_hits} "
+        f"cache_misses={ctx.cache_misses} "
+        f"cache_errors={ctx.cache_errors} "
+        f"cache_fuse_tripped={ctx.cache_fuse_tripped} "
+        f"cache_write_errors={ctx.cache_write_errors} "
         f"peers_browsed={ctx.peers_browsed} "
         f"peers_browsed_lazy={ctx.peers_browsed_lazy} "
         f"fanout_waves={ctx.fanout_waves} "

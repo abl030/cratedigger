@@ -25,6 +25,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import TrackRecord
+from lib.browse import BrowseManyResult
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.enqueue import (
@@ -274,6 +275,30 @@ class TestWaveShape(unittest.TestCase):
         self.assertGreater(ctx.browse_time_s, 0.0)
         self.assertEqual(ctx.fanout_waves, 1)
         self.assertEqual(ctx.peers_browsed, 2)
+
+    def test_primary_negative_skips_are_visible_to_matching(self):
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(1)
+        user = users[0]
+        file_dir = f"Music\\{user}\\Album"
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        browse_result = BrowseManyResult(
+            negative_skips={(user, file_dir)},
+            browse_attempts=0,
+        )
+
+        def fake_match(_tracks, _allowed_filetype, _dirs, username, ctx):
+            self.assertEqual(username, user)
+            self.assertIn((user, file_dir), ctx.peer_cache_negative_skips)
+            return _nomatch()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=browse_result), \
+             patch("lib.enqueue.check_for_match", side_effect=fake_match):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertEqual(ctx.peers_browsed, 0)
+        self.assertEqual(ctx.peer_cache_negative_skips, {(user, file_dir)})
 
 
 # ---------------------------------------------------------------------------

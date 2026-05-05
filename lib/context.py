@@ -36,26 +36,27 @@ class CratediggerContext:
     denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
     cooled_down_users: set[str] = field(default_factory=set)
     prefetched_album_tracks: dict[int, list[Any]] = field(default_factory=dict)
-
-    # --- Cache timestamps (epoch floats, for per-entry TTL eviction) ---
-    _folder_cache_ts: dict[str, dict[str, float]] = field(default_factory=dict)
-    _upload_speed_ts: dict[str, float] = field(default_factory=dict)
-    _dir_audio_count_ts: dict[str, dict[str, float]] = field(default_factory=dict)
+    peer_cache: Any = None
+    peer_cache_negative_skips: set[tuple[str, str]] = field(default_factory=set)
 
     # --- Per-cycle timing accumulators (issue #198 U1 instrumentation).
     # browse / match are wrapped at the call sites in lib/matching.py;
-    # search is wrapped around _search_and_queue_parallel in cratedigger.py;
-    # cache_load is set once by lib/cache.load_caches.
+    # search is wrapped around _search_and_queue_parallel in cratedigger.py.
     #
-    # peers_browsed is the fan-out path's count (every (user, dir) submitted
-    # to a wave, success or failure). peers_browsed_lazy is the fallback
-    # path in lib/matching.py — it fires when fan-out left a (user, dir)
-    # unwritten via _browse_one's exception swallow. Splitting them avoids
-    # double-counting that same (user, dir) when the lazy path retries it.
+    # peers_browsed counts actual cold slskd directory submissions from the
+    # primary fan-out path. Redis hits, Redis negative skips, and duplicate
+    # callers that join existing in-flight browses do not increment it.
+    # peers_browsed_lazy tracks residual cold submissions from the fallback
+    # path in lib/matching.py.
     browse_time_s: float = 0.0
     match_time_s: float = 0.0
     search_time_s: float = 0.0
-    cache_load_s: float = 0.0
+    cache_pos_hits: int = 0
+    cache_neg_hits: int = 0
+    cache_misses: int = 0
+    cache_errors: int = 0
+    cache_fuse_tripped: int = 0
+    cache_write_errors: int = 0
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0

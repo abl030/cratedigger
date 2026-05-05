@@ -1,21 +1,16 @@
-"""Tests for U1 instrumentation: cycle-summary formatting + cache_load_s timing.
+"""Tests for cycle-summary formatting and per-cycle instrumentation.
 
-Issue #198 — instrumentation lands first as its own commit so we have numerical
-"before" data on browse / search / match / cache_load percentages before the
-fan-out refactor.
+The summary line is the operator-facing signal for browse/search/match timing,
+fan-out work, and Redis peer-cache behavior.
 """
 from __future__ import annotations
 
 import configparser
-import json
-import os
-import tempfile
 import unittest
 from typing import cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import SlskdFile, TrackRecord
-from lib.cache import load_caches, save_caches
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.cycle_summary import format_cycle_summary
@@ -70,72 +65,15 @@ class TestContextAccumulators(unittest.TestCase):
         ctx = _make_ctx()
         self.assertEqual(ctx.browse_time_s, 0.0)
         self.assertEqual(ctx.match_time_s, 0.0)
-        self.assertEqual(ctx.cache_load_s, 0.0)
+        self.assertEqual(ctx.cache_pos_hits, 0)
+        self.assertEqual(ctx.cache_neg_hits, 0)
+        self.assertEqual(ctx.cache_misses, 0)
+        self.assertEqual(ctx.cache_errors, 0)
+        self.assertEqual(ctx.cache_fuse_tripped, 0)
+        self.assertEqual(ctx.cache_write_errors, 0)
         self.assertEqual(ctx.peers_browsed, 0)
         self.assertEqual(ctx.peers_browsed_lazy, 0)
         self.assertEqual(ctx.fanout_waves, 0)
-
-
-class TestCacheLoadTiming(unittest.TestCase):
-    """`load_caches` records its wall-clock duration on `ctx.cache_load_s` so
-    the cycle summary can attribute time to the JSON cache load tax."""
-
-    def test_load_with_existing_file_records_positive_duration(self):
-        with tempfile.TemporaryDirectory() as var_dir:
-            # Seed a small valid cache file
-            payload = {
-                "saved_at": "2026-05-01T00:00:00+00:00",
-                "folder_cache": {},
-                "user_upload_speed": {},
-                "search_dir_audio_count": {},
-            }
-            with open(os.path.join(var_dir, "cratedigger_cache.json"), "w") as f:
-                json.dump(payload, f)
-
-            ctx = _make_ctx()
-            self.assertEqual(ctx.cache_load_s, 0.0)
-            load_caches(ctx, var_dir)
-            self.assertGreater(ctx.cache_load_s, 0.0)
-            self.assertLess(ctx.cache_load_s, 5.0,
-                            "cache load on a tiny file should be near-instant")
-
-    def test_load_with_missing_file_leaves_duration_zero(self):
-        with tempfile.TemporaryDirectory() as var_dir:
-            ctx = _make_ctx()
-            load_caches(ctx, var_dir)
-            self.assertEqual(ctx.cache_load_s, 0.0,
-                             "no file → no measurable load → stay at 0.0")
-
-    def test_load_with_corrupt_file_records_parse_attempt(self):
-        """Corrupt files still credit the (tiny) parse-attempt cost so the
-        cycle summary reflects time we actually spent. The try/finally
-        guarantees the metric isn't silently dropped on the early-return
-        path — that would be the same kind of bug as #2 in matching.py."""
-        with tempfile.TemporaryDirectory() as var_dir:
-            with open(os.path.join(var_dir, "cratedigger_cache.json"), "w") as f:
-                f.write("{ not valid json")
-            ctx = _make_ctx()
-            load_caches(ctx, var_dir)
-            self.assertGreater(ctx.cache_load_s, 0.0)
-            self.assertLess(
-                ctx.cache_load_s, 1.0,
-                "corrupt-file parse cost should be near-instant",
-            )
-
-    def test_save_load_roundtrip_preserves_accumulator_default(self):
-        """save_caches doesn't read or write accumulator fields — they're
-        cycle-scoped, not persistent."""
-        with tempfile.TemporaryDirectory() as var_dir:
-            ctx = _make_ctx()
-            ctx.browse_time_s = 99.0  # would-be live-cycle value
-            save_caches(ctx, var_dir)
-
-            ctx2 = _make_ctx()
-            load_caches(ctx2, var_dir)
-            self.assertEqual(
-                ctx2.browse_time_s, 0.0,
-                "accumulators must not leak across cycles via the cache file",
-            )
 
 
 class TestFormatCycleSummary(unittest.TestCase):
@@ -146,7 +84,12 @@ class TestFormatCycleSummary(unittest.TestCase):
     REQUIRED_KEYS = (
         "browse_time_s=",
         "match_time_s=",
-        "cache_load_s=",
+        "cache_pos_hits=",
+        "cache_neg_hits=",
+        "cache_misses=",
+        "cache_errors=",
+        "cache_fuse_tripped=",
+        "cache_write_errors=",
         "peers_browsed=",
         "peers_browsed_lazy=",
         "fanout_waves=",
@@ -166,7 +109,12 @@ class TestFormatCycleSummary(unittest.TestCase):
         ctx = _make_ctx()
         ctx.browse_time_s = 12.3
         ctx.match_time_s = 4.5
-        ctx.cache_load_s = 6.7
+        ctx.cache_pos_hits = 8
+        ctx.cache_neg_hits = 9
+        ctx.cache_misses = 10
+        ctx.cache_errors = 11
+        ctx.cache_fuse_tripped = 12
+        ctx.cache_write_errors = 13
         ctx.peers_browsed = 42
         ctx.peers_browsed_lazy = 5
         ctx.fanout_waves = 2
@@ -176,7 +124,13 @@ class TestFormatCycleSummary(unittest.TestCase):
         line = format_cycle_summary(ctx, elapsed_s=99.9)
         self.assertIn("browse_time_s=12.3", line)
         self.assertIn("match_time_s=4.5", line)
-        self.assertIn("cache_load_s=6.7", line)
+        self.assertNotIn("cache_load_s=", line)
+        self.assertIn("cache_pos_hits=8", line)
+        self.assertIn("cache_neg_hits=9", line)
+        self.assertIn("cache_misses=10", line)
+        self.assertIn("cache_errors=11", line)
+        self.assertIn("cache_fuse_tripped=12", line)
+        self.assertIn("cache_write_errors=13", line)
         self.assertIn("peers_browsed=42", line)
         self.assertIn("peers_browsed_lazy=5", line)
         self.assertIn("fanout_waves=2", line)

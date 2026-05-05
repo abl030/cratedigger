@@ -110,5 +110,41 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
 
 
+class TestOwnedRedisContract(unittest.TestCase):
+    def test_cratedigger_owns_local_redis_server_by_default(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("redis = {", text)
+        self.assertIn('default = true;', text)
+        self.assertIn("services.redis.servers.cratedigger", text)
+        self.assertIn("enable = cfg.redis.enable", text)
+        self.assertIn("bind = cfg.redis.host", text)
+        self.assertIn("port = cfg.redis.port", text)
+        self.assertIn('maxmemory = cfg.redis.maxmemory', text)
+        self.assertIn('"maxmemory-policy" = "allkeys-lru"', text)
+
+    def test_peer_cache_config_is_rendered(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("[Peer Cache]", text)
+        self.assertIn("redis_host = ${cfg.redis.host}", text)
+        self.assertIn("redis_port = ${toString cfg.redis.port}", text)
+        self.assertIn("ttl_seconds = ${toString cfg.peerCache.ttlSeconds}", text)
+        self.assertIn("speed_ttl_seconds = ${toString cfg.peerCache.speedTtlSeconds}", text)
+        self.assertIn("redis_connect_timeout_ms = ${toString cfg.peerCache.redisConnectTimeoutMs}", text)
+        self.assertIn("redis_operation_timeout_ms = ${toString cfg.peerCache.redisOperationTimeoutMs}", text)
+
+    def test_pipeline_and_web_are_ordered_after_owned_redis(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";', text)
+        self.assertIn('after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;', text)
+        self.assertIn('wants = redisServiceUnits;', text)
+        self.assertIn('after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;', text)
+        self.assertIn('wants = redisServiceUnits;', text)
+
+    def test_pipeline_wrapper_passes_redis_host_and_port(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('--redis-host "${cfg.redis.host}"', text)
+        self.assertIn("--redis-port ${toString cfg.redis.port}", text)
+
+
 if __name__ == "__main__":
     unittest.main()

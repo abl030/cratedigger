@@ -5,7 +5,6 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 `~/nixosconfig/modules/nixos/services/cratedigger.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
 - sops-nix per-key secret materialization (`cratedigger-secrets-split` oneshot — see below)
 - the nspawn PostgreSQL container for the pipeline DB
-- the redis instance for the web UI cache
 - the `homelab.localProxy.hosts` entry for `music.ablz.au`
 - systemd `after`/`wants`/`restartTriggers` splicing in `container@cratedigger-db.service`
 
@@ -21,8 +20,10 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
 | `pipelineDb.dsn` | (required) | PostgreSQL DSN. |
+| `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `1gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
+| `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beetsValidation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
-| `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. The module does NOT enable redis — provide one. |
+| `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
 | `notifiers.meelo.{enable,url,usernameFile,passwordFile}` | disabled | Meelo notifier. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile}` | disabled | Jellyfin notifier. |
@@ -49,14 +50,16 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 
 ## What the module does
 
-1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, slskd-api).
+1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard, slskd-api).
 2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
 3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path. App units render through an atomic temp-file-and-rename step because importer, preview, web, and timer-driven services can start concurrently after migrations.
-4. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
+4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
+5. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
 
 ## Systemd units
 
 - `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The app units `requires` it, so they cannot start against an un-migrated DB.
+- `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. `cratedigger.service` and `cratedigger-web.service` want/after it, but do not require it; runtime Redis failures degrade to cold-cache behavior.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
   (configurable via `timer.onUnitInactiveSec`).
@@ -107,6 +110,49 @@ nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
 ```
 
 This catches: option surface breakage, prestart sed-substitution bugs, systemd dep graph cycles, wrapper script PYTHONPATH errors, missing python deps. It does NOT exercise slskd interaction or real downloads (those need fixture data — see the python suite). Run before any `nix/module.nix` change.
+
+For Redis peer-cache changes, verify with a paused timer and one manual cycle:
+
+```bash
+sudo systemctl stop cratedigger.timer
+sudo nixos-rebuild switch --flake .#HOST
+systemctl is-active redis-cratedigger.service
+redis-cli -p 6379 CONFIG GET maxmemory-policy
+systemctl show -p After -p Wants cratedigger.service cratedigger-web.service
+grep -A8 '^\[Peer Cache\]' /var/lib/cratedigger/config.ini
+sudo systemctl start cratedigger.service
+journalctl -u cratedigger.service -n 80 --no-pager | grep 'Cratedigger cycle complete'
+redis-cli -p 6379 --scan --pattern 'peer_*' | wc -l
+sudo systemctl start cratedigger.timer
+```
+
+Expected output: Redis is `active`, `maxmemory-policy` is `allkeys-lru`,
+both app units list `redis-cratedigger.service` in `After` and `Wants`, and
+`config.ini` contains `[Peer Cache]` with the rendered Redis host, port, TTL,
+and timeout values. The first cycle is allowed to be cold; later cycle
+summaries should show `cache_pos_hits`, `cache_neg_hits`, and `cache_misses`
+moving while `cache_errors=0 cache_fuse_tripped=0 cache_write_errors=0`.
+
+Stop and roll back if cache error counters are nonzero after Redis is active,
+if Redis key growth is far above the number of browsed peer directories, or if
+matching/download behavior regresses. The old
+`/var/lib/cratedigger/cratedigger_cache.json` is no longer read or updated by
+new code; keep it on disk only as a rollback aid after code rollback.
+
+Rollback:
+
+```bash
+sudo systemctl stop cratedigger.timer cratedigger.service
+sudo nixos-rebuild switch --flake .#HOST --rollback
+# Optional when bad Redis writes are suspected:
+redis-cli -p 6379 --scan --pattern 'peer_dir:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_dir_neg:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_speed:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_dir_count:*' | xargs -r redis-cli -p 6379 DEL
+sudo systemctl start cratedigger.service
+stat /var/lib/cratedigger/cratedigger_cache.json
+sudo systemctl start cratedigger.timer
+```
 
 After deploy, verify the queue workers before assuming imports will drain:
 

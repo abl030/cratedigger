@@ -151,7 +151,7 @@ Add it to your flake:
 }
 ```
 
-You provide: PostgreSQL (the module just takes a DSN), slskd, redis if you want web caching, and a secrets backend that materializes `*File` paths the module reads. The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.cratedigger.user` once you've set up the surrounding permissions.
+You provide: PostgreSQL (the module just takes a DSN), slskd, and a secrets backend that materializes `*File` paths the module reads. The module owns a local Redis server by default for the pipeline peer cache and web metadata cache (`redis-cratedigger.service`, `maxmemory=1gb`, `allkeys-lru`). The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.cratedigger.user` once you've set up the surrounding permissions.
 
 Try it without committing:
 
@@ -455,6 +455,7 @@ Shared infrastructure lives in `tests/fakes.py` (stateful fakes) and `tests/help
 Deployed via NixOS. The upstream module at [`nix/module.nix`](nix/module.nix) builds a Python environment with dependencies and registers the runtime systemd units:
 
 - `cratedigger-db-migrate.service` — oneshot, runs the schema migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch`. `restartIfChanged = true` + `RemainAfterExit = true` so it always re-evaluates when the unit derivation changes but doesn't re-run between cycles.
+- `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. The pipeline/web units want and start after it, but do not require it; Redis failures degrade to cold-cache behavior.
 - `cratedigger.service` — oneshot pipeline run, triggered by `cratedigger.timer`. Runs healthcheck → prestart (renders `config.ini`) → `cratedigger.py`. `restartIfChanged = false` so deploys don't restart it mid-cycle; the next timer fire picks up the new code.
 - `cratedigger.timer` — starts the next cycle 1 second after the previous
   oneshot exits by default (`services.cratedigger.timer.onUnitInactiveSec`).
@@ -480,6 +481,37 @@ sudo nixos-rebuild switch --flake .       # or via --flake github:user/repo#host
 ```
 
 `restartIfChanged = false` on `cratedigger.service` means the deploy completes without restarting an in-flight cycle; the next 5-min timer fire runs the new code.
+
+For the first Redis peer-cache deploy, run it as a controlled single-cycle rollout:
+
+```bash
+sudo systemctl stop cratedigger.timer
+sudo nixos-rebuild switch --flake .#HOST
+systemctl is-active redis-cratedigger.service
+redis-cli -p 6379 CONFIG GET maxmemory-policy
+grep -A8 '^\[Peer Cache\]' /var/lib/cratedigger/config.ini
+sudo systemctl start cratedigger.service
+journalctl -u cratedigger.service -n 80 --no-pager | grep 'Cratedigger cycle complete'
+redis-cli -p 6379 --scan --pattern 'peer_*' | wc -l
+sudo systemctl start cratedigger.timer
+```
+
+Expected: Redis is `active`, `maxmemory-policy` is `allkeys-lru`, config contains `redis_host = 127.0.0.1`, the first cycle may be cold, and later summaries should show nonzero `cache_pos_hits` or `cache_neg_hits` with `cache_errors=0 cache_fuse_tripped=0 cache_write_errors=0`. Stop and roll back if any cache error counter is nonzero after Redis is active, if key growth is explosive for your cycle volume, or if matches/downloads regress. The old `cratedigger_cache.json` is intentionally left on disk but new code no longer reads or writes it.
+
+Rollback:
+
+```bash
+sudo systemctl stop cratedigger.timer cratedigger.service
+sudo nixos-rebuild switch --flake .#HOST --rollback
+# Optional when bad Redis writes are suspected:
+redis-cli -p 6379 --scan --pattern 'peer_dir:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_dir_neg:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_speed:*' | xargs -r redis-cli -p 6379 DEL
+redis-cli -p 6379 --scan --pattern 'peer_dir_count:*' | xargs -r redis-cli -p 6379 DEL
+sudo systemctl start cratedigger.service
+stat /var/lib/cratedigger/cratedigger_cache.json
+sudo systemctl start cratedigger.timer
+```
 
 After deploying importer queue changes, check:
 
