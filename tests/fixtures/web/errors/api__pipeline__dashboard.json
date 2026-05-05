@@ -13,6 +13,7 @@
         "searches": 144,
         "distinct_requests": 9,
         "searches_per_hour": 6,
+        "searches_per_24h": 144,
         "avg_elapsed_s": 72,
         "median_elapsed_s": 65,
         "p95_elapsed_s": 140,

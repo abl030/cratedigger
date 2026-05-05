@@ -1227,11 +1227,16 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(searches_24h["label"], "24h")
         self.assertEqual(searches_24h["searches"], 5)
         self.assertEqual(searches_24h["distinct_requests"], 2)
+        self.assertAlmostEqual(searches_24h["searches_per_24h"], 5)
         self.assertEqual(searches_24h["outcomes"]["found"], 1)
         self.assertEqual(searches_24h["outcomes"]["no_match"], 1)
         self.assertEqual(searches_24h["outcomes"]["no_results"], 1)
         self.assertEqual(searches_24h["outcomes"]["exhausted"], 1)
         self.assertEqual(searches_24h["outcomes"]["errors"], 1)
+
+        searches_6h = metrics["searches"]["windows"][1]
+        self.assertEqual(searches_6h["label"], "6h")
+        self.assertAlmostEqual(searches_6h["searches_per_24h"], 20)
 
         cycles_6h = metrics["cycles"]["windows"][1]
         self.assertEqual(cycles_6h["label"], "6h")

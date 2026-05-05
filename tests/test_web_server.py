@@ -194,6 +194,7 @@ def _make_server():
                     "searches": 12,
                     "distinct_requests": 8,
                     "searches_per_hour": 0.5,
+                    "searches_per_24h": 12,
                     "avg_elapsed_s": 4.2,
                     "median_elapsed_s": 3.1,
                     "p95_elapsed_s": 9.9,
@@ -212,6 +213,7 @@ def _make_server():
                     "searches": 5,
                     "distinct_requests": 5,
                     "searches_per_hour": 0.8333333333,
+                    "searches_per_24h": 20,
                     "avg_elapsed_s": 3.0,
                     "median_elapsed_s": 2.8,
                     "p95_elapsed_s": 5.0,
@@ -937,8 +939,8 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
-        "searches_per_hour", "avg_elapsed_s", "median_elapsed_s",
-        "p95_elapsed_s", "max_elapsed_s", "outcomes",
+        "searches_per_hour", "searches_per_24h", "avg_elapsed_s",
+        "median_elapsed_s", "p95_elapsed_s", "max_elapsed_s", "outcomes",
     }
     DASHBOARD_CYCLE_WINDOW_FIELDS = {
         "label", "hours", "cycles", "avg_cycle_s", "median_cycle_s",

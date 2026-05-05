@@ -1983,6 +1983,7 @@ class PipelineDB:
             "searches": searches,
             "distinct_requests": int(row.get("distinct_requests") or 0),
             "searches_per_hour": searches / hours if hours else 0,
+            "searches_per_24h": (searches / hours * 24) if hours else 0,
             "avg_elapsed_s": _float_or_none(row.get("avg_elapsed_s")),
             "median_elapsed_s": _float_or_none(row.get("median_elapsed_s")),
             "p95_elapsed_s": _float_or_none(row.get("p95_elapsed_s")),

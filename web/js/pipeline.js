@@ -262,14 +262,14 @@ function renderSearchCard(windows) {
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Search Throughput</div>
       <table class="dashboard-table">
-        <thead><tr><th>Window</th><th>Searches</th><th>Requests</th><th>/hr</th><th>Median</th><th>P95</th><th>Found</th><th>No match</th><th>Empty</th><th>Resets</th><th>Errors</th></tr></thead>
+        <thead><tr><th>Window</th><th>Searches</th><th>Requests</th><th>24h Pace</th><th>Median</th><th>P95</th><th>Found</th><th>No match</th><th>Empty</th><th>Resets</th><th>Errors</th></tr></thead>
         <tbody>
           ${windows.map(w => `
             <tr>
               <td>${esc(w.label)}</td>
               <td>${formatCount(w.searches)}</td>
               <td>${formatCount(w.distinct_requests)}</td>
-              <td>${formatDecimal(w.searches_per_hour)}</td>
+              <td>${formatProjected24h(w)}</td>
               <td>${formatDuration(w.median_elapsed_s)}</td>
               <td>${formatDuration(w.p95_elapsed_s)}</td>
               <td>${formatCount(w.outcomes?.found)}</td>
@@ -341,28 +341,27 @@ function renderCycleOutliers(rows) {
 }
 
 function renderLoopSuspects(rows) {
+  const topRows = rows.slice(0, 3);
   return `
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Loop Suspects</div>
       <table class="dashboard-table">
-        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>24h</th><th>6h</th><th>Found</th><th>No match</th><th>No results</th><th>Resets</th><th>Errors</th><th>Last</th></tr></thead>
+        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>24h</th><th>Found</th><th>No match</th><th>Empty</th><th>Resets</th><th>Errors</th></tr></thead>
         <tbody>
-          ${rows.map(r => `
+          ${topRows.map(r => `
             <tr>
               <td>#${r.request_id}</td>
-              <td>${esc(r.artist_name || '')}</td>
-              <td>${esc(r.album_title || '')}</td>
+              <td title="${esc(r.artist_name || '')}">${esc(formatShortText(r.artist_name, 10))}</td>
+              <td title="${esc(r.album_title || '')}">${esc(formatShortText(r.album_title, 5))}</td>
               <td class="${r.searches_24h > 3 ? 'metric-warn' : ''}">${formatCount(r.searches_24h)}</td>
-              <td>${formatCount(r.searches_6h)}</td>
               <td>${formatCount(r.found_24h)}</td>
               <td>${formatCount(r.no_match_24h)}</td>
               <td>${formatCount(r.no_results_24h)}</td>
               <td>${formatCount(r.reset_24h)}</td>
               <td class="${r.problem_24h ? 'metric-warn' : ''}">${formatCount(r.problem_24h)}</td>
-              <td>${r.last_search_at ? awstDateTime(r.last_search_at) : 'never'}</td>
             </tr>
           `).join('')}
-          ${rows.length === 0 ? '<tr><td colspan="11">No repeated wanted searches in 24h</td></tr>' : ''}
+          ${topRows.length === 0 ? '<tr><td colspan="9">No repeated wanted searches in 24h</td></tr>' : ''}
         </tbody>
       </table>
     </div>
@@ -403,6 +402,31 @@ function formatDecimal(value) {
   if (value == null || Number.isNaN(Number(value))) return 'n/a';
   const n = Number(value);
   return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+}
+
+function formatShortText(value, maxLength) {
+  const text = String(value || '');
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function formatProjected24h(w) {
+  if (w.searches_per_24h != null) {
+    const direct = Number(w.searches_per_24h);
+    if (Number.isFinite(direct)) return formatCount(Math.round(direct));
+  }
+
+  if (w.searches_per_hour != null) {
+    const perHour = Number(w.searches_per_hour);
+    if (Number.isFinite(perHour)) return formatCount(Math.round(perHour * 24));
+  }
+
+  const searches = Number(w.searches);
+  const hours = Number(w.hours);
+  if (Number.isFinite(searches) && Number.isFinite(hours) && hours > 0) {
+    return formatCount(Math.round((searches / hours) * 24));
+  }
+
+  return 'n/a';
 }
 
 function formatDuration(value) {
