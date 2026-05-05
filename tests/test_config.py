@@ -154,6 +154,52 @@ class TestConfigFromIni(unittest.TestCase):
         cfg = CratediggerConfig.from_ini(ini)
         self.assertEqual(cfg.search_file_limit, 50000)
 
+    def test_peer_cache_defaults_when_section_missing(self):
+        """Missing [Peer Cache] section yields the Redis peer-cache defaults."""
+        cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+        self.assertEqual(cfg.peer_cache_redis_host, "127.0.0.1")
+        self.assertEqual(cfg.peer_cache_redis_port, 6379)
+        self.assertEqual(cfg.peer_cache_ttl_seconds, 604800)
+        self.assertEqual(cfg.peer_cache_speed_ttl_seconds, 86400)
+        self.assertEqual(cfg.peer_cache_redis_connect_timeout_ms, 200)
+        self.assertEqual(cfg.peer_cache_redis_operation_timeout_ms, 100)
+
+    def test_peer_cache_explicit_values(self):
+        ini = configparser.ConfigParser()
+        ini.read_string(
+            "[Peer Cache]\n"
+            "redis_host = 10.0.0.5\n"
+            "redis_port = 6380\n"
+            "ttl_seconds = 12345\n"
+            "speed_ttl_seconds = 456\n"
+            "redis_connect_timeout_ms = 250\n"
+            "redis_operation_timeout_ms = 75\n"
+        )
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.peer_cache_redis_host, "10.0.0.5")
+        self.assertEqual(cfg.peer_cache_redis_port, 6380)
+        self.assertEqual(cfg.peer_cache_ttl_seconds, 12345)
+        self.assertEqual(cfg.peer_cache_speed_ttl_seconds, 456)
+        self.assertEqual(cfg.peer_cache_redis_connect_timeout_ms, 250)
+        self.assertEqual(cfg.peer_cache_redis_operation_timeout_ms, 75)
+
+    def test_peer_cache_minimums_clamped(self):
+        ini = configparser.ConfigParser()
+        ini.read_string(
+            "[Peer Cache]\n"
+            "redis_port = 0\n"
+            "ttl_seconds = 0\n"
+            "speed_ttl_seconds = -1\n"
+            "redis_connect_timeout_ms = 0\n"
+            "redis_operation_timeout_ms = -50\n"
+        )
+        cfg = CratediggerConfig.from_ini(ini)
+        self.assertEqual(cfg.peer_cache_redis_port, 1)
+        self.assertEqual(cfg.peer_cache_ttl_seconds, 1)
+        self.assertEqual(cfg.peer_cache_speed_ttl_seconds, 1)
+        self.assertEqual(cfg.peer_cache_redis_connect_timeout_ms, 1)
+        self.assertEqual(cfg.peer_cache_redis_operation_timeout_ms, 1)
+
     def test_search_response_limit_zero_passes_through(self):
         """`from_ini` does not validate; a literal 0 is accepted as-is.
 

@@ -27,7 +27,9 @@ from unittest.mock import MagicMock
 
 from lib.browse import _fanout_browse_users, get_browse_coordinator
 from lib.context import CratediggerContext
+from lib.peer_cache import PeerCache
 from tests.fakes import FakeSlskdAPI
+from tests.test_peer_cache import FakeRedis
 
 
 def _make_ctx(slskd: Any) -> CratediggerContext:
@@ -65,7 +67,64 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         self.assertEqual(set(ctx.folder_cache.keys()), set(users))
         for u in users:
             self.assertEqual(set(ctx.folder_cache[u].keys()), set(dirs))
-            self.assertEqual(set(ctx._folder_cache_ts[u].keys()), set(dirs))
+
+    def test_redis_positive_hit_warms_hot_cache_without_slskd_browse(self):
+        slskd = FakeSlskdAPI()
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+        directory = _make_directory("A")
+        peer_cache.set_directory("user1", "A", directory)
+
+        ctx = _make_ctx(slskd)
+        ctx.peer_cache = peer_cache
+        result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
+
+        self.assertEqual(slskd.users.directory_calls, [])
+        self.assertEqual(ctx.folder_cache["user1"]["A"], directory)
+        self.assertEqual(result.browse_attempts, 0)
+        self.assertEqual(result.negative_skips, set())
+        self.assertEqual(ctx.cache_pos_hits, 1)
+
+    def test_redis_negative_hit_skips_slskd_without_hot_cache_write(self):
+        slskd = FakeSlskdAPI()
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+        peer_cache.set_negative("user1", "A")
+
+        ctx = _make_ctx(slskd)
+        ctx.peer_cache = peer_cache
+        result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
+
+        self.assertEqual(slskd.users.directory_calls, [])
+        self.assertEqual(ctx.folder_cache["user1"], {})
+        self.assertEqual(result.browse_attempts, 0)
+        self.assertEqual(result.negative_skips, {("user1", "A")})
+        self.assertEqual(ctx.cache_neg_hits, 1)
+
+    def test_empty_browse_writes_persistent_negative(self):
+        slskd = FakeSlskdAPI()
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+
+        ctx = _make_ctx(slskd)
+        ctx.peer_cache = peer_cache
+        result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
+
+        self.assertEqual(result.browse_attempts, 1)
+        self.assertIn("peer_dir_neg:user1:A", redis.store)
+
+    def test_exception_browse_does_not_write_persistent_negative(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory_error("user1", "A", RuntimeError("slskd down"))
+        redis = FakeRedis()
+        peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
+
+        ctx = _make_ctx(slskd)
+        ctx.peer_cache = peer_cache
+        result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
+
+        self.assertEqual(result.browse_attempts, 1)
+        self.assertNotIn("peer_dir_neg:user1:A", redis.store)
 
     def test_pre_creates_user_buckets_for_every_work_item(self):
         """Every user in the wave must have an inner dict before any future writes.

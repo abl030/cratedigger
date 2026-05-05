@@ -65,17 +65,9 @@ pkgs.testers.nixosTest {
       web = {
         enable = true;
         beetsDb = "/etc/cratedigger/beets.db";
-        redis.host = "127.0.0.1";
       };
       timer.enable = false;
       healthCheck.enable = false;
-    };
-
-    # The module doesn't enable redis itself — provide one for the web UI.
-    services.redis.servers."" = {
-      enable = true;
-      port = 6379;
-      bind = "127.0.0.1";
     };
 
     # Order our migrate unit after postgres comes up.
@@ -83,8 +75,10 @@ pkgs.testers.nixosTest {
       after = [ "postgresql.service" ];
       requires = [ "postgresql.service" ];
     };
-    systemd.services.cratedigger-web.after = [ "postgresql.service" "redis.service" ];
-    systemd.services.cratedigger-web.wants = [ "postgresql.service" "redis.service" ];
+    systemd.services.cratedigger.after = [ "postgresql.service" ];
+    systemd.services.cratedigger.wants = [ "postgresql.service" ];
+    systemd.services.cratedigger-web.after = [ "postgresql.service" ];
+    systemd.services.cratedigger-web.wants = [ "postgresql.service" ];
 
     # Speed up the VM
     virtualisation.memorySize = 2048;
@@ -93,6 +87,7 @@ pkgs.testers.nixosTest {
   testScript = ''
     machine.start()
     machine.wait_for_unit("postgresql.service")
+    machine.wait_for_unit("redis-cratedigger.service")
     machine.wait_for_unit("cratedigger-db-migrate.service")
 
     # The migrator is a oneshot with RemainAfterExit=true — confirm it landed
@@ -120,6 +115,14 @@ pkgs.testers.nixosTest {
     assert mode == "644", f"config.ini should be 0644, got {mode}"
     machine.succeed("grep -q 'enabled = False' /var/lib/cratedigger/config.ini")  # beets disabled
     machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '\\[Peer Cache\\]' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q 'redis_host = 127.0.0.1' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q 'ttl_seconds = 604800' /var/lib/cratedigger/config.ini")
+    machine.succeed("${pkgs.redis}/bin/redis-cli -p 6379 CONFIG GET maxmemory-policy | grep -q allkeys-lru")
+    machine.succeed("systemctl show -p After cratedigger.service | grep -q redis-cratedigger.service")
+    machine.succeed("systemctl show -p Wants cratedigger.service | grep -q redis-cratedigger.service")
+    machine.succeed("systemctl show -p After cratedigger-web.service | grep -q redis-cratedigger.service")
+    machine.succeed("systemctl show -p Wants cratedigger-web.service | grep -q redis-cratedigger.service")
 
     # pipeline-cli on PATH and connects
     machine.succeed("pipeline-cli list wanted")

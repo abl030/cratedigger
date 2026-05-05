@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import time
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,6 +15,32 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("cratedigger")
+
+
+@dataclass(frozen=True)
+class BrowseManyResult:
+    directories: dict[tuple[str, str], Any] = field(default_factory=dict)
+    negative_skips: set[tuple[str, str]] = field(default_factory=set)
+    browse_attempts: int = 0
+
+
+@dataclass(frozen=True)
+class BrowseOneResult:
+    file_dir: str
+    directory: Any | None = None
+    cache_negative: bool = False
+
+
+def _peer_cache_for(ctx: CratediggerContext) -> Any | None:
+    return getattr(ctx, "peer_cache", None)
+
+
+def _drain_peer_cache_stats(ctx: CratediggerContext) -> None:
+    cache = _peer_cache_for(ctx)
+    if cache is None:
+        return
+    from lib.peer_cache import drain_stats_into_context
+    drain_stats_into_context(ctx, cache)
 
 
 class BrowseCoordinator:
@@ -28,7 +54,7 @@ class BrowseCoordinator:
             thread_name_prefix="browse",
         )
         self._lock = threading.RLock()
-        self._inflight: dict[tuple[str, str], Future[Any | None]] = {}
+        self._inflight: dict[tuple[str, str], Future[BrowseOneResult]] = {}
 
     @property
     def max_workers(self) -> int:
@@ -51,29 +77,78 @@ class BrowseCoordinator:
         self,
         work_items: list[tuple[str, str]],
         slskd_client: Any,
-    ) -> dict[tuple[str, str], Any]:
+    ) -> BrowseManyResult:
         """Browse uncached directories with process-wide capacity."""
         if not work_items:
-            return {}
+            return BrowseManyResult()
 
-        futures: dict[tuple[str, str], Future[Any | None]] = {}
-        with self._lock:
-            for user, file_dir in work_items:
+        futures: dict[tuple[str, str], Future[BrowseOneResult]] = {}
+        negative_skips: set[tuple[str, str]] = set()
+        browse_attempts = 0
+        for user, file_dir in work_items:
+            key = (user, file_dir)
+            with self._lock:
                 self._ctx.folder_cache.setdefault(user, {})
-                self._ctx._folder_cache_ts.setdefault(user, {})
                 cached = self._ctx.folder_cache[user].get(file_dir)
                 if cached is not None:
-                    future: Future[Any | None] = Future()
-                    future.set_result(cached)
-                    futures[(user, file_dir)] = future
+                    future: Future[BrowseOneResult] = Future()
+                    future.set_result(BrowseOneResult(file_dir, cached))
+                    futures[key] = future
                     continue
-                key = (user, file_dir)
+                existing_future = self._inflight.get(key)
+                if existing_future is not None:
+                    futures[key] = existing_future
+                    continue
+
+            peer_cache = _peer_cache_for(self._ctx)
+            if peer_cache is not None:
+                redis_cached = peer_cache.get_directory(user, file_dir)
+                _drain_peer_cache_stats(self._ctx)
+                if redis_cached is not None:
+                    with self._lock:
+                        existing_future = self._inflight.get(key)
+                        if existing_future is None:
+                            _store_hot_directory(
+                                self._ctx, user, file_dir, redis_cached,
+                            )
+                        else:
+                            futures[key] = existing_future
+                            continue
+                    future = Future()
+                    future.set_result(BrowseOneResult(file_dir, redis_cached))
+                    futures[key] = future
+                    continue
+                if peer_cache.has_negative(user, file_dir):
+                    _drain_peer_cache_stats(self._ctx)
+                    with self._lock:
+                        cached = self._ctx.folder_cache[user].get(file_dir)
+                        if cached is not None:
+                            future = Future()
+                            future.set_result(BrowseOneResult(file_dir, cached))
+                            futures[key] = future
+                            continue
+                        existing_future = self._inflight.get(key)
+                        if existing_future is not None:
+                            futures[key] = existing_future
+                            continue
+                    negative_skips.add(key)
+                    continue
+                _drain_peer_cache_stats(self._ctx)
+
+            with self._lock:
+                cached = self._ctx.folder_cache[user].get(file_dir)
+                if cached is not None:
+                    future = Future()
+                    future.set_result(BrowseOneResult(file_dir, cached))
+                    futures[key] = future
+                    continue
                 existing_future = self._inflight.get(key)
                 if existing_future is None:
                     browse_future = self._executor.submit(
                         self._browse_and_cache, user, file_dir, slskd_client,
                     )
                     self._inflight[key] = browse_future
+                    browse_attempts += 1
                 else:
                     browse_future = existing_future
                 futures[key] = browse_future
@@ -81,9 +156,15 @@ class BrowseCoordinator:
         results: dict[tuple[str, str], Any] = {}
         for key, future in futures.items():
             result = future.result()
-            if result is not None:
-                results[key] = result
-        return results
+            if result.directory is not None:
+                results[key] = result.directory
+            elif result.cache_negative:
+                negative_skips.add(key)
+        return BrowseManyResult(
+            directories=results,
+            negative_skips=negative_skips,
+            browse_attempts=browse_attempts,
+        )
 
     def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
@@ -93,12 +174,16 @@ class BrowseCoordinator:
         username: str,
         file_dir: str,
         slskd_client: Any,
-    ) -> Any | None:
-        _file_dir, result = _browse_one(username, file_dir, slskd_client)
+    ) -> BrowseOneResult:
+        result = _browse_one(username, file_dir, slskd_client)
         with self._lock:
-            if result is not None:
-                _cache_browsed_directory(self._ctx, username, file_dir, result)
+            if result.directory is not None:
+                _store_hot_directory(self._ctx, username, file_dir, result.directory)
             self._inflight.pop((username, file_dir), None)
+        if result.directory is not None:
+            _write_peer_cache_directory(self._ctx, username, file_dir, result.directory)
+        elif result.cache_negative:
+            _write_peer_cache_negative(self._ctx, username, file_dir)
         return result
 
 
@@ -141,15 +226,52 @@ def _cache_browsed_directory(
     username: str,
     file_dir: str,
     directory: Any,
+    *,
+    persist: bool = True,
+) -> None:
+    _store_hot_directory(ctx, username, file_dir, directory)
+    if persist:
+        _write_peer_cache_directory(ctx, username, file_dir, directory)
+
+
+def _store_hot_directory(
+    ctx: CratediggerContext,
+    username: str,
+    file_dir: str,
+    directory: Any,
 ) -> None:
     _ensure_cache_user(ctx, username)
     ctx.folder_cache[username][file_dir] = directory
-    ctx._folder_cache_ts[username][file_dir] = time.time()
+    negative_skips = getattr(ctx, "peer_cache_negative_skips", None)
+    if negative_skips is not None:
+        negative_skips.discard((username, file_dir))
+
+
+def _write_peer_cache_directory(
+    ctx: CratediggerContext,
+    username: str,
+    file_dir: str,
+    directory: Any,
+) -> None:
+    peer_cache = _peer_cache_for(ctx)
+    if peer_cache is not None:
+        peer_cache.set_directory(username, file_dir, directory)
+        _drain_peer_cache_stats(ctx)
+
+
+def _write_peer_cache_negative(
+    ctx: CratediggerContext,
+    username: str,
+    file_dir: str,
+) -> None:
+    peer_cache = _peer_cache_for(ctx)
+    if peer_cache is not None:
+        peer_cache.set_negative(username, file_dir)
+        _drain_peer_cache_stats(ctx)
 
 
 def _ensure_cache_user(ctx: CratediggerContext, username: str) -> None:
     ctx.folder_cache.setdefault(username, {})
-    ctx._folder_cache_ts.setdefault(username, {})
 
 
 def ensure_cache_user(ctx: CratediggerContext, username: str) -> None:
@@ -248,17 +370,24 @@ def _browse_one(
     username: str,
     file_dir: str,
     slskd_client: Any,
-) -> tuple[str, Any | None]:
+) -> BrowseOneResult:
     """Browse a single directory from slskd."""
     try:
-        directory = slskd_client.users.directory(
+        directories = slskd_client.users.directory(
             username=username,
             directory=file_dir,
-        )[0]
-        return file_dir, directory
+        )
     except Exception:
         logger.exception(f'Error getting directory from user: "{username}"')
-        return file_dir, None
+        return BrowseOneResult(file_dir)
+    if not directories:
+        return BrowseOneResult(file_dir, cache_negative=True)
+    try:
+        directory = directories[0]
+    except Exception:
+        logger.exception(f'Invalid directory response from user: "{username}"')
+        return BrowseOneResult(file_dir)
+    return BrowseOneResult(file_dir, directory)
 
 
 def _browse_directories(
@@ -272,8 +401,10 @@ def _browse_directories(
         return {}
 
     if len(dirs_to_browse) == 1:
-        file_dir, result = _browse_one(username, dirs_to_browse[0], slskd_client)
-        return {file_dir: result} if result is not None else {}
+        result = _browse_one(username, dirs_to_browse[0], slskd_client)
+        if result.directory is None:
+            return {}
+        return {result.file_dir: result.directory}
 
     results: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -282,9 +413,9 @@ def _browse_directories(
             for d in dirs_to_browse
         }
         for future in as_completed(futures):
-            file_dir, result = future.result()
-            if result is not None:
-                results[file_dir] = result
+            result = future.result()
+            if result.directory is not None:
+                results[result.file_dir] = result.directory
 
     return results
 
@@ -294,7 +425,7 @@ def _fanout_browse_users(
     slskd_client: Any,
     ctx: CratediggerContext,
     max_workers: int,
-) -> None:
+) -> BrowseManyResult:
     """Bounded parallel browse fan-out across (user, dir) pairs.
 
     Routes each `(username, file_dir)` browse through the shared
@@ -307,14 +438,14 @@ def _fanout_browse_users(
     real peers had a chance to respond and were starving the pipeline (see
     2026-05-02 regression).
 
-    Thread-safety: BrowseCoordinator owns writes to `ctx.folder_cache` and
-    `ctx._folder_cache_ts`; callers observe "all dirs failed for this user"
-    via an empty pre-created inner dict.
+    Thread-safety: BrowseCoordinator owns writes to `ctx.folder_cache`;
+    callers observe "all dirs failed for this user" via an empty pre-created
+    inner dict.
     """
     if not work_items:
-        return
+        return BrowseManyResult()
 
-    get_browse_coordinator(ctx, max_workers).browse_many(work_items, slskd_client)
+    return get_browse_coordinator(ctx, max_workers).browse_many(work_items, slskd_client)
 
 
 def _browse_directories_for_ctx(
@@ -325,8 +456,19 @@ def _browse_directories_for_ctx(
 ) -> dict[str, Any]:
     """Browse one user's directories through the shared context boundary."""
     work = [(username, d) for d in dirs_to_browse]
-    browsed = get_browse_coordinator(ctx, max_workers).browse_many(work, ctx.slskd)
+    browsed = get_browse_coordinator(ctx, max_workers).browse_many(work, ctx.slskd).directories
     return {
         file_dir: directory
         for (_username, file_dir), directory in browsed.items()
     }
+
+
+def _browse_directories_for_ctx_result(
+    dirs_to_browse: list[str],
+    username: str,
+    ctx: CratediggerContext,
+    max_workers: int,
+) -> BrowseManyResult:
+    """Browse one user's directories and preserve negative-skip metadata."""
+    work = [(username, d) for d in dirs_to_browse]
+    return get_browse_coordinator(ctx, max_workers).browse_many(work, ctx.slskd)

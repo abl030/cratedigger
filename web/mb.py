@@ -17,8 +17,8 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-# Use the `web.` package-qualified path to avoid any collision with
-# lib/cache.py (a different module — the per-user folder cache).
+# Use the `web.` package-qualified path to keep the web metadata cache
+# separate from the pipeline's peer-cache implementation.
 from web import cache as _cache
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"

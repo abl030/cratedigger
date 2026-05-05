@@ -10,6 +10,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 
 from lib.browse import (
     _browse_directories_for_ctx,
+    _browse_directories_for_ctx_result,
     cache_browsed_directory,
     ensure_cache_user,
     rank_candidate_dirs,
@@ -301,6 +302,17 @@ def check_for_match(
     if not dirs_to_try:
         return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
 
+    peer_cache_negative_skips = getattr(ctx, "peer_cache_negative_skips", set())
+    if peer_cache_negative_skips:
+        dirs_to_try = [
+            file_dir for file_dir in dirs_to_try
+            if (username, file_dir) not in peer_cache_negative_skips
+        ]
+        if not dirs_to_try:
+            return MatchResult(
+                matched=False, directory={}, file_dir="", candidates=candidates,
+            )
+
     ensure_cache_user(ctx, username)
 
     uncached = [d for d in dirs_to_try if d not in ctx.folder_cache[username]]
@@ -314,13 +326,29 @@ def check_for_match(
         # try/finally so an exception inside _browse_directories still
         # credits the accumulator — silent loss skews the baseline.
         browse_t0 = time.monotonic()
+        browse_attempts = len(uncached)
+        negative_skips: set[tuple[str, str]] = set()
         try:
-            browsed = _browse_directories(
-                uncached,
-                username,
-                ctx,
-                ctx.cfg.browse_global_max_workers,
-            )
+            if getattr(ctx, "peer_cache", None) is not None:
+                browse_result = _browse_directories_for_ctx_result(
+                    uncached,
+                    username,
+                    ctx,
+                    ctx.cfg.browse_global_max_workers,
+                )
+                browsed = {
+                    file_dir: directory
+                    for (_user, file_dir), directory in browse_result.directories.items()
+                }
+                browse_attempts = browse_result.browse_attempts
+                negative_skips = browse_result.negative_skips
+            else:
+                browsed = _browse_directories(
+                    uncached,
+                    username,
+                    ctx,
+                    ctx.cfg.browse_global_max_workers,
+                )
         finally:
             ctx.browse_time_s += time.monotonic() - browse_t0
             # Lazy-fallback path: fan-out either swallowed an exception via
@@ -328,11 +356,17 @@ def check_for_match(
             # this caller bypassed the wave loop. Either way, count
             # separately from peers_browsed so the cycle summary can
             # distinguish primary fan-out load from residual lazy retries.
-            ctx.peers_browsed_lazy += len(uncached)
-        for d, result in browsed.items():
-            cache_browsed_directory(ctx, username, d, result)
+            ctx.peers_browsed_lazy += browse_attempts
+        if getattr(ctx, "peer_cache", None) is None:
+            for d, result in browsed.items():
+                cache_browsed_directory(ctx, username, d, result)
 
-        if not browsed and len(uncached) == len(dirs_to_try):
+        if (
+            not browsed
+            and not negative_skips
+            and browse_attempts == len(uncached)
+            and len(uncached) == len(dirs_to_try)
+        ):
             ctx.broken_user.append(username)
             logger.debug(f"All browses failed for {username}, marked as broken")
             return MatchResult(

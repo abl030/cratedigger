@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
 
 import slskd_api
@@ -573,6 +574,8 @@ def _merge_search_result(result, ctx):
 
     Called only from the main thread — no locking needed.
     """
+    from lib.peer_cache import drain_stats_into_context
+
     album_id = result.album_id
     if album_id not in ctx.search_cache:
         ctx.search_cache[album_id] = {}
@@ -587,18 +590,43 @@ def _merge_search_result(result, ctx):
                 if d not in ctx.search_cache[album_id][username][filetype]:
                     ctx.search_cache[album_id][username][filetype].append(d)
 
+    peer_cache = getattr(ctx, "peer_cache", None)
+    if peer_cache is not None:
+        for username, filetypes in result.cache_entries.items():
+            cached_speed = peer_cache.get_upload_speed(username)
+            drain_stats_into_context(ctx, peer_cache)
+            if cached_speed is not None:
+                existing_speed = ctx.user_upload_speed.get(username, 0)
+                if cached_speed > existing_speed:
+                    ctx.user_upload_speed[username] = cached_speed
+            for dirs in filetypes.values():
+                for d in dirs:
+                    cached_count = peer_cache.get_dir_audio_count(username, d)
+                    drain_stats_into_context(ctx, peer_cache)
+                    if cached_count is None:
+                        continue
+                    counts = ctx.search_dir_audio_count.setdefault(username, {})
+                    existing_count = counts.get(d, 0)
+                    if cached_count > existing_count:
+                        counts[d] = cached_count
+
     for username, speed in result.upload_speeds.items():
         if username not in ctx.user_upload_speed or speed > ctx.user_upload_speed[username]:
             ctx.user_upload_speed[username] = speed
-            ctx._upload_speed_ts[username] = time.time()
+            if peer_cache is not None:
+                peer_cache.set_upload_speed(username, speed)
+                drain_stats_into_context(ctx, peer_cache)
 
     for username, dir_counts in result.dir_audio_counts.items():
         if username not in ctx.search_dir_audio_count:
             ctx.search_dir_audio_count[username] = {}
         for d, count in dir_counts.items():
             existing = ctx.search_dir_audio_count[username].get(d, 0)
-            ctx.search_dir_audio_count[username][d] = max(existing, count)
-            ctx._dir_audio_count_ts.setdefault(username, {})[d] = time.time()
+            merged = max(existing, count)
+            ctx.search_dir_audio_count[username][d] = merged
+            if peer_cache is not None and merged > existing:
+                peer_cache.set_dir_audio_count(username, d, merged)
+                drain_stats_into_context(ctx, peer_cache)
 
 
 def _log_search_result(album, result, ctx) -> None:
@@ -676,6 +704,9 @@ def _apply_find_download_result(
         ctx.peers_browsed += metrics.peers_browsed
         ctx.peers_browsed_lazy += metrics.peers_browsed_lazy
         ctx.fanout_waves += metrics.fanout_waves
+        ctx.cache_pos_hits += metrics.cache_pos_hits
+        ctx.cache_neg_hits += metrics.cache_neg_hits
+        ctx.cache_misses += metrics.cache_misses
     elif getattr(find_result, "metrics", None) is not None:
         raise AssertionError("find_download metrics require owner context merge")
     if find_result.outcome == "found":
@@ -1032,6 +1063,10 @@ def main():
                         help="Var directory for lock file and caches (default: cwd)")
     parser.add_argument("--no-lock-file", action="store_true",
                         help="Disable lock file creation")
+    parser.add_argument("--redis-host", default=None,
+                        help="Redis host for the pipeline peer cache")
+    parser.add_argument("--redis-port", type=int, default=None,
+                        help="Redis port for the pipeline peer cache")
     args = parser.parse_args()
 
     lock_file_path = os.path.join(args.var_dir, ".cratedigger.lock")
@@ -1062,6 +1097,17 @@ def main():
         # --- Parse config into typed dataclass ---
         from lib.config import CratediggerConfig
         cfg = CratediggerConfig.from_ini(config, config_dir=args.config_dir, var_dir=args.var_dir)
+        if args.redis_host is not None or args.redis_port is not None:
+            redis_port = (
+                max(1, min(65535, args.redis_port))
+                if args.redis_port is not None
+                else cfg.peer_cache_redis_port
+            )
+            cfg = replace(
+                cfg,
+                peer_cache_redis_host=args.redis_host or cfg.peer_cache_redis_host,
+                peer_cache_redis_port=redis_port,
+            )
 
         setup_logging(config)
 
@@ -1107,10 +1153,8 @@ def main():
         # Build context with fresh caches for this cycle
         from lib.context import CratediggerContext
         _module_ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=pipeline_db_source)
-
-        # Load persisted caches from previous runs
-        from lib.cache import load_caches
-        load_caches(_module_ctx, cfg.var_dir)
+        from lib.peer_cache import connect_from_config
+        _module_ctx.peer_cache = connect_from_config(cfg)
 
         # Populate global user cooldowns (issue #39)
         try:
@@ -1192,13 +1236,6 @@ def main():
         logger.info(format_cycle_summary(_module_ctx, elapsed))
 
     finally:
-        # Save caches for next run
-        try:
-            from lib.cache import save_caches as _save
-            _save(_module_ctx, cfg.var_dir)
-        except Exception:
-            pass
-
         # Bust web UI cache so freshly imported albums appear immediately
         try:
             import urllib.request

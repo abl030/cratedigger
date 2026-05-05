@@ -39,6 +39,8 @@ CREATE TABLE user_cooldowns (
 4. **Cache**: `ctx.cooled_down_users` populated at cycle start in `cratedigger.py main()`, shared with Phase 1 thread. Updated in real-time when new cooldowns are applied mid-cycle.
 5. **Enforcement**: `try_enqueue()` and `try_multi_enqueue()` in `lib/enqueue.py` skip users in `ctx.cooled_down_users` before checking the per-request denylist.
 
+Cooldowns are user-level and remain authoritative before Redis peer-cache lookups. A cooled-down user is skipped before any per-directory positive or negative cache check, so persistent `peer_dir_neg:{user}:{dir}` entries never override the global cooldown decision.
+
 ## Re-cooldown behavior
 
 After the 3-day cooldown expires, the user gets one chance. If they succeed, the success breaks their failure streak. If they fail, `check_and_apply_cooldown` sees 4 old failures + 1 new = 5 failures → immediate re-cooldown.

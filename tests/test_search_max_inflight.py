@@ -274,6 +274,9 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
                         peers_browsed=3,
                         peers_browsed_lazy=1,
                         fanout_waves=2,
+                        cache_pos_hits=5,
+                        cache_neg_hits=1,
+                        cache_misses=8,
                     ),
                 )
             return FindDownloadResult(
@@ -281,12 +284,15 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
                 candidates=(score_miss,),
                 metrics=FindDownloadMetrics(
                     browse_time_s=0.5,
-                    match_time_s=0.75,
-                    peers_browsed=4,
-                    peers_browsed_lazy=0,
-                    fanout_waves=1,
-                ),
-            )
+                        match_time_s=0.75,
+                        peers_browsed=4,
+                        peers_browsed_lazy=0,
+                        fanout_waves=1,
+                        cache_pos_hits=2,
+                        cache_neg_hits=3,
+                        cache_misses=4,
+                    ),
+                )
 
         with patch.object(
             cratedigger, "_select_variant_for_album", side_effect=variant_for,
@@ -315,6 +321,9 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         self.assertEqual(ctx.peers_browsed, 7)
         self.assertEqual(ctx.peers_browsed_lazy, 1)
         self.assertEqual(ctx.fanout_waves, 3)
+        self.assertEqual(ctx.cache_pos_hits, 7)
+        self.assertEqual(ctx.cache_neg_hits, 4)
+        self.assertEqual(ctx.cache_misses, 12)
 
         logs_by_request = {row.request_id: row for row in db.search_logs}
         self.assertEqual(logs_by_request[rid_found].outcome, "found")

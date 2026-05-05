@@ -47,6 +47,9 @@ class FindDownloadMetrics:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
+    cache_pos_hits: int = 0
+    cache_neg_hits: int = 0
+    cache_misses: int = 0
 
     @classmethod
     def from_context(cls, ctx: CratediggerContext) -> "FindDownloadMetrics":
@@ -56,6 +59,9 @@ class FindDownloadMetrics:
             peers_browsed=ctx.peers_browsed,
             peers_browsed_lazy=ctx.peers_browsed_lazy,
             fanout_waves=ctx.fanout_waves,
+            cache_pos_hits=ctx.cache_pos_hits,
+            cache_neg_hits=ctx.cache_neg_hits,
+            cache_misses=ctx.cache_misses,
         )
 
 
@@ -142,6 +148,8 @@ def prepare_find_download_context(
 
     from lib.context import CratediggerContext
 
+    peer_cache = ctx.peer_cache.fork() if getattr(ctx.peer_cache, "fork", None) else ctx.peer_cache
+
     return CratediggerContext(
         cfg=ctx.cfg,
         slskd=ctx.slskd,
@@ -153,8 +161,8 @@ def prepare_find_download_context(
         current_album_cache={album_id: album},
         denied_users_cache={request_id: set(denied_users)},
         cooled_down_users=set(ctx.cooled_down_users),
-        _folder_cache_ts=ctx._folder_cache_ts,
         prefetched_album_tracks={album_id: list(tracks)},
+        peer_cache=peer_cache,
         browse_coordinator=coordinator,
         browse_coordinator_lock=ctx.browse_coordinator_lock,
     )
@@ -436,8 +444,9 @@ def _iter_wave_matches(
 
         if work:
             t0 = time.monotonic()
+            browse_result = None
             try:
-                _fanout_browse_users(
+                browse_result = _fanout_browse_users(
                     work, ctx.slskd, ctx,
                     max_workers=cfg.browse_global_max_workers,
                 )
@@ -445,13 +454,18 @@ def _iter_wave_matches(
                 elapsed = time.monotonic() - t0
                 ctx.browse_time_s += elapsed
             ctx.fanout_waves += 1
-            ctx.peers_browsed += len(work)
+            browse_attempts = getattr(browse_result, "browse_attempts", len(work))
+            negative_skip_items = set(getattr(browse_result, "negative_skips", ()))
+            ctx.peer_cache_negative_skips.update(negative_skip_items)
+            negative_skips = len(negative_skip_items)
+            ctx.peers_browsed += browse_attempts
             n_returned = sum(
                 1 for (u, d) in work if d in ctx.folder_cache.get(u, {})
             )
             logger.info(
                 f"wave: K={K} n_uncached={len(work)} n_returned={n_returned} "
-                f"elapsed_s={elapsed:.1f}"
+                f"n_negative_skips={negative_skips} "
+                f"n_browse_attempts={browse_attempts} elapsed_s={elapsed:.1f}"
             )
 
         for username in wave:

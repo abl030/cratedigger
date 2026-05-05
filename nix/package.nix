@@ -14,6 +14,7 @@ let
     ps.music-tag
     ps.msgspec
     ps.redis     # web UI cache (graceful no-op if redis server is down, but the module must be importable)
+    ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
     slskd-api
   ];
 in {
