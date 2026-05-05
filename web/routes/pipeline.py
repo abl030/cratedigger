@@ -173,11 +173,25 @@ def get_pipeline_recent(h, params: dict[str, list[str]]) -> None:
     h._json({"recent": serialized})
 
 
+def _attach_latest_download_history(
+    items: list[dict],
+    history_batch: dict[int, list[dict]],
+) -> list[dict]:
+    for item in items:
+        history = history_batch.get(item["id"], [])
+        if history:
+            last = build_download_history_row(history[0])
+            item["last_verdict"] = last.verdict
+            item["last_outcome"] = last.outcome
+            item["last_username"] = last.soulseek_username
+            item["download_count"] = len(history)
+    return items
+
+
 def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     s = _server()
     counts = s._db().count_by_status()
     all_data: dict[str, object] = {"counts": counts}
-    # Collect all items across statuses, then batch-fetch history
     status_items: dict[str, list[dict]] = {}
     all_ids: list[int] = []
     for status in ("wanted", "downloading", "imported", "manual"):
@@ -186,18 +200,23 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
         all_ids.extend([int(str(r["id"])) for r in rows])
     history_batch = s._db().get_download_history_batch(all_ids)
     for status in ("wanted", "downloading", "imported", "manual"):
-        items = []
-        for item in status_items[status]:
-            history = history_batch.get(item["id"], [])
-            if history:
-                last = build_download_history_row(history[0])
-                item["last_verdict"] = last.verdict
-                item["last_outcome"] = last.outcome
-                item["last_username"] = last.soulseek_username
-                item["download_count"] = len(history)
-            items.append(item)
-        all_data[status] = items
+        all_data[status] = _attach_latest_download_history(
+            status_items[status],
+            history_batch,
+        )
     h._json(all_data)
+
+
+def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
+    s = _server()
+    counts = s._db().count_by_status()
+    rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
+    ids = [int(str(r["id"])) for r in rows]
+    history_batch = s._db().get_download_history_batch(ids)
+    h._json({
+        "counts": counts,
+        "downloading": _attach_latest_download_history(rows, history_batch),
+    })
 
 
 def get_pipeline_dashboard(h, params: dict[str, list[str]]) -> None:
@@ -1103,6 +1122,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/status": get_pipeline_status,
     "/api/pipeline/recent": get_pipeline_recent,
     "/api/pipeline/all": get_pipeline_all,
+    "/api/pipeline/downloading": get_pipeline_downloading,
     "/api/pipeline/dashboard": get_pipeline_dashboard,
     "/api/pipeline/constants": get_pipeline_constants,
     "/api/pipeline/simulate": get_pipeline_simulate,

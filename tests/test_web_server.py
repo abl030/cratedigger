@@ -553,6 +553,37 @@ class TestServerEndpoints(unittest.TestCase):
         self.mock_db.get_by_status.return_value = []
         self.mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
 
+    def test_pipeline_downloading_returns_current_downloads_only(self):
+        downloading_row = make_request_row(
+            id=201, album_title="Active Download", artist_name="DL Artist",
+            mb_release_id="dl-uuid", status="downloading",
+            active_download_state={
+                "filetype": "mp3 320",
+                "enqueued_at": "2026-05-05T12:00:00+00:00",
+                "files": [{"username": "peer", "bytes_transferred": 1, "size": 2}],
+            },
+        )
+        self.mock_db.get_by_status.side_effect = (
+            lambda s: [downloading_row] if s == "downloading" else []
+        )
+        self.mock_db.count_by_status.return_value = {"downloading": 1}
+        self.mock_db.get_download_history_batch.return_value = {}
+
+        status, data = self._get("/api/pipeline/downloading")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["counts"]["downloading"], 1)
+        self.assertEqual(len(data["downloading"]), 1)
+        self.assertEqual(data["downloading"][0]["album_title"], "Active Download")
+        self.mock_db.get_by_status.assert_called_with("downloading")
+        self.mock_db.get_download_history_batch.assert_called_once_with([201])
+
+        self.mock_db.get_by_status.side_effect = None
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.get_download_history_batch.reset_mock()
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 0, "imported": 1, "manual": 0}
+
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")
         self.assertEqual(status, 200)
@@ -818,6 +849,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/status",
         "/api/pipeline/recent",
         "/api/pipeline/all",
+        "/api/pipeline/downloading",
         "/api/pipeline/dashboard",
         "/api/pipeline/constants",
         "/api/pipeline/simulate",

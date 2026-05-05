@@ -79,6 +79,62 @@ console.log('renderImportQueueItems() prefers terminal import messages over stal
     'stale preview message hidden for terminal rows');
 }
 
+console.log('renderDownloadingItems() shows current file progress and user');
+{
+  const html = __test__.renderDownloadingItems([{
+    id: 81,
+    created_at: '2026-05-05T10:00:00+00:00',
+    updated_at: '2026-05-05T12:30:00+00:00',
+    album_title: 'Ocean Songs',
+    artist_name: 'Dirty Three',
+    last_outcome: 'timeout',
+    active_download_state: {
+      filetype: 'mp3 320',
+      enqueued_at: '2026-05-05T12:20:00+00:00',
+      last_progress_at: '2026-05-05T12:25:00+00:00',
+      files: [
+        {
+          username: 'peer-a',
+          size: 100,
+          bytes_transferred: 100,
+          last_state: 'Completed, Succeeded',
+        },
+        {
+          username: 'peer-a',
+          size: 200,
+          bytes_transferred: 0,
+          last_state: 'Queued, Remotely',
+        },
+      ],
+    },
+  }]);
+  assertContains(html, 'Ocean Songs', 'album title rendered');
+  assertContains(html, 'Dirty Three', 'artist name rendered');
+  assertContains(html, 'downloading', 'downloading badge rendered');
+  assertContains(html, 'mp3 320 · 1/2 files · peer-a · 1 queued',
+    'download progress summary rendered');
+  assertContains(html, 'last: timeout', 'last outcome rendered');
+}
+
+console.log('renderDownloadingItems() escapes current download fields');
+{
+  const html = __test__.renderDownloadingItems([{
+    id: 82,
+    created_at: '2026-05-05T10:00:00+00:00',
+    album_title: '<album>',
+    artist_name: '<artist>',
+    active_download_state: {
+      filetype: '<lossless>',
+      files: [{ username: '<peer>' }],
+    },
+  }]);
+  assertContains(html, '&lt;album&gt;', 'album is escaped');
+  assertContains(html, '&lt;artist&gt;', 'artist is escaped');
+  assertContains(html, '&lt;lossless&gt;', 'filetype is escaped');
+  assertContains(html, '&lt;peer&gt;', 'peer username is escaped');
+  assertExcludes(html, '<album>', 'raw album is not rendered');
+}
+
 console.log('renderRecentsItems() shows bad-extension postflight warning chip');
 {
   const html = __test__.renderRecentsItems([{

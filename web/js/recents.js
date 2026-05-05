@@ -24,6 +24,7 @@ export function setRecentsSub(sub) {
 function renderRecentsSubnav() {
   return `<div style="display:flex;gap:2px;margin-bottom:12px;">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
+    <button class="p-btn ${state.recentsSub === 'downloading' ? 'active-status' : ''}" onclick="window.setRecentsSub('downloading')">Downloading</button>
     <button class="p-btn ${state.recentsSub === 'queue' ? 'active-status' : ''}" onclick="window.setRecentsSub('queue')">Queue</button>
   </div>`;
 }
@@ -159,6 +160,66 @@ export function renderImportQueueItems(jobs) {
   }).join('');
 }
 
+function downloadFileCounts(files) {
+  const counts = { total: files.length, completed: 0, queued: 0, errored: 0 };
+  for (const f of files) {
+    const stateText = String(f.last_state || '');
+    const size = Number(f.size || 0);
+    const transferred = Number(f.bytes_transferred || 0);
+    if (stateText.includes('Errored')) counts.errored += 1;
+    if (stateText.includes('Queued')) counts.queued += 1;
+    if (stateText.includes('Succeeded') || (size > 0 && transferred >= size)) {
+      counts.completed += 1;
+    }
+  }
+  return counts;
+}
+
+function downloadingSummary(item) {
+  const active = item.active_download_state || {};
+  const files = Array.isArray(active.files) ? active.files : [];
+  const counts = downloadFileCounts(files);
+  const users = [...new Set(files.map(f => f.username).filter(Boolean))];
+  const userSummary = users.length > 2
+    ? `${users.slice(0, 2).join(', ')} +${users.length - 2}`
+    : users.join(', ');
+  const filetype = active.filetype || item.format || 'unknown';
+  const progress = counts.total ? `${counts.completed}/${counts.total} files` : 'no file state';
+  const stateParts = [];
+  if (counts.queued) stateParts.push(`${counts.queued} queued`);
+  if (counts.errored) stateParts.push(`${counts.errored} errored`);
+  if (active.last_progress_at) stateParts.push(`progress ${awstTime(active.last_progress_at)}`);
+  if (active.enqueued_at) stateParts.push(`enqueued ${awstTime(active.enqueued_at)}`);
+
+  return [filetype, progress, userSummary, ...stateParts].filter(Boolean).join(' · ');
+}
+
+/**
+ * Render current downloading pipeline rows for the Recents tab.
+ * @param {Array<Object>} items
+ * @returns {string}
+ */
+export function renderDownloadingItems(items) {
+  if (items.length === 0) return '<div class="loading">No active downloads</div>';
+  return items.map(item => {
+    const date = item.updated_at ? awstDate(item.updated_at) : awstDate(item.created_at || '');
+    return `
+      <div class="r-item" style="border-left-color:#1a3a5a" onclick="window.toggleDetail('downloading-${item.id}', ${item.id})">
+        <div class="p-top">
+          <div>
+            <div class="p-title">${esc(item.album_title)} <span class="badge badge-downloading">downloading</span></div>
+            <div class="p-artist">${esc(item.artist_name)}</div>
+          </div>
+          <div style="font-size:0.75em;color:#666;">#${item.id}</div>
+        </div>
+        <div class="p-meta"><span>${esc(downloadingSummary(item))}</span></div>
+        <div class="p-meta"><span>${date}</span>${item.last_outcome ? `<span>last: ${esc(item.last_outcome)}</span>` : ''}</div>
+      </div>
+      <div class="p-detail" id="downloading-${item.id}"></div>
+    `;
+  }).join('');
+}
+
 async function loadImportQueue() {
   const el = document.getElementById('recents-content');
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
@@ -172,6 +233,28 @@ async function loadImportQueue() {
   }
 }
 
+async function loadDownloading() {
+  const el = document.getElementById('recents-content');
+  el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
+  try {
+    let r = await fetch(`${API}/api/pipeline/downloading`);
+    if (r.status === 404) r = await fetch(`${API}/api/pipeline/all`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const items = data.downloading || [];
+    const count = data.counts?.downloading ?? items.length;
+    el.innerHTML = renderRecentsSubnav()
+      + `<div class="r-date-header">${formatDownloadingCount(count)}</div>`
+      + renderDownloadingItems(items);
+  } catch (e) {
+    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load downloads</div>';
+  }
+}
+
+function formatDownloadingCount(count) {
+  return `${count} active download${count === 1 ? '' : 's'}`;
+}
+
 /**
  * Load recents from API and render.
  * @returns {Promise<void>}
@@ -180,6 +263,10 @@ export async function loadRecents() {
   const el = document.getElementById('recents-content');
   if (state.recentsSub === 'queue') {
     await loadImportQueue();
+    return;
+  }
+  if (state.recentsSub === 'downloading') {
+    await loadDownloading();
     return;
   }
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
@@ -205,6 +292,7 @@ export async function loadRecents() {
 }
 
 export const __test__ = {
+  renderDownloadingItems,
   renderImportQueueItems,
   renderRecentsItems,
   setRecentsSub,
