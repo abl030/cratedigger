@@ -445,7 +445,7 @@ function renderCycleOutliers(rows) {
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Cycle Outliers</div>
       <table class="dashboard-table">
-        <thead><tr><th>Completed</th><th>Total</th><th>Search</th><th>Browse</th><th>Match</th><th>Watchdog</th><th>Peers</th><th>Waves</th></tr></thead>
+        <thead><tr><th>Completed</th><th>Total</th><th>Search</th><th>Browse</th><th>Match</th><th>Watchdog</th><th>Peer/Dirs</th><th>Waves</th></tr></thead>
         <tbody>
           ${rows.map(r => `
             <tr>
