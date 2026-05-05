@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, awstDate, awstDateTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
+import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton } from './release_actions.js';
 
@@ -39,6 +39,11 @@ export function setPipelineView(view) {
   } else {
     loadPipeline();
   }
+}
+
+export function toggleCoverageMatchGraph() {
+  state.pipelineMatchGraphOpen = !state.pipelineMatchGraphOpen;
+  renderPipelineDashboard();
 }
 
 /**
@@ -162,6 +167,7 @@ function renderPipelineDashboard() {
   const searches = /** @type {any[]} */ (data.searches?.windows || []);
   const cycles = /** @type {any[]} */ (data.cycles?.windows || []);
   const coverage = /** @type {any} */ (data.coverage || {});
+  const coverageWithRates = withCoverageMatchRates(coverage, searches);
   const redis = /** @type {any} */ (data.redis || {});
   const peerDirs = /** @type {any} */ (data.peer_dirs || {});
   const generated = data.generated_at ? awstDateTime(data.generated_at) : '';
@@ -173,7 +179,7 @@ function renderPipelineDashboard() {
     </div>
     <div class="dashboard-grid">
       ${renderRedisCard(redis)}
-      ${renderCoverageCard(coverage)}
+      ${renderCoverageCard(coverageWithRates)}
       ${renderPeerDirCard(peerDirs)}
       ${renderSearchCard(searches)}
       ${renderCycleCard(cycles)}
@@ -245,6 +251,7 @@ function renderCoverageCard(coverage) {
   const never = coverage.wanted_never_searched || 0;
   const searchedPct = wanted ? searched24 / wanted : 1;
   const coverageClass = stale24 === 0 ? 'metric-good' : never > 0 ? 'metric-bad' : 'metric-warn';
+  const graphOpen = state.pipelineMatchGraphOpen;
   return `
     <div class="dashboard-card">
       <div class="dashboard-card-title">Wanted Coverage</div>
@@ -253,12 +260,85 @@ function renderCoverageCard(coverage) {
         <div class="metric-row"><span>Wanted</span><strong>${formatCount(wanted)}</strong></div>
         <div class="metric-row"><span>Searched 24h</span><strong class="${coverageClass}">${formatCount(searched24)}</strong></div>
         <div class="metric-row"><span>Searched 6h</span><strong>${formatCount(searched6)}</strong></div>
+        <div class="metric-row"><span>Match/hr 6h</span><strong class="${coverage.matches_6h ? 'metric-good' : ''}">${formatMatchRate(coverage.matches_per_hour_6h)}</strong></div>
+        <div class="metric-row metric-clickable ${graphOpen ? 'metric-open' : ''}" onclick="window.toggleCoverageMatchGraph()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.toggleCoverageMatchGraph();}" role="button" tabindex="0"><span>Match/hr 24h</span><strong class="${coverage.matches_24h ? 'metric-good' : ''}">${formatMatchRate(coverage.matches_per_hour_24h)}</strong></div>
+        ${graphOpen ? renderMatchRateChart(coverage.match_rate_series_24h || []) : ''}
         <div class="metric-row"><span>Stale 24h</span><strong class="${stale24 ? 'metric-warn' : 'metric-good'}">${formatCount(stale24)}</strong></div>
         <div class="metric-row"><span>Never</span><strong class="${never ? 'metric-bad' : 'metric-good'}">${formatCount(never)}</strong></div>
         <div class="metric-row"><span>Top 10 share</span><strong>${formatPercent(coverage.top_10_share_24h)}</strong></div>
       </div>
     </div>
   `;
+}
+
+function renderMatchRateChart(points) {
+  const series = normalizeMatchRateSeries(points);
+  if (series.length === 0) {
+    return '<div class="match-rate-chart"><div class="chart-empty">No hourly match data yet</div></div>';
+  }
+
+  const width = 240;
+  const height = 64;
+  const gap = 2;
+  const maxRate = Math.max(1, ...series.map(p => p.rate));
+  const barWidth = Math.max(2, (width - gap * (series.length - 1)) / series.length);
+  const bars = series.map((point, index) => {
+    const barHeight = Math.max(point.matches > 0 ? 2 : 0, (point.rate / maxRate) * height);
+    const x = index * (barWidth + gap);
+    const y = height - barHeight;
+    const label = point.time ? `${awstTime(point.time)} ${formatMatchRate(point.rate)}/hr (${formatCount(point.matches)})` : `${formatMatchRate(point.rate)}/hr`;
+    return `<g><title>${esc(label)}</title><rect class="match-rate-bar ${point.matches ? 'active' : ''}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barHeight.toFixed(2)}"></rect></g>`;
+  }).join('');
+  const first = series[0]?.time ? awstTime(series[0].time) : '';
+  const last = series[series.length - 1]?.time ? awstTime(series[series.length - 1].time) : '';
+  return `
+    <div class="match-rate-chart">
+      <div class="match-rate-chart-head"><span>Last 24 hours</span><strong>peak ${formatMatchRate(maxRate)}/hr</strong></div>
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Match rate over the last 24 hours">${bars}</svg>
+      <div class="match-rate-chart-axis"><span>${first}</span><span>${last}</span></div>
+    </div>
+  `;
+}
+
+function normalizeMatchRateSeries(points) {
+  return (Array.isArray(points) ? points : []).map(point => {
+    const row = point || {};
+    const matches = Number(row.matches || 0);
+    const rate = row.matches_per_hour == null ? matches : Number(row.matches_per_hour);
+    return {
+      time: row.bucket_start || '',
+      matches,
+      rate: Number.isFinite(rate) ? rate : 0,
+    };
+  });
+}
+
+function withCoverageMatchRates(coverage, windows) {
+  if (
+    coverage.matches_per_hour_6h != null
+    && coverage.matches_per_hour_24h != null
+  ) {
+    return coverage;
+  }
+
+  const rates = {
+    matches_24h: 0,
+    matches_6h: 0,
+    matches_per_hour_24h: 0,
+    matches_per_hour_6h: 0,
+  };
+  for (const w of Array.isArray(windows) ? windows : []) {
+    const hours = Number(w.hours || 0);
+    const found = Number(w.outcomes?.found || 0);
+    if (hours === 24) {
+      rates.matches_24h = found;
+      rates.matches_per_hour_24h = found / 24;
+    } else if (hours === 6) {
+      rates.matches_6h = found;
+      rates.matches_per_hour_6h = found / 6;
+    }
+  }
+  return {...coverage, ...rates};
 }
 
 function renderSearchCard(windows) {
@@ -404,6 +484,12 @@ function formatCount(value) {
 
 function formatDecimal(value) {
   if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  const n = Number(value);
+  return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+}
+
+function formatMatchRate(value) {
+  if (value == null || Number.isNaN(Number(value))) return '0.00';
   const n = Number(value);
   return n >= 10 ? n.toFixed(1) : n.toFixed(2);
 }
@@ -693,5 +779,9 @@ export async function updateStatus(id, newStatus) {
 }
 
 export const __test__ = {
+  normalizeMatchRateSeries,
+  renderCoverageCard,
+  renderMatchRateChart,
   renderPipelineNav,
+  withCoverageMatchRates,
 };

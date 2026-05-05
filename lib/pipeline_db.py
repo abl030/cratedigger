@@ -2098,10 +2098,48 @@ class PipelineDB:
         )
         return {
             **summary,
+            "match_rate_series_24h": self._dashboard_match_rate_series(24),
             "top_10_share_24h": top_10_share,
             "top_loop_suspects": top_suspects,
             "stale_wanted": self._dashboard_stale_wanted(),
         }
+
+    def _dashboard_match_rate_series(self, hours: int) -> list[dict[str, Any]]:
+        clamped_hours = max(1, min(int(hours), 168))
+        cur = self._execute("""
+            WITH buckets AS (
+                SELECT generate_series(
+                    date_trunc('hour', NOW())
+                        - ((%s::int - 1) * INTERVAL '1 hour'),
+                    date_trunc('hour', NOW()),
+                    INTERVAL '1 hour'
+                ) AS bucket_start
+            ),
+            found AS (
+                SELECT
+                    date_trunc('hour', created_at) AS bucket_start,
+                    COUNT(*)::int AS matches
+                FROM search_log
+                WHERE outcome = 'found'
+                  AND created_at >= date_trunc('hour', NOW())
+                    - ((%s::int - 1) * INTERVAL '1 hour')
+                GROUP BY 1
+            )
+            SELECT
+                buckets.bucket_start,
+                COALESCE(found.matches, 0)::int AS matches
+            FROM buckets
+            LEFT JOIN found ON found.bucket_start = buckets.bucket_start
+            ORDER BY buckets.bucket_start
+        """, (clamped_hours, clamped_hours))
+        return [
+            {
+                "bucket_start": _isoformat_or_none(row["bucket_start"]),
+                "matches": int(row["matches"] or 0),
+                "matches_per_hour": int(row["matches"] or 0),
+            }
+            for row in cur.fetchall()
+        ]
 
     def _dashboard_coverage_summary(self) -> dict[str, Any]:
         cur = self._execute("""
@@ -2122,6 +2160,18 @@ class PipelineDB:
                     )::int AS searches_6h
                 FROM search_log
                 GROUP BY request_id
+            ),
+            match_rates AS (
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE outcome = 'found'
+                          AND created_at >= NOW() - INTERVAL '24 hours'
+                    )::int AS matches_24h,
+                    COUNT(*) FILTER (
+                        WHERE outcome = 'found'
+                          AND created_at >= NOW() - INTERVAL '6 hours'
+                    )::int AS matches_6h
+                FROM search_log
             )
             SELECT
                 COUNT(*)::int AS wanted_total,
@@ -2138,14 +2188,19 @@ class PipelineDB:
                 COALESCE(SUM(pr.searches_6h), 0)::int
                     AS active_wanted_searches_6h,
                 MIN(pr.last_search_at) FILTER (WHERE pr.last_search_at IS NOT NULL)
-                    AS oldest_last_search_at
+                    AS oldest_last_search_at,
+                COALESCE(MAX(match_rates.matches_24h), 0)::int AS matches_24h,
+                COALESCE(MAX(match_rates.matches_6h), 0)::int AS matches_6h
             FROM wanted w
             LEFT JOIN per_request pr ON pr.request_id = w.id
+            CROSS JOIN match_rates
         """)
         row = cur.fetchone() or {}
         wanted_total = int(row.get("wanted_total") or 0)
         searched_24h = int(row.get("wanted_searched_24h") or 0)
         searched_6h = int(row.get("wanted_searched_6h") or 0)
+        matches_24h = int(row.get("matches_24h") or 0)
+        matches_6h = int(row.get("matches_6h") or 0)
         return {
             "wanted_total": wanted_total,
             "wanted_searched_24h": searched_24h,
@@ -2162,6 +2217,10 @@ class PipelineDB:
             "oldest_last_search_at": _isoformat_or_none(
                 row.get("oldest_last_search_at")
             ),
+            "matches_24h": matches_24h,
+            "matches_6h": matches_6h,
+            "matches_per_hour_24h": matches_24h / 24,
+            "matches_per_hour_6h": matches_6h / 6,
         }
 
     def _dashboard_loop_suspects(self) -> list[dict[str, Any]]:

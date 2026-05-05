@@ -57,6 +57,68 @@ console.log('renderRecentsSubnav() refreshes the active recents subtab');
   assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
 
+console.log('renderRecentsCounts() stays focused on history filters');
+{
+  state.recentsFilter = 'all';
+  state.recentsCounts = {
+    all: 10,
+    imported: 3,
+    rejected: 7,
+    matches_24h: 24,
+    matches_6h: 12,
+    matches_per_hour_24h: 1,
+    matches_per_hour_6h: 2,
+  };
+  const html = __test__.renderRecentsCounts();
+  assertContains(html, '<div class="count-num">10</div><div class="count-label">all</div>',
+    'all count rendered');
+  assertContains(html, '<div class="count-num">3</div><div class="count-label">imported</div>',
+    'imported count rendered');
+  assertContains(html, '<div class="count-num">7</div><div class="count-label">rejected</div>',
+    'rejected count rendered');
+  assertExcludes(html, 'match/hr', 'match rates are not rendered in count cards');
+}
+
+console.log('renderRecentsItems() shows match rates beside the first date header');
+{
+  const html = __test__.renderRecentsItems([
+    {
+      id: 10,
+      request_id: 20,
+      created_at: '2026-05-05T12:00:00+00:00',
+      album_title: 'Match Rate Album',
+      artist_name: 'Artist',
+      badge: 'Imported',
+      badge_class: 'badge-new',
+      border_color: '#1a4a2a',
+      summary: 'MP3 320 · user',
+    },
+  ], {
+    matches_per_hour_6h: 4.5,
+    matches_per_hour_24h: 5.3333333333,
+  });
+  assertContains(html, 'recents-date-header', 'first date uses date metric row');
+  assertContains(html, '6h 4.50 match/hr', '6h match rate rendered');
+  assertContains(html, '24h 5.33 match/hr', '24h match rate rendered');
+}
+
+console.log('matchRatesFromDashboardWindows() derives found enqueue rates from old dashboard payloads');
+{
+  const rates = __test__.matchRatesFromDashboardWindows([
+    {label: '24h', hours: 24, outcomes: {found: 132}},
+    {label: '6h', hours: 6, outcomes: {found: 27}},
+  ]);
+  if (rates.matches_24h === 132
+      && rates.matches_6h === 27
+      && rates.matches_per_hour_24h === 5.5
+      && rates.matches_per_hour_6h === 4.5) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: dashboard windows did not derive expected match rates');
+  }
+}
+
 console.log('renderImportQueueItems() shows uncertain preview failures without next styling');
 {
   const html = __test__.renderImportQueueItems([{

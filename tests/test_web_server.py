@@ -158,8 +158,12 @@ def _make_server():
             "search_filetype_override": None, "source": "request",
         },
     ]
-    mock_db._execute.return_value = MagicMock(
-        fetchone=MagicMock(return_value={"total": 1, "imported": 1}))
+    mock_db._execute.return_value = MagicMock(fetchone=MagicMock(return_value={
+        "total": 1,
+        "imported": 1,
+        "matches_24h": 3,
+        "matches_6h": 1,
+    }))
     mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
     mock_db.get_by_status.return_value = []
     mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
@@ -322,6 +326,22 @@ def _make_server():
             "active_wanted_searches_24h": 12,
             "active_wanted_searches_6h": 5,
             "oldest_last_search_at": "2026-05-04T00:00:00+00:00",
+            "matches_24h": 3,
+            "matches_6h": 1,
+            "matches_per_hour_24h": 0.125,
+            "matches_per_hour_6h": 0.1666666667,
+            "match_rate_series_24h": [
+                {
+                    "bucket_start": "2026-05-04T23:00:00+00:00",
+                    "matches": 1,
+                    "matches_per_hour": 1,
+                },
+                {
+                    "bucket_start": "2026-05-05T00:00:00+00:00",
+                    "matches": 2,
+                    "matches_per_hour": 2,
+                },
+            ],
             "top_10_share_24h": 0.75,
             "top_loop_suspects": [
                 {
@@ -506,9 +526,12 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._get("/api/pipeline/log")
         self.assertEqual(status, 200)
         counts = data["counts"]
-        for key in ("all", "imported", "rejected"):
+        for key in ("all", "imported", "rejected", "matches_24h", "matches_6h"):
             self.assertIn(key, counts)
             self.assertIsInstance(counts[key], int)
+        for key in ("matches_per_hour_24h", "matches_per_hour_6h"):
+            self.assertIn(key, counts)
+            self.assertIsInstance(counts[key], (int, float))
 
     def test_pipeline_status(self):
         status, data = self._get("/api/pipeline/status")
@@ -986,7 +1009,12 @@ class TestPipelineRouteContracts(_WebServerCase):
         "wanted_unsearched_24h", "wanted_unsearched_6h",
         "wanted_never_searched", "active_wanted_searches_24h",
         "active_wanted_searches_6h", "oldest_last_search_at",
-        "top_10_share_24h", "top_loop_suspects", "stale_wanted",
+        "matches_24h", "matches_6h", "matches_per_hour_24h",
+        "matches_per_hour_6h", "match_rate_series_24h", "top_10_share_24h",
+        "top_loop_suspects", "stale_wanted",
+    }
+    DASHBOARD_MATCH_RATE_POINT_FIELDS = {
+        "bucket_start", "matches", "matches_per_hour",
     }
     DASHBOARD_PEER_DIR_FIELDS = {"totals", "days"}
     DASHBOARD_PEER_DIR_TOTAL_FIELDS = {
@@ -1021,8 +1049,16 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, {"log", "counts"}, "pipeline log response")
         _assert_required_fields(self, data["log"][0], self.LOG_ENTRY_REQUIRED_FIELDS,
                                 "pipeline log entry")
-        _assert_required_fields(self, data["counts"], {"all", "imported", "rejected"},
-                                "pipeline log counts")
+        _assert_required_fields(
+            self,
+            data["counts"],
+            {
+                "all", "imported", "rejected", "matches_24h",
+                "matches_6h", "matches_per_hour_24h",
+                "matches_per_hour_6h",
+            },
+            "pipeline log counts",
+        )
 
     def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
         original_log = copy.deepcopy(self.mock_db.get_log.return_value)
@@ -1113,6 +1149,13 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline dashboard peer dir day")
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
+        self.assertIsInstance(data["coverage"]["match_rate_series_24h"], list)
+        _assert_required_fields(
+            self,
+            data["coverage"]["match_rate_series_24h"][0],
+            self.DASHBOARD_MATCH_RATE_POINT_FIELDS,
+            "pipeline dashboard match rate point",
+        )
         _assert_required_fields(
             self,
             data["coverage"]["top_loop_suspects"][0],

@@ -63,6 +63,11 @@
     "active_wanted_searches_24h": 144,
     "active_wanted_searches_6h": 34,
     "oldest_last_search_at": "2026-05-04T04:00:00+00:00",
+    "matches_24h": 0,
+    "matches_6h": 0,
+    "matches_per_hour_24h": 0,
+    "matches_per_hour_6h": 0,
+    "match_rate_series_24h": [],
     "top_10_share_24h": 0.91,
     "top_loop_suspects": [],
     "stale_wanted": []

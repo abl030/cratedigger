@@ -1253,6 +1253,19 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["wanted_unsearched_24h"], 1)
         self.assertEqual(coverage["wanted_never_searched"], 1)
         self.assertEqual(coverage["active_wanted_searches_24h"], 5)
+        self.assertEqual(coverage["matches_24h"], 1)
+        self.assertEqual(coverage["matches_6h"], 1)
+        self.assertAlmostEqual(coverage["matches_per_hour_24h"], 1 / 24)
+        self.assertAlmostEqual(coverage["matches_per_hour_6h"], 1 / 6)
+        self.assertEqual(len(coverage["match_rate_series_24h"]), 24)
+        self.assertEqual(
+            sum(point["matches"] for point in coverage["match_rate_series_24h"]),
+            1,
+        )
+        self.assertEqual(
+            set(coverage["match_rate_series_24h"][0]),
+            {"bucket_start", "matches", "matches_per_hour"},
+        )
         self.assertEqual(coverage["top_loop_suspects"][0]["request_id"], self.req1)
         self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 4)
         self.assertEqual(coverage["top_loop_suspects"][0]["reset_24h"], 1)

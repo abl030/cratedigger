@@ -33,9 +33,10 @@ function renderRecentsSubnav() {
 /**
  * Render recents items grouped by date.
  * @param {Array<Object>} items
+ * @param {Object|null} [matchRates]
  * @returns {string} HTML string
  */
-export function renderRecentsItems(items) {
+export function renderRecentsItems(items, matchRates = null) {
   if (items.length === 0) return '<div class="loading">No matching entries</div>';
 
   // Group by date (AWST)
@@ -47,8 +48,8 @@ export function renderRecentsItems(items) {
   }
   const dates = Object.keys(byDate).sort().reverse();
 
-  return dates.map(date => `
-    <div class="r-date-header">${date}</div>
+  return dates.map((date, idx) => `
+    ${renderRecentsDateHeader(date, idx === 0 ? matchRates : null)}
     ${byDate[date].map(item => {
       const time = awstTime(item.created_at || '');
       const badge = item.badge || '';
@@ -92,6 +93,14 @@ export function renderRecentsItems(items) {
       `;
     }).join('')}
   `).join('');
+}
+
+function renderRecentsDateHeader(date, matchRates) {
+  if (!matchRates) return `<div class="r-date-header">${date}</div>`;
+  return `<div class="r-date-header recents-date-header">
+    <span>${date}</span>
+    <span class="recents-date-metrics">6h ${formatMatchRate(matchRates.matches_per_hour_6h)} match/hr · 24h ${formatMatchRate(matchRates.matches_per_hour_24h)} match/hr</span>
+  </div>`;
 }
 
 function queueBadge(job, index) {
@@ -256,6 +265,65 @@ function formatDownloadingCount(count) {
   return `${count} active download${count === 1 ? '' : 's'}`;
 }
 
+function formatMatchRate(value) {
+  if (value == null || Number.isNaN(Number(value))) return '0.00';
+  const rate = Number(value);
+  return rate >= 10 ? rate.toFixed(1) : rate.toFixed(2);
+}
+
+function hasMatchRates(counts) {
+  return counts
+    && counts.matches_per_hour_6h != null
+    && counts.matches_per_hour_24h != null;
+}
+
+function matchRatesFromDashboardWindows(windows) {
+  const rates = {
+    matches_24h: 0,
+    matches_6h: 0,
+    matches_per_hour_24h: 0,
+    matches_per_hour_6h: 0,
+  };
+  for (const w of Array.isArray(windows) ? windows : []) {
+    const hours = Number(w.hours || 0);
+    const found = Number(w.outcomes?.found || 0);
+    if (hours === 24) {
+      rates.matches_24h = found;
+      rates.matches_per_hour_24h = found / 24;
+    } else if (hours === 6) {
+      rates.matches_6h = found;
+      rates.matches_per_hour_6h = found / 6;
+    }
+  }
+  return rates;
+}
+
+async function loadRecentsMatchRatesFallback() {
+  if (hasMatchRates(state.recentsCounts)) return;
+  try {
+    const r = await fetch(`${API}/api/pipeline/dashboard`);
+    if (!r.ok) return;
+    const data = await r.json();
+    state.recentsCounts = {
+      ...state.recentsCounts,
+      ...matchRatesFromDashboardWindows(data.searches?.windows || []),
+    };
+  } catch (e) {
+    // Keep recents usable when the dashboard endpoint is unavailable.
+  }
+}
+
+function renderRecentsCounts() {
+  return `<div class="recents-counts">
+    <div class="count ${state.recentsFilter === 'all' ? 'active' : ''}" onclick="window.setRecentsFilter('all')">
+      <div class="count-num">${state.recentsCounts.all}</div><div class="count-label">all</div></div>
+    <div class="count ${state.recentsFilter === 'imported' ? 'active' : ''}" onclick="window.setRecentsFilter('imported')">
+      <div class="count-num">${state.recentsCounts.imported}</div><div class="count-label">imported</div></div>
+    <div class="count ${state.recentsFilter === 'rejected' ? 'active' : ''}" onclick="window.setRecentsFilter('rejected')">
+      <div class="count-num">${state.recentsCounts.rejected}</div><div class="count-label">rejected</div></div>
+  </div>`;
+}
+
 /**
  * Load recents from API and render.
  * @returns {Promise<void>}
@@ -278,23 +346,24 @@ export async function loadRecents() {
     const data = await r.json();
     const items = data.log || [];
     if (data.counts) state.recentsCounts = data.counts;
+    if (state.recentsFilter === 'all') await loadRecentsMatchRatesFallback();
 
-    let html = renderRecentsSubnav() + `<div style="display:flex;gap:8px;margin-bottom:8px;">
-      <div class="count ${state.recentsFilter === 'all' ? 'active' : ''}" onclick="window.setRecentsFilter('all')">
-        <div class="count-num">${state.recentsCounts.all}</div><div class="count-label">all</div></div>
-      <div class="count ${state.recentsFilter === 'imported' ? 'active' : ''}" onclick="window.setRecentsFilter('imported')">
-        <div class="count-num">${state.recentsCounts.imported}</div><div class="count-label">imported</div></div>
-      <div class="count ${state.recentsFilter === 'rejected' ? 'active' : ''}" onclick="window.setRecentsFilter('rejected')">
-        <div class="count-num">${state.recentsCounts.rejected}</div><div class="count-label">rejected</div></div>
-    </div>`;
-    html += renderRecentsItems(items);
+    let html = renderRecentsSubnav() + renderRecentsCounts();
+    html += renderRecentsItems(
+      items,
+      state.recentsFilter === 'all' ? state.recentsCounts : null,
+    );
     el.innerHTML = html;
   } catch (e) { el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load log</div>'; }
 }
 
 export const __test__ = {
+  hasMatchRates,
+  matchRatesFromDashboardWindows,
   renderDownloadingItems,
   renderImportQueueItems,
+  renderRecentsCounts,
+  renderRecentsDateHeader,
   renderRecentsSubnav,
   renderRecentsItems,
   setRecentsSub,

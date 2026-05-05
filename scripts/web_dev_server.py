@@ -45,7 +45,15 @@ FALLBACK_FIXTURES: dict[str, dict[str, Any]] = {
     },
     "/api/pipeline/log": {
         "log": [],
-        "counts": {"all": 0, "imported": 0, "rejected": 0},
+        "counts": {
+            "all": 0,
+            "imported": 0,
+            "rejected": 0,
+            "matches_24h": 0,
+            "matches_6h": 0,
+            "matches_per_hour_24h": 0,
+            "matches_per_hour_6h": 0,
+        },
     },
 }
 

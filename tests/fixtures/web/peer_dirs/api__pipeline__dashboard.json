@@ -109,6 +109,18 @@
     "active_wanted_searches_24h": 143,
     "active_wanted_searches_6h": 143,
     "oldest_last_search_at": "2026-05-05T10:20:00+00:00",
+    "matches_24h": 128,
+    "matches_6h": 27,
+    "matches_per_hour_24h": 5.3333333333,
+    "matches_per_hour_6h": 4.5,
+    "match_rate_series_24h": [
+      {"bucket_start": "2026-05-04T11:00:00+00:00", "matches": 3, "matches_per_hour": 3},
+      {"bucket_start": "2026-05-04T12:00:00+00:00", "matches": 7, "matches_per_hour": 7},
+      {"bucket_start": "2026-05-04T13:00:00+00:00", "matches": 0, "matches_per_hour": 0},
+      {"bucket_start": "2026-05-04T14:00:00+00:00", "matches": 11, "matches_per_hour": 11},
+      {"bucket_start": "2026-05-04T15:00:00+00:00", "matches": 6, "matches_per_hour": 6},
+      {"bucket_start": "2026-05-04T16:00:00+00:00", "matches": 9, "matches_per_hour": 9}
+    ],
     "top_10_share_24h": 0.43,
     "top_loop_suspects": [],
     "stale_wanted": []

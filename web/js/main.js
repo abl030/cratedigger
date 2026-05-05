@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow, closeVaFallback } from './browse.js';
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
-import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
+import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -95,6 +95,7 @@ Object.assign(window, {
   setPipelineView,
   setFilter,
   renderPipeline,
+  toggleCoverageMatchGraph,
   toggleDetail,
   deleteRequest,
   updateStatus,
