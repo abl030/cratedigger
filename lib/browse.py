@@ -17,6 +17,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _routine_browse_http_status(error: Exception) -> int | None:
+    if error.__class__.__name__ != "HTTPError":
+        return None
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int):
+        return None
+    if status == 404 or 500 <= status <= 599:
+        return status
+    return None
+
+
 @dataclass(frozen=True)
 class BrowseManyResult:
     directories: dict[tuple[str, str], Any] = field(default_factory=dict)
@@ -377,8 +391,14 @@ def _browse_one(
             username=username,
             directory=file_dir,
         )
-    except Exception:
-        logger.exception(f'Error getting directory from user: "{username}"')
+    except Exception as e:
+        status = _routine_browse_http_status(e)
+        if status is not None:
+            logger.info(
+                f"browse skip {username}/{file_dir}: slskd returned HTTP {status}"
+            )
+        else:
+            logger.exception(f'Error getting directory from user: "{username}"')
         return BrowseOneResult(file_dir)
     if not directories:
         return BrowseOneResult(file_dir, cache_negative=True)

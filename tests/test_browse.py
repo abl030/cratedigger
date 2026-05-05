@@ -23,9 +23,9 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from lib.browse import _fanout_browse_users, get_browse_coordinator
+from lib.browse import _browse_one, _fanout_browse_users, get_browse_coordinator
 from lib.context import CratediggerContext
 from lib.peer_cache import PeerCache
 from tests.fakes import FakeSlskdAPI
@@ -47,6 +47,119 @@ def _make_directory(dir_path: str) -> dict[str, Any]:
         "directory": dir_path,
         "files": [{"filename": "01 - Track.flac", "size": 100}],
     }
+
+
+class _HttpResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.url = "http://localhost:5030/api/v0/users/user1/directory"
+
+
+class HTTPError(Exception):
+    def __init__(self, message: str, response: _HttpResponse | None = None) -> None:
+        super().__init__(message)
+        self.response = response
+
+
+def _http_error(status_code: int | None) -> HTTPError:
+    if status_code is None:
+        return HTTPError("HTTP error without response")
+    return HTTPError(
+        f"{status_code} Client Error",
+        response=_HttpResponse(status_code),
+    )
+
+
+class TestBrowseOneHttpErrorLogging(unittest.TestCase):
+    def test_http_404_browse_failure_is_info_log_without_negative_cache(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory_error("user1", "Album", _http_error(404))
+
+        with patch("lib.browse.logger") as logger:
+            result = _browse_one("user1", "Album", slskd)
+
+        self.assertEqual(result.file_dir, "Album")
+        self.assertIsNone(result.directory)
+        self.assertFalse(result.cache_negative)
+        logger.info.assert_called_once()
+        logger.exception.assert_not_called()
+        line = logger.info.call_args.args[0]
+        self.assertIn("user1", line)
+        self.assertIn("Album", line)
+        self.assertIn("404", line)
+
+    def test_http_5xx_browse_failure_is_info_log_without_negative_cache(self):
+        for status_code in (500, 503):
+            with self.subTest(status_code=status_code):
+                slskd = FakeSlskdAPI()
+                slskd.users.set_directory_error(
+                    "user1", "Album", _http_error(status_code),
+                )
+
+                with patch("lib.browse.logger") as logger:
+                    result = _browse_one("user1", "Album", slskd)
+
+                self.assertEqual(result.file_dir, "Album")
+                self.assertIsNone(result.directory)
+                self.assertFalse(result.cache_negative)
+                logger.info.assert_called_once()
+                logger.exception.assert_not_called()
+                self.assertIn(str(status_code), logger.info.call_args.args[0])
+
+    def test_non_routine_http_failure_keeps_exception_logging(self):
+        for status_code in (401, 403):
+            with self.subTest(status_code=status_code):
+                slskd = FakeSlskdAPI()
+                slskd.users.set_directory_error(
+                    "user1", "Album", _http_error(status_code),
+                )
+
+                with patch("lib.browse.logger") as logger:
+                    result = _browse_one("user1", "Album", slskd)
+
+                self.assertEqual(result.file_dir, "Album")
+                self.assertIsNone(result.directory)
+                self.assertFalse(result.cache_negative)
+                logger.info.assert_not_called()
+                logger.exception.assert_called_once()
+
+    def test_http_failure_without_status_keeps_exception_logging(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory_error("user1", "Album", _http_error(None))
+
+        with patch("lib.browse.logger") as logger:
+            result = _browse_one("user1", "Album", slskd)
+
+        self.assertEqual(result.file_dir, "Album")
+        self.assertIsNone(result.directory)
+        self.assertFalse(result.cache_negative)
+        logger.info.assert_not_called()
+        logger.exception.assert_called_once()
+
+    def test_non_http_browse_failure_keeps_exception_logging(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_directory_error("user1", "Album", RuntimeError("boom"))
+
+        with patch("lib.browse.logger") as logger:
+            result = _browse_one("user1", "Album", slskd)
+
+        self.assertEqual(result.file_dir, "Album")
+        self.assertIsNone(result.directory)
+        self.assertFalse(result.cache_negative)
+        logger.info.assert_not_called()
+        logger.exception.assert_called_once()
+
+    def test_empty_browse_response_still_sets_negative_cache_flag(self):
+        slskd = FakeSlskdAPI()
+
+        with patch("lib.browse.logger") as logger:
+            result = _browse_one("user1", "Album", slskd)
+
+        self.assertEqual(result.file_dir, "Album")
+        self.assertIsNone(result.directory)
+        self.assertTrue(result.cache_negative)
+        logger.info.assert_not_called()
+        logger.exception.assert_not_called()
 
 
 class TestFanoutBrowseHappyPath(unittest.TestCase):
