@@ -1211,6 +1211,12 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             self.req1, query="loop b", elapsed_s=4.0, outcome="no_match"
         )
         self.db.log_search(
+            self.req1, query=None, elapsed_s=1.0, outcome="exhausted"
+        )
+        self.db.log_search(
+            self.req1, query="loop c", elapsed_s=3.0, outcome="timeout"
+        )
+        self.db.log_search(
             self.req2, query="healthy", elapsed_s=6.0, outcome="found"
         )
 
@@ -1218,11 +1224,13 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
 
         searches_24h = metrics["searches"]["windows"][0]
         self.assertEqual(searches_24h["label"], "24h")
-        self.assertEqual(searches_24h["searches"], 3)
+        self.assertEqual(searches_24h["searches"], 5)
         self.assertEqual(searches_24h["distinct_requests"], 2)
         self.assertEqual(searches_24h["outcomes"]["found"], 1)
         self.assertEqual(searches_24h["outcomes"]["no_match"], 1)
         self.assertEqual(searches_24h["outcomes"]["no_results"], 1)
+        self.assertEqual(searches_24h["outcomes"]["exhausted"], 1)
+        self.assertEqual(searches_24h["outcomes"]["errors"], 1)
 
         cycles_6h = metrics["cycles"]["windows"][1]
         self.assertEqual(cycles_6h["label"], "6h")
@@ -1238,9 +1246,11 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["wanted_searched_24h"], 2)
         self.assertEqual(coverage["wanted_unsearched_24h"], 1)
         self.assertEqual(coverage["wanted_never_searched"], 1)
-        self.assertEqual(coverage["active_wanted_searches_24h"], 3)
+        self.assertEqual(coverage["active_wanted_searches_24h"], 5)
         self.assertEqual(coverage["top_loop_suspects"][0]["request_id"], self.req1)
-        self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 2)
+        self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 4)
+        self.assertEqual(coverage["top_loop_suspects"][0]["reset_24h"], 1)
+        self.assertEqual(coverage["top_loop_suspects"][0]["problem_24h"], 1)
         self.assertEqual(coverage["stale_wanted"][0]["request_id"], self.req3)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 

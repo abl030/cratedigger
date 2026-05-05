@@ -333,6 +333,7 @@ def _make_server():
                     "found_24h": 0,
                     "no_match_24h": 2,
                     "no_results_24h": 2,
+                    "reset_24h": 0,
                     "problem_24h": 0,
                 },
             ],
@@ -349,6 +350,7 @@ def _make_server():
                     "found_24h": 0,
                     "no_match_24h": 0,
                     "no_results_24h": 0,
+                    "reset_24h": 0,
                     "problem_24h": 0,
                 },
             ],
@@ -1040,6 +1042,12 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline dashboard coverage")
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
+        _assert_required_fields(
+            self,
+            data["coverage"]["top_loop_suspects"][0],
+            {"reset_24h", "problem_24h"},
+            "pipeline dashboard loop suspect",
+        )
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {
         "request", "history", "tracks", "manual_reason", "last_search",

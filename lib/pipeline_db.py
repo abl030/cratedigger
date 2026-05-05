@@ -2046,7 +2046,11 @@ class PipelineDB:
                     )::int AS no_results_24h,
                     COUNT(*) FILTER (
                         WHERE created_at >= NOW() - INTERVAL '24 hours'
-                          AND outcome IN ('timeout', 'error', 'empty_query', 'exhausted')
+                          AND outcome = 'exhausted'
+                    )::int AS reset_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '24 hours'
+                          AND outcome IN ('timeout', 'error', 'empty_query')
                     )::int AS problem_24h
                 FROM search_log
                 GROUP BY request_id
@@ -2059,6 +2063,7 @@ class PipelineDB:
                 COALESCE(pr.found_24h, 0)::int AS found_24h,
                 COALESCE(pr.no_match_24h, 0)::int AS no_match_24h,
                 COALESCE(pr.no_results_24h, 0)::int AS no_results_24h,
+                COALESCE(pr.reset_24h, 0)::int AS reset_24h,
                 COALESCE(pr.problem_24h, 0)::int AS problem_24h
             FROM wanted w
             JOIN per_request pr ON pr.request_id = w.id
@@ -2122,6 +2127,7 @@ class PipelineDB:
             "found_24h": int(row.get("found_24h") or 0),
             "no_match_24h": int(row.get("no_match_24h") or 0),
             "no_results_24h": int(row.get("no_results_24h") or 0),
+            "reset_24h": int(row.get("reset_24h") or 0),
             "problem_24h": int(row.get("problem_24h") or 0),
         }
 

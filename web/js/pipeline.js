@@ -230,7 +230,7 @@ function renderSearchCard(windows) {
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Search Throughput</div>
       <table class="dashboard-table">
-        <thead><tr><th>Window</th><th>Searches</th><th>Requests</th><th>/hr</th><th>Median</th><th>P95</th><th>Found</th><th>No match</th><th>Empty</th><th>Errors</th></tr></thead>
+        <thead><tr><th>Window</th><th>Searches</th><th>Requests</th><th>/hr</th><th>Median</th><th>P95</th><th>Found</th><th>No match</th><th>Empty</th><th>Resets</th><th>Errors</th></tr></thead>
         <tbody>
           ${windows.map(w => `
             <tr>
@@ -243,10 +243,11 @@ function renderSearchCard(windows) {
               <td>${formatCount(w.outcomes?.found)}</td>
               <td>${formatCount(w.outcomes?.no_match)}</td>
               <td>${formatCount(w.outcomes?.no_results)}</td>
+              <td>${formatCount(w.outcomes?.exhausted)}</td>
               <td class="${w.outcomes?.errors ? 'metric-warn' : ''}">${formatCount(w.outcomes?.errors)}</td>
             </tr>
           `).join('')}
-          ${windows.length === 0 ? '<tr><td colspan="10">No search metrics</td></tr>' : ''}
+          ${windows.length === 0 ? '<tr><td colspan="11">No search metrics</td></tr>' : ''}
         </tbody>
       </table>
     </div>
@@ -312,7 +313,7 @@ function renderLoopSuspects(rows) {
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Loop Suspects</div>
       <table class="dashboard-table">
-        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>24h</th><th>6h</th><th>Found</th><th>No match</th><th>No results</th><th>Problems</th><th>Last</th></tr></thead>
+        <thead><tr><th>ID</th><th>Artist</th><th>Album</th><th>24h</th><th>6h</th><th>Found</th><th>No match</th><th>No results</th><th>Resets</th><th>Errors</th><th>Last</th></tr></thead>
         <tbody>
           ${rows.map(r => `
             <tr>
@@ -324,11 +325,12 @@ function renderLoopSuspects(rows) {
               <td>${formatCount(r.found_24h)}</td>
               <td>${formatCount(r.no_match_24h)}</td>
               <td>${formatCount(r.no_results_24h)}</td>
+              <td>${formatCount(r.reset_24h)}</td>
               <td class="${r.problem_24h ? 'metric-warn' : ''}">${formatCount(r.problem_24h)}</td>
               <td>${r.last_search_at ? awstDateTime(r.last_search_at) : 'never'}</td>
             </tr>
           `).join('')}
-          ${rows.length === 0 ? '<tr><td colspan="10">No repeated wanted searches in 24h</td></tr>' : ''}
+          ${rows.length === 0 ? '<tr><td colspan="11">No repeated wanted searches in 24h</td></tr>' : ''}
         </tbody>
       </table>
     </div>
