@@ -189,6 +189,7 @@ function renderPipelineDashboard() {
       ${renderSearchCard(searches)}
       ${renderCycleCard(cycles)}
       ${renderCycleOutliers(data.cycles?.outliers || [])}
+      ${renderPeerDirHeavyQueries(peerDirs)}
       ${renderLoopSuspects(coverage.top_loop_suspects || [])}
       ${renderStaleWanted(coverage.stale_wanted || [])}
     </div>
@@ -460,6 +461,40 @@ function renderCycleOutliers(rows) {
             </tr>
           `).join('')}
           ${rows.length === 0 ? '<tr><td colspan="8">No cycle rows yet</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderPeerDirHeavyQueries(peerDirs) {
+  const rows = /** @type {any[]} */ (peerDirs.heavy_queries || []);
+  const hours = Number(peerDirs.heavy_query_hours || 24);
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Peer/Dir Heavy Queries (${formatCount(hours)}h)</div>
+      <table class="dashboard-table dashboard-query-table">
+        <thead><tr><th>Searched</th><th>Req</th><th>MBID</th><th>Release</th><th>Query</th><th>Variant</th><th>Results</th><th>Peer/Dirs</th><th>Waves</th><th>Browse</th></tr></thead>
+        <tbody>
+          ${rows.map(r => {
+            const release = [r.artist_name, r.album_title].filter(Boolean).join(' - ');
+            const mbid = r.mb_release_id || '';
+            return `
+              <tr>
+                <td>${awstDateTime(r.created_at || '')}</td>
+                <td title="search_log #${formatCount(r.search_log_id)}">#${r.request_id}</td>
+                <td title="${esc(mbid)}">${esc(formatShortText(mbid, 8))}</td>
+                <td title="${esc(release)}">${esc(formatShortText(release, 28))}</td>
+                <td class="dashboard-query-cell" title="${esc(r.query || '')}">${esc(r.query || '')}</td>
+                <td>${esc(r.variant || '')}</td>
+                <td>${formatCount(r.result_count)}</td>
+                <td class="${r.peer_dirs > 10000 ? 'metric-warn' : ''}">${formatCount(r.peer_dirs)}</td>
+                <td>${formatCount(r.fanout_waves)}</td>
+                <td>${formatDuration(r.browse_time_s)}</td>
+              </tr>
+            `;
+          }).join('')}
+          ${rows.length === 0 ? '<tr><td colspan="10">No per-query peer/dir metrics yet</td></tr>' : ''}
         </tbody>
       </table>
     </div>
@@ -826,6 +861,7 @@ export const __test__ = {
   renderCoverageCard,
   renderHourlyMatchRateChart,
   renderMatchRateChart,
+  renderPeerDirHeavyQueries,
   renderPipelineNav,
   withCoverageMatchRates,
 };

@@ -1206,10 +1206,15 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         )
 
         self.db.log_search(
-            self.req1, query="loop a", elapsed_s=2.0, outcome="no_results"
+            self.req1, query="loop a", elapsed_s=2.0, outcome="no_results",
+            peers_browsed=4, peers_browsed_lazy=1, fanout_waves=1,
+            browse_time_s=5.0,
         )
         self.db.log_search(
-            self.req1, query="loop b", elapsed_s=4.0, outcome="no_match"
+            self.req1, query="loop b", result_count=500, elapsed_s=4.0,
+            outcome="no_match", variant="track_0", peers_browsed=33,
+            peers_browsed_lazy=2, fanout_waves=3, browse_time_s=12.5,
+            match_time_s=0.5,
         )
         self.db.log_search(
             self.req1, query=None, elapsed_s=1.0, outcome="exhausted"
@@ -1280,6 +1285,15 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["top_loop_suspects"][0]["reset_24h"], 1)
         self.assertEqual(coverage["top_loop_suspects"][0]["problem_24h"], 1)
         self.assertEqual(coverage["stale_wanted"][0]["request_id"], self.req3)
+        heavy = metrics["peer_dirs"]["heavy_queries"]
+        self.assertEqual(heavy[0]["request_id"], self.req1)
+        self.assertEqual(heavy[0]["mb_release_id"], "dash-1")
+        self.assertEqual(heavy[0]["query"], "loop b")
+        self.assertEqual(heavy[0]["variant"], "track_0")
+        self.assertEqual(heavy[0]["result_count"], 500)
+        self.assertEqual(heavy[0]["peer_dirs"], 35)
+        self.assertEqual(heavy[0]["fanout_waves"], 3)
+        self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
     def test_peer_dir_observations_track_first_seen_counts(self):

@@ -35,6 +35,8 @@
   },
   "peer_dirs": {
     "days": [],
+    "heavy_query_hours": 24,
+    "heavy_queries": [],
     "totals": {
       "known_combos": 0,
       "known_peers": 0,

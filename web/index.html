@@ -177,6 +177,9 @@
   .dashboard-table tr:last-child td { border-bottom: none; }
   .dashboard-table td:first-child { white-space: nowrap; }
   .dashboard-table td:nth-child(2), .dashboard-table td:nth-child(n+4) { white-space: nowrap; }
+  .dashboard-query-table td:nth-child(4),
+  .dashboard-query-table td:nth-child(5) { white-space: normal; min-width: 180px; max-width: 360px; }
+  .dashboard-query-cell { color: #ddd !important; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
   @media (max-width: 640px) {
     .dashboard-grid { grid-template-columns: 1fr; }
     .dashboard-header { display: block; }

@@ -132,7 +132,7 @@ WHERE id = <id>;
 
 ## `search_log`
 
-Every search attempt is logged to `search_log` with: `request_id`, `query` (normalized search term), `result_count`, `elapsed_s`, `outcome`, `variant`, `final_state`, `candidates` (JSONB), `created_at`. Failed searches also increment `search_attempts` on `album_requests` and trigger exponential backoff.
+Every search attempt is logged to `search_log` with: `request_id`, `query` (normalized search term), `result_count`, `elapsed_s`, `outcome`, `variant`, `final_state`, `candidates` (JSONB), browse/match cost fields (`browse_time_s`, `match_time_s`, `peers_browsed`, `peers_browsed_lazy`, `fanout_waves`), and `created_at`. Failed searches also increment `search_attempts` on `album_requests` and trigger exponential backoff.
 
 Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable download), `no_results` (0 results from slskd), `timeout`, `error`, `empty_query` (can't build query), `exhausted` (variant ladder ran out — see below).
 

@@ -391,6 +391,29 @@ def _make_server():
             ],
         },
         "peer_dirs": {
+            "heavy_query_hours": 24,
+            "heavy_queries": [
+                {
+                    "search_log_id": 88,
+                    "request_id": 100,
+                    "mb_release_id": "dash-heavy-mbid",
+                    "artist_name": "Test Artist",
+                    "album_title": "Loop Album",
+                    "status": "wanted",
+                    "created_at": "2026-05-05T00:03:00+00:00",
+                    "query": "loop heavy tokens",
+                    "variant": "track_0",
+                    "outcome": "no_match",
+                    "result_count": 500,
+                    "elapsed_s": 12.0,
+                    "browse_time_s": 42.0,
+                    "match_time_s": 1.0,
+                    "peers_browsed": 110,
+                    "peers_browsed_lazy": 5,
+                    "peer_dirs": 115,
+                    "fanout_waves": 6,
+                },
+            ],
             "totals": {
                 "known_combos": 1200,
                 "known_peers": 220,
@@ -1038,13 +1061,22 @@ class TestPipelineRouteContracts(_WebServerCase):
     DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS = {
         "bucket_start", "matches", "matches_per_day",
     }
-    DASHBOARD_PEER_DIR_FIELDS = {"totals", "days"}
+    DASHBOARD_PEER_DIR_FIELDS = {
+        "totals", "days", "heavy_queries", "heavy_query_hours",
+    }
     DASHBOARD_PEER_DIR_TOTAL_FIELDS = {
         "known_combos", "known_peers", "known_dirs", "new_24h",
         "cold_seen_24h", "days_with_new", "tracked_since",
     }
     DASHBOARD_PEER_DIR_DAY_FIELDS = {
         "date", "new_combos", "new_peers", "new_dirs",
+    }
+    DASHBOARD_PEER_DIR_HEAVY_QUERY_FIELDS = {
+        "search_log_id", "request_id", "mb_release_id", "artist_name",
+        "album_title", "status", "created_at", "query", "variant",
+        "outcome", "result_count", "elapsed_s", "browse_time_s",
+        "match_time_s", "peers_browsed", "peers_browsed_lazy",
+        "peer_dirs", "fanout_waves",
     }
 
     def setUp(self) -> None:
@@ -1169,6 +1201,9 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["peer_dirs"]["days"][0],
                                 self.DASHBOARD_PEER_DIR_DAY_FIELDS,
                                 "pipeline dashboard peer dir day")
+        _assert_required_fields(self, data["peer_dirs"]["heavy_queries"][0],
+                                self.DASHBOARD_PEER_DIR_HEAVY_QUERY_FIELDS,
+                                "pipeline dashboard peer dir heavy query")
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
         self.assertIsInstance(data["coverage"]["match_rate_series_24h"], list)

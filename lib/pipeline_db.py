@@ -1792,7 +1792,12 @@ class PipelineDB:
                    outcome: str = "error",
                    candidates: "list[CandidateScore] | None" = None,
                    variant: str | None = None,
-                   final_state: str | None = None) -> None:
+                   final_state: str | None = None,
+                   browse_time_s: float = 0.0,
+                   match_time_s: float = 0.0,
+                   peers_browsed: int = 0,
+                   peers_browsed_lazy: int = 0,
+                   fanout_waves: int = 0) -> None:
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
@@ -1809,11 +1814,13 @@ class PipelineDB:
         self._execute("""
             INSERT INTO search_log (
                 request_id, query, result_count, elapsed_s, outcome,
-                candidates, variant, final_state
+                candidates, variant, final_state, browse_time_s, match_time_s,
+                peers_browsed, peers_browsed_lazy, fanout_waves
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (request_id, query, result_count, elapsed_s, outcome,
-              candidates_json, variant, final_state))
+              candidates_json, variant, final_state, browse_time_s, match_time_s,
+              peers_browsed, peers_browsed_lazy, fanout_waves))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
@@ -2035,6 +2042,9 @@ class PipelineDB:
         covers only persisted Postgres state: searches, cycles, and active
         request coverage.
         """
+        peer_dirs = self.get_peer_dir_daily_metrics()
+        peer_dirs["heavy_queries"] = self._dashboard_peer_dir_heavy_queries()
+        peer_dirs["heavy_query_hours"] = 24
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "searches": {
@@ -2056,7 +2066,77 @@ class PipelineDB:
                 ),
             },
             "coverage": self._dashboard_coverage(),
-            "peer_dirs": self.get_peer_dir_daily_metrics(),
+            "peer_dirs": peer_dirs,
+        }
+
+    def _dashboard_peer_dir_heavy_queries(
+        self,
+        *,
+        hours: int = 24,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Return recent search rows that generated the most peer/dir work."""
+        clamped_hours = max(1, min(int(hours), 168))
+        clamped_limit = max(1, min(int(limit), 50))
+        cur = self._execute("""
+            SELECT
+                sl.id AS search_log_id,
+                sl.request_id,
+                ar.mb_release_id,
+                ar.artist_name,
+                ar.album_title,
+                ar.status,
+                sl.created_at,
+                sl.query,
+                sl.variant,
+                sl.outcome,
+                sl.result_count,
+                sl.elapsed_s,
+                sl.browse_time_s,
+                sl.match_time_s,
+                sl.peers_browsed,
+                sl.peers_browsed_lazy,
+                sl.fanout_waves,
+                (sl.peers_browsed + sl.peers_browsed_lazy)::int AS peer_dirs
+            FROM search_log sl
+            JOIN album_requests ar ON ar.id = sl.request_id
+            WHERE sl.created_at >= NOW() - %s::interval
+              AND (sl.peers_browsed + sl.peers_browsed_lazy) > 0
+            ORDER BY
+                (sl.peers_browsed + sl.peers_browsed_lazy) DESC,
+                sl.fanout_waves DESC,
+                sl.created_at DESC,
+                sl.id DESC
+            LIMIT %s
+        """, (f"{clamped_hours} hours", clamped_limit))
+        return [
+            self._serialize_dashboard_heavy_query_row(dict(row))
+            for row in cur.fetchall()
+        ]
+
+    def _serialize_dashboard_heavy_query_row(
+        self,
+        row: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "search_log_id": int(row["search_log_id"]),
+            "request_id": int(row["request_id"]),
+            "mb_release_id": row.get("mb_release_id"),
+            "artist_name": row.get("artist_name"),
+            "album_title": row.get("album_title"),
+            "status": row.get("status"),
+            "created_at": _isoformat_or_none(row.get("created_at")),
+            "query": row.get("query"),
+            "variant": row.get("variant"),
+            "outcome": row.get("outcome"),
+            "result_count": int(row.get("result_count") or 0),
+            "elapsed_s": _float_or_none(row.get("elapsed_s")),
+            "browse_time_s": float(row.get("browse_time_s") or 0.0),
+            "match_time_s": float(row.get("match_time_s") or 0.0),
+            "peers_browsed": int(row.get("peers_browsed") or 0),
+            "peers_browsed_lazy": int(row.get("peers_browsed_lazy") or 0),
+            "peer_dirs": int(row.get("peer_dirs") or 0),
+            "fanout_waves": int(row.get("fanout_waves") or 0),
         }
 
     def _dashboard_search_window(self, label: str, hours: int) -> dict[str, Any]:

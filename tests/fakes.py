@@ -113,6 +113,11 @@ class SearchLogRow:
     candidates: str | None = None
     variant: str | None = None
     final_state: str | None = None
+    browse_time_s: float = 0.0
+    match_time_s: float = 0.0
+    peers_browsed: int = 0
+    peers_browsed_lazy: int = 0
+    fanout_waves: int = 0
 
 
 @dataclass
@@ -2000,6 +2005,9 @@ class FakePipelineDB:
         }
 
     def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
+        peer_dirs = self.get_peer_dir_daily_metrics()
+        peer_dirs["heavy_queries"] = []
+        peer_dirs["heavy_query_hours"] = 24
         return {
             "generated_at": _utcnow().isoformat(),
             "searches": {"windows": []},
@@ -2013,7 +2021,7 @@ class FakePipelineDB:
                 )[:8],
             },
             "coverage": {},
-            "peer_dirs": self.get_peer_dir_daily_metrics(),
+            "peer_dirs": peer_dirs,
         }
 
     def _download_log_to_dict(self,
@@ -2203,7 +2211,12 @@ class FakePipelineDB:
                    outcome: str = "error",
                    candidates: list[CandidateScore] | None = None,
                    variant: str | None = None,
-                   final_state: str | None = None) -> None:
+                   final_state: str | None = None,
+                   browse_time_s: float = 0.0,
+                   match_time_s: float = 0.0,
+                   peers_browsed: int = 0,
+                   peers_browsed_lazy: int = 0,
+                   fanout_waves: int = 0) -> None:
         """Mirror PipelineDB.log_search wire boundary.
 
         ``candidates`` is encoded via ``msgspec.json.encode`` (same as the
@@ -2226,6 +2239,11 @@ class FakePipelineDB:
             candidates=candidates_json,
             variant=variant,
             final_state=final_state,
+            browse_time_s=browse_time_s,
+            match_time_s=match_time_s,
+            peers_browsed=peers_browsed,
+            peers_browsed_lazy=peers_browsed_lazy,
+            fanout_waves=fanout_waves,
         ))
 
     def get_search_history(self,
@@ -2272,6 +2290,11 @@ class FakePipelineDB:
             "candidates": candidates,
             "variant": entry.variant,
             "final_state": entry.final_state,
+            "browse_time_s": entry.browse_time_s,
+            "match_time_s": entry.match_time_s,
+            "peers_browsed": entry.peers_browsed,
+            "peers_browsed_lazy": entry.peers_browsed_lazy,
+            "fanout_waves": entry.fanout_waves,
         }
 
     # --- User cooldowns ---

@@ -154,6 +154,8 @@
         "new_dirs": 0
       }
     ],
+    "heavy_query_hours": 24,
+    "heavy_queries": [],
     "totals": {
       "known_combos": 1621,
       "known_peers": 316,

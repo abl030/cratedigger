@@ -663,6 +663,11 @@ def _log_search_result(album, result, ctx) -> None:
         candidates=top,
         variant=result.variant_tag,
         final_state=result.final_state,
+        browse_time_s=result.browse_time_s,
+        match_time_s=result.match_time_s,
+        peers_browsed=result.peers_browsed,
+        peers_browsed_lazy=result.peers_browsed_lazy,
+        fanout_waves=result.fanout_waves,
     )
     # Increment search_attempts + backoff for any non-found outcome.
     # Exhausted variants do not increment — the counter is reset below so
@@ -700,6 +705,11 @@ def _apply_find_download_result(
     result.candidates = tuple(find_result.candidates)
     if ctx is not None and getattr(find_result, "metrics", None) is not None:
         metrics = find_result.metrics
+        result.browse_time_s = metrics.browse_time_s
+        result.match_time_s = metrics.match_time_s
+        result.peers_browsed = metrics.peers_browsed
+        result.peers_browsed_lazy = metrics.peers_browsed_lazy
+        result.fanout_waves = metrics.fanout_waves
         ctx.browse_time_s += metrics.browse_time_s
         ctx.match_time_s += metrics.match_time_s
         ctx.peers_browsed += metrics.peers_browsed

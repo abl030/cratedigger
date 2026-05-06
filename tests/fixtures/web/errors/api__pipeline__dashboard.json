@@ -82,6 +82,8 @@
         "new_dirs": 8540
       }
     ],
+    "heavy_query_hours": 24,
+    "heavy_queries": [],
     "totals": {
       "known_combos": 8800,
       "known_peers": 901,

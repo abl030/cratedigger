@@ -328,6 +328,12 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         logs_by_request = {row.request_id: row for row in db.search_logs}
         self.assertEqual(logs_by_request[rid_found].outcome, "found")
         self.assertEqual(logs_by_request[rid_miss].outcome, "no_match")
+        self.assertEqual(logs_by_request[rid_found].peers_browsed, 3)
+        self.assertEqual(logs_by_request[rid_found].peers_browsed_lazy, 1)
+        self.assertEqual(logs_by_request[rid_found].fanout_waves, 2)
+        self.assertEqual(logs_by_request[rid_found].browse_time_s, 1.5)
+        self.assertEqual(logs_by_request[rid_miss].peers_browsed, 4)
+        self.assertEqual(logs_by_request[rid_miss].fanout_waves, 1)
         found_candidates = json.loads(logs_by_request[rid_found].candidates or "[]")
         miss_candidates = json.loads(logs_by_request[rid_miss].candidates or "[]")
         self.assertEqual(found_candidates[0]["username"], "peer1")

@@ -149,5 +149,34 @@ console.log('withCoverageMatchRates() falls back to search window found counts')
   }
 }
 
+console.log('renderPeerDirHeavyQueries() shows release ids and exact query tokens');
+{
+  const html = __test__.renderPeerDirHeavyQueries({
+    heavy_query_hours: 24,
+    heavy_queries: [
+      {
+        search_log_id: 88,
+        request_id: 1843,
+        mb_release_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        artist_name: 'The Wiggles',
+        album_title: 'The Wiggles',
+        created_at: '2026-05-06T00:00:00+00:00',
+        query: '*he *iggles 1991',
+        variant: 'unwild_year',
+        result_count: 1000,
+        peer_dirs: 32355,
+        fanout_waves: 422,
+        browse_time_s: 3868,
+      },
+    ],
+  });
+  assertContains(html, 'Peer/Dir Heavy Queries (24h)', 'card title includes window');
+  assertContains(html, '#1843', 'request id rendered');
+  assertContains(html, 'aaaaaaaa', 'release id prefix rendered');
+  assertContains(html, '*he *iggles 1991', 'exact query rendered');
+  assertContains(html, '32,355', 'peer/dir count rendered');
+  assertContains(html, '64m 28s', 'browse duration rendered');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

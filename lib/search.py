@@ -61,6 +61,14 @@ class SearchResult:
     candidates: tuple[CandidateScore, ...] = ()
     variant_tag: str | None = None
     final_state: str | None = None
+    # Per-search browse/match cost copied from FindDownloadMetrics. These are
+    # persisted on search_log so the dashboard can identify the exact query
+    # tokens that produce the largest peer/dir fan-out.
+    browse_time_s: float = 0.0
+    match_time_s: float = 0.0
+    peers_browsed: int = 0
+    peers_browsed_lazy: int = 0
+    fanout_waves: int = 0
     # True when `_collect_search_results` cancelled the search via slskd's
     # PUT /api/v0/searches/{id} after 90s of no new peer responses (issue
     # #212). Diagnostic only — outcome classification still reflects what
