@@ -3065,9 +3065,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_track_variant_used_after_unwild_year(self):
         """Cycle threshold+2 with year + tracks → variant=track_0.
 
-        First per-track query is the cleaned first-track title only — no
-        artist, no wildcards. Album-match scoring downstream disambiguates
-        wrong albums via the sub-count gate + filename ratio.
+        First per-track query is the cleaned first usable track title only:
+        one-token track titles are skipped because they are too broad
+        without artist/release context.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -3085,7 +3085,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         db.update_request_fields(rid, search_attempts=7)
         db.set_tracks(rid, [
             {"track_number": 1, "title": "Tallahassee"},
-            {"track_number": 2, "title": "Idylls"},
+            {"track_number": 2, "title": "Wide Open Road"},
             {"track_number": 3, "title": "Frontier"},
             {"track_number": 4, "title": "Treasure"},
         ])
@@ -3098,9 +3098,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(result.variant_tag, "track_0")
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         call = slskd.searches.search_text_calls[0]
-        # Track tier query is the bare first track title — no wildcards,
-        # no artist tokens.
-        self.assertEqual(call.search_text, "Tallahassee")
+        # Track tier skips the bare one-word first title and uses the first
+        # multi-token title with no wildcards or artist tokens.
+        self.assertEqual(call.search_text, "Wide Open Road")
         self.assertNotIn("*", call.search_text)
         self.assertNotIn("Wiggles", call.search_text)
         # search_log persisted the variant.

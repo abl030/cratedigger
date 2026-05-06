@@ -309,16 +309,17 @@ class TestPerTrackQueries(unittest.TestCase):
         out = _per_track_queries(["Of It"])
         self.assertEqual(out, ["Of It"])
 
-    def test_skips_short_single_token_titles(self):
-        # Bare one-word track searches like "Sweet" are too broad without
-        # artist/release context and can fan out to thousands of peers.
+    def test_skips_single_token_titles(self):
+        # Bare one-word track searches like "Sweet" or "Tallahassee" are too
+        # broad without artist/release context and can fan out to thousands
+        # of peers.
         out = _per_track_queries([
             "Sweet",
             "Twenty Four Seven",
             "Tallahassee",
             "Go",
         ])
-        self.assertEqual(out, ["Twenty Four Seven", "Tallahassee"])
+        self.assertEqual(out, ["Twenty Four Seven"])
 
 
 class TestSelectVariant(unittest.TestCase):
@@ -642,11 +643,16 @@ class TestSelectVariant(unittest.TestCase):
                 self.assertEqual(v.tag, expected_tag)
                 self.assertEqual(v.query, expected_query)
 
-    def test_track_tier_skips_short_single_token_titles(self):
-        titles = ["Sweet", "Twenty Four Seven", "Go", "Tallahassee"]
+    def test_track_tier_skips_single_token_titles(self):
+        titles = [
+            "Sweet",
+            "Twenty Four Seven",
+            "Go",
+            "Drawn Together",
+        ]
         cases = [
             (7, "track_0", "Twenty Four Seven"),
-            (8, "track_1", "Tallahassee"),
+            (8, "track_1", "Drawn Together"),
             (9, "exhausted", None),
         ]
         for attempts, expected_tag, expected_query in cases:
@@ -669,7 +675,7 @@ class TestSelectVariant(unittest.TestCase):
             base_query="*ase",
             base_query_unwild="base",
             year="1991",
-            track_titles=["Sweet", "Go", "Sun"],
+            track_titles=["Sweet", "Go", "Sun", "Tallahassee"],
         )
         self.assertEqual(v.kind, "exhausted")
         self.assertEqual(v.tag, "exhausted")
@@ -677,7 +683,7 @@ class TestSelectVariant(unittest.TestCase):
 
     def test_track_tag_format_exact(self):
         # Tag for track tier must be exactly "track_<idx>".
-        titles = [f"Distinct{n:03d}xxxx" for n in range(20)]
+        titles = [f"Distinct{n:03d}xxxx Song" for n in range(20)]
         for idx in (0, 1, 2, 5, 17):
             with self.subTest(idx=idx):
                 attempts = 5 + 2 + idx  # threshold + unwild + unwild_year + idx
