@@ -743,6 +743,78 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(claimed.id, queued.id)
         self.assertEqual(claimed.status, "running")
 
+    def test_abandon_auto_import_request_guards_state_and_logs(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "current_path": "/tmp/staged",
+                "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
+            },
+        ))
+
+        log_id = db.abandon_auto_import_request(
+            request_id=42,
+            current_path="/tmp/staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_scenario="abandoned_auto_import",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/staged",
+            error_message="abandoned",
+            validation_result=None,
+        )
+
+        self.assertEqual(log_id, 1)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["active_download_state"])
+        self.assertEqual(db.recorded_attempts, [(42, "download")])
+        self.assertEqual(
+            db.download_logs[0].beets_scenario,
+            "abandoned_auto_import",
+        )
+
+        second = db.abandon_auto_import_request(
+            request_id=42,
+            current_path="/tmp/staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_scenario="abandoned_auto_import",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/staged",
+            error_message="abandoned",
+            validation_result=None,
+        )
+        self.assertIsNone(second)
+        self.assertEqual(len(db.download_logs), 1)
+
+    def test_dashboard_metric_stubs_return_core_shapes(self):
+        db = FakePipelineDB()
+
+        cycle_id = db.record_cycle_metrics(cycle_total_s=12.5)
+        new_dirs = db.record_peer_dir_observations([
+            ("alice", "Artist\\Album"),
+            ("alice", "Artist\\Album"),
+            ("bob", "Other\\Album"),
+        ])
+        repeated = db.record_peer_dir_observations([
+            ("alice", "Artist\\Album"),
+        ])
+
+        self.assertEqual(cycle_id, 1)
+        self.assertEqual(new_dirs, 2)
+        self.assertEqual(repeated, 0)
+        peer_metrics = db.get_peer_dir_daily_metrics()
+        self.assertEqual(peer_metrics["totals"]["known_combos"], 2)
+        dashboard = db.get_pipeline_dashboard_metrics()
+        self.assertIn("cycles", dashboard)
+        self.assertEqual(dashboard["cycles"]["recent"][0]["cycle_total_s"],
+                         12.5)
+        self.assertEqual(dashboard["peer_dirs"]["totals"]["known_combos"], 2)
+
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 

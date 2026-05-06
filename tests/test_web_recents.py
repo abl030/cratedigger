@@ -587,6 +587,16 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Failed")
         self.assertEqual(result.badge_class, "badge-failed")
 
+    def test_abandoned_auto_import_failed_row_uses_readable_error(self):
+        result = classify_log_entry(_entry(
+            outcome="failed",
+            beets_scenario="abandoned_auto_import",
+            error_message="Abandoned interrupted auto-import; queued for redownload",
+        ))
+
+        self.assertEqual(result.badge, "Failed")
+        self.assertIn("Abandoned interrupted auto-import", result.verdict)
+
     def test_timeout(self):
         result = classify_log_entry(_entry(outcome="timeout", beets_scenario="timeout"))
         self.assertEqual(result.badge, "Failed")

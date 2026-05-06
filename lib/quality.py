@@ -3753,7 +3753,7 @@ def full_pipeline_decision(
 class OrphanInfo:
     """A detected inconsistency in pipeline DB state."""
     request_id: int
-    issue_type: str  # "corrupt_downloading" | "orphaned_download" | "blocked_post_move" | "blocked_recovery"
+    issue_type: str  # corrupt_downloading | orphaned_download | blocked_post_move | blocked_recovery | auto_abandon_import
     detail: str
 
 
@@ -3870,6 +3870,15 @@ def suggest_repair(issue: OrphanInfo) -> RepairAction:
             request_id=issue.request_id,
             action="manual_review",
             detail="Inspect blocked local-processing row and finish or reset it explicitly",
+        )
+    if issue.issue_type == "auto_abandon_import":
+        return RepairAction(
+            request_id=issue.request_id,
+            action="wait_for_automatic_recovery",
+            detail=(
+                "Poller/importer will quarantine the interrupted "
+                "auto-import and reset it to wanted"
+            ),
         )
     else:
         return RepairAction(

@@ -130,6 +130,44 @@ class TestMoveFailedImport(unittest.TestCase):
         assert result is not None
         self.assertNotIn("bad_files", result)
 
+    def test_abandoned_auto_import_uses_prefixed_folder(self):
+        from lib.util import move_abandoned_auto_import
+        src = os.path.join(self.tmpdir, "Album [request-42]")
+        os.makedirs(src)
+        open(os.path.join(src, "01.opus"), "w").close()
+
+        result = move_abandoned_auto_import(src)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("failed_imports", result)
+        self.assertTrue(os.path.basename(result).startswith("abandoned_auto_import"))
+        self.assertIn("Album [request-42]", os.path.basename(result))
+        self.assertTrue(os.path.exists(os.path.join(result, "01.opus")))
+        self.assertFalse(os.path.exists(src))
+        self.assertNotIn("bad_files", result)
+
+    def test_abandoned_auto_import_dedup_suffix(self):
+        from lib.util import move_abandoned_auto_import
+        src = os.path.join(self.tmpdir, "Album [request-42]")
+        os.makedirs(src)
+        failed_dir = os.path.join(self.tmpdir, "failed_imports")
+        os.makedirs(os.path.join(
+            failed_dir,
+            "abandoned_auto_import - Album [request-42]",
+        ))
+
+        result = move_abandoned_auto_import(src)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.endswith("_1"))
+
+    def test_abandoned_auto_import_missing_source_returns_none(self):
+        from lib.util import move_abandoned_auto_import
+        result = move_abandoned_auto_import("/nonexistent/path/album")
+        self.assertIsNone(result)
+
 
 class TestRepairMp3Headers(unittest.TestCase):
 

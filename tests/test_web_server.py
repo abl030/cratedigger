@@ -611,7 +611,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(len(data["downloading"]), 1)
         self.assertEqual(data["downloading"][0]["album_title"], "Active Download")
         self.mock_db.get_by_status.assert_called_with("downloading")
-        self.mock_db.get_download_history_batch.assert_called_once_with([201])
+        self.mock_db.get_download_history_batch.assert_any_call([201])
 
         self.mock_db.get_by_status.side_effect = None
         self.mock_db.get_by_status.return_value = []

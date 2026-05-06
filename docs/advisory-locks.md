@@ -186,8 +186,28 @@ two cases for `auto-import/` retries:
   files, and dispatches as normal.
 - **Flag is set** — `dispatch_import_core` set this stamp immediately
   before launching `run_import_one(...)`. The subprocess may have
-  written to beets before crashing, so retry is unsafe and would risk
-  a double-import. The guard blocks; manual recovery is required.
+  written to beets before crashing, so rerunning the same staged folder
+  is unsafe and would risk a double-import. If no live import job owns
+  the row and the RELEASE lock can be acquired, runtime recovery
+  abandons the local attempt instead: it moves any remaining
+  request-scoped staged folder under a sibling
+  `failed_imports/abandoned_auto_import ...` folder, writes a
+  non-rejection `download_log.outcome='failed'` audit row with
+  `beets_scenario='abandoned_auto_import'`, resets the request to
+  `wanted`, and lets the next normal search/download cycle retry. The
+  reset and audit row are committed through a guarded ownership check on
+  the still-`downloading` row and matching `active_download_state`
+  current path; if that guard fails after the filesystem move, the move
+  is rolled back. The audit row is excluded from source-cooldown
+  accounting and does not create denylist, wrong-match, or bad-file
+  evidence.
+
+First deploy smoke for this policy: request #1034 (Phil Spector - Back
+to Mono) should leave `downloading` on the next poll/importer cycle
+without manual filesystem or database edits. If its staged directory
+still exists, it should be preserved under an
+`abandoned_auto_import` failed-import folder; `ImaginaryEndings` should
+not be denylisted or cooled down by the cleanup.
 
 `post-validation/` retries re-enter normally regardless because
 `StagedAlbum.move_to(...)` is idempotent when the album is already at

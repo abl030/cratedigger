@@ -1499,6 +1499,58 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["validation_attempts"], 1)
         self.assertEqual(req["next_retry_after"], before_retry)
 
+    def test_abandon_auto_import_request_audits_and_resets_atomically(self):
+        req_id = self.db.add_request(
+            mb_release_id="abandon-auto-import",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        state = {
+            "current_path": "/tmp/staged",
+            "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
+        }
+        self.assertTrue(self.db.set_downloading(req_id, json.dumps(state)))
+
+        log_id = self.db.abandon_auto_import_request(
+            request_id=req_id,
+            current_path="/tmp/staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_scenario="abandoned_auto_import",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/staged",
+            error_message="abandoned",
+            validation_result=None,
+        )
+
+        self.assertIsInstance(log_id, int)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertIsNone(req["active_download_state"])
+        self.assertEqual(req["download_attempts"], 1)
+        history = self.db.get_download_history(req_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["beets_scenario"],
+                         "abandoned_auto_import")
+
+        second = self.db.abandon_auto_import_request(
+            request_id=req_id,
+            current_path="/tmp/staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_scenario="abandoned_auto_import",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/staged",
+            error_message="abandoned",
+            validation_result=None,
+        )
+        self.assertIsNone(second)
+        self.assertEqual(len(self.db.get_download_history(req_id)), 1)
+
     def test_get_wanted_prioritizes_only_never_attempted_rows(self):
         fresh_ids = {
             self.db.add_request(
@@ -2544,6 +2596,26 @@ class TestUserCooldowns(unittest.TestCase):
                              outcome="timeout")
         result = self.db.check_and_apply_cooldown("newuser")
         self.assertFalse(result)
+
+    def test_check_and_apply_cooldown_ignores_abandoned_auto_import_audit(self):
+        """Interrupted local imports should not count as source failures."""
+        for _ in range(4):
+            self.db.log_download(
+                request_id=self.req1,
+                soulseek_username="retryuser",
+                outcome="timeout",
+            )
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="retryuser",
+            outcome="failed",
+            beets_scenario="abandoned_auto_import",
+        )
+
+        result = self.db.check_and_apply_cooldown("retryuser")
+
+        self.assertFalse(result)
+        self.assertNotIn("retryuser", self.db.get_cooled_down_users())
 
 
 class TestReleaseIdToLockKey(unittest.TestCase):

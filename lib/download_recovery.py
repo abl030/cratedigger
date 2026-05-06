@@ -471,6 +471,13 @@ def find_blocked_processing_path_issues(
         if location.path != current_path:
             continue
         if location.kind == "request_scoped_auto_import_staged":
+            state = row.get("active_download_state")
+            subprocess_started = (
+                isinstance(state, dict)
+                and state.get("import_subprocess_started_at") is not None
+            )
+            if not subprocess_started:
+                continue
             has_path_entries = has_entries(current_path)
             mb_release_id = row.get("mb_release_id")
             normalized_mbid = (
@@ -523,8 +530,9 @@ def find_blocked_processing_path_issues(
                 issues.append(BlockedRecoveryIssue(
                     request_id=request_id,
                     detail=(
-                        "persisted processing path missing after local "
-                        f"processing: {current_path}"
+                        "auto-abandonable request-scoped auto-import "
+                        "staged path is missing after interrupted import; "
+                        f"runtime recovery will reset and redownload: {current_path}"
                     ),
                 ))
                 continue
@@ -543,9 +551,9 @@ def find_blocked_processing_path_issues(
             issues.append(BlockedRecoveryIssue(
                 request_id=request_id,
                 detail=(
-                    "persisted request-scoped auto-import staged path is "
-                    "still populated, but no auto-import is currently "
-                    f"running: {location.path}"
+                    "auto-abandonable request-scoped auto-import staged "
+                    "path is still populated after interrupted import; "
+                    f"runtime recovery will quarantine and redownload: {location.path}"
                 ),
             ))
             continue
