@@ -88,11 +88,48 @@ class TestImporterWorker(unittest.TestCase):
             force=True,
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
+            source_dirs=None,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(self._result(updated)["success"], True)
         self.assertEqual(job.id, updated.id)
+
+    def test_force_import_job_forwards_source_dirs(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+                source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
+            ),
+            preview_enabled=True,
+        )
+        self._mark_importable(db, job)
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.import_dispatch.dispatch_import_from_db",
+            return_value=DispatchOutcome(True, "imported"),
+        ) as dispatch:
+            importer.process_claimed_job(cast(Any, db), claimed)
+
+        dispatch.assert_called_once_with(
+            db,
+            request_id=42,
+            failed_path="/tmp/failed",
+            force=True,
+            outcome_label=IMPORT_JOB_FORCE,
+            source_username="alice",
+            source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
+        )
 
     def test_manual_import_failure_marks_job_failed(self):
         from scripts import importer

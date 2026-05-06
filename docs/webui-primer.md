@@ -44,7 +44,10 @@ Browser → https://music.ablz.au
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/manual-import/import` | POST | Queue manual import for a matched folder |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
+| `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
+| `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
+| `/api/wrong-matches/triage` | POST | Re-run wrong-match auto-triage for a single candidate |
 | `/api/wrong-matches/delete-transparent-non-flac` | POST | Bulk-delete wrong-match folders whose exact library copy is already transparent and whose pending downloads are non-FLAC |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running import jobs in Recents queue order |
@@ -69,9 +72,10 @@ Browser → https://music.ablz.au
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
 - **Pipeline tab** — status dashboard (wanted/imported/manual counts + wanted list)
-- **Wrong Matches / Manual Import** — import buttons queue work and poll
-  `import_jobs`, so long beets imports do not block the web request. Failed
-  queued force-imports remove the reviewed wrong-match source from the
+- **Wrong Matches tab** — the old Complete-folder manual-import page is gone;
+  the tab now opens straight into Wrong Matches. Import actions queue work and
+  poll `import_jobs`, so long beets imports do not block the web request.
+  Failed queued force-imports remove the reviewed wrong-match source from the
   actionable list while preserving the failed job/download audit.
 - **Recents Queue subview** — Recents has History and Queue subviews. Queue
   shows import jobs in beets-import order, with preview states (`waiting`,
@@ -82,6 +86,9 @@ Browser → https://music.ablz.au
   queues those folders as force-import jobs and deletes the non-green folders
   in one action, then removes the release row without repainting the whole
   review pane.
+- **Wrong Matches explorer** — expanding a candidate now shows the original
+  downloaded folder names captured from the Soulseek user, a per-file explorer,
+  extracted audio tags, and inline browser playback for supported audio files.
 - **Wrong Matches bulk cleanup** — top-level cleanup deletes pending non-FLAC
   wrong-match folders for releases that already have an exact transparent copy
   in beets, leaving FLAC candidates for manual review.
@@ -95,6 +102,43 @@ Browser → https://music.ablz.au
   Recents History: collapsed cards show a triage chip, and expanded download
   history shows action, preview, reason, and stage-chain detail.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls the value-preview adapter through `/api/pipeline/simulate` with presets for known scenarios.
+
+## Dev Server Workflows
+
+`scripts/web_dev_server.py` exists so you can edit local frontend files without
+deploying `music.ablz.au`. The important split is:
+
+- `--data live-db` — run local route code against a read-only PostgreSQL
+  session and the backend host's filesystem.
+- `--data prod-api` — serve local `web/` files while proxying `/api/*` to some
+  other read-only backend.
+
+For Wrong Matches, the backend must be able to read the actual rejected folders
+from disk. A laptop with only DB access is not enough because the explorer and
+audio endpoints open the real files. In this homelab, `doc1` and `doc2` are the
+useful backend hosts.
+
+A practical "develop anywhere" loop is:
+
+```bash
+# backend host shell
+PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
+
+# local machine shell
+ssh -N -L 18096:127.0.0.1:8096 <backend-host>
+nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --host 127.0.0.1 --port 8096"
+```
+
+If the backend host does not have direct reachability to `192.168.100.11:5432`,
+add an SSH tunnel there first:
+
+```bash
+ssh -N -L 15432:192.168.100.11:5432 doc2
+```
+
+The local proxy forwards byte-range headers, so wrong-match audio preview and
+seek still work through the tunnel.
 
 ## NixOS Configuration
 

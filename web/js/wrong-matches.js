@@ -8,9 +8,22 @@ let _loaded = false;
 let _lastData = null;
 /** @type {HTMLElement | null} */
 let _lastEl = null;
+/** @type {Map<number, 'loading'|'loaded'>} */
+const _entryExplorerState = new Map();
 
 const DEFAULT_CONVERGE_THRESHOLD_MILLI = 180;
 const CONVERGE_THRESHOLD_KEY_PREFIX = 'wrongMatches.converge.threshold.';
+const EXPLORER_SHARED_TAG_PRIORITY = ['albumartist', 'artist', 'album', 'date', 'genre', 'catalognumber', 'label', 'comment', 'discnumber', 'totaltracks'];
+const EXPLORER_TRACK_TAG_KEYS = new Set(['title', 'tracknumber']);
+const MUSICBRAINZ_TAG_ENTITY_PATH = {
+  musicbrainz_albumartistid: 'artist',
+  musicbrainz_albumid: 'release',
+  musicbrainz_artistid: 'artist',
+  musicbrainz_releasegroupid: 'release-group',
+  musicbrainz_releasetrackid: 'track',
+  musicbrainz_trackid: 'recording',
+  musicbrainz_workid: 'work',
+};
 
 /**
  * Format seconds as m:ss.
@@ -21,6 +34,281 @@ function fmtLen(s) {
   const m = Math.floor(s / 60);
   const sec = Math.round(s % 60);
   return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
+/**
+ * Format a byte count as a short human-readable string.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function fmtBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = (value >= 10 || unit === 0) ? String(Math.round(value)) : value.toFixed(1);
+  return `${rounded} ${units[unit]}`;
+}
+
+/**
+ * @param {any} entry
+ * @returns {string[]}
+ */
+function sourceDirsForEntry(entry) {
+  return Array.isArray(entry?.source_dirs)
+    ? entry.source_dirs.filter((/** @type {unknown} */ sourceDir) => (
+      typeof sourceDir === 'string' && sourceDir.trim()
+    ))
+    : [];
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {string[]}
+ */
+function cleanedTagValues(raw) {
+  const values = Array.isArray(raw) ? raw : [raw];
+  return values.filter((/** @type {unknown} */ value) => (
+    typeof value === 'string' && value.trim()
+  ));
+}
+
+/**
+ * @param {Record<string, string[]>} tags
+ * @param {string[]} preferred
+ * @returns {string[]}
+ */
+function orderedTagKeys(tags, preferred = []) {
+  const all = Object.keys(tags || {});
+  const seen = new Set();
+  const ordered = [];
+  for (const key of preferred) {
+    if (all.includes(key) && !seen.has(key)) {
+      ordered.push(key);
+      seen.add(key);
+    }
+  }
+  for (const key of all.sort()) {
+    if (!seen.has(key)) ordered.push(key);
+  }
+  return ordered;
+}
+
+/**
+ * @param {Record<string, string[]>} tags
+ * @returns {Record<string, string[]>}
+ */
+function visibleExplorerTags(tags) {
+  /** @type {Record<string, string[]>} */
+  const visible = {};
+  for (const [rawKey, rawValue] of Object.entries(tags || {})) {
+    const key = String(rawKey).toLowerCase();
+    if (key.startsWith('replaygain_')) continue;
+    const values = cleanedTagValues(rawValue);
+    if (values.length === 0) continue;
+    visible[key] = values;
+  }
+  return visible;
+}
+
+/**
+ * @param {string[]|undefined} values
+ * @returns {string}
+ */
+function tagValueText(values) {
+  return Array.isArray(values) ? values.join(' · ') : '';
+}
+
+/**
+ * @param {string} key
+ * @param {string} value
+ * @returns {string}
+ */
+function explorerTagValueUrl(key, value) {
+  const normalizedKey = String(key || '').toLowerCase();
+  const normalizedValue = String(value || '').trim();
+  const mbPath = MUSICBRAINZ_TAG_ENTITY_PATH[normalizedKey];
+  if (mbPath && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalizedValue)) {
+    return `https://musicbrainz.org/${mbPath}/${normalizedValue.toLowerCase()}`;
+  }
+  if (/^https?:\/\//i.test(normalizedValue)) return normalizedValue;
+  return '';
+}
+
+/**
+ * @param {string} key
+ * @param {string[]|undefined} values
+ * @returns {string}
+ */
+function renderExplorerTagValues(key, values) {
+  if (!Array.isArray(values) || values.length === 0) return '';
+  return values.map((value) => {
+    const url = explorerTagValueUrl(key, value);
+    if (!url) return esc(value);
+    return `<a href="${esc(url)}" target="_blank" rel="noopener" style="color:#6af;" onclick="event.stopPropagation();">${esc(value)}</a>`;
+  }).join(' · ');
+}
+
+/**
+ * @param {Record<string, string[]>} tags
+ * @param {string} key
+ * @returns {string}
+ */
+function firstTagValue(tags, key) {
+  const values = tags[key];
+  return Array.isArray(values) && values.length > 0 ? values[0] : '';
+}
+
+/**
+ * @param {any[]} files
+ * @returns {Record<string, string[]>}
+ */
+function sharedExplorerTags(files) {
+  if (!Array.isArray(files) || files.length === 0) return {};
+  const perFileTags = files.map((/** @type {any} */ file) => (
+    visibleExplorerTags((file?.tags && typeof file.tags === 'object') ? file.tags : {})
+  ));
+  const first = perFileTags[0] || {};
+  /** @type {Record<string, string[]>} */
+  const shared = {};
+  for (const key of orderedTagKeys(first, EXPLORER_SHARED_TAG_PRIORITY)) {
+    if (EXPLORER_TRACK_TAG_KEYS.has(key)) continue;
+    const firstText = tagValueText(first[key]);
+    if (!firstText) continue;
+    if (perFileTags.every((/** @type {Record<string, string[]>} */ fileTags) => (
+      tagValueText(fileTags[key]) === firstText
+    ))) {
+      shared[key] = first[key];
+    }
+  }
+  return shared;
+}
+
+/**
+ * @param {Record<string, string[]>} tags
+ * @returns {string}
+ */
+function renderExplorerTagGrid(tags) {
+  const tagKeys = orderedTagKeys(tags, EXPLORER_SHARED_TAG_PRIORITY);
+  if (tagKeys.length === 0) return '';
+  return `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:0.76em;margin-top:8px;">
+      ${tagKeys.map((key) => (
+        `<div style="color:#666;">${esc(key)}</div><div style="color:#aaa;">${renderExplorerTagValues(key, tags[key])}</div>`
+      )).join('')}
+    </div>`;
+}
+
+/**
+ * @param {any} file
+ * @returns {string}
+ */
+function renderWrongMatchExplorerFile(file) {
+  const bits = [];
+  if (file?.format) bits.push(String(file.format).toUpperCase());
+  if (Number.isFinite(file?.bitrate_kbps)) bits.push(`${file.bitrate_kbps} kbps`);
+  if (Number.isFinite(file?.duration_seconds)) bits.push(fmtLen(file.duration_seconds));
+  if (Number.isFinite(file?.size_bytes)) bits.push(fmtBytes(file.size_bytes));
+
+  const tags = visibleExplorerTags((file?.tags && typeof file.tags === 'object') ? file.tags : {});
+  const trackNumber = firstTagValue(tags, 'tracknumber');
+  const title = firstTagValue(tags, 'title') || String(file?.relative_path || file?.filename || '?');
+  const summary = bits.length > 0 ? bits.join(' · ') : 'Unknown audio file';
+  let html = `
+    <div style="margin-top:6px;padding:8px 10px;background:#131313;border:1px solid #262626;border-radius:4px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="min-width:0;flex:1 1 220px;">
+          <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;min-width:0;">
+            ${trackNumber ? `<span style="color:#6a9;font-family:monospace;font-size:0.78em;">${esc(trackNumber)}</span>` : ''}
+            <span style="color:#ddd;font-size:0.82em;min-width:0;overflow-wrap:anywhere;">${esc(title)}</span>
+          </div>
+          <div style="color:#666;font-size:0.74em;margin-top:2px;">${esc(summary)}</div>
+        </div>`;
+
+  if (file?.playable && file?.stream_url) {
+    html += `
+      <div style="flex:1 1 280px;min-width:220px;max-width:420px;">
+        <audio controls preload="none" src="${esc(file.stream_url)}" style="width:100%;" onclick="event.stopPropagation();"></audio>
+      </div>`;
+  } else {
+    html += '<div style="color:#666;font-size:0.76em;">Browser playback unavailable</div>';
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+/**
+ * @param {any} data
+ * @returns {string}
+ */
+function renderWrongMatchExplorer(data) {
+  const files = Array.isArray(data?.files) ? data.files : [];
+  const otherFileCount = Number.isFinite(data?.other_file_count) ? data.other_file_count : 0;
+  const audioFileCount = Number.isFinite(data?.audio_file_count) ? data.audio_file_count : files.length;
+  const sourceDirs = sourceDirsForEntry(data);
+  const sharedTags = sharedExplorerTags(files);
+  const orderedBy = typeof data?.ordered_by === 'string' ? data.ordered_by : 'folder';
+  let summary = '';
+  if (sourceDirs.length > 0 || Object.keys(sharedTags).length > 0) {
+    const parts = [];
+    if (sourceDirs.length > 0) {
+      parts.push(`
+        <div>
+          <div style="color:#666;">Downloaded as</div>
+          <div style="color:#aaa;">${sourceDirs.map((dir) => esc(dir)).join('<br>')}</div>
+        </div>`);
+    }
+    summary = `
+      <div style="margin:6px 0 10px 0;">
+        ${parts.length > 0 ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px 12px;font-size:0.76em;">${parts.join('')}</div>` : ''}
+        ${renderExplorerTagGrid(sharedTags)}
+      </div>`;
+  }
+  if (files.length === 0) {
+    return `${summary}<div style="color:#666;font-size:0.78em;padding:8px 0;">No audio files found in this folder.</div>`;
+  }
+
+  let html = `
+    <div style="margin-top:10px;">
+      ${summary}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <div style="color:#888;font-size:0.78em;">${audioFileCount} track${audioFileCount === 1 ? '' : 's'} in surviving folder${orderedBy === 'matched' ? ' in matched order' : ''}</div>
+        ${otherFileCount > 0 ? `<div style="color:#666;font-size:0.74em;">${otherFileCount} non-audio file${otherFileCount === 1 ? '' : 's'} hidden</div>` : ''}
+      </div>
+      ${files.map(renderWrongMatchExplorerFile).join('')}
+    </div>`;
+  return html;
+}
+
+/**
+ * @param {number} logId
+ * @returns {Promise<void>}
+ */
+async function ensureWrongMatchExplorer(logId) {
+  const mount = document.getElementById(`wm-explorer-${logId}`);
+  if (!mount) return;
+  const state = _entryExplorerState.get(logId);
+  if (state === 'loading' || state === 'loaded') return;
+
+  _entryExplorerState.set(logId, 'loading');
+  mount.innerHTML = '<div style="color:#666;font-size:0.78em;padding:8px 0;">Loading file explorer…</div>';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/explorer?download_log_id=${encodeURIComponent(String(logId))}`);
+    const data = await r.json();
+    if (!r.ok || data.status !== 'ok') {
+      throw new Error(data.error || data.message || 'Explorer load failed');
+    }
+    mount.innerHTML = renderWrongMatchExplorer(data);
+    _entryExplorerState.set(logId, 'loaded');
+  } catch (_e) {
+    _entryExplorerState.delete(logId);
+    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer. <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
+  }
 }
 
 /**
@@ -558,6 +846,7 @@ export function setWrongMatchConvergeCleanup(_checked) {
 function renderWrongMatches(data, el) {
   _lastData = data;
   _lastEl = el;
+  _entryExplorerState.clear();
   /** @type {any[]} */
   const groups = (data.groups || []).filter((/** @type {any} */ g) => (g.pending_count || 0) > 0);
   if (groups.length === 0) {
@@ -793,7 +1082,7 @@ function renderEntry(e, thresholdMilli, requestId) {
   const evidence = formatEntryEvidence(e);
 
   const header = `
-    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}')">
+    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
       <div class="p-top">
         <div>
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
@@ -824,10 +1113,14 @@ function renderEntry(e, thresholdMilli, requestId) {
 function renderEntryDetail(e, job) {
   let html = '';
   const c = e.candidate;
+  const sourceDirs = sourceDirsForEntry(e);
 
   if (c) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${c.year})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
     if (c.label) html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(c.label)}${c.catalognum ? ` / ${esc(c.catalognum)}` : ''}</span></div>`;
+  }
+  if (sourceDirs.length > 0) {
+    html += `<div class="p-detail-row"><span class="p-detail-label">Downloaded as</span><span class="p-detail-value" style="font-size:0.8em;">${sourceDirs.map((dir) => esc(dir)).join('<br>')}</span></div>`;
   }
   if (e.failed_path) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.failed_path)}</span></div>`;
@@ -891,6 +1184,12 @@ function renderEntryDetail(e, job) {
     html += '</div>';
   }
 
+  html += `
+    <div style="margin-top:10px;">
+      <div style="color:#6a9;font-weight:600;font-size:0.82em;">File explorer</div>
+      <div id="wm-explorer-${e.download_log_id}" style="margin-top:4px;color:#555;font-size:0.78em;">Open this candidate to inspect tags and play files.</div>
+    </div>`;
+
   html += '<div class="p-actions" style="margin-top:10px;">';
   const active = job && (job.status === 'queued' || job.status === 'running');
   const label = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
@@ -913,10 +1212,31 @@ export function toggleWrongMatchGroup(id) {
 /**
  * Toggle a single entry's expanded view.
  * @param {string} id
+ * @param {number=} logId
  */
-export function toggleWrongMatchEntry(id) {
+export async function toggleWrongMatchEntry(id, logId) {
   const el = document.getElementById(id);
-  if (el) el.classList.toggle('open');
+  if (!el) return;
+  const toggled = el.classList.toggle('open');
+  const isOpen = typeof toggled === 'boolean'
+    ? toggled
+    : (typeof el.classList.contains === 'function' ? el.classList.contains('open') : false);
+  const resolvedLogId = Number.isFinite(logId)
+    ? Number(logId)
+    : Number.parseInt(id.replace('wm-entry-', ''), 10);
+  if (isOpen && Number.isFinite(resolvedLogId)) {
+    await ensureWrongMatchExplorer(resolvedLogId);
+  }
+}
+
+/**
+ * @param {number} logId
+ */
+export async function reloadWrongMatchExplorer(logId) {
+  const normalized = Number(logId);
+  if (!Number.isFinite(normalized)) return;
+  _entryExplorerState.delete(normalized);
+  await ensureWrongMatchExplorer(normalized);
 }
 
 /**
@@ -998,10 +1318,13 @@ export const __test__ = {
   isConvergeGreen,
   losslessOpusGroups,
   normalizeThreshold,
+  reloadWrongMatchExplorer,
+  renderWrongMatchExplorer,
   renderWrongMatches,
   setWrongMatchConvergeCleanup,
   setWrongMatchConvergeThreshold,
   thresholdForGroup,
+  toggleWrongMatchEntry,
   transparentNonFlacGroups,
 };
 

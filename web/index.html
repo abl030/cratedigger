@@ -283,7 +283,7 @@
   <div class="tab" onclick="showTab('recents')">Recents</div>
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
   <div class="tab" onclick="showTab('decisions')">Decisions</div>
-  <div class="tab" onclick="showTab('manual')">Manual Import</div>
+  <div class="tab" onclick="showTab('manual')">Wrong Matches</div>
 </div>
 
 <div id="browse-section" class="section active">
@@ -350,12 +350,7 @@
 </div>
 
 <div id="manual-section" class="section">
-  <div style="display:flex;gap:2px;margin-bottom:12px;">
-    <button class="p-btn active-status" id="manual-sub-complete" onclick="showManualSub('complete')">Complete</button>
-    <button class="p-btn" id="manual-sub-wrong" onclick="showManualSub('wrong')">Wrong Matches</button>
-  </div>
-  <div id="manual-complete"><div id="manual-content" class="loading">Loading...</div></div>
-  <div id="manual-wrong" style="display:none;"><div id="wrong-matches-content" class="loading"></div></div>
+  <div id="wrong-matches-content" class="loading"></div>
 </div>
 
 

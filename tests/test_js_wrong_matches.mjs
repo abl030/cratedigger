@@ -30,6 +30,10 @@ function assertDeepEqual(actual, expected, msg) {
   assertEqual(JSON.stringify(actual), JSON.stringify(expected), msg);
 }
 
+function countOccurrences(text, needle) {
+  return (String(text).match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+}
+
 function installStorage() {
   const values = new Map();
   globalThis.localStorage = {
@@ -82,9 +86,9 @@ function wrongMatchesData() {
       quality_rank: null,
       status: 'wanted',
       entries: [
-        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance', local_items: [{ path: '01.mp3', format: 'MP3' }] },
-        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance', local_items: [{ path: '02.mp3', format: 'MP3' }] },
-        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance', local_items: [{ path: '03.mp3', format: 'MP3' }] },
+        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance', source_dirs: ['user1\\Scott Walker - Scott 3'], local_items: [{ path: '01.mp3', format: 'MP3' }] },
+        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance', source_dirs: ['user2\\Scott Walker - Scott 3'], local_items: [{ path: '02.mp3', format: 'MP3' }] },
+        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance', source_dirs: ['user3\\Scott Walker - Scott 3'], local_items: [{ path: '03.mp3', format: 'MP3' }] },
       ],
     }],
   };
@@ -444,10 +448,161 @@ console.log('renderEntry() embeds evidence cells without preview hooks');
   const html = dom.wrongMatches.innerHTML;
   assert(html.includes('suspect'), 'rendered HTML carries the spectral grade');
   assert(html.includes('265'), 'rendered HTML carries the lossless-source V0 average');
+  assert(html.includes('Downloaded as'), 'rendered HTML surfaces preserved source folders');
+  assert(html.includes('wm-explorer-100'), 'rendered HTML includes an explorer mount');
   // R3 / AE2: no preview button or preview action surfaces in this feature.
   assert(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
   assert(!/preview[-_]btn/.test(html), 'no preview button class');
   assert(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
+}
+
+console.log('renderWrongMatchExplorer() collapses shared album tags and hides replaygain noise');
+{
+  const html = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    ordered_by: 'matched',
+    folder_name: 'The Castiles Live (Vol. 1)',
+    source_dirs: ['user1\\The Castiles Live (Vol. 1)'],
+    audio_file_count: 2,
+    other_file_count: 1,
+    files: [{
+      relative_path: '01-Purple Haze.flac',
+      filename: '01-Purple Haze.flac',
+      format: 'FLAC',
+      bitrate_kbps: 780,
+      duration_seconds: 275,
+      size_bytes: 26000000,
+      playable: true,
+      stream_url: '/api/wrong-matches/audio?download_log_id=1&path=01-Purple%20Haze.flac',
+      tags: {
+        title: ['Purple Haze'],
+        tracknumber: ['7'],
+        artist: ['The Castiles'],
+        albumartist: ['The Castiles'],
+        album: ['The Castiles Live (Vol. 1)'],
+        date: ['1967'],
+        genre: ['Americana'],
+        musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+        musicbrainz_artistid: ['4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'],
+        replaygain_album_gain: ['-4.19 dB'],
+        replaygain_track_gain: ['-4.86 dB'],
+      },
+    }, {
+      relative_path: '02-Get Outta My Life.flac',
+      filename: '02-Get Outta My Life.flac',
+      format: 'FLAC',
+      bitrate_kbps: 803,
+      duration_seconds: 64,
+      size_bytes: 6200000,
+      playable: true,
+      stream_url: '/api/wrong-matches/audio?download_log_id=1&path=02-Get%20Outta%20My%20Life.flac',
+      tags: {
+        title: ['Get Outta My Life'],
+        tracknumber: ['8'],
+        artist: ['The Castiles'],
+        albumartist: ['The Castiles'],
+        album: ['The Castiles Live (Vol. 1)'],
+        date: ['1967'],
+        genre: ['Americana'],
+        musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+        musicbrainz_artistid: ['4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'],
+        replaygain_album_gain: ['-4.19 dB'],
+        replaygain_track_gain: ['-5.04 dB'],
+      },
+    }],
+  });
+
+  assert(html.includes('Downloaded as'), 'keeps the original user folder in the summary');
+  assert(html.includes('albumartist'), 'renders shared album-level tags');
+  assert(html.includes('2 tracks in surviving folder in matched order'), 'surfaces matched-order explorer label');
+  assertEqual(countOccurrences(html, 'The Castiles Live (Vol. 1)'), 2, 'album name appears in the preserved source folder and shared tag summary');
+  assert(html.includes('Purple Haze'), 'renders the first track title inline');
+  assert(html.includes('Get Outta My Life'), 'renders the second track title inline');
+  assert(html.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'links musicbrainz_albumid to the release page');
+  assert(html.includes('https://musicbrainz.org/artist/4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'), 'links musicbrainz_artistid to the artist page');
+  assertEqual(countOccurrences(html, '<audio'), 2, 'renders one player per track');
+  assert(!html.includes('replaygain_album_gain'), 'hides replaygain album tags');
+  assert(!html.includes('replaygain_track_gain'), 'hides replaygain track tags');
+}
+
+console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
+{
+  installStorage();
+  const dom = installDom();
+  let open = false;
+  const detail = {
+    classList: {
+      toggle() {
+        open = !open;
+        return open;
+      },
+      contains() {
+        return open;
+      },
+    },
+  };
+  const mount = { innerHTML: '' };
+  const elements = new Map([
+    ['wm-entry-100', detail],
+    ['wm-explorer-100', mount],
+  ]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      json: async () => ({
+        status: 'ok',
+        ordered_by: 'matched',
+        failed_path: '/mnt/virtio/Music/Incoming/post-validation/Scott Walker - Scott 3',
+        folder_name: 'Scott Walker - Scott 3',
+        source_dirs: ['user1\\Scott Walker - Scott 3'],
+        audio_file_count: 1,
+        other_file_count: 0,
+        files: [{
+          relative_path: '01 - It\'s Raining Today.mp3',
+          filename: '01 - It\'s Raining Today.mp3',
+          format: 'mp3',
+          bitrate_kbps: 320,
+          duration_seconds: 181,
+          size_bytes: 1234567,
+          playable: true,
+          stream_url: '/api/wrong-matches/audio?download_log_id=100&path=01%20-%20It%27s%20Raining%20Today.mp3',
+          tags: {
+            title: ['It\'s Raining Today'],
+            artist: ['Scott Walker'],
+            album: ['Scott 3'],
+            musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+            musicbrainz_trackid: ['d5b1a858-84be-4005-a2a0-29dfcf005851'],
+            replaygain_track_gain: ['-4.1 dB'],
+          },
+        }],
+      }),
+    };
+  };
+
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  assertDeepEqual(
+    calls,
+    ['/api/wrong-matches/explorer?download_log_id=100'],
+    'opening an entry loads the explorer exactly once',
+  );
+  assert(mount.innerHTML.includes('Downloaded as'), 'explorer shows the original user folder');
+  assert(mount.innerHTML.includes('Scott 3'), 'explorer shows shared album tags once loaded');
+  assert(mount.innerHTML.includes('It&#39;s Raining Today'), 'explorer shows extracted tags');
+  assert(mount.innerHTML.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'lazy-loaded explorer links the album MBID');
+  assert(mount.innerHTML.includes('https://musicbrainz.org/recording/d5b1a858-84be-4005-a2a0-29dfcf005851'), 'lazy-loaded explorer links the recording MBID');
+  assert(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
+  assert(!mount.innerHTML.includes('replaygain_track_gain'), 'explorer hides replaygain noise');
+
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  assertEqual(calls.length, 1, 'reopening an entry reuses the loaded explorer state');
 }
 
 console.log('formatLosslessOpusToastBody() reports spectral-suspect skips');

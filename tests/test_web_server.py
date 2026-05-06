@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import HTTPServer
@@ -602,6 +603,7 @@ class TestServerEndpoints(unittest.TestCase):
             lambda s: [downloading_row] if s == "downloading" else []
         )
         self.mock_db.count_by_status.return_value = {"downloading": 1}
+        self.mock_db.get_download_history_batch.reset_mock()
         self.mock_db.get_download_history_batch.return_value = {}
 
         status, data = self._get("/api/pipeline/downloading")
@@ -680,6 +682,7 @@ class TestServerEndpoints(unittest.TestCase):
             "validation_result": {
                 "failed_path": "/tmp/Test Album",
                 "scenario": "high_distance",
+                "source_dirs": ["baduser\\Artist\\Album"],
             },
         }
 
@@ -696,6 +699,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(kwargs["dedupe_key"], force_import_dedupe_key(42))
         self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Test Album")
         self.assertEqual(kwargs["payload"]["source_username"], "baduser")
+        self.assertEqual(kwargs["payload"]["source_dirs"], ["baduser\\Artist\\Album"])
 
     def test_post_set_intent_default_clears_stale_lossless_override(self):
         self.mock_db.get_request.return_value = make_request_row(
@@ -908,10 +912,12 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/manual-import/import",
         "/api/import-preview",
         "/api/wrong-matches",
+        "/api/wrong-matches/audio",
         "/api/wrong-matches/converge",
         "/api/wrong-matches/triage",
         "/api/wrong-matches/delete",
         "/api/wrong-matches/delete-group",
+        "/api/wrong-matches/explorer",
         "/api/wrong-matches/delete-transparent-non-flac",
         "/api/wrong-matches/delete-lossless-opus",
     }
@@ -4865,7 +4871,7 @@ class TestWrongMatchesContract(unittest.TestCase):
     }
     ENTRY_REQUIRED_FIELDS = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
-        "distance", "scenario", "detail", "candidate", "local_items",
+        "distance", "scenario", "detail", "source_dirs", "candidate", "local_items",
         # Per-candidate stored evidence (R1+R2 of the spectral-evidence
         # plan) — surfaced from download_log so the operator can eyeball
         # candidates by audio quality. Always present in the payload;
@@ -4889,6 +4895,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         "failed_path": str,
         "files_exist": bool,
         "distance": (int, float, type(None)),
+        "source_dirs": list,
     }
 
     def _row(self, download_log_id: int, request_id: int, username: str,
@@ -5000,6 +5007,186 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(entry["v0_probe_kind"], "lossless_source_v0")
         self.assertEqual(entry["v0_probe_avg_bitrate"], 265)
 
+    def test_entry_surfaces_preserved_source_dirs(self):
+        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
+        row["validation_result"]["source_dirs"] = [
+            "baduser\\Artist\\Album",
+            "baduser\\Artist\\Album\\CD2",
+        ]
+        self.mock_db.get_wrong_matches.return_value = [row]
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertEqual(
+            entry["source_dirs"],
+            ["baduser\\Artist\\Album", "baduser\\Artist\\Album\\CD2"],
+        )
+
+    def test_wrong_match_explorer_lists_audio_files_and_source_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"fake mp3 bytes")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                    "source_dirs": ["baduser\\Artist\\Album"],
+                },
+            }
+
+            status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["source_dirs"], ["baduser\\Artist\\Album"])
+        self.assertEqual(data["audio_file_count"], 1)
+        self.assertEqual(data["files"][0]["relative_path"], "01 - Track.mp3")
+        self.assertTrue(data["files"][0]["playable"])
+        self.assertIn("/api/wrong-matches/audio?download_log_id=42", data["files"][0]["stream_url"])
+
+    def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"fake mp3 bytes")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                },
+            }
+
+            class _FakeInfo:
+                length = 181.0
+                bitrate = 320000
+
+            class _FakeAudio:
+                tags = {
+                    "APIC:": ["embedded cover art"],
+                    "TALB": ["Shut Up And Listen To Majosha"],
+                    "TCON": ["Funk Rock"],
+                    "TDRC": ["1989"],
+                    "TPE1": ["Majosha"],
+                    "TPE2": ["Majosha"],
+                    "TPOS": ["2"],
+                    "TXXX:MusicBrainz Album Id": ["20f1e791-34cd-4b47-8783-51492b90218a"],
+                }
+                info = _FakeInfo()
+
+            with patch("mutagen.File", return_value=_FakeAudio()):
+                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+
+        self.assertEqual(status, 200)
+        tags = data["files"][0]["tags"]
+        self.assertNotIn("apic:", tags)
+        self.assertEqual(tags["album"], ["Shut Up And Listen To Majosha"])
+        self.assertEqual(tags["genre"], ["Funk Rock"])
+        self.assertEqual(tags["date"], ["1989"])
+        self.assertEqual(tags["artist"], ["Majosha"])
+        self.assertEqual(tags["albumartist"], ["Majosha"])
+        self.assertEqual(tags["discnumber"], ["2"])
+        self.assertEqual(
+            tags["musicbrainz_albumid"],
+            ["20f1e791-34cd-4b47-8783-51492b90218a"],
+        )
+
+    def test_wrong_match_explorer_returns_files_in_beets_matched_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for filename in ("a.mp3", "b.mp3", "c.mp3"):
+                with open(os.path.join(tmpdir, filename), "wb") as handle:
+                    handle.write(b"fake mp3 bytes")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                    "candidates": [{
+                        "is_target": True,
+                        "mapping": [
+                            {
+                                "item": {"path": "c.mp3", "title": "Third", "track": 12, "disc": 1},
+                                "track": {"medium_index": 1, "medium": 1, "title": "Target One"},
+                            },
+                            {
+                                "item": {"path": "a.mp3", "title": "First", "track": 1, "disc": 1},
+                                "track": {"medium_index": 2, "medium": 1, "title": "Target Two"},
+                            },
+                            {
+                                "item": {"path": "b.mp3", "title": "Second", "track": 7, "disc": 1},
+                                "track": {"medium_index": 3, "medium": 1, "title": "Target Three"},
+                            },
+                        ],
+                    }],
+                },
+            }
+
+            class _FakeInfo:
+                length = 181.0
+                bitrate = 320000
+
+            def _fake_audio(path: str):
+                basename = os.path.basename(path)
+
+                class _FakeAudio:
+                    info = _FakeInfo()
+                    if basename == "a.mp3":
+                        tags = {"title": ["First"], "tracknumber": ["1/14"], "discnumber": ["1/1"]}
+                    elif basename == "b.mp3":
+                        tags = {"title": ["Second"], "tracknumber": ["7/14"], "discnumber": ["1/1"]}
+                    else:
+                        tags = {"title": ["Third"], "tracknumber": ["12/14"], "discnumber": ["1/1"]}
+
+                return _FakeAudio()
+
+            with patch("mutagen.File", side_effect=_fake_audio):
+                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["ordered_by"], "matched")
+        self.assertEqual(
+            [file["relative_path"] for file in data["files"]],
+            ["c.mp3", "a.mp3", "b.mp3"],
+        )
+        self.assertEqual(
+            [file["matched_order"] for file in data["files"]],
+            [1, 2, 3],
+        )
+
+    def test_wrong_match_audio_supports_byte_ranges(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"abcdef")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                },
+            }
+
+            req = Request(
+                f"{self.base}/api/wrong-matches/audio?download_log_id=42&path=01%20-%20Track.mp3",
+                headers={"Range": "bytes=1-3"},
+            )
+            with urlopen(req) as resp:
+                body = resp.read()
+                status = resp.status
+                content_range = resp.headers["Content-Range"]
+                accept_ranges = resp.headers["Accept-Ranges"]
+
+        self.assertEqual(status, 206)
+        self.assertEqual(body, b"bcd")
+        self.assertEqual(content_range, "bytes 1-3/6")
+        self.assertEqual(accept_ranges, "bytes")
+
     def test_entry_evidence_keys_present_when_null(self):
         """Covers AE2 — missing evidence is missing data, not a trigger.
 
@@ -5013,6 +5200,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         # set to None; this test pins that the resulting entry mirrors that.
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
+        self.assertEqual(entry["source_dirs"], [])
         for field in ("spectral_grade", "spectral_bitrate",
                       "v0_probe_kind", "v0_probe_avg_bitrate"):
             self.assertIn(field, entry)
@@ -5719,6 +5907,9 @@ class TestWrongMatchesContract(unittest.TestCase):
             self._row(102, 42, "u3", "/fi/c", distance=0.226),
             self._row(200, 99, "other", "/fi/other", distance=0.100),
         ]
+        self.mock_db.get_wrong_matches.return_value[0]["validation_result"]["source_dirs"] = [
+            "u1\\Artist\\Album",
+        ]
         entries = {
             100: self._entry(100, 42, "/fi/a"),
             101: self._entry(101, 42, "/fi/b"),
@@ -5761,6 +5952,10 @@ class TestWrongMatchesContract(unittest.TestCase):
             ],
         )
         self.assertEqual(self.mock_db.clear_wrong_match_paths.call_count, 2)
+        self.assertEqual(
+            self.mock_db.enqueue_import_job.call_args_list[0].kwargs["payload"]["source_dirs"],
+            ["u1\\Artist\\Album"],
+        )
         self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
         self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
 

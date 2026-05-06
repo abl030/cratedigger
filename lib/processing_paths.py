@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Sequence
 
 AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
 POST_VALIDATION_STAGING_SUBDIR = "post-validation"
@@ -13,6 +14,21 @@ DUPLICATE_REMOVE_GUARD_SUBDIR = "duplicate-remove-guard"
 def sanitize_processing_folder_name(folder_name: str) -> str:
     """Sanitize a filesystem path component for local processing paths."""
     return re.sub(r'[<>:."/\\|?*]', "", folder_name).strip()
+
+
+def normalize_source_dirs(values: Sequence[object]) -> list[str]:
+    """Return unique non-empty remote source directories in input order."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
 
 
 def normalize_processing_path(path: str) -> str:

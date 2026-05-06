@@ -395,6 +395,7 @@ class ValidationResult(msgspec.Struct):
     soulseek_username: Optional[str] = None
     download_folder: Optional[str] = None
     failed_path: Optional[str] = None
+    source_dirs: list[str] = []
     denylisted_users: list[str] = []
     # Audio integrity
     corrupt_files: list[str] = []

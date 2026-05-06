@@ -13,8 +13,7 @@ import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, render
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
-import { loadManualImport, runManualImport } from './manual.js';
-import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
+import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toast } from './state.js';
 
@@ -32,18 +31,7 @@ function showTab(name) {
   if (name === 'pipeline') loadPipeline();
   if (name === 'recents') loadRecents();
   if (name === 'decisions') loadDecisions();
-  if (name === 'manual') showManualSub(state.manualSub || 'complete');
-}
-
-/** @param {string} sub - 'complete' or 'wrong' */
-function showManualSub(sub) {
-  state.manualSub = sub;
-  document.getElementById('manual-complete').style.display = sub === 'complete' ? 'block' : 'none';
-  document.getElementById('manual-wrong').style.display = sub === 'wrong' ? 'block' : 'none';
-  document.getElementById('manual-sub-complete').className = 'p-btn' + (sub === 'complete' ? ' active-status' : '');
-  document.getElementById('manual-sub-wrong').className = 'p-btn' + (sub === 'wrong' ? ' active-status' : '');
-  if (sub === 'complete') loadManualImport();
-  if (sub === 'wrong') loadWrongMatches();
+  if (name === 'manual') loadWrongMatches();
 }
 
 // --- Search input (debounced) ---
@@ -114,12 +102,10 @@ Object.assign(window, {
   renderDisambiguateInto,
   toggleDisambRGTracks,
   disambRemove,
-  loadManualImport,
-  runManualImport,
-  showManualSub,
   loadWrongMatches,
   toggleWrongMatchGroup,
   toggleWrongMatchEntry,
+  reloadWrongMatchExplorer,
   forceImportWrongMatch,
   deleteWrongMatch,
   deleteWrongMatchGroup,

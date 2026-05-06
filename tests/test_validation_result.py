@@ -334,6 +334,7 @@ class TestValidationResultConstruction(unittest.TestCase):
         self.assertIsNone(vr.soulseek_username)
         self.assertIsNone(vr.download_folder)
         self.assertIsNone(vr.failed_path)
+        self.assertEqual(vr.source_dirs, [])
         self.assertEqual(vr.denylisted_users, [])
         self.assertEqual(vr.corrupt_files, [])
         self.assertIsNone(vr.error)
@@ -383,9 +384,11 @@ class TestValidationResultConstruction(unittest.TestCase):
             soulseek_username="baduser123",
             download_folder="/mnt/virtio/music/slskd/Artist - Album",
             failed_path="/mnt/virtio/Music/Failed/Artist/Album",
+            source_dirs=["baduser123\\Artist\\Album"],
             denylisted_users=["baduser123"],
         )
         self.assertEqual(vr.soulseek_username, "baduser123")
+        self.assertEqual(vr.source_dirs, ["baduser123\\Artist\\Album"])
         self.assertEqual(len(vr.denylisted_users), 1)
 
 
@@ -416,6 +419,7 @@ class TestValidationResultSerialization(unittest.TestCase):
             local_track_count=10,
             soulseek_username="gooduser",
             download_folder="/downloads/A - B",
+            source_dirs=["gooduser\\Shared\\A - B"],
             denylisted_users=[],
             corrupt_files=[],
         )
@@ -427,6 +431,7 @@ class TestValidationResultSerialization(unittest.TestCase):
         self.assertTrue(vr2.candidates[0].is_target)
         self.assertEqual(vr2.candidates[1].track_count, 15)
         self.assertEqual(vr2.soulseek_username, "gooduser")
+        self.assertEqual(vr2.source_dirs, ["gooduser\\Shared\\A - B"])
 
     def test_round_trip_with_corrupt_files(self) -> None:
         vr = ValidationResult(

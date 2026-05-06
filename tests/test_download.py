@@ -158,12 +158,16 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
             def __init__(self, db):
                 self.db = db
                 self.rejected = False
+                self.reject_args = None
+                self.reject_kwargs = None
 
             def _get_db(self):
                 return self.db
 
             def reject_and_requeue(self, *args, **kwargs):
                 self.rejected = True
+                self.reject_args = args
+                self.reject_kwargs = kwargs
                 return 77
 
         db = FakePipelineDB()
@@ -201,6 +205,9 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
                 )
 
         self.assertTrue(source.rejected)
+        assert source.reject_args is not None
+        stored = source.reject_args[1]
+        self.assertEqual(stored.source_dirs, ["user1\\Music"])
         triage.assert_called_once_with(db, 77)
 
 
