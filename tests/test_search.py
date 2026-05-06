@@ -309,6 +309,17 @@ class TestPerTrackQueries(unittest.TestCase):
         out = _per_track_queries(["Of It"])
         self.assertEqual(out, ["Of It"])
 
+    def test_skips_short_single_token_titles(self):
+        # Bare one-word track searches like "Sweet" are too broad without
+        # artist/release context and can fan out to thousands of peers.
+        out = _per_track_queries([
+            "Sweet",
+            "Twenty Four Seven",
+            "Tallahassee",
+            "Go",
+        ])
+        self.assertEqual(out, ["Twenty Four Seven", "Tallahassee"])
+
 
 class TestSelectVariant(unittest.TestCase):
     """Variant generator ladder — pure decision logic.
@@ -630,6 +641,39 @@ class TestSelectVariant(unittest.TestCase):
                 )
                 self.assertEqual(v.tag, expected_tag)
                 self.assertEqual(v.query, expected_query)
+
+    def test_track_tier_skips_short_single_token_titles(self):
+        titles = ["Sweet", "Twenty Four Seven", "Go", "Tallahassee"]
+        cases = [
+            (7, "track_0", "Twenty Four Seven"),
+            (8, "track_1", "Tallahassee"),
+            (9, "exhausted", None),
+        ]
+        for attempts, expected_tag, expected_query in cases:
+            with self.subTest(attempts=attempts, tag=expected_tag):
+                v = select_variant(
+                    search_attempts=attempts,
+                    threshold=5,
+                    base_query="*ase",
+                    base_query_unwild="base",
+                    year="1991",
+                    track_titles=titles,
+                )
+                self.assertEqual(v.tag, expected_tag)
+                self.assertEqual(v.query, expected_query)
+
+    def test_track_tier_exhausts_when_all_track_titles_are_too_broad(self):
+        v = select_variant(
+            search_attempts=7,
+            threshold=5,
+            base_query="*ase",
+            base_query_unwild="base",
+            year="1991",
+            track_titles=["Sweet", "Go", "Sun"],
+        )
+        self.assertEqual(v.kind, "exhausted")
+        self.assertEqual(v.tag, "exhausted")
+        self.assertIsNone(v.query)
 
     def test_track_tag_format_exact(self):
         # Tag for track tier must be exactly "track_<idx>".

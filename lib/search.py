@@ -79,6 +79,11 @@ class SearchResult:
 # 4 is the safe maximum.
 MAX_SEARCH_TOKENS = 4
 
+# Per-track searches have no artist or release context. Short one-word
+# titles fan out across unrelated releases too easily, so only let a
+# single-token track title through when it has enough shape to be useful.
+MIN_SINGLE_TOKEN_TRACK_QUERY_CHARS = 8
+
 
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
@@ -144,6 +149,12 @@ def cap_tokens(tokens, max_tokens=MAX_SEARCH_TOKENS):
             break
 
     return ordered
+
+
+def _track_query_is_distinctive(tokens: list[str]) -> bool:
+    if len(tokens) > 1:
+        return True
+    return len(tokens) == 1 and len(tokens[0]) >= MIN_SINGLE_TOKEN_TRACK_QUERY_CHARS
 
 
 def build_query(
@@ -256,6 +267,8 @@ def _per_track_queries(track_titles: list[str]) -> list[str]:
 
     Cleaning rules:
       - Empty queries (titles that clean to nothing alpha) are skipped.
+      - Short one-token queries are skipped because they are too broad
+        without artist/release context.
       - Identical tokenised queries are deduplicated case-insensitively
         so duplicate tracklist entries (e.g. two ``Archie's Theme`` tracks
         on the Wiggles 1991 album) don't burn two cycles on the same
@@ -274,6 +287,8 @@ def _per_track_queries(track_titles: list[str]) -> list[str]:
         if not tokens:
             continue
         tokens = cap_tokens(tokens)
+        if not _track_query_is_distinctive(tokens):
+            continue
         query = " ".join(tokens)
         if not query:
             continue
