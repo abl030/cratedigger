@@ -79,10 +79,6 @@ class SearchResult:
 # 4 is the safe maximum.
 MAX_SEARCH_TOKENS = 4
 
-# Per-track searches have no artist or release context. One-word titles fan
-# out across unrelated releases too easily, regardless of word length.
-
-
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
 
@@ -149,8 +145,27 @@ def cap_tokens(tokens, max_tokens=MAX_SEARCH_TOKENS):
     return ordered
 
 
-def _track_query_is_distinctive(tokens: list[str]) -> bool:
-    return len(tokens) > 1
+def _longest_artist_token(
+    artist_name: str,
+    excluded_tokens: set[str] | None = None,
+) -> str | None:
+    """Return the longest useful literal artist token for track queries.
+
+    Ties keep source order, so "Dallas Crane" contributes "Dallas". Short
+    artist tokens are ignored because Soulseek drops <=2-char tokens anyway.
+    """
+    cleaned = strip_special_chars(artist_name)
+    if cleaned.lower() in ("various artists", "various"):
+        return None
+
+    excluded = excluded_tokens or set()
+    tokens = [t for t in cleaned.split() if len(t) > 2]
+    candidates = [t for t in tokens if t.lower() not in excluded]
+    if candidates:
+        return max(candidates, key=len)
+    if tokens:
+        return max(tokens, key=len)
+    return None
 
 
 def build_query(
@@ -217,15 +232,15 @@ def build_query(
 # Variant generator
 #
 # Pure function: given the current cycle counter, escalation threshold, both
-# base queries (wildcarded + un-wildcarded), year, and track titles, return
-# which query to issue next. Single source of truth for the search-cycle
-# ladder. No I/O.
+# base queries (wildcarded + un-wildcarded), year, track titles, and artist
+# name, return which query to issue next. Single source of truth for the
+# search-cycle ladder. No I/O.
 #
 # Ladder:
 #   cycle < threshold        → kind="default",     query=base_query (wildcarded)
 #   cycle == threshold       → kind="unwild",      query=base_query_unwild
 #   cycle == threshold + 1   → kind="unwild_year", query="<unwild> <yyyy>" (if year known)
-#   cycle == threshold + N   → kind="track",       query=<one track title>, idx N
+#   cycle == threshold + N   → kind="track",       query=<one track query>, idx N
 #   queue drained            → kind="exhausted",   query=None (search loop short-circuits)
 #
 # Year is treated as unknown when None or starts with "0000" (the AlbumRecord
@@ -251,7 +266,10 @@ class SearchVariant:
     slice_index: int | None  # track tier only, for diagnostics
 
 
-def _per_track_queries(track_titles: list[str]) -> list[str]:
+def _per_track_queries(
+    track_titles: list[str],
+    artist_name: str = "",
+) -> list[str]:
     """Build the per-track query list.
 
     Each track title is independently cleaned and tokenised by the same
@@ -259,20 +277,22 @@ def _per_track_queries(track_titles: list[str]) -> list[str]:
     drop short tokens (<=2 chars, with the standard fallback when *all*
     tokens are short), then cap to ``MAX_SEARCH_TOKENS``. The result is a
     list of ready-to-issue Soulseek query strings, one per track, in
-    source-tracklist order.
+    source-tracklist order. Single-token track queries get the longest
+    cleaned artist token appended for extra entropy, e.g. "Sweet Dallas".
 
     Cleaning rules:
       - Empty queries (titles that clean to nothing alpha) are skipped.
-      - One-token queries are skipped because they are too broad without
-        artist/release context.
+      - One-token queries are enriched with the longest artist token when
+        available because bare one-word titles are too broad.
       - Identical tokenised queries are deduplicated case-insensitively
         so duplicate tracklist entries (e.g. two ``Archie's Theme`` tracks
         on the Wiggles 1991 album) don't burn two cycles on the same
         query.
 
-    No artist context is added. The album-match step (sub-count gate +
-    filename ratio + cross-check) handles disambiguation after slskd
-    returns peers, so the per-track query optimises for recall.
+    No wildcards are added. The album-match step (sub-count gate + filename
+    ratio + cross-check) handles disambiguation after slskd returns peers,
+    so the per-track query optimises for recall while avoiding ultra-broad
+    bare one-word searches.
     """
     seen_lower: set[str] = set()
     queries: list[str] = []
@@ -283,8 +303,13 @@ def _per_track_queries(track_titles: list[str]) -> list[str]:
         if not tokens:
             continue
         tokens = cap_tokens(tokens)
-        if not _track_query_is_distinctive(tokens):
-            continue
+        if len(tokens) == 1:
+            artist_token = _longest_artist_token(
+                artist_name,
+                excluded_tokens={tokens[0].lower()},
+            )
+            if artist_token:
+                tokens = tokens + [artist_token]
         query = " ".join(tokens)
         if not query:
             continue
@@ -320,6 +345,7 @@ def select_variant(
     base_query_unwild: str,
     year: str | None,
     track_titles: list[str],
+    artist_name: str = "",
 ) -> SearchVariant:
     """Select the variant for this search cycle.
 
@@ -332,7 +358,7 @@ def select_variant(
 
       threshold     → unwild      (un-wildcarded base)
       threshold+1   → unwild_year (un-wildcarded base + year, if known)
-      threshold+N   → track_<i>   (one bare track title per cycle)
+      threshold+N   → track_<i>   (one track query per cycle)
       drained       → exhausted
     """
     if search_attempts < threshold:
@@ -381,7 +407,7 @@ def select_variant(
     track_start_offset = 2 if year_known else 1
     track_idx = esc_idx - track_start_offset
 
-    queries = _per_track_queries(track_titles)
+    queries = _per_track_queries(track_titles, artist_name=artist_name)
     if track_idx < 0 or track_idx >= len(queries):
         return SearchVariant(
             kind="exhausted",

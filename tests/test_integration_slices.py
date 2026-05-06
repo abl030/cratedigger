@@ -2636,7 +2636,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         return cfg
 
     def _make_album(self, *, request_id=1843, source="request",
-                    discogs_release_id=None, mb_release_id="mbid-test"):
+                    discogs_release_id=None, mb_release_id="mbid-test",
+                    artist_name="Wiggles"):
         """Build an AlbumRecord matching the production from_db_row shape."""
         from album_source import AlbumRecord, ReleaseRecord, MediaRecord
 
@@ -2650,7 +2651,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         return AlbumRecord(
             id=-request_id, title="Album",
             release_date="1991-01-01T00:00:00Z",
-            artist_id=0, artist_name="Wiggles",
+            artist_id=0, artist_name=artist_name,
             foreign_artist_id="",
             releases=[release],
             db_request_id=request_id, db_source=source,
@@ -3065,9 +3066,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_track_variant_used_after_unwild_year(self):
         """Cycle threshold+2 with year + tracks → variant=track_0.
 
-        First per-track query is the cleaned first usable track title only:
-        one-token track titles are skipped because they are too broad
-        without artist/release context.
+        First per-track query is the cleaned first track title only. One-token
+        track titles append the longest artist token for extra entropy.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -3078,7 +3078,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
 
         db = FakePipelineDB()
         rid = db.add_request(
-            artist_name="Wiggles", album_title="Album",
+            artist_name="The Mountain Goats", album_title="Album",
             source="request", mb_release_id="mbid-v4", year=1991,
         )
         # threshold(5) + unwild(1) + unwild_year(1) → cycle 7 = track_0.
@@ -3089,7 +3089,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             {"track_number": 3, "title": "Frontier"},
             {"track_number": 4, "title": "Treasure"},
         ])
-        album = self._make_album(request_id=rid, mb_release_id="mbid-v4")
+        album = self._make_album(
+            request_id=rid,
+            mb_release_id="mbid-v4",
+            artist_name="The Mountain Goats",
+        )
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -3098,11 +3102,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(result.variant_tag, "track_0")
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         call = slskd.searches.search_text_calls[0]
-        # Track tier skips the bare one-word first title and uses the first
-        # multi-token title with no wildcards or artist tokens.
-        self.assertEqual(call.search_text, "Wide Open Road")
+        # Track tier keeps the one-word first title but appends a literal
+        # artist token. No wildcards are used.
+        self.assertEqual(call.search_text, "Tallahassee Mountain")
         self.assertNotIn("*", call.search_text)
-        self.assertNotIn("Wiggles", call.search_text)
+        self.assertNotIn("Goats", call.search_text)
         # search_log persisted the variant.
         self.assertEqual(db.search_logs[0].variant, "track_0")
 

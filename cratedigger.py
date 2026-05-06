@@ -269,6 +269,7 @@ def _select_variant_for_album(album, search_cfg, db):
         base_query_unwild=base_query_unwild or base_query,
         year=year,
         track_titles=track_titles,
+        artist_name=album.artist_name,
     )
     return variant, base_query
 

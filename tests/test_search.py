@@ -248,12 +248,13 @@ class TestBuildQuery(unittest.TestCase):
 
 
 class TestPerTrackQueries(unittest.TestCase):
-    """Per-track queries: cleaned title tokens, no artist, no wildcards.
+    """Per-track queries: cleaned title tokens, no wildcards.
 
     Each track title becomes one full query; no AND-mash across multiple
     tracks. The album-match scoring step (sub-count gate + filename ratio
     + cross-check) disambiguates wrong albums after slskd responses come
-    back, so we want maximal recall per query.
+    back, so we want maximal recall per query. Single-token titles append
+    one literal artist token for entropy.
     """
 
     def test_basic_titles_in_original_order(self):
@@ -309,17 +310,26 @@ class TestPerTrackQueries(unittest.TestCase):
         out = _per_track_queries(["Of It"])
         self.assertEqual(out, ["Of It"])
 
-    def test_skips_single_token_titles(self):
+    def test_enriches_single_token_titles_with_artist_token(self):
         # Bare one-word track searches like "Sweet" or "Tallahassee" are too
-        # broad without artist/release context and can fan out to thousands
-        # of peers.
+        # broad; append the longest artist token. Ties keep source order, so
+        # "Dallas Crane" contributes "Dallas".
         out = _per_track_queries([
             "Sweet",
             "Twenty Four Seven",
             "Tallahassee",
             "Go",
+        ], artist_name="Dallas Crane")
+        self.assertEqual(out, [
+            "Sweet Dallas",
+            "Twenty Four Seven",
+            "Tallahassee Dallas",
+            "Go Dallas",
         ])
-        self.assertEqual(out, ["Twenty Four Seven"])
+
+    def test_single_token_artist_entropy_prefers_longest_artist_token(self):
+        out = _per_track_queries(["Tallahassee"], artist_name="The Mountain Goats")
+        self.assertEqual(out, ["Tallahassee Mountain"])
 
 
 class TestSelectVariant(unittest.TestCase):
@@ -329,7 +339,7 @@ class TestSelectVariant(unittest.TestCase):
       cycle < threshold       → default     (wildcarded base)
       cycle == threshold      → unwild      (un-wildcarded base)
       cycle == threshold + 1  → unwild_year (un-wild base + year, if known)
-      cycle == threshold + N  → track_<i>   (one bare track title per cycle)
+      cycle == threshold + N  → track_<i>   (one track query per cycle)
       pool drained            → exhausted
 
     The wildcarded default form bypasses Soulseek's per-peer artist banlist
@@ -643,7 +653,7 @@ class TestSelectVariant(unittest.TestCase):
                 self.assertEqual(v.tag, expected_tag)
                 self.assertEqual(v.query, expected_query)
 
-    def test_track_tier_skips_single_token_titles(self):
+    def test_track_tier_enriches_single_token_titles(self):
         titles = [
             "Sweet",
             "Twenty Four Seven",
@@ -651,9 +661,11 @@ class TestSelectVariant(unittest.TestCase):
             "Drawn Together",
         ]
         cases = [
-            (7, "track_0", "Twenty Four Seven"),
-            (8, "track_1", "Drawn Together"),
-            (9, "exhausted", None),
+            (7, "track_0", "Sweet Dallas"),
+            (8, "track_1", "Twenty Four Seven"),
+            (9, "track_2", "Go Dallas"),
+            (10, "track_3", "Drawn Together"),
+            (11, "exhausted", None),
         ]
         for attempts, expected_tag, expected_query in cases:
             with self.subTest(attempts=attempts, tag=expected_tag):
@@ -664,22 +676,33 @@ class TestSelectVariant(unittest.TestCase):
                     base_query_unwild="base",
                     year="1991",
                     track_titles=titles,
+                    artist_name="Dallas Crane",
                 )
                 self.assertEqual(v.tag, expected_tag)
                 self.assertEqual(v.query, expected_query)
 
-    def test_track_tier_exhausts_when_all_track_titles_are_too_broad(self):
-        v = select_variant(
-            search_attempts=7,
-            threshold=5,
-            base_query="*ase",
-            base_query_unwild="base",
-            year="1991",
-            track_titles=["Sweet", "Go", "Sun", "Tallahassee"],
-        )
-        self.assertEqual(v.kind, "exhausted")
-        self.assertEqual(v.tag, "exhausted")
-        self.assertIsNone(v.query)
+    def test_track_tier_keeps_advancing_when_all_track_titles_are_one_word(self):
+        titles = ["Sweet", "Go", "Sun", "Tallahassee"]
+        cases = [
+            (7, "track_0", "Sweet Dallas"),
+            (8, "track_1", "Go Dallas"),
+            (9, "track_2", "Sun Dallas"),
+            (10, "track_3", "Tallahassee Dallas"),
+            (11, "exhausted", None),
+        ]
+        for attempts, expected_tag, expected_query in cases:
+            with self.subTest(attempts=attempts, tag=expected_tag):
+                v = select_variant(
+                    search_attempts=attempts,
+                    threshold=5,
+                    base_query="*ase",
+                    base_query_unwild="base",
+                    year="1991",
+                    track_titles=titles,
+                    artist_name="Dallas Crane",
+                )
+                self.assertEqual(v.tag, expected_tag)
+                self.assertEqual(v.query, expected_query)
 
     def test_track_tag_format_exact(self):
         # Tag for track tier must be exactly "track_<idx>".
