@@ -26,6 +26,7 @@ from lib.processing_paths import (
     canonical_processing_path,
     directory_has_entries,
     normalize_processing_path,
+    normalize_source_dirs,
     path_is_within_root,
     stage_to_ai_path,
     stage_to_ai_root,
@@ -356,6 +357,12 @@ def _canonical_import_folder_path(
         title=album_data.title,
         year=album_data.year,
         slskd_download_dir=slskd_download_dir,
+    )
+
+
+def _source_dirs_for_album(album_data: GrabListEntry) -> list[str]:
+    return normalize_source_dirs(
+        [file.file_dir for file in album_data.files if file.file_dir],
     )
 
 
@@ -1098,6 +1105,7 @@ def _process_beets_validation(album_data: GrabListEntry,
     usernames_pre = set(f.username for f in album_data.files if f.username)
     bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
     bv_result.download_folder = current_path
+    bv_result.source_dirs = _source_dirs_for_album(album_data)
 
     if bv_result.valid:
         dl_pre = _build_download_info(album_data)
@@ -1215,6 +1223,7 @@ def _reject_request_auto_import(
         detail=detail,
         error=error,
     )
+    failed_result.source_dirs = _source_dirs_for_album(album_data)
     failed_result.failed_path = move_failed_import(
         staged_album.current_path,
         scenario=failed_result.scenario,
@@ -1439,6 +1448,7 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 cfg=ctx.cfg,
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
+                source_dirs=_source_dirs_for_album(album_data),
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
@@ -1449,6 +1459,7 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
                             staged_album: StagedAlbum,
                             ctx: CratediggerContext) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
+    bv_result.source_dirs = _source_dirs_for_album(album_data)
     failed_dest = move_failed_import(
         staged_album.current_path,
         scenario=bv_result.scenario,

@@ -37,6 +37,7 @@ from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
 from web import mb as mb_api
 from web import discogs as discogs_api
 from web import cache as cache_api
+from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
 def _server():
@@ -1114,6 +1115,7 @@ def post_pipeline_force_import(h, body: dict) -> None:
             download_log_id=int(log_id),
             failed_path=resolved_path,
             source_username=entry.get("soulseek_username"),
+            source_dirs=source_dirs_from_validation_result(vr),
         ),
         message=f"Force import queued for {req['artist_name']} - {req['album_title']}",
     )

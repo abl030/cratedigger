@@ -14,7 +14,7 @@ import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSou
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
 import { loadManualImport, runManualImport } from './manual.js';
-import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
+import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toast } from './state.js';
 
@@ -120,6 +120,7 @@ Object.assign(window, {
   loadWrongMatches,
   toggleWrongMatchGroup,
   toggleWrongMatchEntry,
+  reloadWrongMatchExplorer,
   forceImportWrongMatch,
   deleteWrongMatch,
   deleteWrongMatchGroup,

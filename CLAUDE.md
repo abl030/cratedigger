@@ -14,7 +14,7 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
    ```
    The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 3. **nixosconfig changes MUST be made on doc1.** The repo lives at `~/nixosconfig` on doc1. Doc1 has the git push credentials; doc2 and Windows do not. SSH to doc1 first, edit, commit, push, then deploy to doc2.
-4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
+4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH, or from doc1 via `ssh doc2 'pipeline-cli ...'`. Raw TCP reachability to `192.168.100.11:5432` exists on doc1/doc2, not on the Framework laptop by default. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated music collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — they are different MusicBrainz releases (countries, track counts, labels) and the user wants them all. Beets must disambiguate them into separate folders.
 
 ## Subsystems
@@ -58,6 +58,30 @@ ssh doc2 'sudo cat /var/lib/cratedigger/config.ini'
 ```
 
 **IMPORTANT for Claude Code**: `systemctl start cratedigger` blocks until the oneshot finishes (minutes). **Always use `--no-block`** when starting via SSH from a Bash tool call. Never use `&` inside SSH quotes to background systemctl — SSH keeps the connection open waiting for all child processes regardless.
+
+### Web dev server
+
+`scripts/web_dev_server.py --data live-db` needs a real PostgreSQL connection to
+`192.168.100.11:5432`. Do **not** use `localhost:5432` unless you explicitly set
+up a tunnel yourself.
+
+- On **doc1** (`proxmox-vm`) or **doc2**: `live-db` works.
+- On **framework**: `live-db` fails by default because the doc2 nspawn DB network
+  is not directly reachable from that laptop.
+- On **framework/Windows**: either SSH to doc1 and run the dev server there, or
+  use `--data prod-api` / `--data fixture` locally.
+
+Canonical `live-db` command from doc1:
+
+```bash
+cd ~/cratedigger
+PIPELINE_DB_DSN=postgresql://cratedigger@192.168.100.11:5432/cratedigger \
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 0.0.0.0 --port 8096"
+```
+
+Then open `http://doc1:8096` from another LAN machine. This serves checked-out
+local frontend files from doc1 while reading live pipeline data in read-only
+mode.
 
 ## Repository layout
 

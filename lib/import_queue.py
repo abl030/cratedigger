@@ -272,6 +272,7 @@ def force_import_payload(
     download_log_id: int,
     failed_path: str,
     source_username: str | None = None,
+    source_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "download_log_id": int(download_log_id),
@@ -279,6 +280,8 @@ def force_import_payload(
     }
     if source_username:
         payload["source_username"] = source_username
+    if source_dirs:
+        payload["source_dirs"] = [str(source_dir) for source_dir in source_dirs]
     return payload
 
 

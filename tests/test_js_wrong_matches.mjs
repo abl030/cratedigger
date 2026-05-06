@@ -82,9 +82,9 @@ function wrongMatchesData() {
       quality_rank: null,
       status: 'wanted',
       entries: [
-        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance', local_items: [{ path: '01.mp3', format: 'MP3' }] },
-        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance', local_items: [{ path: '02.mp3', format: 'MP3' }] },
-        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance', local_items: [{ path: '03.mp3', format: 'MP3' }] },
+        { download_log_id: 100, soulseek_username: 'u1', distance: 0.167, scenario: 'high_distance', source_dirs: ['user1\\Scott Walker - Scott 3'], local_items: [{ path: '01.mp3', format: 'MP3' }] },
+        { download_log_id: 101, soulseek_username: 'u2', distance: 0.180, scenario: 'high_distance', source_dirs: ['user2\\Scott Walker - Scott 3'], local_items: [{ path: '02.mp3', format: 'MP3' }] },
+        { download_log_id: 102, soulseek_username: 'u3', distance: 0.226, scenario: 'high_distance', source_dirs: ['user3\\Scott Walker - Scott 3'], local_items: [{ path: '03.mp3', format: 'MP3' }] },
       ],
     }],
   };
@@ -444,10 +444,83 @@ console.log('renderEntry() embeds evidence cells without preview hooks');
   const html = dom.wrongMatches.innerHTML;
   assert(html.includes('suspect'), 'rendered HTML carries the spectral grade');
   assert(html.includes('265'), 'rendered HTML carries the lossless-source V0 average');
+  assert(html.includes('Downloaded as'), 'rendered HTML surfaces preserved source folders');
+  assert(html.includes('wm-explorer-100'), 'rendered HTML includes an explorer mount');
   // R3 / AE2: no preview button or preview action surfaces in this feature.
   assert(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
   assert(!/preview[-_]btn/.test(html), 'no preview button class');
   assert(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
+}
+
+console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
+{
+  installStorage();
+  const dom = installDom();
+  let open = false;
+  const detail = {
+    classList: {
+      toggle() {
+        open = !open;
+        return open;
+      },
+      contains() {
+        return open;
+      },
+    },
+  };
+  const mount = { innerHTML: '' };
+  const elements = new Map([
+    ['wm-entry-100', detail],
+    ['wm-explorer-100', mount],
+  ]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      json: async () => ({
+        status: 'ok',
+        failed_path: '/mnt/virtio/Music/Incoming/post-validation/Scott Walker - Scott 3',
+        folder_name: 'Scott Walker - Scott 3',
+        source_dirs: ['user1\\Scott Walker - Scott 3'],
+        audio_file_count: 1,
+        other_file_count: 0,
+        files: [{
+          relative_path: '01 - It\'s Raining Today.mp3',
+          filename: '01 - It\'s Raining Today.mp3',
+          format: 'mp3',
+          bitrate_kbps: 320,
+          duration_seconds: 181,
+          size_bytes: 1234567,
+          playable: true,
+          stream_url: '/api/wrong-matches/audio?download_log_id=100&path=01%20-%20It%27s%20Raining%20Today.mp3',
+          tags: {
+            title: ['It\'s Raining Today'],
+            artist: ['Scott Walker'],
+          },
+        }],
+      }),
+    };
+  };
+
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  assertDeepEqual(
+    calls,
+    ['/api/wrong-matches/explorer?download_log_id=100'],
+    'opening an entry loads the explorer exactly once',
+  );
+  assert(mount.innerHTML.includes('Downloaded as'), 'explorer shows the original user folder');
+  assert(mount.innerHTML.includes('It&#39;s Raining Today'), 'explorer shows extracted tags');
+  assert(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
+
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  assertEqual(calls.length, 1, 'reopening an entry reuses the loaded explorer state');
 }
 
 console.log('formatLosslessOpusToastBody() reports spectral-suspect skips');

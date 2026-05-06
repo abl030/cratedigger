@@ -1,6 +1,7 @@
 """Manual import route handlers — scan, import, wrong matches."""
 
 import json
+import os
 import shutil
 import msgspec
 
@@ -31,6 +32,11 @@ from lib.import_preview import (
     preview_import_from_values,
 )
 from web.routes.pipeline import _serialize_import_job
+from web.wrong_match_file_service import (
+    build_wrong_match_explorer,
+    resolve_wrong_match_stream_file,
+    source_dirs_from_validation_result,
+)
 
 
 def _server():
@@ -512,6 +518,7 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
             "detail": vr.get("detail"),
             "soulseek_username": row.get("soulseek_username")
                 or vr.get("soulseek_username"),
+            "source_dirs": source_dirs_from_validation_result(vr),
             "candidate": target,
             "local_items": vr.get("items", []),
             "import_job": import_job,
@@ -553,6 +560,136 @@ def _is_lossless_opus_group(group: dict[str, object]) -> bool:
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     """Return grouped wrong-match rejections for the manual-review UI."""
     h._json({"groups": _build_wrong_match_groups()})
+
+
+def _download_log_id_from_params(params: dict[str, list[str]]) -> int:
+    raw_id = params.get("download_log_id", [""])[0]
+    try:
+        return int(raw_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("download_log_id must be an integer") from exc
+
+
+def _byte_range(range_header: str | None, size: int) -> tuple[int, int, int] | None:
+    if not range_header:
+        return None
+    if not range_header.startswith("bytes="):
+        raise ValueError("Only bytes ranges are supported")
+
+    raw = range_header[6:].strip()
+    if "," in raw:
+        raise ValueError("Multiple ranges are not supported")
+    start_raw, sep, end_raw = raw.partition("-")
+    if not sep:
+        raise ValueError("Invalid range")
+
+    if not start_raw:
+        suffix = int(end_raw)
+        if suffix <= 0:
+            raise ValueError("Invalid suffix range")
+        start = max(size - suffix, 0)
+        end = size - 1
+    else:
+        start = int(start_raw)
+        end = size - 1 if not end_raw else int(end_raw)
+
+    if start < 0 or end < start or start >= size:
+        raise ValueError("Range out of bounds")
+    end = min(end, size - 1)
+    return start, end, (end - start) + 1
+
+
+def get_wrong_match_explorer(h, params: dict[str, list[str]]) -> None:
+    """Return filesystem-backed file/tag explorer data for one wrong match."""
+    try:
+        log_id = _download_log_id_from_params(params)
+    except ValueError as exc:
+        h._error(str(exc))
+        return
+
+    entry = _server()._db().get_download_log_entry(log_id)
+    if not entry:
+        h._error(f"Download log entry {log_id} not found", 404)
+        return
+
+    try:
+        payload = build_wrong_match_explorer(
+            download_log_id=log_id,
+            entry=entry,
+        )
+    except FileNotFoundError as exc:
+        h._error(str(exc), 404)
+        return
+    h._json(payload)
+
+
+def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
+    """Stream one wrong-match audio file with byte-range support."""
+    try:
+        log_id = _download_log_id_from_params(params)
+    except ValueError as exc:
+        h._error(str(exc))
+        return
+
+    relative_path = params.get("path", [""])[0]
+    if not relative_path:
+        h._error("Missing path")
+        return
+
+    entry = _server()._db().get_download_log_entry(log_id)
+    if not entry:
+        h._error(f"Download log entry {log_id} not found", 404)
+        return
+
+    try:
+        abs_path, mime_type = resolve_wrong_match_stream_file(
+            entry=entry,
+            relative_path=relative_path,
+        )
+    except ValueError as exc:
+        h._error(str(exc))
+        return
+    except FileNotFoundError as exc:
+        h._error(str(exc), 404)
+        return
+
+    size = os.path.getsize(abs_path)
+    try:
+        requested_range = _byte_range(h.headers.get("Range"), size)
+    except ValueError:
+        h.send_response(416)
+        h.send_header("Content-Range", f"bytes */{size}")
+        h.send_header("Access-Control-Allow-Origin", "*")
+        h.end_headers()
+        return
+
+    start = 0
+    end = size - 1
+    content_length = size
+    status = 200
+    if requested_range is not None:
+        start, end, content_length = requested_range
+        status = 206
+
+    h.send_response(status)
+    h.send_header("Content-Type", mime_type)
+    h.send_header("Content-Length", str(content_length))
+    h.send_header("Accept-Ranges", "bytes")
+    h.send_header("Cache-Control", "no-cache")
+    h.send_header("Access-Control-Allow-Origin", "*")
+    if requested_range is not None:
+        h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+    h.end_headers()
+
+    with open(abs_path, "rb") as handle:
+        handle.seek(start)
+        remaining = content_length
+        while remaining > 0:
+            chunk = handle.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            h.wfile.write(chunk)
+            remaining -= len(chunk)
 
 
 def _delete_wrong_match_row(pdb, log_id: int) -> bool:
@@ -831,6 +968,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
                     download_log_id=lid,
                     failed_path=resolved_path,
                     source_username=source_username,
+                    source_dirs=source_dirs_from_validation_result(vr),
                 ),
                 message=(
                     f"Force import queued for "
@@ -959,6 +1097,8 @@ def post_wrong_match_triage(h, body: dict) -> None:
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
+    "/api/wrong-matches/audio": get_wrong_match_audio,
+    "/api/wrong-matches/explorer": get_wrong_match_explorer,
 }
 POST_ROUTES: dict[str, object] = {
     "/api/manual-import/import": post_manual_import,

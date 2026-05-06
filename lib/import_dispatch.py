@@ -24,6 +24,7 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          extract_usernames, is_comparable_lossless_source_probe,
                          narrow_override_on_downgrade,
                          rejection_backfill_override)
+from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
                       repair_mp3_headers, trigger_meelo_clean)
 from lib.preimport import inspect_local_files, run_preimport_gates
@@ -786,6 +787,7 @@ def dispatch_import_core(
     outcome_label: str = "success",
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
+    source_dirs: list[str] | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -798,6 +800,8 @@ def dispatch_import_core(
     from lib.util import trigger_meelo_scan as _trigger_meelo
     from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
+
+    source_dirs = normalize_source_dirs(source_dirs or [])
 
     mode = (
         "FORCE-IMPORT" if force
@@ -968,6 +972,7 @@ def dispatch_import_core(
                         scenario="no_json_result",
                         detail=f"import_one.py rc={run.returncode}, no JSON",
                         error=f"rc={run.returncode}",
+                        source_dirs=source_dirs,
                     ).to_json(),
                     staged_path=path)
                 outcome_message = f"No JSON result (rc={run.returncode})"
@@ -1172,6 +1177,7 @@ def dispatch_import_core(
                                                scenario=fail_scenario,
                                                detail=fail_detail,
                                                error=fail_error,
+                                               source_dirs=source_dirs,
                                            ).to_json()),
                         staged_path=path)
                     if narrowed_override is not None:
@@ -1271,6 +1277,7 @@ def dispatch_import_core(
                     scenario="timeout",
                     detail="import_one.py timed out",
                     error="timeout",
+                    source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path)
             outcome_message = "Import timed out"
@@ -1286,6 +1293,7 @@ def dispatch_import_core(
                     scenario="exception",
                     detail="unhandled exception in auto-import",
                     error="exception",
+                    source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path)
             outcome_message = "Unhandled exception"
@@ -1300,6 +1308,7 @@ def dispatch_import_from_db(
     force: bool = False,
     outcome_label: str = "force_import",
     source_username: str | None = None,
+    source_dirs: list[str] | None = None,
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
@@ -1326,6 +1335,7 @@ def dispatch_import_from_db(
         force: Pass --force to import_one.py (bypass distance check)
         outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
         source_username: Original Soulseek username for force-import audit/denylist flows
+        source_dirs: Original remote source directories for wrong-match forensics
     """
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
@@ -1344,6 +1354,7 @@ def dispatch_import_from_db(
             force=force,
             outcome_label=outcome_label,
             source_username=source_username,
+            source_dirs=source_dirs,
         )
 
 
@@ -1355,9 +1366,12 @@ def _dispatch_import_from_db_locked(
     force: bool,
     outcome_label: str,
     source_username: str | None,
+    source_dirs: list[str] | None,
 ) -> "DispatchOutcome":
     """Body of dispatch_import_from_db, called once the advisory lock is held."""
     from lib.grab_list import DownloadFile
+
+    source_dirs = normalize_source_dirs(source_dirs or [])
 
     req = db.get_request(request_id)
     if not req:
@@ -1434,6 +1448,7 @@ def _dispatch_import_from_db_locked(
                 scenario="nested_layout",
                 detail=detail,
                 failed_path=failed_path,
+                source_dirs=source_dirs,
             ).to_json(),
             staged_path=failed_path,
         )
@@ -1500,6 +1515,7 @@ def _dispatch_import_from_db_locked(
                 scenario=preimport.scenario or "preimport_reject",
                 detail=preimport.detail,
                 failed_path=failed_path,
+                source_dirs=source_dirs,
                 corrupt_files=list(preimport.corrupt_files),
                 matched_bad_hash_id=preimport.matched_bad_hash_id,
                 matched_bad_track_path=preimport.matched_bad_track_path,
@@ -1548,4 +1564,5 @@ def _dispatch_import_from_db_locked(
         cfg=cfg,
         outcome_label=outcome_label,
         requeue_on_failure=False,
+        source_dirs=source_dirs,
     )

@@ -100,6 +100,7 @@ def execute_import_job(
                 message="Import job payload is missing failed_path",
             )
         source_username = payload.get("source_username")
+        source_dirs = payload.get("source_dirs")
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
@@ -109,6 +110,11 @@ def execute_import_job(
             source_username=(
                 str(source_username)
                 if source_username is not None
+                else None
+            ),
+            source_dirs=(
+                [str(source_dir) for source_dir in source_dirs if source_dir]
+                if isinstance(source_dirs, list)
                 else None
             ),
         )
