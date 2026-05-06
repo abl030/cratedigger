@@ -451,19 +451,46 @@ from one of three read-only data sources:
 # Deterministic fixture data, no network or DB required
 nix-shell --run "python3 scripts/web_dev_server.py --data fixture --scenario peer_dirs --port 8096"
 
-# Local frontend files against production API JSON
-nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --port 8096"
+# Local frontend files against any remote read-only backend
+nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --port 8096"
 
-# Local frontend files plus local route code against a live DB session
-PIPELINE_DB_DSN=postgresql://cratedigger@192.168.100.11:5432/cratedigger \
-  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --port 8096"
+# On the backend host only: local route code against a live DB session
+PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
 ```
 
-Open <http://127.0.0.1:8096>. For access from another machine on the LAN, pass
-`--host 0.0.0.0` and open <http://doc1:8096>. The page gets a small dev badge
-and reloads automatically when `web/index.html`, `web/js/*.js`, or the active
-fixture JSON changes. Mutating API requests are blocked in all modes; `live-db`
-also sets the PostgreSQL session to `default_transaction_read_only=on`.
+`prod-api` is a generic proxy mode despite the historical name. Point
+`--prod-base-url` at `https://music.ablz.au`, another dev server, or an SSH
+forwarded port.
+
+For Wrong Matches and other file-backed views, `live-db` must run on a host
+that can open the real download folders on disk. PostgreSQL access alone is not
+enough because the explorer and audio endpoints read files directly. In the
+current homelab, `doc1` and `doc2` can act as backend hosts; a laptop usually
+cannot.
+
+Canonical "works from anywhere with SSH" flow:
+
+```bash
+# 1. On a backend host that can see the files, start the live-db server.
+#    If that host needs a DB tunnel first, expose doc2's PostgreSQL locally:
+ssh -N -L 15432:192.168.100.11:5432 doc2
+PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
+
+# 2. From your local machine, tunnel the remote backend back to localhost.
+ssh -N -L 18096:127.0.0.1:8096 <backend-host>
+
+# 3. Serve your checked-out frontend files locally against that backend.
+nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --host 127.0.0.1 --port 8096"
+```
+
+Open <http://127.0.0.1:8096>. The page gets a small dev badge and reloads
+automatically when `web/index.html`, `web/js/*.js`, or the active fixture JSON
+changes. Mutating API requests are blocked in all modes; `live-db` also sets
+the PostgreSQL session to `default_transaction_read_only=on`. The `prod-api`
+proxy forwards `Range` requests, so in-browser audio playback and seek work
+through the tunnel.
 
 The test layer follows a 4-category taxonomy documented in `.claude/rules/code-quality.md`:
 

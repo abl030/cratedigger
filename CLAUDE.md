@@ -61,27 +61,45 @@ ssh doc2 'sudo cat /var/lib/cratedigger/config.ini'
 
 ### Web dev server
 
-`scripts/web_dev_server.py --data live-db` needs a real PostgreSQL connection to
-`192.168.100.11:5432`. Do **not** use `localhost:5432` unless you explicitly set
-up a tunnel yourself.
+Use `scripts/web_dev_server.py` in two layers:
 
-- On **doc1** (`proxmox-vm`) or **doc2**: `live-db` works.
-- On **framework**: `live-db` fails by default because the doc2 nspawn DB network
-  is not directly reachable from that laptop.
-- On **framework/Windows**: either SSH to doc1 and run the dev server there, or
-  use `--data prod-api` / `--data fixture` locally.
+- `--data live-db` runs local route code against a real read-only PostgreSQL
+  session and the backend host's filesystem.
+- `--data prod-api` serves your checked-out frontend files locally while
+  proxying `/api/*` to another read-only backend. Despite the name, it can
+  target any remote base URL, not just prod.
 
-Canonical `live-db` command from doc1:
+For Wrong Matches, `live-db` must run on a host that can see the rejected
+folders on disk. DB reachability alone is not enough because
+`/api/wrong-matches/explorer` and `/api/wrong-matches/audio` open real files.
+In this homelab, `doc1` and `doc2` qualify as backend hosts; Framework and
+Windows do not unless the relevant paths are mounted locally.
 
-```bash
-cd ~/cratedigger
-PIPELINE_DB_DSN=postgresql://cratedigger@192.168.100.11:5432/cratedigger \
-  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 0.0.0.0 --port 8096"
-```
+Canonical remote-dev flow from any machine with SSH access:
 
-Then open `http://doc1:8096` from another LAN machine. This serves checked-out
-local frontend files from doc1 while reading live pipeline data in read-only
-mode.
+1. Start a `live-db` backend on a host that can see the files. If that host
+   does not have direct DB reachability, tunnel PostgreSQL first:
+   ```bash
+   ssh -N -L 15432:192.168.100.11:5432 doc2
+   PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
+     nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
+   ```
+2. Tunnel that backend to your local machine if `8096` is not already reachable:
+   ```bash
+   ssh -N -L 18096:127.0.0.1:8096 <backend-host>
+   ```
+3. On your local checkout, serve the frontend against the tunneled backend:
+   ```bash
+   nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --host 127.0.0.1 --port 8096"
+   ```
+
+Open `http://127.0.0.1:8096`. This gives live reload for local `web/` edits
+without exposing the Postgres port to the laptop. The proxy forwards `Range`
+headers, so Wrong Matches audio playback and scrubbing still work through the
+tunnel.
+
+`--beets-db` is optional in this flow. Wrong Matches does not need it; only
+beets-backed library badges and lookups do.
 
 ## Repository layout
 

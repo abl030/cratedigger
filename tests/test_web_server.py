@@ -5047,6 +5047,117 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertTrue(data["files"][0]["playable"])
         self.assertIn("/api/wrong-matches/audio?download_log_id=42", data["files"][0]["stream_url"])
 
+    def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"fake mp3 bytes")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                },
+            }
+
+            class _FakeInfo:
+                length = 181.0
+                bitrate = 320000
+
+            class _FakeAudio:
+                tags = {
+                    "APIC:": ["embedded cover art"],
+                    "TALB": ["Shut Up And Listen To Majosha"],
+                    "TCON": ["Funk Rock"],
+                    "TDRC": ["1989"],
+                    "TPE1": ["Majosha"],
+                    "TPE2": ["Majosha"],
+                    "TPOS": ["2"],
+                    "TXXX:MusicBrainz Album Id": ["20f1e791-34cd-4b47-8783-51492b90218a"],
+                }
+                info = _FakeInfo()
+
+            with patch("mutagen.File", return_value=_FakeAudio()):
+                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+
+        self.assertEqual(status, 200)
+        tags = data["files"][0]["tags"]
+        self.assertNotIn("apic:", tags)
+        self.assertEqual(tags["album"], ["Shut Up And Listen To Majosha"])
+        self.assertEqual(tags["genre"], ["Funk Rock"])
+        self.assertEqual(tags["date"], ["1989"])
+        self.assertEqual(tags["artist"], ["Majosha"])
+        self.assertEqual(tags["albumartist"], ["Majosha"])
+        self.assertEqual(tags["discnumber"], ["2"])
+        self.assertEqual(
+            tags["musicbrainz_albumid"],
+            ["20f1e791-34cd-4b47-8783-51492b90218a"],
+        )
+
+    def test_wrong_match_explorer_returns_files_in_beets_matched_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for filename in ("a.mp3", "b.mp3", "c.mp3"):
+                with open(os.path.join(tmpdir, filename), "wb") as handle:
+                    handle.write(b"fake mp3 bytes")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                    "candidates": [{
+                        "is_target": True,
+                        "mapping": [
+                            {
+                                "item": {"path": "c.mp3", "title": "Third", "track": 12, "disc": 1},
+                                "track": {"medium_index": 1, "medium": 1, "title": "Target One"},
+                            },
+                            {
+                                "item": {"path": "a.mp3", "title": "First", "track": 1, "disc": 1},
+                                "track": {"medium_index": 2, "medium": 1, "title": "Target Two"},
+                            },
+                            {
+                                "item": {"path": "b.mp3", "title": "Second", "track": 7, "disc": 1},
+                                "track": {"medium_index": 3, "medium": 1, "title": "Target Three"},
+                            },
+                        ],
+                    }],
+                },
+            }
+
+            class _FakeInfo:
+                length = 181.0
+                bitrate = 320000
+
+            def _fake_audio(path: str):
+                basename = os.path.basename(path)
+
+                class _FakeAudio:
+                    info = _FakeInfo()
+                    if basename == "a.mp3":
+                        tags = {"title": ["First"], "tracknumber": ["1/14"], "discnumber": ["1/1"]}
+                    elif basename == "b.mp3":
+                        tags = {"title": ["Second"], "tracknumber": ["7/14"], "discnumber": ["1/1"]}
+                    else:
+                        tags = {"title": ["Third"], "tracknumber": ["12/14"], "discnumber": ["1/1"]}
+
+                return _FakeAudio()
+
+            with patch("mutagen.File", side_effect=_fake_audio):
+                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["ordered_by"], "matched")
+        self.assertEqual(
+            [file["relative_path"] for file in data["files"]],
+            ["c.mp3", "a.mp3", "b.mp3"],
+        )
+        self.assertEqual(
+            [file["matched_order"] for file in data["files"]],
+            [1, 2, 3],
+        )
+
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = os.path.join(tmpdir, "01 - Track.mp3")

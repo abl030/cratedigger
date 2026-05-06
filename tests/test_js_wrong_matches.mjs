@@ -30,6 +30,10 @@ function assertDeepEqual(actual, expected, msg) {
   assertEqual(JSON.stringify(actual), JSON.stringify(expected), msg);
 }
 
+function countOccurrences(text, needle) {
+  return (String(text).match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+}
+
 function installStorage() {
   const values = new Map();
   globalThis.localStorage = {
@@ -452,6 +456,75 @@ console.log('renderEntry() embeds evidence cells without preview hooks');
   assert(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
 }
 
+console.log('renderWrongMatchExplorer() collapses shared album tags and hides replaygain noise');
+{
+  const html = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    ordered_by: 'matched',
+    folder_name: 'The Castiles Live (Vol. 1)',
+    source_dirs: ['user1\\The Castiles Live (Vol. 1)'],
+    audio_file_count: 2,
+    other_file_count: 1,
+    files: [{
+      relative_path: '01-Purple Haze.flac',
+      filename: '01-Purple Haze.flac',
+      format: 'FLAC',
+      bitrate_kbps: 780,
+      duration_seconds: 275,
+      size_bytes: 26000000,
+      playable: true,
+      stream_url: '/api/wrong-matches/audio?download_log_id=1&path=01-Purple%20Haze.flac',
+      tags: {
+        title: ['Purple Haze'],
+        tracknumber: ['7'],
+        artist: ['The Castiles'],
+        albumartist: ['The Castiles'],
+        album: ['The Castiles Live (Vol. 1)'],
+        date: ['1967'],
+        genre: ['Americana'],
+        musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+        musicbrainz_artistid: ['4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'],
+        replaygain_album_gain: ['-4.19 dB'],
+        replaygain_track_gain: ['-4.86 dB'],
+      },
+    }, {
+      relative_path: '02-Get Outta My Life.flac',
+      filename: '02-Get Outta My Life.flac',
+      format: 'FLAC',
+      bitrate_kbps: 803,
+      duration_seconds: 64,
+      size_bytes: 6200000,
+      playable: true,
+      stream_url: '/api/wrong-matches/audio?download_log_id=1&path=02-Get%20Outta%20My%20Life.flac',
+      tags: {
+        title: ['Get Outta My Life'],
+        tracknumber: ['8'],
+        artist: ['The Castiles'],
+        albumartist: ['The Castiles'],
+        album: ['The Castiles Live (Vol. 1)'],
+        date: ['1967'],
+        genre: ['Americana'],
+        musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+        musicbrainz_artistid: ['4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'],
+        replaygain_album_gain: ['-4.19 dB'],
+        replaygain_track_gain: ['-5.04 dB'],
+      },
+    }],
+  });
+
+  assert(html.includes('Downloaded as'), 'keeps the original user folder in the summary');
+  assert(html.includes('albumartist'), 'renders shared album-level tags');
+  assert(html.includes('2 tracks in surviving folder in matched order'), 'surfaces matched-order explorer label');
+  assertEqual(countOccurrences(html, 'The Castiles Live (Vol. 1)'), 2, 'album name appears in the preserved source folder and shared tag summary');
+  assert(html.includes('Purple Haze'), 'renders the first track title inline');
+  assert(html.includes('Get Outta My Life'), 'renders the second track title inline');
+  assert(html.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'links musicbrainz_albumid to the release page');
+  assert(html.includes('https://musicbrainz.org/artist/4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'), 'links musicbrainz_artistid to the artist page');
+  assertEqual(countOccurrences(html, '<audio'), 2, 'renders one player per track');
+  assert(!html.includes('replaygain_album_gain'), 'hides replaygain album tags');
+  assert(!html.includes('replaygain_track_gain'), 'hides replaygain track tags');
+}
+
 console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
 {
   installStorage();
@@ -485,6 +558,7 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
       ok: true,
       json: async () => ({
         status: 'ok',
+        ordered_by: 'matched',
         failed_path: '/mnt/virtio/Music/Incoming/post-validation/Scott Walker - Scott 3',
         folder_name: 'Scott Walker - Scott 3',
         source_dirs: ['user1\\Scott Walker - Scott 3'],
@@ -502,6 +576,10 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
           tags: {
             title: ['It\'s Raining Today'],
             artist: ['Scott Walker'],
+            album: ['Scott 3'],
+            musicbrainz_albumid: ['20f1e791-34cd-4b47-8783-51492b90218a'],
+            musicbrainz_trackid: ['d5b1a858-84be-4005-a2a0-29dfcf005851'],
+            replaygain_track_gain: ['-4.1 dB'],
           },
         }],
       }),
@@ -515,8 +593,12 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
     'opening an entry loads the explorer exactly once',
   );
   assert(mount.innerHTML.includes('Downloaded as'), 'explorer shows the original user folder');
+  assert(mount.innerHTML.includes('Scott 3'), 'explorer shows shared album tags once loaded');
   assert(mount.innerHTML.includes('It&#39;s Raining Today'), 'explorer shows extracted tags');
+  assert(mount.innerHTML.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'lazy-loaded explorer links the album MBID');
+  assert(mount.innerHTML.includes('https://musicbrainz.org/recording/d5b1a858-84be-4005-a2a0-29dfcf005851'), 'lazy-loaded explorer links the recording MBID');
   assert(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
+  assert(!mount.innerHTML.includes('replaygain_track_gain'), 'explorer hides replaygain noise');
 
   await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
   await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
