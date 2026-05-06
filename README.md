@@ -151,7 +151,7 @@ Add it to your flake:
 }
 ```
 
-You provide: PostgreSQL (the module just takes a DSN), slskd, and a secrets backend that materializes `*File` paths the module reads. The module owns a local Redis server by default for the pipeline peer cache and web metadata cache (`redis-cratedigger.service`, `maxmemory=1gb`, `allkeys-lru`). The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.cratedigger.user` once you've set up the surrounding permissions.
+You provide: PostgreSQL (the module just takes a DSN), slskd, and a secrets backend that materializes `*File` paths the module reads. The module owns a local Redis server by default for the pipeline peer cache and web metadata cache (`redis-cratedigger.service`, `maxmemory=2gb`, `allkeys-lru`). The module defaults to running as root because slskd downloads land outside any service-user home and beets needs broad filesystem access; override `services.cratedigger.user` once you've set up the surrounding permissions.
 
 Try it without committing:
 

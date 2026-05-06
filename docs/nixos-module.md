@@ -20,7 +20,7 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
 | `pipelineDb.dsn` | (required) | PostgreSQL DSN. |
-| `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `1gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
+| `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beetsValidation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
 | `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |

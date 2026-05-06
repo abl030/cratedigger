@@ -119,6 +119,7 @@ class TestOwnedRedisContract(unittest.TestCase):
         self.assertIn("enable = cfg.redis.enable", text)
         self.assertIn("bind = cfg.redis.host", text)
         self.assertIn("port = cfg.redis.port", text)
+        self.assertIn('default = "2gb";', text)
         self.assertIn('maxmemory = cfg.redis.maxmemory', text)
         self.assertIn('"maxmemory-policy" = "allkeys-lru"', text)
 
