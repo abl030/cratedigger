@@ -1496,6 +1496,109 @@ class PipelineDB:
         assert row is not None, "INSERT RETURNING should always return a row"
         return int(row["id"])
 
+    def abandon_auto_import_request(
+        self,
+        *,
+        request_id: int,
+        current_path: str,
+        soulseek_username: str | None,
+        filetype: str | None,
+        beets_scenario: str,
+        beets_detail: str,
+        outcome: str,
+        staged_path: str,
+        error_message: str,
+        validation_result: str | None,
+    ) -> int | None:
+        """Atomically audit and reset an owned interrupted auto-import row."""
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    UPDATE album_requests
+                    SET status = 'wanted',
+                        active_download_state = NULL,
+                        manual_reason = NULL,
+                        updated_at = %s
+                    WHERE id = %s
+                      AND status = 'downloading'
+                      AND active_download_state IS NOT NULL
+                      AND active_download_state->>'current_path' = %s
+                      AND active_download_state->>'import_subprocess_started_at'
+                          IS NOT NULL
+                    RETURNING id
+                    """,
+                    (now, request_id, current_path),
+                )
+                if cur.fetchone() is None:
+                    self.conn.rollback()
+                    return None
+
+                cur.execute(
+                    """
+                    UPDATE album_requests
+                    SET download_attempts = COALESCE(download_attempts, 0) + 1,
+                        last_attempt_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    RETURNING download_attempts
+                    """,
+                    (now, now, request_id),
+                )
+                attempt_row = cur.fetchone()
+                assert attempt_row is not None, f"Request {request_id} not found"
+                new_count = int(attempt_row["download_attempts"])
+                backoff_minutes = min(
+                    BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+                    BACKOFF_MAX_MINUTES,
+                )
+                cur.execute(
+                    """
+                    UPDATE album_requests
+                    SET next_retry_after = %s
+                    WHERE id = %s
+                    """,
+                    (now + timedelta(minutes=backoff_minutes), request_id),
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO download_log (
+                        request_id, soulseek_username, filetype,
+                        beets_scenario, beets_detail, outcome,
+                        staged_path, error_message, validation_result
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        request_id,
+                        soulseek_username,
+                        filetype,
+                        beets_scenario,
+                        beets_detail,
+                        outcome,
+                        staged_path,
+                        error_message,
+                        validation_result,
+                    ),
+                )
+                log_row = cur.fetchone()
+                assert log_row is not None, "INSERT RETURNING should return a row"
+                log_id = int(log_row["id"])
+            self.conn.commit()
+            return log_id
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
     def get_download_log_entry(self, log_id):
         """Get a single download_log entry by its ID."""
         cur = self._execute(
@@ -2460,6 +2563,7 @@ class PipelineDB:
         cur = self._execute("""
             SELECT outcome FROM download_log
             WHERE outcome IS NOT NULL
+              AND COALESCE(beets_scenario, '') <> 'abandoned_auto_import'
               AND %s = ANY(
                   regexp_split_to_array(
                       regexp_replace(COALESCE(soulseek_username, ''), '\\s*,\\s*', ',', 'g'),

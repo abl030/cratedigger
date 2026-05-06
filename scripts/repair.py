@@ -110,6 +110,12 @@ def _auto_import_in_progress(
         return None
 
 
+def _blocked_processing_issue_type(detail: str) -> str:
+    if "auto-abandonable request-scoped auto-import" in detail:
+        return "auto_abandon_import"
+    return "blocked_post_move"
+
+
 def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     slskd_key: str | None) -> list:
     """Collect all issues: DB inconsistencies + optional orphaned downloads."""
@@ -142,7 +148,7 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
             blocked_processing_path_issues = [
                 OrphanInfo(
                     request_id=issue.request_id,
-                    issue_type="blocked_post_move",
+                    issue_type=_blocked_processing_issue_type(issue.detail),
                     detail=issue.detail,
                 )
                 for issue in find_blocked_processing_path_issues(
@@ -242,6 +248,11 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
                     from_status="downloading"),
             )
             print(f"  [{issue.request_id}] Reset to wanted ({issue.issue_type})")
+        elif repair.action == "wait_for_automatic_recovery":
+            print(
+                f"  [{issue.request_id}] Skipped: "
+                "automatic recovery will handle this row"
+            )
         else:
             print(f"  [{issue.request_id}] Skipped: {repair.action} (manual review required)")
 

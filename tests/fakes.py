@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -540,6 +540,8 @@ class FakePipelineDB:
         self.download_logs: list[DownloadLogRow] = []
         self._import_jobs: list[dict[str, Any]] = []
         self.search_logs: list[SearchLogRow] = []
+        self.cycle_metrics: list[dict[str, Any]] = []
+        self.peer_dir_observations: dict[str, dict[str, Any]] = {}
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
@@ -1405,6 +1407,55 @@ class FakePipelineDB:
         ))
         return self._next_download_log_id
 
+    def abandon_auto_import_request(
+        self,
+        *,
+        request_id: int,
+        current_path: str,
+        soulseek_username: str | None,
+        filetype: str | None,
+        beets_scenario: str,
+        beets_detail: str,
+        outcome: str,
+        staged_path: str,
+        error_message: str,
+        validation_result: Any,
+    ) -> int | None:
+        row = self._requests.get(request_id)
+        if row is None or row.get("status") != "downloading":
+            return None
+        state = row.get("active_download_state")
+        if isinstance(state, str):
+            try:
+                state = json.loads(state)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(state, dict):
+            return None
+        if state.get("current_path") != current_path:
+            return None
+        if state.get("import_subprocess_started_at") is None:
+            return None
+
+        now = _utcnow()
+        row["status"] = "wanted"
+        row["active_download_state"] = None
+        row["manual_reason"] = None
+        row["updated_at"] = now
+        self.status_history.append((request_id, "wanted"))
+        self.record_attempt(request_id, "download")
+        return self.log_download(
+            request_id=request_id,
+            soulseek_username=soulseek_username,
+            filetype=filetype,
+            beets_scenario=beets_scenario,
+            beets_detail=beets_detail,
+            outcome=outcome,
+            staged_path=staged_path,
+            error_message=error_message,
+            validation_result=validation_result,
+        )
+
     def add_denylist(self, request_id: int, username: str,
                      reason: str | None = None) -> None:
         self.denylist.append(DenylistEntry(request_id, username, reason))
@@ -1831,6 +1882,139 @@ class FakePipelineDB:
             result.setdefault(entry.request_id, []).append(
                 self._download_log_to_dict(entry))
         return result
+
+    # --- Pipeline dashboard telemetry ---
+
+    def record_cycle_metrics(
+        self,
+        *,
+        cycle_total_s: float,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        browse_time_s: float = 0.0,
+        match_time_s: float = 0.0,
+        search_time_s: float = 0.0,
+        cache_pos_hits: int = 0,
+        cache_neg_hits: int = 0,
+        cache_misses: int = 0,
+        cache_errors: int = 0,
+        cache_fuse_tripped: int = 0,
+        cache_write_errors: int = 0,
+        peers_browsed: int = 0,
+        peers_browsed_lazy: int = 0,
+        fanout_waves: int = 0,
+        cycle_searches_watchdog_killed: int = 0,
+        find_download_queued: int = 0,
+        find_download_completed: int = 0,
+        find_download_drain_time_s: float = 0.0,
+    ) -> int:
+        row = {
+            "id": len(self.cycle_metrics) + 1,
+            "started_at": started_at,
+            "created_at": completed_at or _utcnow(),
+            "cycle_total_s": cycle_total_s,
+            "browse_time_s": browse_time_s,
+            "match_time_s": match_time_s,
+            "search_time_s": search_time_s,
+            "cache_pos_hits": cache_pos_hits,
+            "cache_neg_hits": cache_neg_hits,
+            "cache_misses": cache_misses,
+            "cache_errors": cache_errors,
+            "cache_fuse_tripped": cache_fuse_tripped,
+            "cache_write_errors": cache_write_errors,
+            "peers_browsed": peers_browsed,
+            "peers_browsed_lazy": peers_browsed_lazy,
+            "fanout_waves": fanout_waves,
+            "cycle_searches_watchdog_killed": cycle_searches_watchdog_killed,
+            "find_download_queued": find_download_queued,
+            "find_download_completed": find_download_completed,
+            "find_download_drain_time_s": find_download_drain_time_s,
+        }
+        self.cycle_metrics.append(row)
+        return int(row["id"])
+
+    def record_peer_dir_observations(
+        self,
+        observations: Iterable[tuple[str, str]],
+        *,
+        observed_at: datetime | None = None,
+    ) -> int:
+        from lib.pipeline_db import _peer_dir_hashes
+
+        observed = observed_at or _utcnow()
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        unique = {
+            (str(username), str(file_dir))
+            for username, file_dir in observations
+            if username and file_dir
+        }
+        new_count = 0
+        for username, file_dir in sorted(unique):
+            combo_hash, username_hash, dir_hash = _peer_dir_hashes(
+                username,
+                file_dir,
+            )
+            row = self.peer_dir_observations.get(combo_hash)
+            if row is None:
+                self.peer_dir_observations[combo_hash] = {
+                    "combo_hash": combo_hash,
+                    "username_hash": username_hash,
+                    "dir_hash": dir_hash,
+                    "first_seen_at": observed,
+                    "last_seen_at": observed,
+                    "seen_count": 1,
+                }
+                new_count += 1
+            else:
+                row["last_seen_at"] = max(row["last_seen_at"], observed)
+                row["seen_count"] = int(row.get("seen_count") or 0) + 1
+        return new_count
+
+    def get_peer_dir_daily_metrics(self, days: int = 14) -> dict[str, Any]:
+        clamped_days = max(1, min(int(days), 90))
+        rows = list(self.peer_dir_observations.values())
+        return {
+            "days": [
+                {
+                    "date": (_utcnow() - timedelta(days=idx)).date().isoformat(),
+                    "new_combos": 0,
+                    "new_peers": 0,
+                    "new_dirs": 0,
+                }
+                for idx in range(clamped_days)
+            ],
+            "totals": {
+                "known_combos": len(rows),
+                "known_peers": len({row["username_hash"] for row in rows}),
+                "known_dirs": len({row["dir_hash"] for row in rows}),
+                "new_24h": len(rows),
+                "cold_seen_24h": len(rows),
+                "days_with_new": 1 if rows else 0,
+                "tracked_since": (
+                    min(row["first_seen_at"] for row in rows).isoformat()
+                    if rows
+                    else None
+                ),
+            },
+        }
+
+    def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
+        return {
+            "generated_at": _utcnow().isoformat(),
+            "searches": {"windows": []},
+            "cycles": {
+                "windows": [],
+                "recent": list(reversed(self.cycle_metrics[-12:])),
+                "outliers": sorted(
+                    self.cycle_metrics,
+                    key=lambda row: row["cycle_total_s"],
+                    reverse=True,
+                )[:8],
+            },
+            "coverage": {},
+            "peer_dirs": self.get_peer_dir_daily_metrics(),
+        }
 
     def _download_log_to_dict(self,
                               entry: DownloadLogRow) -> dict[str, Any]:

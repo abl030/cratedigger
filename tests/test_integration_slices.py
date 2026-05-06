@@ -3658,17 +3658,17 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         # downstream tag-write/beets-validate sequence picks the files up.
         self.assertEqual(entry.import_folder, staged_path)
 
-    def test_subprocess_started_blocks_retry(self):
+    def test_subprocess_started_abandons_and_resets(self):
         """Once ``import_subprocess_started_at`` is set, the wedge guard
-        MUST still block: the subprocess may have written to beets, so
-        retry is unsafe and operator recovery is required. This is the
-        original safety property the structural fix preserves.
+        must not retry the same staged folder. It abandons the local
+        attempt, preserves leftover files under failed_imports, and
+        resets the request for a clean redownload.
         """
         from lib.download import _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            entry, _, _, _, ctx, staged_path = self._setup_wedged_request(
+            entry, request_id, _, _, ctx, staged_path = self._setup_wedged_request(
                 tmpdir,
                 import_subprocess_started_at="2026-04-27T14:00:39+00:00")
             staged_album = StagedAlbum.from_entry(
@@ -3676,11 +3676,24 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
             result = _materialize_processing_dir(
                 entry, staged_album, ctx)
 
-        self.assertIsNone(
+            failed_parent = os.path.join(
+                os.path.dirname(staged_path),
+                "failed_imports",
+            )
+            moved = os.listdir(failed_parent)
+
+        self.assertIs(
             result,
-            "Subprocess-started wedge must be blocked — beets may have "
-            "started writing; an auto retry would risk a double-import.",
+            False,
+            "Subprocess-started residue must not retry in place; it should "
+            "abandon and let the next search/download cycle own recovery.",
         )
+        self.assertEqual(
+            ctx.pipeline_db_source._get_db().request(request_id)["status"],
+            "wanted",
+        )
+        self.assertEqual(len(moved), 1)
+        self.assertTrue(moved[0].startswith("abandoned_auto_import"))
 
 
 class TestSearchWatchdogSlice(unittest.TestCase):

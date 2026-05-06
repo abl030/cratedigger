@@ -116,6 +116,39 @@ def _is_ignorable_audio_validation_stderr(
 
 _BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
 FAILED_IMPORT_SEARCH_DIRS = ("/mnt/virtio/music/slskd",)
+ABANDONED_AUTO_IMPORT_PREFIX = "abandoned_auto_import"
+
+
+def _move_to_failed_imports(
+    src_path: str,
+    *,
+    scenario: str | None = None,
+    folder_name: str | None = None,
+) -> str | None:
+    src_path = os.path.abspath(src_path)
+    if not os.path.exists(src_path):
+        return None
+
+    parent_dir = os.path.dirname(src_path)
+    failed_imports_dir = os.path.join(parent_dir, "failed_imports")
+    if scenario in _BAD_FILE_SCENARIOS:
+        failed_imports_dir = os.path.join(failed_imports_dir, "bad_files")
+    os.makedirs(failed_imports_dir, exist_ok=True)
+
+    target_folder_name = folder_name or os.path.basename(src_path)
+    target_path = os.path.join(failed_imports_dir, target_folder_name)
+
+    counter = 1
+    while os.path.exists(target_path):
+        target_path = os.path.join(
+            failed_imports_dir,
+            f"{target_folder_name}_{counter}",
+        )
+        counter += 1
+
+    shutil.move(src_path, target_path)
+    logger.info(f"Failed import moved to: {target_path}")
+    return target_path
 
 
 def move_failed_import(src_path: str, scenario: str | None = None) -> str | None:
@@ -128,27 +161,16 @@ def move_failed_import(src_path: str, scenario: str | None = None) -> str | None
     failed_imports/bad_files/ to keep them separate from wrong matches
     that may be manually imported later.
     """
-    src_path = os.path.abspath(src_path)
-    if not os.path.exists(src_path):
-        return None
+    return _move_to_failed_imports(src_path, scenario=scenario)
 
-    parent_dir = os.path.dirname(src_path)
-    failed_imports_dir = os.path.join(parent_dir, "failed_imports")
-    if scenario in _BAD_FILE_SCENARIOS:
-        failed_imports_dir = os.path.join(failed_imports_dir, "bad_files")
-    os.makedirs(failed_imports_dir, exist_ok=True)
 
-    folder_name = os.path.basename(src_path)
-    target_path = os.path.join(failed_imports_dir, folder_name)
-
-    counter = 1
-    while os.path.exists(target_path):
-        target_path = os.path.join(failed_imports_dir, f"{folder_name}_{counter}")
-        counter += 1
-
-    shutil.move(src_path, target_path)
-    logger.info(f"Failed import moved to: {target_path}")
-    return target_path
+def move_abandoned_auto_import(src_path: str) -> str | None:
+    """Move an interrupted auto-import to a diagnosable failed_imports folder."""
+    folder_name = os.path.basename(os.path.abspath(src_path))
+    return _move_to_failed_imports(
+        src_path,
+        folder_name=f"{ABANDONED_AUTO_IMPORT_PREFIX} - {folder_name}",
+    )
 
 
 def resolve_failed_path(

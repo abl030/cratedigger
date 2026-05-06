@@ -46,7 +46,11 @@ from lib.import_queue import (
     automation_import_payload,
 )
 from lib.staged_album import StagedAlbum
-from lib.util import move_failed_import, log_validation_result
+from lib.util import (
+    move_abandoned_auto_import,
+    move_failed_import,
+    log_validation_result,
+)
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -57,6 +61,10 @@ AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",
     "spectral_reject",
 })
+ABANDONED_AUTO_IMPORT_SCENARIO = "abandoned_auto_import"
+_ABANDON_PATH_PRESENT = "present"
+_ABANDON_PATH_ABSENT = "absent"
+_ABANDON_PATH_UNKNOWN = "unknown"
 
 
 # Lazy import for spectral analysis — avoids hard dep on sox at import time
@@ -546,6 +554,41 @@ def _log_post_move_resume_blocked(
     )
 
 
+def _request_import_subprocess_started(
+    db: Any,
+    request_id: int | None,
+) -> bool | None:
+    """Return subprocess-start evidence, or None when ownership is unknown."""
+    if request_id is None or db is None:
+        return None
+    try:
+        row = db.get_request(request_id)
+    except Exception:
+        logger.debug(
+            "Failed to read active_download_state for resume guard",
+            exc_info=True,
+        )
+        return None
+    if not row:
+        return None
+    raw_state = row.get("active_download_state")
+    if not raw_state:
+        return False
+    try:
+        state = (
+            ActiveDownloadState.from_dict(raw_state)
+            if isinstance(raw_state, dict)
+            else ActiveDownloadState.from_json(str(raw_state))
+        )
+    except Exception:
+        logger.debug(
+            "Failed to parse active_download_state for resume guard",
+            exc_info=True,
+        )
+        return None
+    return state.import_subprocess_started_at is not None
+
+
 def _import_subprocess_already_started(
     db: Any,
     request_id: int | None,
@@ -571,34 +614,220 @@ def _import_subprocess_already_started(
     operator can still recover manually. Returns ``False`` (permit
     retry) only on positive evidence the subprocess never launched.
     """
-    if request_id is None or db is None:
-        return True
+    return _request_import_subprocess_started(db, request_id) is not False
+
+
+def _probe_abandon_path_liveness(path: str) -> str:
+    """Return whether a staged path is definitely present, absent, or unknown."""
     try:
-        row = db.get_request(request_id)
-    except Exception:
-        logger.debug(
-            "Failed to read active_download_state for resume guard",
-            exc_info=True,
+        os.stat(path)
+    except FileNotFoundError:
+        return _ABANDON_PATH_ABSENT
+    except OSError:
+        logger.exception(
+            "ABANDON AUTO-IMPORT BLOCKED: could not stat current_path=%s",
+            path,
         )
-        return True
-    if not row:
-        return True
-    raw_state = row.get("active_download_state")
-    if not raw_state:
+        return _ABANDON_PATH_UNKNOWN
+    return _ABANDON_PATH_PRESENT
+
+
+def _restore_abandoned_auto_import(
+    *,
+    failed_path: str | None,
+    current_path: str,
+) -> None:
+    if failed_path is None:
+        return
+    try:
+        if os.path.exists(failed_path) and not os.path.exists(current_path):
+            os.makedirs(os.path.dirname(current_path), exist_ok=True)
+            shutil.move(failed_path, current_path)
+    except Exception:
+        logger.exception(
+            "ABANDON AUTO-IMPORT ROLLBACK FAILED: failed_path=%s current_path=%s",
+            failed_path,
+            current_path,
+        )
+
+
+def _commit_abandoned_auto_import(
+    db: Any,
+    *,
+    request_id: int,
+    current_path: str,
+    dl_info: Any,
+    detail: str,
+    validation_result: str | None,
+) -> bool:
+    commit = getattr(db, "abandon_auto_import_request", None)
+    if commit is not None:
+        log_id = commit(
+            request_id=request_id,
+            current_path=current_path,
+            soulseek_username=dl_info.username,
+            filetype=dl_info.filetype,
+            beets_scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
+            beets_detail=detail,
+            outcome="failed",
+            staged_path=current_path,
+            error_message=detail,
+            validation_result=validation_result,
+        )
+        return log_id is not None
+
+    logger.error(
+        "ABANDON AUTO-IMPORT BLOCKED: DB object has no "
+        "abandon_auto_import_request helper for request_id=%s",
+        request_id,
+    )
+    return False
+
+
+def _abandon_interrupted_auto_import(
+    album_data: GrabListEntry,
+    *,
+    request_id: int,
+    current_path: str,
+    db: Any,
+    detail: str,
+) -> bool:
+    """Quarantine an interrupted auto-import attempt and redownload later."""
+    path_state = _probe_abandon_path_liveness(current_path)
+    if path_state == _ABANDON_PATH_UNKNOWN:
+        return False
+
+    failed_path: str | None = None
+    if path_state == _ABANDON_PATH_PRESENT:
+        try:
+            failed_path = move_abandoned_auto_import(current_path)
+        except Exception:
+            logger.exception(
+                "ABANDON AUTO-IMPORT FAILED: request_id=%s current_path=%s",
+                request_id,
+                current_path,
+            )
+            return False
+
+    dl_info = _build_download_info(album_data)
+    validation_result: str | None = None
+    if failed_path is not None:
+        validation_result = ValidationResult(
+            valid=False,
+            scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
+            detail=detail,
+            path=current_path,
+            soulseek_username=dl_info.username,
+            download_folder=current_path,
+            failed_path=failed_path,
+        ).to_json()
+
+    logger.warning(
+        "ABANDON AUTO-IMPORT: request_id=%s %s - %s current_path=%s "
+        "failed_path=%s detail=%s",
+        request_id,
+        album_data.artist,
+        album_data.title,
+        current_path,
+        failed_path,
+        detail,
+    )
+    try:
+        committed = _commit_abandoned_auto_import(
+            db,
+            request_id=request_id,
+            current_path=current_path,
+            dl_info=dl_info,
+            detail=detail,
+            validation_result=validation_result,
+        )
+    except Exception:
+        _restore_abandoned_auto_import(
+            failed_path=failed_path,
+            current_path=current_path,
+        )
+        logger.exception(
+            "ABANDON AUTO-IMPORT DB COMMIT FAILED: request_id=%s current_path=%s",
+            request_id,
+            current_path,
+        )
+        return False
+    if not committed:
+        _restore_abandoned_auto_import(
+            failed_path=failed_path,
+            current_path=current_path,
+        )
+        logger.warning(
+            "ABANDON AUTO-IMPORT SKIPPED: request_id=%s current_path=%s "
+            "row ownership changed before commit",
+            request_id,
+            current_path,
+        )
+        return False
+    return True
+
+
+def _abandon_request_scoped_auto_import(
+    album_data: GrabListEntry,
+    *,
+    request_id: int | None,
+    current_path: str,
+    current_path_kind: str,
+    db: Any,
+    detail: str,
+) -> bool:
+    if (
+        request_id is None
+        or db is None
+        or current_path_kind != "request_scoped_auto_import_staged"
+    ):
+        return False
+    if not album_data.mb_release_id:
+        _log_post_move_resume_blocked(
+            album_data,
+            current_path=current_path,
+            detail=(
+                "already lives at the request-scoped auto-import staged "
+                "path but has no release id for the liveness lock; "
+                "manual recovery is required."
+            ),
+        )
         return False
     try:
-        state = (
-            ActiveDownloadState.from_dict(raw_state)
-            if isinstance(raw_state, dict)
-            else ActiveDownloadState.from_json(str(raw_state))
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
         )
+
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key(album_data.mb_release_id),
+        ) as acquired:
+            if not acquired:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=current_path,
+                    detail=(
+                        "already lives at the request-scoped auto-import "
+                        "staged path, but the release import lock is held; "
+                        "leaving it for the active importer."
+                    ),
+                )
+                return False
+            return _abandon_interrupted_auto_import(
+                album_data,
+                request_id=request_id,
+                current_path=current_path,
+                db=db,
+                detail=detail,
+            )
     except Exception:
-        logger.debug(
-            "Failed to parse active_download_state for resume guard",
-            exc_info=True,
+        logger.exception(
+            "ABANDON AUTO-IMPORT LOCK CHECK FAILED: request_id=%s current_path=%s",
+            request_id,
+            current_path,
         )
-        return True
-    return state.import_subprocess_started_at is not None
+        return False
 
 
 def _materialize_processing_dir(
@@ -638,12 +867,37 @@ def _materialize_processing_dir(
     )
 
     if current_path_location.kind != "canonical":
-        subprocess_started = _import_subprocess_already_started(
+        subprocess_started = _request_import_subprocess_started(
             db, request_id)
+        if current_path_location.kind == "request_scoped_auto_import_staged":
+            if subprocess_started is True:
+                handled = _abandon_request_scoped_auto_import(
+                    album_data,
+                    request_id=request_id,
+                    current_path=staged_album.current_path,
+                    current_path_kind=current_path_location.kind,
+                    db=db,
+                    detail=(
+                        "Abandoned interrupted auto-import; queued for "
+                        "redownload"
+                    ),
+                )
+                return False if handled else None
+            if subprocess_started is None:
+                _log_post_move_resume_blocked(
+                    album_data,
+                    current_path=staged_album.current_path,
+                    detail=(
+                        "already lives at the request-scoped auto-import "
+                        "staged path but import ownership could not be "
+                        "verified; manual recovery is required."
+                    ),
+                )
+                return None
         if not os.path.isdir(staged_album.current_path):
             if (
                 current_path_location.blocks_post_move_retry
-                and subprocess_started
+                and subprocess_started is not False
             ):
                 _log_post_move_resume_blocked(
                     album_data,
@@ -669,7 +923,7 @@ def _materialize_processing_dir(
         if missing_paths:
             if (
                 current_path_location.blocks_post_move_retry
-                and subprocess_started
+                and subprocess_started is not False
             ):
                 _log_post_move_resume_blocked(
                     album_data,
@@ -689,7 +943,7 @@ def _materialize_processing_dir(
             return False
         if (
             current_path_location.blocks_auto_import_dispatch
-            and _import_subprocess_already_started(db, request_id)
+            and subprocess_started is not False
         ):
             detail = (
                 "already lives at the request-scoped auto-import staged "
@@ -1724,6 +1978,13 @@ def _active_automation_import_job(db: Any, request_id: int):
     )
 
 
+def _active_import_job_for_request(db: Any, request_id: int):
+    getter = getattr(db, "get_active_import_job_for_request", None)
+    if getter is not None:
+        return getter(request_id)
+    return _active_automation_import_job(db, request_id)
+
+
 def _enqueue_completed_processing(
     entry: GrabListEntry,
     request_id: int,
@@ -1789,6 +2050,22 @@ def _processing_path_ready_for_importer(
         slskd_download_dir=ctx.cfg.slskd_download_dir,
     )
     subprocess_started = state.import_subprocess_started_at is not None
+    if (
+        current_path_location.kind == "request_scoped_auto_import_staged"
+        and subprocess_started
+    ):
+        _abandon_request_scoped_auto_import(
+            entry,
+            request_id=request_id,
+            current_path=state.current_path,
+            current_path_kind=current_path_location.kind,
+            db=db,
+            detail=(
+                "Abandoned interrupted auto-import; queued for redownload"
+            ),
+        )
+        return False
+
     if not os.path.isdir(state.current_path):
         # The canonical processing folder may not exist yet. The importer
         # materializes it from the completed slskd files as its first step.
@@ -1905,13 +2182,23 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_dict(raw_state)
         else:
             state = ActiveDownloadState.from_json(raw_state)
-        active_import_job = _active_automation_import_job(db, request_id)
+        active_import_job = _active_import_job_for_request(db, request_id)
         if active_import_job is not None:
+            job_id = (
+                active_import_job.get("id")
+                if isinstance(active_import_job, dict)
+                else getattr(active_import_job, "id", "?")
+            )
+            job_status = (
+                active_import_job.get("status")
+                if isinstance(active_import_job, dict)
+                else getattr(active_import_job, "status", "?")
+            )
             logger.info(
                 "Request %s is waiting on importer job %s (%s)",
                 request_id,
-                getattr(active_import_job, "id", "?"),
-                getattr(active_import_job, "status", "?"),
+                job_id,
+                job_status,
             )
             continue
         if state.processing_started_at is not None:

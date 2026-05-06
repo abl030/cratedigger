@@ -34,6 +34,14 @@ Full schema lives in `migrations/*.sql`. This doc covers the fields that appear 
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
 - `outcome TEXT` — one of 6 values: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`.
 
+Interrupted request auto-import cleanup uses `outcome='failed'` with
+`beets_scenario='abandoned_auto_import'` and a readable
+`error_message`. This is an interruption audit row, not a source
+rejection: cooldown lookback excludes this scenario, and the cleanup
+does not write denylist, wrong-match, or bad-audio evidence. The audit
+row and `downloading` to `wanted` reset are committed together only when
+the request still owns the same `active_download_state.current_path`.
+
 ## `import_jobs` — shared importer queue
 
 All beets-mutating import work is submitted to `import_jobs` and drained by
@@ -104,6 +112,12 @@ FROM download_log ORDER BY id DESC LIMIT 10;
 ## `download_log.validation_result` JSONB
 
 `beets_validate()` returns a `ValidationResult` with the full candidate list from the harness. Every validation (success or rejection) stores this. Contains: all beets candidates with distance breakdown per component (album, artist, tracks, media, source, year...), full track lists per candidate, the item→track mapping (which local file matched which MB track), local file list, beets recommendation level, soulseek username, download folder, failed_path, denylisted users, corrupt files.
+
+For `abandoned_auto_import` audit rows, `validation_result.failed_path`
+points at the prefixed failed-import folder when a leftover staged
+directory existed. A missing staged directory may produce the same audit
+scenario without a `validation_result` body; `error_message` remains the
+operator-facing reason.
 
 ```sql
 -- Why was distance high?

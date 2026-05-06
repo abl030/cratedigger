@@ -20,7 +20,7 @@ from lib.import_queue import (
 )
 from lib.import_preview import ImportPreviewResult
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_ctx_with_fake_db, make_request_row
 
 
 class TestImporterWorker(unittest.TestCase):
@@ -473,6 +473,93 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.message, "Pre-import gate rejected")
         self.assertEqual(updated.error, "Pre-import gate rejected")
         self.assertEqual(self._result(updated)["success"], False)
+
+    def test_requeued_automation_job_abandons_interrupted_auto_import(self):
+        from scripts import importer
+        from lib.processing_paths import stage_to_ai_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            slskd_root = os.path.join(tmpdir, "slskd")
+            os.makedirs(staging_root)
+            os.makedirs(slskd_root)
+            staged_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=42,
+                auto_import=True,
+            )
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "w") as fp:
+                fp.write("converted audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                artist_name="Test Artist",
+                album_title="Test Album",
+                year=2020,
+                mb_release_id="test-mbid",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "processing_started_at": "2026-04-25T00:10:00+00:00",
+                    "import_subprocess_started_at": "2026-04-25T00:11:00+00:00",
+                    "current_path": staged_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=False,
+            )
+            claimed = db.claim_next_import_job(worker_id="old-worker")
+            assert claimed is not None
+
+            recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
+            self.assertEqual([job.id for job in recovered], [claimed.id])
+
+            cfg = type("Cfg", (), {
+                "slskd_download_dir": slskd_root,
+                "beets_staging_dir": staging_root,
+                "beets_validation_enabled": False,
+            })()
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            updated = importer.run_once(cast(Any, db), worker_id="new-worker", ctx=ctx)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.get_active_import_job_for_request(42), None)
+            self.assertFalse(os.path.exists(staged_path))
+            failed_parent = os.path.join(os.path.dirname(staged_path), "failed_imports")
+            moved = os.listdir(failed_parent)
+            self.assertEqual(len(moved), 1)
+            self.assertTrue(moved[0].startswith("abandoned_auto_import"))
+            self.assertTrue(os.path.exists(os.path.join(
+                failed_parent,
+                moved[0],
+                "01.opus",
+            )))
+            self.assertEqual(len(db.download_logs), 1)
+            db.assert_log(
+                self,
+                0,
+                outcome="failed",
+                beets_scenario="abandoned_auto_import",
+            )
+            self.assertEqual(db.denylist, [])
+            self.assertEqual(db.cooldowns_applied, [])
 
 
 class TestImportPreviewWorker(unittest.TestCase):

@@ -293,6 +293,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
                     "current_path": (
                         "/tmp/staging/auto-import/"
                         "Test Artist/Test Album [request-1]"
@@ -329,6 +330,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
                     "current_path": (
                         "/tmp/staging/auto-import/"
                         "Test Artist/Test Album [request-1]"
@@ -350,6 +352,41 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
 
         self.assertEqual(issues, [])
 
+    def test_reports_missing_auto_import_path_when_import_is_not_running_as_auto_abandonable(self):
+        issues = find_blocked_processing_path_issues(
+            [{
+                "id": 1,
+                "status": "downloading",
+                "mb_release_id": "test-mbid",
+                "artist_name": "Test Artist",
+                "album_title": "Test Album",
+                "year": 2020,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
+                    "current_path": (
+                        "/tmp/staging/auto-import/"
+                        "Test Artist/Test Album [request-1]"
+                    ),
+                    "files": [{
+                        "username": "user1",
+                        "filename": "track.flac",
+                    }],
+                },
+            }],
+            set(),
+            staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+            has_entries=lambda _path: False,
+            auto_import_in_progress=lambda _request_id, _mb_release_id: False,
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].request_id, 1)
+        self.assertIn("auto-abandonable", issues[0].detail)
+        self.assertIn("reset and redownload", issues[0].detail)
+
     def test_reports_request_scoped_auto_import_path_when_import_is_not_running(self):
         issues = find_blocked_processing_path_issues(
             [{
@@ -362,6 +399,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
                     "current_path": (
                         "/tmp/staging/auto-import/"
                         "Test Artist/Test Album [request-1]"
@@ -384,7 +422,8 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
 
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].request_id, 1)
-        self.assertIn("no auto-import is currently running", issues[0].detail)
+        self.assertIn("auto-abandonable", issues[0].detail)
+        self.assertIn("quarantine and redownload", issues[0].detail)
 
     def test_reports_request_scoped_auto_import_path_when_liveness_probe_is_unknown(self):
         issues = find_blocked_processing_path_issues(
@@ -398,6 +437,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
                     "current_path": (
                         "/tmp/staging/auto-import/"
                         "Test Artist/Test Album [request-1]"
@@ -434,6 +474,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
+                    "import_subprocess_started_at": "2026-04-22T00:01:00+00:00",
                     "current_path": (
                         "/tmp/staging/auto-import/"
                         "Test Artist/Test Album [request-1]"

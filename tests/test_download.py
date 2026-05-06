@@ -3241,14 +3241,8 @@ class TestPollActiveDownloads(unittest.TestCase):
                 resumed_path,
             )
 
-    def test_poll_post_move_staged_path_with_missing_file_leaves_row_downloading(self):
-        """Missing files under a staged current_path must block, not requeue —
-        but only when the prior attempt actually launched the import
-        subprocess (``import_subprocess_started_at`` is set). If the
-        subprocess never started, the staged-but-missing-files state is
-        a stale crash residue and resetting to ``wanted`` for re-search
-        is safe. See ``docs/advisory-locks.md``.
-        """
+    def test_poll_post_move_staged_path_with_missing_file_abandons_and_resets(self):
+        """Subprocess-started auto-import residue is abandoned for redownload."""
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -3278,23 +3272,206 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
 
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "wanted")
+            self.assertIn((1, "wanted"), fake_db.status_history)
+            self.assertIsNone(fake_db.request(1)["active_download_state"])
+            failed_parent = os.path.join(
+                os.path.dirname(resumed_path),
+                "failed_imports",
+            )
+            self.assertTrue(os.path.isdir(failed_parent))
+            moved = os.listdir(failed_parent)
+            self.assertEqual(len(moved), 1)
+            self.assertTrue(moved[0].startswith("abandoned_auto_import"))
+            self.assertEqual(len(fake_db.download_logs), 1)
+            fake_db.assert_log(
+                self,
+                0,
+                outcome="failed",
+                beets_scenario="abandoned_auto_import",
+            )
+            self.assertIn(
+                "Abandoned interrupted auto-import",
+                fake_db.download_logs[0].error_message or "",
+            )
+            self.assertEqual(fake_db.denylist, [])
+            self.assertEqual(fake_db.cooldowns_applied, [])
+
+    def test_poll_subprocess_started_auto_import_waits_for_active_manual_job(self):
+        """Any active import job owns the request, not just automation jobs."""
+        from lib.download import poll_active_downloads
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01.opus"), "w") as fp:
+                fp.write("converted audio")
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+            fake_db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=1,
+                dedupe_key="manual:1",
+                payload=manual_import_payload(failed_path=resumed_path),
+                preview_enabled=False,
+            )
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertTrue(os.path.exists(resumed_path))
+            self.assertEqual(fake_db.download_logs, [])
+            self.assertEqual(fake_db.status_history, [])
+
+    def test_poll_abandon_waits_when_release_lock_is_held(self):
+        """A held release lock means a live importer still owns the path."""
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+            fake_db.set_advisory_lock_result(False)
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertTrue(os.path.exists(resumed_path))
+            self.assertEqual(fake_db.download_logs, [])
+            self.assertEqual(fake_db.status_history, [])
+
+    def test_poll_abandon_rolls_back_move_when_db_guard_fails(self):
+        """If the guarded DB commit loses ownership, restore the staged dir."""
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+            fake_db.abandon_auto_import_request = lambda **_kwargs: None  # type: ignore[method-assign]
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertTrue(os.path.exists(resumed_path))
+            self.assertEqual(fake_db.download_logs, [])
+            self.assertEqual(fake_db.status_history, [])
+
+    def test_poll_abandon_blocks_when_path_liveness_is_unknown(self):
+        """Stat errors are not treated as confirmed missing staged paths."""
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "import_subprocess_started_at": _utc_now_iso(),
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+            real_stat = os.stat
+
+            def stat_or_fail(path, *args, **kwargs):
+                if path == resumed_path:
+                    raise OSError("mount unavailable")
+                return real_stat(path, *args, **kwargs)
+
+            with patch("lib.download.os.stat", side_effect=stat_or_fail):
                 poll_active_downloads(ctx)
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertTrue(os.path.exists(resumed_path))
+            self.assertEqual(fake_db.download_logs, [])
             self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(
-                fake_db.request(1)["active_download_state"]["current_path"],
-                resumed_path,
-            )
-            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
-    def test_poll_post_move_auto_import_path_with_missing_dir_leaves_row_downloading(self):
-        """Missing auto-import staging dir must block when subprocess
-        already started (beets may have consumed the dir). When
-        ``import_subprocess_started_at`` is None, the dir vanishing is
-        treated as a normal crash residue — reset to ``wanted``.
-        """
+    def test_poll_post_move_auto_import_path_with_missing_dir_abandons_and_resets(self):
+        """Missing subprocess-started auto-import staging dir is retryable."""
         from lib.download import poll_active_downloads
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -3323,16 +3500,19 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
 
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                poll_active_downloads(ctx)
+            poll_active_downloads(ctx)
 
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(
-                fake_db.request(1)["active_download_state"]["current_path"],
-                resumed_path,
+            self.assertEqual(fake_db.request(1)["status"], "wanted")
+            self.assertIn((1, "wanted"), fake_db.status_history)
+            self.assertIsNone(fake_db.request(1)["active_download_state"])
+            self.assertEqual(len(fake_db.download_logs), 1)
+            fake_db.assert_log(
+                self,
+                0,
+                outcome="failed",
+                beets_scenario="abandoned_auto_import",
             )
-            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
+            self.assertIsNone(fake_db.download_logs[0].validation_result)
 
     def test_poll_post_move_staged_missing_file_resets_when_subprocess_never_started(self):
         """Counterpart: when ``import_subprocess_started_at`` is None,
