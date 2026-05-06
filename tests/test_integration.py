@@ -942,11 +942,12 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         # And should have both files (not the filtered version)
         self.assertEqual(len(result2.directory["files"]), 2)
 
-    def test_successful_match_does_not_call_deepcopy(self):
-        """check_for_match should return the cached directory directly on success."""
+    def test_successful_match_returns_constrained_copy_without_deepcopy(self):
+        """check_for_match should not deep-copy or mutate the cached directory."""
         self.ctx.folder_cache["testuser"] = {
             "Music\\Album": make_directory("Music\\Album", [
                 {"filename": "01 - Track One.flac", "size": 100},
+                {"filename": "01 - Track One.mp3", "size": 100},
             ])
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
@@ -966,7 +967,13 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
 
         self.assertTrue(result.matched)
         self.assertEqual(result.file_dir, "Music\\Album")
-        self.assertIs(result.directory, self.ctx.folder_cache["testuser"]["Music\\Album"])
+        cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
+        self.assertIsNot(result.directory, cached)
+        self.assertEqual(
+            [file["filename"] for file in result.directory["files"]],
+            ["01 - Track One.flac"],
+        )
+        self.assertEqual(len(cached["files"]), 2)
 
 
 class TestSingleEnqueuePathPrefixing(unittest.TestCase):
@@ -1121,6 +1128,11 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             candidates=None,
             variant=None,
             final_state=None,
+            browse_time_s=0.0,
+            match_time_s=0.0,
+            peers_browsed=0,
+            peers_browsed_lazy=0,
+            fanout_waves=0,
         )
         db.record_attempt.assert_called_once_with(42, "search")
 

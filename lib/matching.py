@@ -15,7 +15,7 @@ from lib.browse import (
     ensure_cache_user,
     rank_candidate_dirs,
 )
-from lib.quality import CandidateScore
+from lib.quality import AUDIO_EXTENSIONS, CandidateScore, audio_file_matches
 from lib.util import _track_titles_cross_check
 
 _browse_directories = _browse_directories_for_ctx
@@ -118,7 +118,6 @@ def album_match(
     from lib.quality import parse_filetype_config
 
     spec = parse_filetype_config(filetype)
-    is_catch_all = spec.extension == "*"
 
     matched_titles: list[str] = []
     missing_titles: list[str] = []
@@ -130,15 +129,17 @@ def album_match(
         expected_filename = expected_track["title"]
 
         for slskd_track in slskd_tracks:
-            if is_catch_all:
-                slskd_ext = (
-                    slskd_track["filename"].rsplit(".", 1)[-1].lower()
-                    if "." in slskd_track["filename"]
-                    else ""
-                )
-                expected_filename = expected_track["title"] + "." + slskd_ext
-            else:
-                expected_filename = expected_track["title"] + "." + spec.extension
+            slskd_ext = (
+                slskd_track["filename"].rsplit(".", 1)[-1].lower()
+                if "." in slskd_track["filename"]
+                else ""
+            )
+            expected_ext = slskd_ext if slskd_ext else spec.extension
+            expected_filename = (
+                expected_track["title"] + "." + expected_ext
+                if expected_ext and expected_ext != "*"
+                else expected_track["title"]
+            )
             slskd_filename = slskd_track["filename"]
 
             ratio = difflib.SequenceMatcher(
@@ -216,39 +217,92 @@ def check_ratio(
 def album_track_num(
     directory: SlskdDirectory,
     match_cfg: CratediggerConfig,
+    *,
+    allowed_filetype: str | None = None,
 ) -> dict[str, Any]:
     """Count matching audio tracks and infer a consistent filetype."""
-    from lib.quality import AUDIO_EXTENSIONS as _all_audio_exts
+    from lib.quality import parse_filetype_config
 
     files = directory["files"]
-    specs = match_cfg.allowed_specs
-    has_catch_all = any(s.extension == "*" for s in specs)
-    allowed_exts = (
-        list(_all_audio_exts)
-        if has_catch_all
-        else [s.extension for s in specs]
+    specs = (
+        (parse_filetype_config(allowed_filetype),)
+        if allowed_filetype is not None
+        else match_cfg.allowed_specs
+    )
+    global_catch_all = (
+        allowed_filetype is None and any(s.extension == "*" for s in specs)
     )
     count = 0
-    index = -1
     filetype = ""
     for file in files:
-        ext = file["filename"].split(".")[-1].lower()
-        if ext in allowed_exts:
-            if has_catch_all:
-                if index == -1:
-                    filetype = ext
-                count += 1
-            else:
-                new_index = allowed_exts.index(ext)
-                if index == -1:
-                    index = new_index
-                    filetype = allowed_exts[index]
-                elif new_index != index:
-                    filetype = ""
-                    break
-                count += 1
+        matched_spec = next(
+            (spec for spec in specs if audio_file_matches(file, spec)),
+            None,
+        )
+        if matched_spec is None:
+            continue
+
+        ext = file["filename"].rsplit(".", 1)[-1].lower()
+        if allowed_filetype is not None:
+            current_filetype = matched_spec.config_string
+        elif global_catch_all:
+            current_filetype = ext
+        else:
+            current_filetype = matched_spec.extension
+
+        if filetype == "":
+            filetype = current_filetype
+        elif filetype != current_filetype:
+            filetype = ""
+            break
+        count += 1
 
     return {"count": count, "filetype": filetype}
+
+
+def _audio_files_for_filetype(
+    directory: SlskdDirectory,
+    allowed_filetype: str,
+) -> list[SlskdFile]:
+    return [
+        file for file in directory["files"]
+        if audio_file_matches(file, allowed_filetype)
+    ]
+
+
+def _matched_directory_for_filetype(
+    directory: SlskdDirectory,
+    allowed_filetype: str,
+) -> SlskdDirectory:
+    files = []
+    for file in directory["files"]:
+        filename = file["filename"]
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if audio_file_matches(file, allowed_filetype) or ext not in AUDIO_EXTENSIONS:
+            files.append(file)
+    return {**directory, "files": files}
+
+
+def _search_cache_concrete_codecs_for_dir(
+    ctx: CratediggerContext,
+    album_id: int,
+    username: str,
+    file_dir: str,
+) -> set[str]:
+    from lib.quality import parse_filetype_config
+
+    album_cache = ctx.search_cache.get(album_id, {})
+    user_cache = album_cache.get(username, {}) if isinstance(album_cache, dict) else {}
+    if not isinstance(user_cache, dict):
+        return set()
+    codecs: set[str] = set()
+    for filetype, dirs in user_cache.items():
+        if file_dir not in dirs:
+            continue
+        codec = parse_filetype_config(filetype).codec
+        if codec not in ("*", "lossless"):
+            codecs.add(codec)
+    return codecs
 
 
 def check_for_match(
@@ -273,7 +327,8 @@ def check_for_match(
     if username in ctx.broken_user:
         return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
     track_num = len(tracks)
-    album_info = get_album_by_id(tracks[0]["albumId"], ctx)
+    album_id = tracks[0]["albumId"]
+    album_info = get_album_by_id(album_id, ctx)
     ranked_dirs = rank_candidate_dirs(file_dirs, album_info.title, album_info.artist_name)
 
     dirs_to_try: list[str] = []
@@ -289,7 +344,10 @@ def check_for_match(
         user_counts = ctx.search_dir_audio_count.get(username)
         if user_counts and file_dir in user_counts:
             search_count = user_counts[file_dir]
-            if abs(search_count - track_num) > 2:
+            cached_codecs = _search_cache_concrete_codecs_for_dir(
+                ctx, album_id, username, file_dir,
+            )
+            if len(cached_codecs) <= 1 and abs(search_count - track_num) > 2:
                 logger.debug(
                     f"Pre-filter skip: {username} {file_dir} has {search_count} "
                     f"audio files, need {track_num} tracks"
@@ -384,7 +442,9 @@ def check_for_match(
                 continue
 
             directory = ctx.folder_cache[username][file_dir]
-            tracks_info = album_track_num(directory, ctx.cfg)
+            tracks_info = album_track_num(
+                directory, ctx.cfg, allowed_filetype=allowed_filetype,
+            )
             neg_key = (username, file_dir, track_num, allowed_filetype)
 
             # Sub-count gate: cheap CandidateScore, do NOT call album_match.
@@ -403,7 +463,8 @@ def check_for_match(
                 continue
 
             # Count gate passed — score the dir.
-            score = album_match(tracks, directory["files"], username, allowed_filetype, ctx)
+            score_files = _audio_files_for_filetype(directory, allowed_filetype)
+            score = album_match(tracks, score_files, username, allowed_filetype, ctx)
             candidates.append(CandidateScore(
                 username=username,
                 dir=file_dir,
@@ -420,7 +481,7 @@ def check_for_match(
                 and username not in ctx.cfg.ignored_users
             )
             if strict_accept:
-                if _track_titles_cross_check(tracks, directory["files"]):
+                if _track_titles_cross_check(tracks, score_files):
                     # Log SUCCESSFUL MATCH at the one place enqueue is going
                     # to happen — the previous log site in album_match fired
                     # before the cross-check / ignored_users gate at the
@@ -436,7 +497,9 @@ def check_for_match(
                     logger.info("-------------------")
                     return MatchResult(
                         matched=True,
-                        directory=directory,
+                        directory=_matched_directory_for_filetype(
+                            directory, allowed_filetype,
+                        ),
                         file_dir=file_dir,
                         candidates=candidates,
                     )

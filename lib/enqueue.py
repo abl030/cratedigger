@@ -846,6 +846,16 @@ def try_enqueue(
             match_wave = wave_idx
         directory = download_filter(allowed_filetype, match_result.directory, ctx.cfg)
         files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
+        if not files_to_enqueue:
+            logger.warning(
+                "Matched %s - %s from %s at %s, but no files remained after "
+                "download filtering; skipping candidate",
+                artist_name,
+                album_name,
+                username,
+                allowed_filetype,
+            )
+            continue
         claim = _claim_initial_download_ownership(
             album,
             _planned_downloads(
@@ -1022,16 +1032,40 @@ def try_multi_enqueue(
             )
             return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
         username, match_result, match_wave = first_match
+        directory = download_filter(
+            allowed_filetype, match_result.directory, ctx.cfg,
+        )
+        files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
+        if not files_to_enqueue:
+            logger.warning(
+                "Matched %s - %s disc %s from %s at %s, but no files "
+                "remained after download filtering; aborting multi-disc "
+                "candidate",
+                artist_name,
+                album_name,
+                disk["disk_no"],
+                username,
+                allowed_filetype,
+            )
+            _log_album_browse(
+                artist_name, album_name, allowed_filetype,
+                f"multi-disc{disk['disk_no']}",
+                matched=False, match_wave=match_wave,
+                eligible=len(eligible),
+                peers=ctx.peers_browsed - peers_before,
+                waves=ctx.fanout_waves - waves_before,
+            )
+            return EnqueueAttempt(
+                matched=False,
+                candidates=tuple(accumulated),
+            )
         _log_album_browse(
             artist_name, album_name, allowed_filetype,
             f"multi-disc{disk['disk_no']}",
             matched=True, match_wave=match_wave,
             eligible=len(eligible),
-            peers=ctx.peers_browsed - peers_before,
-            waves=ctx.fanout_waves - waves_before,
-        )
-        directory = download_filter(
-            allowed_filetype, match_result.directory, ctx.cfg,
+                peers=ctx.peers_browsed - peers_before,
+                waves=ctx.fanout_waves - waves_before,
         )
         disk["source"] = (username, directory, match_result.file_dir)
         count_found += 1
@@ -1040,6 +1074,21 @@ def try_multi_enqueue(
         for disk in split_release:
             username, directory, file_dir = disk["source"]
             files_to_enqueue = _prefixed_directory_files(directory, file_dir)
+            if not files_to_enqueue:
+                logger.warning(
+                    "Matched %s - %s disc %s from %s at %s, but no files "
+                    "remained after download filtering; aborting multi-disc "
+                    "candidate",
+                    artist_name,
+                    album_name,
+                    disk["disk_no"],
+                    username,
+                    allowed_filetype,
+                )
+                return EnqueueAttempt(
+                    matched=False,
+                    candidates=tuple(accumulated),
+                )
             disk_planned = _planned_downloads(
                 username=username,
                 file_dir=file_dir,

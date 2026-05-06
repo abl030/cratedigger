@@ -23,6 +23,7 @@ from lib.context import CratediggerContext
 from lib.matching import (
     AlbumMatchScore,
     album_match,
+    album_track_num,
     check_for_match,
 )
 from lib.peer_cache import PeerCache
@@ -173,6 +174,18 @@ class TestAlbumMatchScore(unittest.TestCase):
         score = album_match(tracks, files, "user1", "*", self.ctx)
         self.assertEqual(score.matched_tracks, 2)
 
+    def test_alias_filetype_scores_with_actual_extension(self) -> None:
+        """AAC tracks commonly arrive as .m4a; score against that extension."""
+        cfg = _make_cfg(minimum_match_ratio=0.6)
+        ctx = _make_ctx(cfg, album_id=1, album_title="Cool Album")
+        tracks = [_track(1, "A")]
+        files = [_file("01 - A.m4a", bitRate=256, bitDepth=0)]
+
+        score = album_match(tracks, files, "user1", "aac", ctx)
+
+        self.assertEqual(score.matched_tracks, 1)
+        self.assertEqual(score.missing_titles, [])
+
     def test_empty_slskd_files_lists_every_expected(self) -> None:
         """Empty slskd_tracks → matched=0, missing lists every title."""
         tracks = [_track(1, "Alpha"), _track(1, "Bravo")]
@@ -200,6 +213,42 @@ class TestAlbumMatchScore(unittest.TestCase):
         self.assertEqual(good_score.matched_tracks, bad_score.matched_tracks)
         self.assertEqual(good_score.total_tracks, bad_score.total_tracks)
         self.assertEqual(good_score.missing_titles, bad_score.missing_titles)
+
+
+# ---------------------------------------------------------------------------
+# album_track_num — current-tier filetype counting
+# ---------------------------------------------------------------------------
+
+class TestAlbumTrackNum(unittest.TestCase):
+    def test_current_filetype_gate_ignores_other_allowed_codecs(self) -> None:
+        cfg = _make_cfg()
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                _file("Alpha.flac"),
+                _file("Bravo.flac"),
+            ],
+        }
+
+        result = album_track_num(cast(Any, directory), cfg, allowed_filetype="mp3")
+
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["filetype"], "")
+
+    def test_current_aac_filetype_counts_aac_m4a_files(self) -> None:
+        cfg = _make_cfg()
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                _file("Alpha.m4a", bitRate=256, bitDepth=0),
+                _file("Bravo.m4a", bitRate=256, bitDepth=0),
+            ],
+        }
+
+        result = album_track_num(cast(Any, directory), cfg, allowed_filetype="aac")
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["filetype"], "aac")
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +311,122 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         self.assertEqual(candidates[0].file_count, 3)
         self.assertEqual(candidates[0].filetype, "flac")
         self.assertEqual(candidates[0].username, self.username)
+
+    def test_mixed_format_dir_scores_only_current_filetype(self) -> None:
+        tracks = [
+            _track(1, "Alpha Song Distinct"),
+            _track(1, "Bravo Song Distinct"),
+        ]
+        self._set_browse("dirMixed", [
+            _file("Alpha Song Distinct.flac"),
+            _file("Bravo Song Distinct.flac"),
+            _file("01.mp3"),
+            _file("02.mp3"),
+        ])
+
+        result = check_for_match(
+            tracks, "mp3", ["dirMixed"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].file_count, 2)
+        self.assertEqual(candidates[0].matched_tracks, 0)
+
+    def test_mixed_format_search_count_does_not_skip_current_tier(self) -> None:
+        tracks = [
+            _track(1, "Alpha Song Distinct"),
+            _track(1, "Bravo Song Distinct"),
+        ]
+        self.ctx.search_dir_audio_count = {
+            self.username: {"dirMixed": 6},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "flac": ["dirMixed"],
+                    "mp3": ["dirMixed"],
+                },
+            },
+        }
+        self._set_browse("dirMixed", [
+            _file("Alpha Song Distinct.flac"),
+            _file("Bravo Song Distinct.flac"),
+            _file("01.mp3"),
+            _file("02.mp3"),
+            _file("03.mp3"),
+            _file("04.mp3"),
+        ])
+
+        result = check_for_match(
+            tracks, "flac", ["dirMixed"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].file_count, 2)
+        self.assertNotIn(
+            (self.username, "dirMixed", 2, "flac"),
+            self.ctx.negative_matches,
+        )
+
+    def test_mixed_format_match_directory_excludes_wrong_codec_audio(self) -> None:
+        tracks = [
+            _track(1, "Alpha Song Distinct"),
+            _track(1, "Bravo Song Distinct"),
+        ]
+        self._set_browse("dirMixed", [
+            _file("Alpha Song Distinct.flac"),
+            _file("Bravo Song Distinct.flac"),
+            _file("Alpha Song Distinct.mp3"),
+            _file("Bravo Song Distinct.mp3"),
+            _file("cover.jpg"),
+        ])
+
+        result = check_for_match(
+            tracks, "flac", ["dirMixed"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        self.assertEqual(
+            [file["filename"] for file in result.directory["files"]],
+            [
+                "Alpha Song Distinct.flac",
+                "Bravo Song Distinct.flac",
+                "cover.jpg",
+            ],
+        )
+
+    def test_alias_filetypes_still_use_search_count_prefilter(self) -> None:
+        tracks = [
+            _track(1, "Alpha Song Distinct"),
+            _track(1, "Bravo Song Distinct"),
+        ]
+        self.ctx.search_dir_audio_count = {
+            self.username: {"dirLong": 30},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "mp3 v0": ["dirLong"],
+                    "mp3": ["dirLong"],
+                },
+            },
+        }
+
+        result = check_for_match(
+            tracks, "mp3 v0", ["dirLong"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        self.assertEqual(self._candidates(result), [])
+        self.assertIn(
+            (self.username, "dirLong", 2, "mp3 v0"),
+            self.ctx.negative_matches,
+        )
+        self.assertNotIn(self.username, self.ctx.folder_cache)
 
     def test_subcount_dir_gets_cheap_candidate_entry(self) -> None:
         """Dir with file_count != track_num emits a cheap CandidateScore

@@ -320,35 +320,24 @@ def download_filter(
     """Return a filtered directory listing without mutating the input."""
     logging.debug("download_filtering")
     if download_cfg.download_filtering:
-        from lib.quality import parse_filetype_config, AUDIO_EXTENSIONS as _all_audio
+        from lib.quality import audio_file_matches
 
-        spec = parse_filetype_config(allowed_filetype)
-        whitelist = []
+        whitelist: set[str] = set()
         if download_cfg.use_extension_whitelist:
-            whitelist = list(download_cfg.extensions_whitelist)
-        if spec.extension == "*":
-            whitelist.extend(_all_audio)
-        else:
-            whitelist.append(spec.extension)
-        unwanted = []
-        logger.debug(f"Accepted extensions: {whitelist}")
+            whitelist = {
+                ext.lower().lstrip(".")
+                for ext in download_cfg.extensions_whitelist
+            }
+        kept = []
         for file in directory["files"]:
-            for extension in whitelist:
-                if file["filename"].split(".")[-1].lower() == extension.lower():
-                    break
+            filename = file["filename"]
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if audio_file_matches(file, allowed_filetype) or ext in whitelist:
+                logger.debug(f"Added file to queue: {filename}")
+                kept.append(file)
             else:
-                unwanted.append(file["filename"])
-                logger.debug(f"Unwanted file: {file['filename']}")
-        if len(unwanted) > 0:
-            temp = []
-            logger.debug(f"Unwanted Files: {unwanted}")
-            for file in directory["files"]:
-                if file["filename"] not in unwanted:
-                    logger.debug(f"Added file to queue: {file['filename']}")
-                    temp.append(file)
-            for files in temp:
-                logger.debug(f"File in final list: {files['filename']}")
-            return {**directory, "files": temp}
+                logger.debug(f"Unwanted file: {filename}")
+        return {**directory, "files": kept}
     return directory
 
 

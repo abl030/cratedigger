@@ -22,6 +22,7 @@ from __future__ import annotations
 import configparser
 import json
 import unittest
+from dataclasses import replace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -145,7 +146,10 @@ def _match_for(username: str, file_dir: str) -> MatchResult:
     """Build a MatchResult that matches strictly for one user."""
     return MatchResult(
         matched=True,
-        directory={"directory": file_dir, "files": []},
+        directory={
+            "directory": file_dir,
+            "files": [{"filename": "01 - Track.flac", "size": 123}],
+        },
         file_dir=file_dir,
         candidates=[],
     )
@@ -471,6 +475,86 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
 
 class TestDownloadOwnershipPreclaim(unittest.TestCase):
+    def test_filtered_empty_match_does_not_claim_or_enqueue(self):
+        cfg = replace(_make_cfg(browse_top_k=20), download_filtering=True)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        file_dir = "Music\\u00\\Album"
+        results = {"u00": {"mp3": [file_dir]}}
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01 - Track 1.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        enqueue = MagicMock(return_value=SlskdEnqueueOutcome(
+            status="accepted",
+            downloads=[],
+        ))
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
+            attempt = try_enqueue(_make_tracks(), results, "mp3", ctx)
+
+        self.assertFalse(attempt.matched)
+        self.assertFalse(attempt.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.status_history, [])
+        enqueue.assert_not_called()
+
+    def test_multi_disc_filtered_empty_match_does_not_claim_or_enqueue(self):
+        cfg = replace(_make_cfg(browse_top_k=20), download_filtering=True)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        file_dir = "Music\\u00\\Album"
+        results = {"u00": {"mp3": [file_dir]}}
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01 - Track 1.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        enqueue = MagicMock(return_value=SlskdEnqueueOutcome(
+            status="accepted",
+            downloads=[],
+        ))
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
+            attempt = try_multi_enqueue(release, tracks, results, "mp3", ctx)
+
+        self.assertFalse(attempt.matched)
+        self.assertFalse(attempt.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.status_history, [])
+        enqueue.assert_not_called()
+        self.assertTrue(any(
+            "album_browse" in line and "matched=False" in line
+            for line in log_ctx.output
+        ))
+
     def test_claims_downloading_before_slskd_enqueue(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()

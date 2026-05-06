@@ -2835,6 +2835,28 @@ def filetype_matches(identity: AudioFileSpec, filter_spec: AudioFileSpec) -> boo
     return identity.bitrate is not None and str(identity.bitrate) == quality
 
 
+def audio_file_matches(
+    file: dict[str, Any] | Any,
+    allowed_filetype: str | AudioFileSpec,
+) -> bool:
+    """Return whether a raw slskd file matches a configured audio tier.
+
+    Unlike ``filetype_matches`` directly, this rejects non-audio extensions
+    before catch-all matching. That keeps ``*`` useful for "any audio" without
+    treating covers and README files as enqueueable tracks.
+    """
+    filename = file["filename"]
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in AUDIO_EXTENSIONS:
+        return False
+    filter_spec = (
+        parse_filetype_config(allowed_filetype)
+        if isinstance(allowed_filetype, str)
+        else allowed_filetype
+    )
+    return filetype_matches(file_identity(file), filter_spec)
+
+
 def search_cache_keys_for_identity(
     identity: AudioFileSpec,
     configured_matches: list[str],

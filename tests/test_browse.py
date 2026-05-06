@@ -22,14 +22,35 @@ from __future__ import annotations
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-from lib.browse import _browse_one, _fanout_browse_users, get_browse_coordinator
+from lib.browse import (
+    _browse_one,
+    _fanout_browse_users,
+    download_filter,
+    get_browse_coordinator,
+)
+from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.peer_cache import PeerCache
 from tests.fakes import FakeSlskdAPI
 from tests.test_peer_cache import FakeRedis
+
+
+def _filter_cfg() -> CratediggerConfig:
+    import configparser
+    ini = configparser.ConfigParser()
+    ini["Search Settings"] = {
+        "allowed_filetypes": "aac,alac,flac,mp3,*",
+    }
+    ini["Download Settings"] = {
+        "download_filtering": "true",
+        "use_extension_whitelist": "true",
+        "extensions_whitelist": "jpg,txt",
+    }
+    return CratediggerConfig.from_ini(ini)
 
 
 def _make_ctx(slskd: Any) -> CratediggerContext:
@@ -160,6 +181,92 @@ class TestBrowseOneHttpErrorLogging(unittest.TestCase):
         self.assertTrue(result.cache_negative)
         logger.info.assert_not_called()
         logger.exception.assert_not_called()
+
+
+class TestDownloadFilter(unittest.TestCase):
+    def test_aac_filter_keeps_aac_m4a_files(self):
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                {
+                    "filename": "01 - Every Day More Wicked.m4a",
+                    "size": 100,
+                    "bitRate": 256,
+                    "sampleRate": 44100,
+                    "bitDepth": 0,
+                },
+                {"filename": "cover.jpg", "size": 10},
+            ],
+        }
+
+        filtered = download_filter("aac", cast(Any, directory), _filter_cfg())
+
+        self.assertEqual(
+            [file["filename"] for file in filtered["files"]],
+            ["01 - Every Day More Wicked.m4a", "cover.jpg"],
+        )
+        self.assertEqual(len(directory["files"]), 2)
+
+    def test_aac_filter_rejects_alac_m4a_files(self):
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                {
+                    "filename": "01 - Lossless.m4a",
+                    "size": 100,
+                    "bitRate": 900,
+                    "sampleRate": 44100,
+                    "bitDepth": 16,
+                },
+            ],
+        }
+
+        filtered = download_filter("aac", cast(Any, directory), _filter_cfg())
+
+        self.assertEqual(filtered["files"], [])
+
+    def test_mp3_v0_filter_rejects_cbr_320_files(self):
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                {
+                    "filename": "01 - VBR.mp3",
+                    "size": 100,
+                    "bitRate": 245,
+                    "isVariableBitRate": True,
+                },
+                {
+                    "filename": "02 - CBR.mp3",
+                    "size": 100,
+                    "bitRate": 320,
+                    "isVariableBitRate": False,
+                },
+            ],
+        }
+
+        filtered = download_filter("mp3 v0", cast(Any, directory), _filter_cfg())
+
+        self.assertEqual(
+            [file["filename"] for file in filtered["files"]],
+            ["01 - VBR.mp3"],
+        )
+
+    def test_filter_without_extension_whitelist_drops_artwork(self):
+        cfg = replace(_filter_cfg(), use_extension_whitelist=False)
+        directory = {
+            "directory": "Music\\Album",
+            "files": [
+                {"filename": "01 - Track.flac", "size": 100},
+                {"filename": "cover.jpg", "size": 10},
+            ],
+        }
+
+        filtered = download_filter("flac", cast(Any, directory), cfg)
+
+        self.assertEqual(
+            [file["filename"] for file in filtered["files"]],
+            ["01 - Track.flac"],
+        )
 
 
 class TestFanoutBrowseHappyPath(unittest.TestCase):
