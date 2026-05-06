@@ -215,27 +215,40 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _proxy_api_get(self) -> None:
         url = self.server.config.prod_base_url.rstrip("/") + self.path
+        headers = {
+            "Accept": "application/json,*/*",
+            "User-Agent": "cratedigger-web-dev-server/1.0",
+        }
+        range_header = self.headers.get("Range")
+        if range_header:
+            headers["Range"] = range_header
         req = urllib.request.Request(
             url,
-            headers={
-                "Accept": "application/json,*/*",
-                "User-Agent": "cratedigger-web-dev-server/1.0",
-            },
+            headers=headers,
             method="GET",
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read()
-                content_type = resp.headers.get("Content-Type", "application/json")
-                self._send_bytes(body, content_type, status=resp.status)
+                self._proxy_response(body, resp.headers, status=resp.status)
         except urllib.error.HTTPError as exc:
-            self._send_bytes(
-                exc.read(),
-                exc.headers.get("Content-Type", "application/json"),
-                status=exc.code,
-            )
+            self._proxy_response(exc.read(), exc.headers, status=exc.code)
         except Exception as exc:
             self._json({"error": str(exc), "upstream": url}, status=502)
+
+    def _proxy_response(self, body: bytes, headers, *, status: int) -> None:
+        content_type = headers.get("Content-Type", "application/json")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        for name in ("Content-Length", "Cache-Control", "Accept-Ranges", "Content-Range"):
+            value = headers.get(name)
+            if value:
+                self.send_header(name, value)
+        if not headers.get("Content-Length"):
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_live_db_get(self, parsed) -> None:
         import web.server as web_server
