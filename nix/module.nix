@@ -431,7 +431,7 @@ in {
       };
       maxmemory = mkOption {
         type = types.str;
-        default = "2gb";
+        default = "3gb";
         description = "Redis maxmemory setting for the app-owned cratedigger server.";
       };
     };
