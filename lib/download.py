@@ -430,6 +430,30 @@ def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
     return ok
 
 
+def _is_user_offline_http_error(exc: BaseException) -> bool:
+    """slskd surfaces a peer-offline rejection as an HTTPError whose
+    response body contains 'appears to be offline' (verified against
+    Soulseek.UserOfflineException — see the 2026-05-08 pooyork incident).
+
+    Match on body substring rather than status code: slskd has shipped 400 /
+    500 / 504 across versions for this case, but the body string is durable.
+    Detection is structural — any exception carrying a ``.response`` with
+    a readable ``.text`` containing the marker counts. Avoiding
+    ``isinstance(requests.exceptions.HTTPError)`` keeps the helper safe
+    when ``sys.modules["requests"]`` is monkey-patched in tests.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    try:
+        body = response.text or ""
+    except Exception:
+        return False
+    if not isinstance(body, str):
+        return False
+    return "appears to be offline" in body.lower()
+
+
 def slskd_enqueue_with_outcome(
     username: str,
     files: list[dict[str, Any]],
@@ -439,7 +463,13 @@ def slskd_enqueue_with_outcome(
     """Enqueue files for download via slskd with an explicit outcome."""
     try:
         enqueue = ctx.slskd.transfers.enqueue(username=username, files=files)
-    except Exception:
+    except Exception as exc:
+        if _is_user_offline_http_error(exc):
+            logger.info(
+                "slskd reports peer %s offline at enqueue; classifying as rejected",
+                username,
+            )
+            return SlskdEnqueueOutcome(status="rejected")
         logger.debug("Enqueue failed", exc_info=True)
         return SlskdEnqueueOutcome(status="unknown")
     if not enqueue:

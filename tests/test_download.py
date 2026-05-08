@@ -565,6 +565,148 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
 
+class TestSlskdEnqueueWithOutcome(unittest.TestCase):
+    """slskd_enqueue_with_outcome must distinguish a hard 'user offline'
+    HTTP rejection (verifiable, transfers will never appear) from a
+    generic exception (transient, retry next cycle)."""
+
+    def _make_offline_http_error(self, body: str) -> Exception:
+        """Build an exception whose ``.response.text`` mirrors what slskd
+        returns when the peer is offline. We avoid constructing a real
+        ``requests.HTTPError`` here because ``test_beets_validation.py``
+        replaces ``sys.modules['requests']`` with a MagicMock at discovery
+        time, which would make a runtime ``import requests`` here yield
+        non-class types. The detector matches structurally on
+        ``.response.text``, so a synthetic shape works identically."""
+        from types import SimpleNamespace
+
+        class _FakeHTTPError(Exception):
+            pass
+
+        err = _FakeHTTPError("500 Server Error")
+        err.response = SimpleNamespace(text=body)  # type: ignore[attr-defined]
+        return err
+
+    def test_offline_http_error_body_returns_rejected(self):
+        """The canonical slskd response body 'User pooyork appears to be
+        offline' must be classified as rejected — the safety net that
+        unblocks the 60s vanish timeout."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_offline_http_error(
+            "User pooyork appears to be offline")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "pooyork", [{"filename": "track.flac", "size": 1}],
+                "pooyork\\Music", ctx)
+
+        self.assertEqual(outcome.status, "rejected")
+        self.assertIsNone(outcome.downloads)
+
+    def test_offline_http_error_case_insensitive(self):
+        """Body match must tolerate slskd-version body casing variants."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_offline_http_error(
+            "User FOO Appears To BE OFFLINE")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "foo", [{"filename": "t.flac", "size": 1}], "foo\\m", ctx)
+
+        self.assertEqual(outcome.status, "rejected")
+
+    def test_non_offline_http_error_returns_unknown(self):
+        """HTTPError without the offline marker is still unknown — the
+        request stays downloading for poll-cycle recovery."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_offline_http_error(
+            "internal server error")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.status, "unknown")
+
+    def test_http_error_with_no_response_returns_unknown(self):
+        """Defensive: HTTPError without an attached response should not
+        crash — fall through to unknown."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = Exception("synthetic — no .response")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.status, "unknown")
+
+    def test_connection_error_returns_unknown(self):
+        """Generic non-HTTPError exceptions (network drop, etc.) stay in
+        the unknown / ambiguous bucket — only the verifiable user-offline
+        body promotes to rejected."""
+        from lib.download import slskd_enqueue_with_outcome
+
+        class _ConnectionError(Exception):
+            """Synthetic stand-in. ``test_beets_validation.py`` mocks
+            ``sys.modules['requests']`` so importing real
+            ``requests.ConnectionError`` here yields a non-class type."""
+            pass
+
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = _ConnectionError("dropped")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.status, "unknown")
+
+    def test_falsy_enqueue_response_still_returns_rejected(self):
+        """Regression guard: when slskd-api ever returns falsy (rather
+        than raising), the existing rejected branch still fires."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_result = False
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.status, "rejected")
+
+    def test_successful_enqueue_still_returns_accepted(self):
+        """Regression guard: the happy path is unchanged."""
+        from lib.download import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [{"filename": "track.mp3", "id": "tid-1"}],
+            }],
+        }])
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "track.mp3", "size": 5000000}],
+                "user1\\Music", ctx)
+
+        self.assertEqual(outcome.status, "accepted")
+        self.assertIsNotNone(outcome.downloads)
+        assert outcome.downloads is not None
+        self.assertEqual(outcome.downloads[0].id, "tid-1")
+
+
 class TestGrabMostWanted(unittest.TestCase):
     """grab_most_wanted enqueues and persists state, no blocking monitor."""
 
