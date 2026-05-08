@@ -170,6 +170,194 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
         self.assertEqual(poll_slskd.transfers.get_all_downloads_calls, [True])
 
 
+class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
+    """End-to-end coverage for Part 1 (user_offline classification) +
+    Part 2 (presence probe). Real ``try_enqueue`` over real
+    ``slskd_enqueue_with_outcome`` and ``_peer_is_online_for_enqueue``.
+    Only the network edges (slskd, DB) are faked.
+
+    Reference incident: 2026-05-08 request 2540 (Mercury Rev — Deserter's
+    Songs, peer ``pooyork``) — see
+    docs/brainstorms/2026-05-08-peer-online-probe-at-enqueue-requirements.md.
+    """
+
+    def _build_offline_http_error(self) -> Exception:
+        """Synthetic stand-in for slskd-api's ``requests.HTTPError`` —
+        ``test_beets_validation.py`` mocks ``sys.modules['requests']`` at
+        discovery time, so a real ``requests.HTTPError`` constructed here
+        would not be a real exception. The detector matches structurally
+        on ``.response.text``."""
+        class _FakeHTTPError(Exception):
+            pass
+
+        err = _FakeHTTPError("500 Server Error")
+        err.response = SimpleNamespace(  # type: ignore[attr-defined]
+            text="User pooyork appears to be offline",
+        )
+        return err
+
+    def _make_album(self, request_id: int):
+        return SimpleNamespace(
+            id=request_id,
+            db_request_id=request_id,
+            title="Album",
+            artist_name="Artist",
+            release_date="2024-01-01T00:00:00Z",
+            db_mb_release_id=f"mbid-{request_id}",
+            db_source="request",
+            db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+    def _setup_ctx(
+        self,
+        db: FakePipelineDB,
+        slskd: FakeSlskdAPI,
+        speeds: dict[str, int],
+    ):
+        from lib.download_ownership import DownloadOwnershipWriter
+        cfg = _download_ownership_cfg()
+        ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=slskd)
+        ctx.current_album_cache[1] = self._make_album(1)
+        ctx.user_upload_speed = speeds
+        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        return ctx
+
+    def _wave_match_side_effect(self):
+        from lib.matching import MatchResult
+
+        def matcher(*args, **kwargs):
+            username = kwargs.get("username") or args[3]
+            file_dir = f"Music\\{username}\\Album"
+            return MatchResult(
+                matched=True,
+                directory={
+                    "directory": file_dir,
+                    "files": [{
+                        "filename": f"{file_dir}\\01.flac",
+                        "size": 123,
+                    }],
+                },
+                file_dir=file_dir,
+                candidates=[],
+            )
+        return matcher
+
+    def test_offline_first_then_online_second_enqueues_only_second(self):
+        from lib.enqueue import try_enqueue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "online_peer",
+            "directories": [{
+                "directory": "Music\\online_peer\\Album",
+                "files": [{
+                    "filename": "Music\\online_peer\\Album\\01.flac",
+                    "id": "tid-1",
+                }],
+            }],
+        }])
+        slskd.users.set_status("offline_peer", "Offline")
+        slskd.users.set_status("online_peer", "Online")
+        ctx = self._setup_ctx(db, slskd, speeds={
+            "offline_peer": 10_000,
+            "online_peer": 9_000,
+        })
+        results = {
+            "offline_peer": {"flac": ["Music\\offline_peer\\Album"]},
+            "online_peer": {"flac": ["Music\\online_peer\\Album"]},
+        }
+        tracks = cast(
+            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match",
+                   side_effect=self._wave_match_side_effect()), \
+             patch("time.sleep"):
+            attempt = try_enqueue(tracks, results, "flac", ctx)
+
+        # Both peers probed (in upload-speed order).
+        self.assertEqual(
+            slskd.users.status_calls, ["offline_peer", "online_peer"],
+        )
+        # transfers.enqueue called exactly once, against the online peer.
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 1)
+        self.assertEqual(
+            slskd.transfers.enqueue_calls[0].username, "online_peer",
+        )
+        # Request transitioned to downloading; no spurious download_log.
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+
+    def test_both_peers_offline_no_enqueue_no_log_request_stays_wanted(self):
+        from lib.enqueue import try_enqueue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        slskd.users.set_status("u00", "Offline")
+        slskd.users.set_status("u01", "Offline")
+        ctx = self._setup_ctx(db, slskd, speeds={"u00": 10_000, "u01": 9_000})
+        results = {
+            "u00": {"flac": ["Music\\u00\\Album"]},
+            "u01": {"flac": ["Music\\u01\\Album"]},
+        }
+        tracks = cast(
+            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match",
+                   side_effect=self._wave_match_side_effect()), \
+             patch("time.sleep"):
+            attempt = try_enqueue(tracks, results, "flac", ctx)
+
+        self.assertEqual(slskd.users.status_calls, ["u00", "u01"])
+        self.assertEqual(slskd.transfers.enqueue_calls, [])
+        self.assertFalse(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.download_logs, [])
+
+    def test_probe_online_but_enqueue_user_offline_writes_log(self):
+        """Safety net: if the probe says ``Online`` (status endpoint stale)
+        but ``transfers.enqueue`` then raises a peer-offline HTTPError,
+        Part 1's classification + Part 2's log site compose so the
+        request returns to wanted with a ``user_offline`` log row."""
+        from lib.enqueue import try_enqueue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status("pooyork", "Online")
+        slskd.transfers.enqueue_error = self._build_offline_http_error()
+        ctx = self._setup_ctx(db, slskd, speeds={"pooyork": 10_000})
+        results = {"pooyork": {"flac": ["Music\\pooyork\\Album"]}}
+        tracks = cast(
+            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match",
+                   side_effect=self._wave_match_side_effect()), \
+             patch("time.sleep"):
+            try_enqueue(tracks, results, "flac", ctx)
+
+        # Probe said Online, so we did try.
+        self.assertEqual(slskd.users.status_calls, ["pooyork"])
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 1)
+        # Reset to wanted via verified-no-acceptance, with a log row.
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "user_offline")
+        self.assertEqual(log.soulseek_username, "pooyork")
+        self.assertEqual(log.filetype, "flac")
+
+
 class TestDispatchThroughQualityGate(unittest.TestCase):
     """Integration slice: dispatch_import_core → real parse_import_result
     → real _check_quality_gate_core → domain state assertions.
