@@ -1376,5 +1376,514 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("(empty list)", out)
 
 
+class TestCmdSearchPlanShow(unittest.TestCase):
+    """U6 read-only inspection CLI: ``pipeline-cli search-plan show``.
+
+    Uses ``FakePipelineDB`` so the renderer is exercised against the
+    same code path the real DB uses.
+    """
+
+    def _seed_request(self, *, status: str = "wanted"):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Test Artist", album_title="Test Album",
+            source="request", year=2024, status=status,
+        )
+        return db, rid
+
+    def _create_active_plan(self, db, rid):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        return db.create_successful_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="Test Artist Test Album",
+                    canonical_query_key="k0", repeat_group="default-3",
+                    provenance={"src": "gen"},
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="unwild", query="Test Artist - Album",
+                    canonical_query_key="k1",
+                ),
+            ],
+            metadata_snapshot={"artist_name": "Test Artist"},
+            provenance={"omitted_candidates": []},
+            set_active=True,
+        )
+
+    def _create_failed_plan(self, db, rid, *, status, failure_class):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        return db.create_failed_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            failure_class=failure_class,
+            error_message="boom",
+            transient=(status == "failed_transient"),
+        )
+
+    def _run(self, db, rid, *, json_out: bool = False):
+        args = SimpleNamespace(id=rid, json=json_out)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
+        return rc, stdout.getvalue()
+
+    def test_search_plan_show_human_renders_active_plan(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Active successful plan:", out)
+        self.assertIn("Currentness:", out)
+        self.assertIn("current_generator_searchable: yes", out)
+        self.assertIn("strategy=default", out)
+        self.assertIn("strategy=unwild", out)
+        self.assertIn("Legacy search log", out)
+
+    def test_search_plan_show_json_returns_full_payload(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("request_id", "request", "current_generator_id",
+                    "currentness", "active_plan",
+                    "latest_failed_deterministic",
+                    "latest_failed_transient", "superseded_count",
+                    "legacy_logs"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertIsNotNone(payload["active_plan"])
+        self.assertEqual(
+            len(payload["active_plan"]["items"]), 2,
+            "all items emitted in JSON")
+        self.assertTrue(
+            payload["currentness"]["current_generator_searchable"])
+
+    def test_search_plan_show_human_marks_failures_and_retryable(self):
+        db, rid = self._seed_request()
+        # No active plan; one deterministic and one transient failure.
+        self._create_failed_plan(
+            db, rid, status="failed_deterministic",
+            failure_class="no_runnable_query")
+        self._create_failed_plan(
+            db, rid, status="failed_transient",
+            failure_class="resolver_unavailable")
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Deterministic (sticky)", out)
+        self.assertIn("no_runnable_query", out)
+        self.assertIn("Transient (retryable)", out)
+        self.assertIn("resolver_unavailable", out)
+        self.assertIn("retry_eligible: yes", out)
+        self.assertIn("(no active successful plan)", out)
+
+    def test_search_plan_show_missing_request_returns_nonzero(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("9999", out)
+
+    def test_search_plan_show_no_plan_at_all_human_output_visible(self):
+        db, rid = self._seed_request()
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("(no active successful plan)", out)
+        self.assertIn("current_generator_searchable: no", out)
+        self.assertIn("Deterministic (sticky): (none)", out)
+        self.assertIn("Transient (retryable): (none)", out)
+
+    def test_search_plan_show_legacy_logs_visible_when_no_plan_context(self):
+        db, rid = self._seed_request()
+        # Use log_search to write a row without plan context (legacy).
+        db.log_search(
+            request_id=rid, query="legacy q", result_count=0,
+            elapsed_s=1.0, outcome="no_match", variant="v1",
+            final_state="Completed",
+        )
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["legacy_logs"]["count"], 1)
+        self.assertEqual(len(payload["legacy_logs"]["head"]), 1)
+        head = payload["legacy_logs"]["head"][0]
+        self.assertEqual(head["outcome"], "no_match")
+        self.assertEqual(head["variant"], "v1")
+
+    def test_search_plan_show_flags_generator_id_drift(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        db, rid = self._seed_request()
+        # Seed an active plan on a stale generator id — this can happen
+        # if a request was reconciled before the generator id was bumped
+        # and U4 hasn't re-reconciled yet.
+        db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="search-plan/2026-01-01-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        cu = payload["currentness"]
+        self.assertTrue(cu["has_active_plan"])
+        self.assertTrue(cu["generator_id_mismatch"])
+        self.assertFalse(cu["current_generator_searchable"])
+
+    def test_search_plan_show_integration_covers_ae16_prerequisites(self):
+        """One scenario covering AE16 prerequisites: active plan + det-failed
+        + transient-failed + superseded + legacy logs all visible in both
+        CLI text and CLI --json on the same request."""
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db, rid = self._seed_request()
+        # Active successful plan on the current generator id.
+        self._create_active_plan(db, rid)
+        # Supersede with a second successful plan to grow superseded_count.
+        db.supersede_search_plan_with_replacement(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="new q",
+                canonical_query_key="k0")],
+        )
+        # And a transient failure attempt for the same generator id.
+        self._create_failed_plan(
+            db, rid, status="failed_transient",
+            failure_class="resolver_unavailable")
+        # And a deterministic failure attempt for the same generator.
+        self._create_failed_plan(
+            db, rid, status="failed_deterministic",
+            failure_class="no_runnable_query")
+        # And a few legacy logs.
+        for i in range(5):
+            db.log_search(
+                request_id=rid, query=f"legacy {i}", result_count=0,
+                elapsed_s=0.1, outcome="no_match", variant="v1",
+                final_state="Completed")
+
+        # Human output covers every section.
+        rc, text = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Active successful plan:", text)
+        self.assertIn("Deterministic (sticky)", text)
+        self.assertIn("no_runnable_query", text)
+        self.assertIn("Transient (retryable)", text)
+        self.assertIn("resolver_unavailable", text)
+        self.assertIn("Superseded plans:", text)
+        self.assertIn("count: 1", text)  # one superseded
+        self.assertIn("Legacy search log", text)
+
+        # JSON output mirrors human output bucket-for-bucket.
+        rc_json, payload_text = self._run(db, rid, json_out=True)
+        self.assertEqual(rc_json, 0)
+        payload = json.loads(payload_text)
+        self.assertIsNotNone(payload["active_plan"])
+        self.assertIsNotNone(payload["latest_failed_deterministic"])
+        self.assertIsNotNone(payload["latest_failed_transient"])
+        self.assertEqual(payload["superseded_count"], 1)
+        self.assertEqual(payload["legacy_logs"]["count"], 5)
+        # head is bounded.
+        self.assertLessEqual(len(payload["legacy_logs"]["head"]), 5)
+
+
+class TestCmdSearchPlanShowStats(unittest.TestCase):
+    """U8: ``pipeline-cli search-plan show`` includes a Stats section by
+    default. ``--no-stats`` suppresses it. JSON output exposes the
+    ``stats`` block with cache attribution honesty.
+    """
+
+    def _seed_with_plan(self):
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B",
+            source="request", year=2024, status="wanted",
+        )
+        db.create_successful_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="A B",
+                    canonical_query_key="k0", repeat_group="default-3"),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="unwild", query="A B unwild",
+                    canonical_query_key="k1"),
+            ],
+            set_active=True,
+        )
+        return db, rid
+
+    def test_show_emits_stats_section_by_default(self):
+        db, rid = self._seed_with_plan()
+        args = SimpleNamespace(id=rid, json=False, no_stats=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
+        self.assertEqual(rc, 0)
+        out = stdout.getvalue()
+        self.assertIn("Stats:", out)
+        self.assertIn("cache_attribution_level: cycle_only", out)
+
+    def test_show_suppresses_stats_when_no_stats_flag(self):
+        db, rid = self._seed_with_plan()
+        args = SimpleNamespace(id=rid, json=False, no_stats=True)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
+        self.assertEqual(rc, 0)
+        out = stdout.getvalue()
+        self.assertNotIn("Stats:", out)
+
+    def test_show_json_contains_stats_block(self):
+        db, rid = self._seed_with_plan()
+        args = SimpleNamespace(id=rid, json=True, no_stats=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertIn("stats", payload)
+        self.assertIn("current", payload["stats"])
+        self.assertIn("superseded_and_legacy", payload["stats"])
+        self.assertEqual(
+            payload["stats"]["current"]["cache_attribution_level"],
+            "cycle_only")
+        self.assertFalse(
+            payload["stats"]["current"]["cache_per_search_available"])
+
+    def test_show_legacy_only_request_still_emits_stats_with_legacy_bucket(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B",
+            source="request", year=2024, status="wanted",
+        )
+        # Pre-plan rows only. Legacy bucket lives in superseded_and_legacy
+        # when current_only=False (which the renderer always uses).
+        db.log_search(
+            request_id=rid, query="legacy 1", outcome="no_match")
+        db.log_search(
+            request_id=rid, query="legacy 2", outcome="no_results")
+        args = SimpleNamespace(id=rid, json=True, no_stats=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        legacy = payload["stats"]["superseded_and_legacy"]["legacy_bucket"]
+        self.assertIsNotNone(legacy)
+        self.assertEqual(legacy["attempts"], 2)
+
+
+class TestCmdSearchPlanRegenerate(unittest.TestCase):
+    """U8: ``pipeline-cli search-plan regenerate`` wraps
+    ``SearchPlanService.generate_for_request(regenerate=True)``.
+    """
+
+    def _seed_with_plan(self, *, status: str = "wanted"):
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B",
+            source="request", year=2024, status=status,
+        )
+        db.set_tracks(rid, [
+            {"track_number": 1, "title": "Track One"},
+            {"track_number": 2, "title": "Track Two"},
+            {"track_number": 3, "title": "Track Three"},
+            {"track_number": 4, "title": "Track Four"},
+        ])
+        plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="A B",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        return db, rid, plan_id
+
+    def _run(self, db, rid, *, json_out=False, prepend=False):
+        args = SimpleNamespace(
+            id=rid, json=json_out, prepend_artist=prepend)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                # Build a minimal real config from defaults so the service
+                # can read escalation_threshold etc.
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_regenerate(db, args)
+        return rc, stdout.getvalue()
+
+    def test_regenerate_succeeds_creates_new_active_plan_and_resets_cursor(self):
+        db, rid, old_plan_id = self._seed_with_plan()
+        # Bump cursor / cycle so we can prove they reset to 0/0.
+        db._requests[rid]["next_plan_ordinal"] = 1
+        db._requests[rid]["plan_cycle_count"] = 5
+
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertNotEqual(active.plan.id, old_plan_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertIn("Outcome:", out)
+        self.assertIn("success", out)
+
+    def test_regenerate_twice_does_not_drift_cursor(self):
+        db, rid, _ = self._seed_with_plan()
+        rc1, _ = self._run(db, rid)
+        self.assertEqual(rc1, 0)
+        rc2, _ = self._run(db, rid)
+        self.assertEqual(rc2, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+
+    def test_regenerate_returns_2_when_request_not_found(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_regenerate_imported_request_succeeds_but_not_executable(self):
+        db, rid, _ = self._seed_with_plan(status="imported")
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertEqual(payload["request_status"], "imported")
+        self.assertFalse(payload["executable"])
+
+    def test_regenerate_deterministic_failure_returns_3_preserves_old_plan(self):
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db = FakePipelineDB()
+        # Empty artist/title would normally fail generation; seed a request
+        # with no usable identity and an existing successful plan to prove
+        # preservation.
+        rid = db.add_request(
+            artist_name="", album_title="", source="request", status="wanted",
+        )
+        old_plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="placeholder",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        # Bump cursor; failed regen must not reset it.
+        db._requests[rid]["next_plan_ordinal"] = 0
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 3)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "failed_deterministic")
+        # Old active plan still present.
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.id, old_plan_id)
+
+
+class TestStaleCompletionRacingRegeneration(unittest.TestCase):
+    """U8: a stale plan-A completion arriving after regeneration must
+    log against plan A but never advance plan B's cursor. Integration
+    style — uses real SearchPlanService over FakePipelineDB.
+    """
+
+    def test_stale_completion_logs_does_not_advance_new_cursor(self):
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, SearchPlanItemInput,
+        )
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from lib.search_plan_service import SearchPlanService
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        cfg = CratediggerConfig.from_ini(cp)
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Stale", album_title="Race",
+            source="request", year=2024, status="wanted",
+        )
+        db.set_tracks(rid, [
+            {"track_number": 1, "title": "T1"},
+            {"track_number": 2, "title": "T2"},
+            {"track_number": 3, "title": "T3"},
+            {"track_number": 4, "title": "T4"},
+        ])
+        # Plan A active.
+        plan_a_id = db.create_successful_search_plan(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Stale Race",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        # Snapshot the plan A item id the executor would have read.
+        item_a = next(
+            it for it in db.search_plan_items.values()
+            if it.plan_id == plan_a_id and it.ordinal == 0
+        )
+
+        # Regenerate -> plan B is now active; cursor reset to 0/0.
+        svc = SearchPlanService(db, cfg)
+        result = svc.generate_for_request(rid, regenerate=True)
+        self.assertEqual(result.outcome, "success")
+        active_after = db.get_active_search_plan(rid)
+        assert active_after is not None
+        self.assertNotEqual(active_after.plan.id, plan_a_id)
+        self.assertEqual(active_after.next_ordinal, 0)
+        self.assertEqual(active_after.cycle_count, 0)
+
+        # An in-flight plan-A completion lands now.
+        attempt = ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_a_id, plan_item_id=item_a.id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="k0", plan_repeat_group=None,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            query="Stale Race", outcome="found",
+            plan_item_count=1,
+        )
+        consumed_result = db.record_consumed_search_attempt(attempt)
+        self.assertEqual(consumed_result.cursor_update_status, "stale")
+        self.assertTrue(consumed_result.is_stale)
+
+        # Plan B's cursor untouched.
+        active_after_stale = db.get_active_search_plan(rid)
+        assert active_after_stale is not None
+        self.assertEqual(active_after_stale.next_ordinal, 0)
+        self.assertEqual(active_after_stale.cycle_count, 0)
+        # The log row exists with stale flag.
+        history = db.get_search_history(rid)
+        stale_rows = [r for r in history
+                      if r.get("cursor_update_status") == "stale"]
+        self.assertEqual(len(stale_rows), 1)
+        self.assertEqual(stale_rows[0]["plan_id"], plan_a_id)
+
+
 if __name__ == "__main__":
     unittest.main()
