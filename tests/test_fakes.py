@@ -741,6 +741,86 @@ class TestFakePipelineDBSearchPlans(unittest.TestCase):
             it.plan_id == plan_id for it in db.search_plan_items.values()))
 
 
+class TestFakeGetWantedSearchable(unittest.TestCase):
+    """``FakePipelineDB.get_wanted_searchable`` mirrors PipelineDB's
+    plan-aware execution-eligibility filter.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(ordinal=i, strategy="default", query=q)
+            for i, q in enumerate(queries)
+        ]
+
+    def _make_active(self, db, rid, gen):
+        return db.create_successful_search_plan(
+            request_id=rid, generator_id=gen, items=self._items("Q"))
+
+    def test_filters_to_current_generator_active_plans(self):
+        db = FakePipelineDB()
+        rid_match = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="match")
+        self._make_active(db, rid_match, "g1")
+
+        rid_no_plan = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="no-plan")
+
+        rid_old = db.add_request(
+            artist_name="A", album_title="D", source="request",
+            mb_release_id="old")
+        self._make_active(db, rid_old, "g0")
+
+        rid_imp = db.add_request(
+            artist_name="A", album_title="E", source="request",
+            mb_release_id="imp")
+        self._make_active(db, rid_imp, "g1")
+        db.update_status(rid_imp, "imported")
+
+        rids = {r["id"] for r in db.get_wanted_searchable("g1")}
+        self.assertEqual(rids, {rid_match})
+        # Sanity: rid_no_plan and rid_old are visible to non-plan
+        # diagnostic ``get_wanted`` though.
+        all_ids = {r["id"] for r in db.get_wanted()}
+        self.assertIn(rid_no_plan, all_ids)
+        self.assertIn(rid_old, all_ids)
+
+    def test_failed_plans_excluded(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="fd")
+        db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.assertEqual(db.get_wanted_searchable("g1"), [])
+
+        rid2 = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="ft")
+        db.create_failed_search_plan(
+            request_id=rid2, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        self.assertEqual(db.get_wanted_searchable("g1"), [])
+
+    def test_respects_retry_backoff(self):
+        from datetime import datetime, timedelta, timezone
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="bo")
+        self._make_active(db, rid, "g1")
+        db.update_request_fields(
+            rid,
+            next_retry_after=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        self.assertEqual(db.get_wanted_searchable("g1"), [])
+
+
 class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
     """Lightweight signature parity check between PipelineDB and
     FakePipelineDB for U1 methods. Catches drift when a real DB method
@@ -752,6 +832,7 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
         "create_failed_search_plan",
         "supersede_search_plan_with_replacement",
         "get_active_search_plan",
+        "get_wanted_searchable",
         "list_wanted_for_plan_reconciliation",
         "get_search_plan_inspection",
         "record_consumed_search_attempt",

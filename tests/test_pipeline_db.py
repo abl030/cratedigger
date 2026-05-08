@@ -3687,6 +3687,109 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
 
 
 @requires_postgres
+class TestGetWantedSearchable(unittest.TestCase):
+    """``get_wanted_searchable`` filters Phase 2 execution candidates.
+
+    Only rows whose active plan exists, status='active', and
+    generator_id matches the passed-in id are returned. Rows without a
+    current-generator active plan must be excluded so Phase 2 cannot
+    accidentally fall back to recomputing variants from search_attempts.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_wanted(self, mbid: str) -> int:
+        return self.db.add_request(
+            mb_release_id=mbid, artist_name="A",
+            album_title=mbid, source="request",
+        )
+
+    def _make_active(self, request_id: int, generator_id: str) -> int:
+        return self.db.create_successful_search_plan(
+            request_id=request_id,
+            generator_id=generator_id,
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query=f"q-{request_id}")],
+        )
+
+    def test_returns_only_rows_with_current_generator_active_plan(self):
+        rid_match = self._add_wanted("match")
+        self._make_active(rid_match, "g1")
+
+        rid_no_plan = self._add_wanted("no-plan")  # never planned
+        rid_old_gen = self._add_wanted("old-gen")
+        self._make_active(rid_old_gen, "g0")  # different gen
+
+        rid_imported = self._add_wanted("imp")
+        self._make_active(rid_imported, "g1")
+        self.db.update_status(rid_imported, "imported")
+
+        rows = self.db.get_wanted_searchable("g1")
+        rids = {r["id"] for r in rows}
+        self.assertEqual(rids, {rid_match})
+
+    def test_respects_retry_backoff(self):
+        rid = self._add_wanted("backoff")
+        self._make_active(rid, "g1")
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        self.db._execute(
+            "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
+            (future, rid),
+        )
+        self.db.conn.commit()
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_excludes_request_after_supersede_to_new_generator(self):
+        # Old-generator active plan -> supersede to new -> the new id
+        # must be searchable; the old id is not.
+        rid = self._add_wanted("supersede")
+        self._make_active(rid, "g0")
+        self.assertEqual(
+            [r["id"] for r in self.db.get_wanted_searchable("g0")], [rid])
+        self.db.supersede_search_plan_with_replacement(
+            request_id=rid,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q-new")],
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g0"), [])
+        rids = [r["id"] for r in self.db.get_wanted_searchable("g1")]
+        self.assertEqual(rids, [rid])
+
+    def test_failed_deterministic_only_excluded(self):
+        rid = self._add_wanted("det-fail")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_failed_transient_only_excluded(self):
+        rid = self._add_wanted("trans-fail")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_limit_applied(self):
+        ids = []
+        for i in range(5):
+            rid = self._add_wanted(f"lim-{i}")
+            self._make_active(rid, "g1")
+            ids.append(rid)
+        rows = self.db.get_wanted_searchable("g1", limit=3)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(set(r["id"] for r in rows).issubset(set(ids)))
+
+
+@requires_postgres
 class TestPersistedSearchPlanReconciliation(unittest.TestCase):
     def setUp(self):
         from lib.pipeline_db import SearchPlanItemInput

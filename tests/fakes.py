@@ -2670,6 +2670,48 @@ class FakePipelineDB:
             ))
         return out
 
+    def get_wanted_searchable(
+        self,
+        generator_id: str,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Mirror of ``PipelineDB.get_wanted_searchable``.
+
+        Returns wanted rows that are due (same backoff gate as
+        ``get_wanted``) AND have an active plan whose generator id
+        matches ``generator_id``. Rows without a current-generator
+        active plan are filtered out.
+        """
+        now = _utcnow()
+        eligible: list[dict[str, Any]] = []
+        for r in self._requests.values():
+            if r.get("status") != "wanted":
+                continue
+            if r.get("next_retry_after") is not None and r["next_retry_after"] > now:
+                continue
+            plan_id = r.get("active_plan_id")
+            if plan_id is None:
+                continue
+            plan = self.search_plans.get(plan_id)
+            if plan is None:
+                continue
+            if plan.status != "active":
+                continue
+            if plan.generator_id != generator_id:
+                continue
+            eligible.append(r)
+        eligible.sort(
+            key=lambda r: (
+                0 if (
+                    (r.get("search_attempts") or 0) == 0
+                    and (r.get("download_attempts") or 0) == 0
+                    and (r.get("validation_attempts") or 0) == 0
+                ) else 1
+            ))
+        if limit is not None:
+            eligible = eligible[:int(limit)]
+        return [copy.deepcopy(r) for r in eligible]
+
     def get_search_plan_inspection(
         self,
         request_id: int,

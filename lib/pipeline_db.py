@@ -3234,6 +3234,54 @@ class PipelineDB:
             for r in cur.fetchall()
         ]
 
+    def get_wanted_searchable(
+        self,
+        generator_id: str,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return wanted rows whose active plan matches ``generator_id``.
+
+        This is the **execution-eligibility** filter used by the Phase 2
+        search loop. A wanted request is searchable only if:
+
+          * ``status = 'wanted'`` (same as ``get_wanted``), and
+          * ``next_retry_after`` is null or already due (same backoff
+            semantics as ``get_wanted``), and
+          * ``active_plan_id`` points at a row in ``search_plans`` whose
+            ``status = 'active'`` AND ``generator_id = %s``.
+
+        Rows with no active plan, a deterministic-failed-only plan, a
+        transient-failed-only plan, or an old-generator active plan are
+        excluded -- startup reconciliation owns repairing those before
+        the next cycle.
+
+        Forensic / dashboard / inspection callers should keep using the
+        older ``get_wanted`` (no plan filter) so they can show every
+        wanted row regardless of plan readiness.
+        """
+        now = datetime.now(timezone.utc)
+        sql = """
+            SELECT ar.* FROM album_requests ar
+            JOIN search_plans sp ON ar.active_plan_id = sp.id
+            WHERE ar.status = 'wanted'
+              AND (ar.next_retry_after IS NULL OR ar.next_retry_after <= %s)
+              AND sp.status = 'active'
+              AND sp.generator_id = %s
+            ORDER BY
+              CASE
+                WHEN COALESCE(ar.search_attempts, 0) = 0
+                 AND COALESCE(ar.download_attempts, 0) = 0
+                 AND COALESCE(ar.validation_attempts, 0) = 0
+                THEN 0
+                ELSE 1
+              END,
+              RANDOM()
+        """
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        cur = self._execute(sql, (now, generator_id))
+        return [dict(r) for r in cur.fetchall()]
+
     def list_wanted_for_plan_reconciliation(
         self,
     ) -> list[WantedReconciliationCandidate]:
