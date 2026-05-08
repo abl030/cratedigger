@@ -303,6 +303,28 @@ class WantedReconciliationCandidate:
 
 
 @dataclass(frozen=True)
+class DryRunPlanClassification:
+    """Minimum per-request data the dry-run reconciliation classifier needs.
+
+    ``_classify_dry_run`` only reads the active plan's generator id
+    (already on ``WantedReconciliationCandidate``) and the *generator id*
+    of the most recent failed deterministic / failed transient plan for
+    the request. Returning anything more than that turns a single batch
+    fetch into per-row work; returning anything less makes the bucket
+    decision impossible.
+
+    Either ``latest_failed_deterministic_generator_id`` or
+    ``latest_failed_transient_generator_id`` may be ``None`` independently
+    -- a request can have a deterministic failure from one generator and
+    no transient failure recorded, or vice versa.
+    """
+
+    request_id: int
+    latest_failed_deterministic_generator_id: str | None
+    latest_failed_transient_generator_id: str | None
+
+
+@dataclass(frozen=True)
 class SearchPlanInspection:
     """Aggregate plan view for one request (CLI/API inspection).
 
@@ -3851,6 +3873,76 @@ class PipelineDB:
             )
             for r in cur.fetchall()
         ]
+
+    def list_search_plan_classification_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, DryRunPlanClassification]:
+        """Batch-fetch the per-request data dry-run classification needs.
+
+        Replaces the per-row ``get_search_plan_inspection`` call inside
+        ``startup_reconciliation._classify_dry_run`` (5 sequential
+        queries × ~600 candidates ≈ 2,920 round-trips) with a single
+        query.
+
+        Returns one entry per request id passed in. Requests without
+        any failed plan rows still get an entry whose generator-id
+        fields are both ``None``. Requests not in ``request_ids`` are
+        absent from the result. An empty input list returns ``{}``
+        without hitting the DB.
+
+        We use ``DISTINCT ON (request_id, status)`` ordered by
+        ``created_at DESC, id DESC`` so each request gets at most one
+        row per failure status -- the same row ``_latest()`` selects
+        inside ``get_search_plan_inspection``.
+        """
+        if not request_ids:
+            return {}
+        # Initialise every requested id with a None/None entry so
+        # callers don't have to handle "missing" vs. "no failed plan".
+        out: dict[int, DryRunPlanClassification] = {
+            int(rid): DryRunPlanClassification(
+                request_id=int(rid),
+                latest_failed_deterministic_generator_id=None,
+                latest_failed_transient_generator_id=None,
+            )
+            for rid in request_ids
+        }
+        cur = self._execute(
+            """
+            SELECT DISTINCT ON (request_id, status)
+                   request_id, status, generator_id
+            FROM search_plans
+            WHERE request_id = ANY(%s)
+              AND status IN (%s, %s)
+            ORDER BY request_id, status, created_at DESC, id DESC
+            """,
+            (
+                list(out.keys()),
+                PLAN_STATUS_FAILED_DETERMINISTIC,
+                PLAN_STATUS_FAILED_TRANSIENT,
+            ),
+        )
+        for r in cur.fetchall():
+            rid = int(r["request_id"])
+            current = out[rid]
+            if r["status"] == PLAN_STATUS_FAILED_DETERMINISTIC:
+                out[rid] = DryRunPlanClassification(
+                    request_id=rid,
+                    latest_failed_deterministic_generator_id=r[
+                        "generator_id"],
+                    latest_failed_transient_generator_id=current
+                        .latest_failed_transient_generator_id,
+                )
+            elif r["status"] == PLAN_STATUS_FAILED_TRANSIENT:
+                out[rid] = DryRunPlanClassification(
+                    request_id=rid,
+                    latest_failed_deterministic_generator_id=current
+                        .latest_failed_deterministic_generator_id,
+                    latest_failed_transient_generator_id=r[
+                        "generator_id"],
+                )
+        return out
 
     def get_search_plan_inspection(
         self,

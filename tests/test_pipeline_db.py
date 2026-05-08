@@ -3962,6 +3962,132 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
 
 
 @requires_postgres
+class TestListSearchPlanClassificationForRequests(unittest.TestCase):
+    """Batch-fetch dry-run classification.
+
+    ``list_search_plan_classification_for_requests`` collapses the
+    per-row 5-query inspection call into a single query. Verify the
+    per-request data returned matches what the previous per-row
+    ``get_search_plan_inspection`` path would have surfaced for the
+    same rows.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add(self, mbid: str) -> int:
+        return self.db.add_request(
+            mb_release_id=mbid, artist_name="Artist",
+            album_title=mbid, source="request",
+        )
+
+    def test_empty_input_returns_empty_dict(self):
+        self.assertEqual(
+            self.db.list_search_plan_classification_for_requests([]), {})
+
+    def test_returns_none_generator_ids_when_no_failed_plans(self):
+        rid = self._add("nofail")
+        result = self.db.list_search_plan_classification_for_requests([rid])
+        self.assertIn(rid, result)
+        self.assertIsNone(
+            result[rid].latest_failed_deterministic_generator_id)
+        self.assertIsNone(
+            result[rid].latest_failed_transient_generator_id)
+
+    def test_returns_latest_failed_generator_ids_per_request(self):
+        rid_a = self._add("rid-a")
+        rid_b = self._add("rid-b")
+        rid_c = self._add("rid-c")
+        # rid_a: deterministic failure on g-old, then deterministic
+        # failure on g-new -- the new one should win.
+        self.db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-old",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-new",
+            failure_class="metadata_incomplete", transient=False,
+        )
+        # rid_b: only transient failure on g-new.
+        self.db.create_failed_search_plan(
+            request_id=rid_b, generator_id="g-new",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        # rid_c: both -- one deterministic g-det, one transient g-trans.
+        self.db.create_failed_search_plan(
+            request_id=rid_c, generator_id="g-det",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid_c, generator_id="g-trans",
+            failure_class="dependency_failure", transient=True,
+        )
+
+        result = self.db.list_search_plan_classification_for_requests(
+            [rid_a, rid_b, rid_c])
+
+        self.assertEqual(
+            result[rid_a].latest_failed_deterministic_generator_id, "g-new")
+        self.assertIsNone(
+            result[rid_a].latest_failed_transient_generator_id)
+
+        self.assertIsNone(
+            result[rid_b].latest_failed_deterministic_generator_id)
+        self.assertEqual(
+            result[rid_b].latest_failed_transient_generator_id, "g-new")
+
+        self.assertEqual(
+            result[rid_c].latest_failed_deterministic_generator_id, "g-det")
+        self.assertEqual(
+            result[rid_c].latest_failed_transient_generator_id, "g-trans")
+
+    def test_matches_per_row_inspection_for_same_data(self):
+        """Equivalence guard: the batch result for each request must
+        agree with what ``get_search_plan_inspection`` would say about
+        the same rows. This is the contract the dry-run classifier
+        relies on after the rewrite.
+        """
+        rid = self._add("equiv")
+        # Mixed plan history: deterministic failure, then a successful
+        # plan (irrelevant to the classifier), then a transient
+        # failure.
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+            set_active=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g2",
+            failure_class="resolver_unavailable", transient=True,
+        )
+
+        inspection = self.db.get_search_plan_inspection(rid)
+        det = inspection.latest_failed_deterministic
+        trans = inspection.latest_failed_transient
+
+        batch = self.db.list_search_plan_classification_for_requests([rid])
+        entry = batch[rid]
+        self.assertEqual(
+            entry.latest_failed_deterministic_generator_id,
+            det.generator_id if det is not None else None,
+        )
+        self.assertEqual(
+            entry.latest_failed_transient_generator_id,
+            trans.generator_id if trans is not None else None,
+        )
+
+
+@requires_postgres
 class TestGetWantedSearchable(unittest.TestCase):
     """``get_wanted_searchable`` filters Phase 2 execution candidates.
 

@@ -52,6 +52,7 @@ from lib.search_plan_service import (
 
 if TYPE_CHECKING:
     from lib.pipeline_db import (
+        DryRunPlanClassification,
         PipelineDB,
         SearchPlanInspection,
         WantedReconciliationCandidate,
@@ -140,6 +141,11 @@ class _DBProto(Protocol):
         request_id: int,
     ) -> "SearchPlanInspection": ...
 
+    def list_search_plan_classification_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> "dict[int, DryRunPlanClassification]": ...
+
 
 def reconcile_search_plans(
     db: "PipelineDB | _DBProto",
@@ -192,6 +198,27 @@ def reconcile_search_plans(
     candidates = list(db.list_wanted_for_plan_reconciliation())
     wanted_total = len(candidates)
 
+    # Dry-run path: pre-fetch failed-plan classification for every
+    # wanted row in one query rather than calling
+    # ``get_search_plan_inspection`` per row (5 queries × N rows). On
+    # cold deploys with ~600 wanted, this collapses ~2920 round-trips
+    # into 2 (the all-wanted scan + this batch). Live runs do not need
+    # the batch because they call the service to repair, not the
+    # classifier.
+    dry_run_classifications: "dict[int, DryRunPlanClassification]" = {}
+    if dry_run and candidates:
+        # Only request rows that actually need classification: rows
+        # without an active plan. Rows with an active plan are
+        # classified purely from candidate fields.
+        needing_classification = [
+            c.request_id for c in candidates if c.active_plan_id is None
+        ]
+        if needing_classification:
+            dry_run_classifications = (
+                db.list_search_plan_classification_for_requests(
+                    needing_classification)
+            )
+
     active_current = 0
     generated = 0
     old_generator_replaced = 0
@@ -205,6 +232,9 @@ def reconcile_search_plans(
             outcome = _reconcile_one(
                 db, service, candidate,
                 generator_id=generator_id, dry_run=dry_run,
+                dry_run_classification=(
+                    dry_run_classifications.get(candidate.request_id)
+                    if dry_run else None),
             )
         except Exception as exc:  # noqa: BLE001 — per-row isolation
             # Per-row isolation: one row's exception must not stop the
@@ -272,6 +302,7 @@ def _reconcile_one(
     *,
     generator_id: str,
     dry_run: bool,
+    dry_run_classification: "DryRunPlanClassification | None" = None,
 ) -> str:
     """Classify and (when not dry-run) repair one wanted row.
 
@@ -287,7 +318,10 @@ def _reconcile_one(
         return "active_current"
 
     if dry_run:
-        return _classify_dry_run(db, candidate, generator_id=generator_id)
+        return _classify_dry_run(
+            db, candidate, generator_id=generator_id,
+            classification=dry_run_classification,
+        )
 
     assert service is not None  # _ checked at function entry
     had_old_generator_active = (
@@ -337,11 +371,18 @@ def _classify_dry_run(
     candidate,  # WantedReconciliationCandidate
     *,
     generator_id: str,
+    classification: "DryRunPlanClassification | None" = None,
 ) -> str:
     """Read-only classification path for dry-run.
 
     Mirrors the buckets the live reconciliation would assign without
     persisting anything.
+
+    The optional ``classification`` argument carries the latest
+    failed-deterministic / failed-transient generator ids for this
+    request, pre-fetched in one batch by ``reconcile_search_plans``
+    so we do not pay 5 queries per row × N rows. When omitted (single
+    callers, tests), we fall back to the per-row inspection call.
     """
     if candidate.active_plan_id is not None:
         if candidate.active_plan_generator_id == generator_id:
@@ -350,12 +391,19 @@ def _classify_dry_run(
         return "old_generator_replaced"
 
     # No active plan: distinguish missing vs. failed-recorded.
-    inspection = db.get_search_plan_inspection(candidate.request_id)
-    det = inspection.latest_failed_deterministic
-    trans = inspection.latest_failed_transient
-    if det is not None and det.generator_id == generator_id:
+    if classification is not None:
+        det_gen = classification.latest_failed_deterministic_generator_id
+        trans_gen = classification.latest_failed_transient_generator_id
+    else:
+        inspection = db.get_search_plan_inspection(candidate.request_id)
+        det = inspection.latest_failed_deterministic
+        trans = inspection.latest_failed_transient
+        det_gen = det.generator_id if det is not None else None
+        trans_gen = trans.generator_id if trans is not None else None
+
+    if det_gen == generator_id:
         return "deterministic_failed"
-    if trans is not None and trans.generator_id == generator_id:
+    if trans_gen == generator_id:
         return "retryable_failed"
     # Neither active nor failed -- live run would generate.
     return "generated"

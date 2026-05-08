@@ -888,6 +888,7 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
         "get_active_search_plan",
         "get_wanted_searchable",
         "list_wanted_for_plan_reconciliation",
+        "list_search_plan_classification_for_requests",
         "get_search_plan_inspection",
         "record_consumed_search_attempt",
         "record_non_consuming_search_attempt",

@@ -34,7 +34,8 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              BadAudioHashRow, ConsumedAttemptInput,
                              ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
                              CURSOR_UPDATE_STALE, CURSOR_UPDATE_UNCHANGED,
-                             CURSOR_UPDATE_WRAPPED, NonConsumingAttemptInput,
+                             CURSOR_UPDATE_WRAPPED, DryRunPlanClassification,
+                             NonConsumingAttemptInput,
                              PLAN_STATUS_ACTIVE, PLAN_STATUS_FAILED_DETERMINISTIC,
                              PLAN_STATUS_FAILED_TRANSIENT,
                              PLAN_STATUS_SUPERSEDED,
@@ -2790,6 +2791,50 @@ class FakePipelineDB:
                 next_plan_ordinal=int(r.get("next_plan_ordinal") or 0),
                 plan_cycle_count=int(r.get("plan_cycle_count") or 0),
             ))
+        return out
+
+    def list_search_plan_classification_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, DryRunPlanClassification]:
+        """Mirror of ``PipelineDB.list_search_plan_classification_for_requests``.
+
+        Walks ``self.search_plans`` once and returns the latest failed
+        deterministic / transient generator id per request. Empty input
+        returns ``{}`` without scanning.
+        """
+        if not request_ids:
+            return {}
+        # Initialise so requests with no failed plan rows still surface
+        # in the result with None/None generator ids.
+        out: dict[int, DryRunPlanClassification] = {
+            int(rid): DryRunPlanClassification(
+                request_id=int(rid),
+                latest_failed_deterministic_generator_id=None,
+                latest_failed_transient_generator_id=None,
+            )
+            for rid in request_ids
+        }
+        for rid in out.keys():
+            det_matches = [
+                p for p in self.search_plans.values()
+                if p.request_id == rid
+                and p.status == PLAN_STATUS_FAILED_DETERMINISTIC
+            ]
+            trans_matches = [
+                p for p in self.search_plans.values()
+                if p.request_id == rid
+                and p.status == PLAN_STATUS_FAILED_TRANSIENT
+            ]
+            det_matches.sort(key=lambda p: (p.created_at, p.id), reverse=True)
+            trans_matches.sort(key=lambda p: (p.created_at, p.id), reverse=True)
+            out[rid] = DryRunPlanClassification(
+                request_id=rid,
+                latest_failed_deterministic_generator_id=(
+                    det_matches[0].generator_id if det_matches else None),
+                latest_failed_transient_generator_id=(
+                    trans_matches[0].generator_id if trans_matches else None),
+            )
         return out
 
     def get_wanted_searchable(

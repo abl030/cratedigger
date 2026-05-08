@@ -4082,6 +4082,63 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         self.assertEqual(summary.retryable_failed, 1)
         self.assertEqual(summary.unclassified_no_plan, 0)
 
+    def test_dry_run_buckets_match_pre_batch_behavior_at_scale(self):
+        """End-to-end dry-run over a mixed wanted population must produce
+        the same per-bucket counts after the batch-classification
+        rewrite as the pre-batch path would. Guards against the batch
+        method silently dropping rows or mis-classifying transient vs
+        deterministic.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+
+        # 100 with active current plan -> active_current.
+        for i in range(100):
+            rid = self._seed_wanted(db, f"act-{i}")
+            db.create_successful_search_plan(
+                request_id=rid, generator_id="g-test",
+                items=[SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="q")],
+            )
+        # 50 with active old-generator plan -> old_generator_replaced.
+        for i in range(50):
+            rid = self._seed_wanted(db, f"old-{i}")
+            db.create_successful_search_plan(
+                request_id=rid, generator_id="g-old",
+                items=[SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="q")],
+            )
+        # 30 with deterministic failure on g-test -> deterministic_failed.
+        for i in range(30):
+            rid = self._seed_wanted(db, f"det-{i}")
+            db.create_failed_search_plan(
+                request_id=rid, generator_id="g-test",
+                failure_class="no_runnable_query", transient=False,
+            )
+        # 25 with transient failure on g-test -> retryable_failed.
+        for i in range(25):
+            rid = self._seed_wanted(db, f"trans-{i}")
+            db.create_failed_search_plan(
+                request_id=rid, generator_id="g-test",
+                failure_class="resolver_unavailable", transient=True,
+            )
+        # 40 with no plan at all -> generated.
+        for i in range(40):
+            self._seed_wanted(db, f"new-{i}")
+
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertEqual(summary.wanted_total, 245)
+        self.assertEqual(summary.active_current, 100)
+        self.assertEqual(summary.old_generator_replaced, 50)
+        self.assertEqual(summary.deterministic_failed, 30)
+        self.assertEqual(summary.retryable_failed, 25)
+        self.assertEqual(summary.generated, 40)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertTrue(summary.is_ready)
+
     def test_resumable_after_interrupted_pass(self):
         """A second reconciliation pass after a partial first pass must
         not duplicate active plans or lose failure state.
