@@ -522,7 +522,12 @@ def post_pipeline_search_plan_regenerate(
     except (TypeError, ValueError):
         h._error("Invalid request id")
         return
-    prepend_artist = bool((body or {}).get("prepend_artist", False))
+    prepend_artist: bool | None = None
+    if body is not None and "prepend_artist" in body:
+        if not isinstance(body["prepend_artist"], bool):
+            h._json({"error": "prepend_artist must be a boolean"}, status=400)
+            return
+        prepend_artist = body["prepend_artist"]
     db = _server()._db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
@@ -558,9 +563,11 @@ def post_pipeline_search_plan_regenerate(
         h._json(payload, status=404)
         return
     if result.outcome == RESULT_FAILED_DETERMINISTIC:
+        payload["error"] = result.error_message or "Plan generation failed"
         h._json(payload, status=422)
         return
     if result.outcome == RESULT_FAILED_TRANSIENT:
+        payload["error"] = result.error_message or "Plan generation retryable"
         h._json(payload, status=503)
         return
     # RESULT_SUCCESS or RESULT_NOOP_ACTIVE_PLAN_EXISTS.

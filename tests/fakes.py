@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
+import msgspec
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -44,7 +45,9 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SEARCH_LOG_STAGE_PRE_ATTEMPT,
                              SEARCH_LOG_STAGE_STALE_COMPLETION,
                              SearchPlanInspection, SearchPlanItemInput,
-                             SearchPlanItemRow, SearchPlanRow,
+                             SearchPlanItemProvenance, SearchPlanItemRow,
+                             SearchPlanMetadataSnapshot,
+                             SearchPlanProvenance, SearchPlanRow,
                              WantedReconciliationCandidate)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
@@ -2711,7 +2714,15 @@ class FakePipelineDB:
                 query=r.query,
                 canonical_query_key=r.canonical_query_key,
                 repeat_group=r.repeat_group,
-                provenance=copy.deepcopy(r.provenance),
+                provenance=(
+                    SearchPlanItemProvenance(
+                        values=msgspec.convert(
+                            copy.deepcopy(r.provenance),
+                            type=dict[str, Any],
+                        )
+                    )
+                    if r.provenance is not None else None
+                ),
             )
             for r in rows
         ]
@@ -2723,8 +2734,22 @@ class FakePipelineDB:
             generator_id=plan.generator_id,
             status=plan.status,
             failure_class=plan.failure_class,
-            metadata_snapshot=copy.deepcopy(plan.metadata_snapshot),
-            provenance=copy.deepcopy(plan.provenance),
+            metadata_snapshot=(
+                msgspec.convert(
+                    copy.deepcopy(plan.metadata_snapshot),
+                    type=SearchPlanMetadataSnapshot,
+                )
+                if plan.metadata_snapshot is not None else None
+            ),
+            provenance=(
+                SearchPlanProvenance(
+                    values=msgspec.convert(
+                        copy.deepcopy(plan.provenance),
+                        type=dict[str, Any],
+                    )
+                )
+                if plan.provenance is not None else None
+            ),
             error_message=plan.error_message,
             superseded_at=plan.superseded_at,
             superseded_by_plan_id=plan.superseded_by_plan_id,
@@ -2973,6 +2998,17 @@ class FakePipelineDB:
         active_plan_id = row.get("active_plan_id")
         next_ordinal = int(row.get("next_plan_ordinal") or 0)
         cycle_count = int(row.get("plan_cycle_count") or 0)
+        plan = self.search_plans.get(attempt.plan_id)
+        item = self.search_plan_items.get(attempt.plan_item_id)
+        if (
+            plan is None
+            or plan.request_id != attempt.request_id
+            or item is None
+            or item.plan_id != attempt.plan_id
+        ):
+            raise ValueError(
+                f"plan_item_id={attempt.plan_item_id} does not belong to "
+                f"plan_id={attempt.plan_id} for request_id={attempt.request_id}")
         is_stale = (
             active_plan_id != attempt.plan_id
             or next_ordinal != attempt.plan_ordinal
@@ -2993,12 +3029,6 @@ class FakePipelineDB:
                 new_next_ordinal = next_ordinal
                 new_cycle = cycle_count
             else:
-                # Validate plan_item_id belongs to the executing plan.
-                item = self.search_plan_items.get(attempt.plan_item_id)
-                if item is None or item.plan_id != attempt.plan_id:
-                    raise ValueError(
-                        f"plan_item_id={attempt.plan_item_id} does not "
-                        f"belong to plan_id={attempt.plan_id}")
                 execution_stage = SEARCH_LOG_STAGE_ACCEPTED
                 stale_reason = None
                 count = max(int(attempt.plan_item_count), 0)

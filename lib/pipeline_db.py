@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 import psycopg2
 import psycopg2.extras
+import msgspec
 
 from lib.import_queue import (
     ImportJob,
@@ -244,6 +245,84 @@ class SearchPlanItemInput:
     provenance: dict[str, object] | None = None
 
 
+class SearchPlanMetadataSnapshot(
+    msgspec.Struct, frozen=True, omit_defaults=True,
+):
+    """Typed JSONB boundary for ``search_plans.metadata_snapshot``."""
+
+    artist_name: str | None = None
+    album_title: str | None = None
+    year: Any = None
+    track_count: int | None = None
+    redownload: bool = False
+    prepend_artist: bool = False
+
+
+class SearchPlanProvenance(
+    msgspec.Struct, frozen=True,
+):
+    """Typed JSONB boundary for free-form plan generator provenance."""
+
+    values: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+class SearchPlanItemProvenance(
+    msgspec.Struct, frozen=True,
+):
+    """Typed JSONB boundary for free-form plan-item provenance."""
+
+    values: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+def _metadata_snapshot_from_jsonb(
+    value: Any,
+) -> SearchPlanMetadataSnapshot | None:
+    if value is None:
+        return None
+    return msgspec.convert(value, type=SearchPlanMetadataSnapshot)
+
+
+def _plan_provenance_from_jsonb(value: Any) -> SearchPlanProvenance | None:
+    if value is None:
+        return None
+    if isinstance(value, SearchPlanProvenance):
+        return value
+    return SearchPlanProvenance(
+        values=msgspec.convert(value, type=dict[str, Any]))
+
+
+def _item_provenance_from_jsonb(value: Any) -> SearchPlanItemProvenance | None:
+    if value is None:
+        return None
+    if isinstance(value, SearchPlanItemProvenance):
+        return value
+    return SearchPlanItemProvenance(
+        values=msgspec.convert(value, type=dict[str, Any]))
+
+
+def jsonb_to_builtins(value: Any) -> Any:
+    """Return a JSON-serialisable dict/list/primitive for JSONB structs."""
+    if value is None:
+        return None
+    if isinstance(value, (SearchPlanProvenance, SearchPlanItemProvenance)):
+        return dict(value.values)
+    if isinstance(value, msgspec.Struct):
+        return msgspec.to_builtins(value)
+    return value
+
+
+def _json_param(value: Any, typ: Any) -> psycopg2.extras.Json | None:
+    if value is None:
+        return None
+    if typ in (SearchPlanProvenance, SearchPlanItemProvenance):
+        if isinstance(value, typ):
+            return psycopg2.extras.Json(dict(value.values))
+        return psycopg2.extras.Json(
+            msgspec.convert(value, type=dict[str, Any]))
+    return psycopg2.extras.Json(
+        msgspec.to_builtins(msgspec.convert(value, type=typ)))
+
+
 @dataclass(frozen=True)
 class SearchPlanItemRow:
     """One ``search_plan_items`` row read back from the DB."""
@@ -254,7 +333,7 @@ class SearchPlanItemRow:
     query: str
     canonical_query_key: str | None
     repeat_group: str | None
-    provenance: dict[str, object] | None
+    provenance: SearchPlanItemProvenance | None
 
 
 @dataclass(frozen=True)
@@ -265,8 +344,8 @@ class SearchPlanRow:
     generator_id: str
     status: str
     failure_class: str | None
-    metadata_snapshot: dict[str, object] | None
-    provenance: dict[str, object] | None
+    metadata_snapshot: SearchPlanMetadataSnapshot | None
+    provenance: SearchPlanProvenance | None
     error_message: str | None
     superseded_at: datetime | None
     superseded_by_plan_id: int | None
@@ -3404,8 +3483,9 @@ class PipelineDB:
                         request_id,
                         generator_id,
                         PLAN_STATUS_ACTIVE,
-                        psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
-                        psycopg2.extras.Json(provenance) if provenance is not None else None,
+                        _json_param(
+                            metadata_snapshot, SearchPlanMetadataSnapshot),
+                        _json_param(provenance, SearchPlanProvenance),
                         now,
                     ),
                 )
@@ -3429,7 +3509,8 @@ class PipelineDB:
                             item.query,
                             item.canonical_query_key,
                             item.repeat_group,
-                            psycopg2.extras.Json(item.provenance) if item.provenance is not None else None,
+                            _json_param(
+                                item.provenance, SearchPlanItemProvenance),
                         )
                         for item in items
                     ],
@@ -3496,8 +3577,8 @@ class PipelineDB:
                 generator_id,
                 status,
                 failure_class,
-                psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
-                psycopg2.extras.Json(provenance) if provenance is not None else None,
+                _json_param(metadata_snapshot, SearchPlanMetadataSnapshot),
+                _json_param(provenance, SearchPlanProvenance),
                 error_message,
             ),
         )
@@ -3577,8 +3658,9 @@ class PipelineDB:
                         request_id,
                         generator_id,
                         PLAN_STATUS_ACTIVE,
-                        psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
-                        psycopg2.extras.Json(provenance) if provenance is not None else None,
+                        _json_param(
+                            metadata_snapshot, SearchPlanMetadataSnapshot),
+                        _json_param(provenance, SearchPlanProvenance),
                         now,
                     ),
                 )
@@ -3612,7 +3694,8 @@ class PipelineDB:
                             item.query,
                             item.canonical_query_key,
                             item.repeat_group,
-                            psycopg2.extras.Json(item.provenance) if item.provenance is not None else None,
+                            _json_param(
+                                item.provenance, SearchPlanItemProvenance),
                         )
                         for item in items
                     ],
@@ -3701,8 +3784,9 @@ class PipelineDB:
             generator_id=row["generator_id"],
             status=row["status"],
             failure_class=row["failure_class"],
-            metadata_snapshot=row["metadata_snapshot"],
-            provenance=row["provenance"],
+            metadata_snapshot=_metadata_snapshot_from_jsonb(
+                row["metadata_snapshot"]),
+            provenance=_plan_provenance_from_jsonb(row["provenance"]),
             error_message=row["error_message"],
             superseded_at=row["superseded_at"],
             superseded_by_plan_id=(
@@ -3719,7 +3803,7 @@ class PipelineDB:
                 query=it["query"],
                 canonical_query_key=it["canonical_query_key"],
                 repeat_group=it["repeat_group"],
-                provenance=it["provenance"],
+                provenance=_item_provenance_from_jsonb(it["provenance"]),
             )
             for it in row["items_json"]
         ]
@@ -3790,7 +3874,7 @@ class PipelineDB:
                 query=r["query"],
                 canonical_query_key=r["canonical_query_key"],
                 repeat_group=r["repeat_group"],
-                provenance=r["provenance"],
+                provenance=_item_provenance_from_jsonb(r["provenance"]),
             )
             for r in cur.fetchall()
         ]
@@ -3990,8 +4074,9 @@ class PipelineDB:
                 generator_id=row["generator_id"],
                 status=row["status"],
                 failure_class=row["failure_class"],
-                metadata_snapshot=row["metadata_snapshot"],
-                provenance=row["provenance"],
+                metadata_snapshot=_metadata_snapshot_from_jsonb(
+                    row["metadata_snapshot"]),
+                provenance=_plan_provenance_from_jsonb(row["provenance"]),
                 error_message=row["error_message"],
                 superseded_at=row["superseded_at"],
                 superseded_by_plan_id=(
@@ -4140,6 +4225,27 @@ class PipelineDB:
                 active_plan_id = row["active_plan_id"]
                 next_ordinal = int(row["next_plan_ordinal"])
                 cycle_count = int(row["plan_cycle_count"])
+
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM search_plan_items spi
+                    JOIN search_plans sp ON sp.id = spi.plan_id
+                    WHERE spi.id = %s
+                      AND spi.plan_id = %s
+                      AND sp.request_id = %s
+                    """,
+                    (
+                        attempt.plan_item_id,
+                        attempt.plan_id,
+                        attempt.request_id,
+                    ),
+                )
+                if cur.fetchone() is None:
+                    raise ValueError(
+                        f"plan_item_id={attempt.plan_item_id} does not "
+                        f"belong to plan_id={attempt.plan_id} for "
+                        f"request_id={attempt.request_id}")
 
                 is_stale = (
                     active_plan_id != attempt.plan_id

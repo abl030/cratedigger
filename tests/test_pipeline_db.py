@@ -3785,7 +3785,7 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
             generator_id="g1",
             items=self._items("Artist Album", "Artist Track1"),
             metadata_snapshot={"year": 2024},
-            provenance={"dropped": ["the"]},
+            provenance={"dropped_low_entropy_tokens": ["the"]},
         )
         active = self.db.get_active_search_plan(self.req_id)
         assert active is not None
@@ -3797,8 +3797,15 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertEqual(len(active.items), 2)
         self.assertEqual(active.items[0].ordinal, 0)
         self.assertEqual(active.items[0].query, "Artist Album")
-        self.assertEqual(active.plan.metadata_snapshot, {"year": 2024})
-        self.assertEqual(active.plan.provenance, {"dropped": ["the"]})
+        from lib.pipeline_db import (
+            SearchPlanMetadataSnapshot, SearchPlanProvenance)
+        self.assertIsInstance(
+            active.plan.metadata_snapshot, SearchPlanMetadataSnapshot)
+        self.assertIsInstance(active.plan.provenance, SearchPlanProvenance)
+        self.assertEqual(active.plan.metadata_snapshot.year, 2024)
+        self.assertEqual(
+            active.plan.provenance.values["dropped_low_entropy_tokens"],
+            ["the"])
 
     def test_successful_plan_without_set_active_leaves_request_planless(self):
         plan_id = self.db.create_successful_search_plan(
@@ -3904,12 +3911,12 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
                 ordinal=0, strategy="primary", query="Artist Album",
                 canonical_query_key="artist album",
                 repeat_group="default",
-                provenance={"source": "deterministic", "step": 1},
+                provenance={"repeat_index": 1},
             ),
             self.SearchPlanItemInput(
                 ordinal=1, strategy="track1", query="Artist Track 1",
                 canonical_query_key="artist track 1",
-                provenance={"source": "track", "step": 2},
+                provenance={"source_track_index": 0, "track_slot_index": 1},
             ),
             self.SearchPlanItemInput(
                 ordinal=2, strategy="track2", query="Artist Track 2",
@@ -3930,12 +3937,15 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertEqual(active.items[0].query, "Artist Album")
         self.assertEqual(active.items[0].canonical_query_key, "artist album")
         self.assertEqual(active.items[0].repeat_group, "default")
-        self.assertEqual(
-            active.items[0].provenance,
-            {"source": "deterministic", "step": 1})
+        from lib.pipeline_db import SearchPlanItemProvenance
+        self.assertIsInstance(
+            active.items[0].provenance, SearchPlanItemProvenance)
+        self.assertEqual(active.items[0].provenance.values["repeat_index"], 1)
         self.assertEqual(active.items[1].strategy, "track1")
         self.assertEqual(
-            active.items[1].provenance, {"source": "track", "step": 2})
+            active.items[1].provenance.values["source_track_index"], 0)
+        self.assertEqual(
+            active.items[1].provenance.values["track_slot_index"], 1)
         self.assertIsNone(active.items[2].provenance)
         self.assertIsNone(active.items[2].repeat_group)
         # IDs must be present + ints (matched the prior two-query contract).
@@ -4475,6 +4485,31 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         assert active is not None
         self.assertEqual(active.plan.id, new_plan)
         self.assertEqual(active.next_ordinal, 0)
+
+    def test_rejects_plan_item_from_another_request(self):
+        other_req_id = self.db.add_request(
+            mb_release_id="consumed-other-mbid",
+            artist_name="C", album_title="D", source="request",
+        )
+        other_plan = self.db.create_successful_search_plan(
+            request_id=other_req_id,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q-other")],
+        )
+        other_active = self.db.get_active_search_plan(other_req_id)
+        assert other_active is not None
+        with self.assertRaises(ValueError):
+            self.db.record_consumed_search_attempt(
+                self._attempt(
+                    0,
+                    plan_id=self.plan_id,
+                    plan_item_id=other_active.items[0].id,
+                )
+            )
+        self.assertIsNotNone(other_plan)
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows, [])
 
 
 @requires_postgres

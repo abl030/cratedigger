@@ -3998,7 +3998,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         assert active is not None
         self.assertNotEqual(active.plan.id, old_id)
         self.assertEqual(db.search_plans[old_id].status, "superseded")
-        self.assertEqual(active.plan.metadata_snapshot["track_count"], 2)
+        self.assertEqual(active.plan.metadata_snapshot.track_count, 2)
 
     def test_old_generator_rows_supersede_to_current_with_cursor_reset(self):
         from lib.pipeline_db import SearchPlanItemInput

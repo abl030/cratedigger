@@ -149,7 +149,7 @@ class TestSearchPlanServiceAddTime(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(4)
         assert active is not None
-        self.assertEqual(active.plan.metadata_snapshot["prepend_artist"], True)
+        self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
     def test_add_time_failure_records_failed_deterministic_plan(self):
@@ -252,7 +252,7 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(15)
         assert active is not None
-        self.assertEqual(active.plan.metadata_snapshot["prepend_artist"], True)
+        self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
     def test_regenerate_supersedes_previous_active_plan(self):
@@ -374,8 +374,9 @@ class TestSearchPlanServiceTrackCountReplan(unittest.TestCase):
         # The new plan's snapshot matches the new track count.
         active = self.db.get_active_search_plan(60)
         assert active is not None
-        snap = active.plan.metadata_snapshot or {}
-        self.assertEqual(snap.get("track_count"), len(full))
+        snap = active.plan.metadata_snapshot
+        assert snap is not None
+        self.assertEqual(snap.track_count, len(full))
 
     def test_same_track_count_no_replan(self):
         """When today's tracks count matches the snapshot, no regeneration."""

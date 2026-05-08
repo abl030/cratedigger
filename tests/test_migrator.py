@@ -331,6 +331,49 @@ class TestPersistedSearchPlansSchema(unittest.TestCase):
             with self.subTest(col=col):
                 self.assertEqual(is_null, "YES")
 
+    def test_search_log_plan_item_must_belong_to_logged_plan(self):
+        rid_a = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('owner-a', 'A', 'A', 'request')
+            RETURNING id
+        """)[0][0]
+        rid_b = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('owner-b', 'B', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            plan_a = self._query("""
+                INSERT INTO search_plans (request_id, generator_id, status)
+                VALUES (%s, 'g1', 'active')
+                RETURNING id
+            """, (rid_a,))[0][0]
+            plan_b = self._query("""
+                INSERT INTO search_plans (request_id, generator_id, status)
+                VALUES (%s, 'g1', 'active')
+                RETURNING id
+            """, (rid_b,))[0][0]
+            item_b = self._query("""
+                INSERT INTO search_plan_items
+                    (plan_id, ordinal, strategy, query)
+                VALUES (%s, 0, 'default', 'q')
+                RETURNING id
+            """, (plan_b,))[0][0]
+
+            with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                self._exec("""
+                    INSERT INTO search_log
+                        (request_id, query, outcome, plan_id, plan_item_id)
+                    VALUES (%s, 'q', 'no_match', %s, %s)
+                """, (rid_a, plan_a, item_b))
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id IN (%s, %s)",
+                (rid_a, rid_b),
+            )
+
     def test_search_log_outcome_check_still_allows_exhausted(self):
         """Migration 014 must NOT tighten the outcome domain.
 

@@ -20,6 +20,7 @@ from lib.pipeline_db import (
     SearchPlanStats,
     SearchPlanStatsBucket,
     SearchPlanStatsGroup,
+    jsonb_to_builtins,
 )
 from lib.search import SEARCH_PLAN_GENERATOR_ID
 
@@ -76,8 +77,8 @@ def _plan_to_dict(plan: SearchPlanRow) -> dict[str, Any]:
         "generator_id": plan.generator_id,
         "status": plan.status,
         "failure_class": plan.failure_class,
-        "metadata_snapshot": plan.metadata_snapshot,
-        "provenance": plan.provenance,
+        "metadata_snapshot": jsonb_to_builtins(plan.metadata_snapshot),
+        "provenance": jsonb_to_builtins(plan.provenance),
         "error_message": plan.error_message,
         "superseded_at": _iso(plan.superseded_at),
         "superseded_by_plan_id": plan.superseded_by_plan_id,
@@ -94,7 +95,7 @@ def _item_to_dict(item: SearchPlanItemRow) -> dict[str, Any]:
         "query": item.query,
         "canonical_query_key": item.canonical_query_key,
         "repeat_group": item.repeat_group,
-        "provenance": item.provenance,
+        "provenance": jsonb_to_builtins(item.provenance),
     }
 
 

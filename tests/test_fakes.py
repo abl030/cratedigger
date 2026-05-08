@@ -732,6 +732,35 @@ class TestFakePipelineDBSearchPlans(unittest.TestCase):
         self.assertEqual(db.search_logs, [])
         self.assertEqual(db.request(rid)["next_plan_ordinal"], 0)
 
+    def test_consumed_attempt_rejects_item_from_another_request(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid_a = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        rid_b = db.add_request(
+            artist_name="C", album_title="D", source="request",
+            mb_release_id="m2",
+        )
+        plan_a = db.create_successful_search_plan(
+            request_id=rid_a, generator_id="g1", items=self._items("Q0"))
+        plan_b = db.create_successful_search_plan(
+            request_id=rid_b, generator_id="g1", items=self._items("R0"))
+        item_b = next(
+            it for it in db.search_plan_items.values()
+            if it.plan_id == plan_b)
+
+        with self.assertRaises(ValueError):
+            db.record_consumed_search_attempt(ConsumedAttemptInput(
+                request_id=rid_a, plan_id=plan_a,
+                plan_item_id=item_b.id, plan_ordinal=0,
+                plan_strategy="slot_0", plan_canonical_query_key="q0",
+                plan_repeat_group=None, plan_generator_id="g1",
+                query="Q0", outcome="no_match", plan_item_count=1,
+            ))
+        self.assertEqual(db.search_logs, [])
+
     def test_non_consuming_logs_and_applies_backoff(self):
         from lib.pipeline_db import NonConsumingAttemptInput
         db = FakePipelineDB()

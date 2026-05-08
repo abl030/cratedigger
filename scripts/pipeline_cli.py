@@ -1547,6 +1547,12 @@ def cmd_search_plan_show(db, args):
     payload = build_inspection_payload(
         db, int(args.id), include_stats=include_stats)
     if isinstance(payload, RequestNotFound):
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "error": "Not found",
+                "request_id": payload.request_id,
+            }, indent=2, sort_keys=True))
+            return 2
         print(f"  Request {payload.request_id} not found.")
         return 2
     if getattr(args, "json", False):

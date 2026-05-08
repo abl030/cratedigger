@@ -2142,6 +2142,7 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(status, 422)
         self.assertEqual(data["outcome"], "failed_deterministic")
         self.assertEqual(data["failure_class"], "no_runnable_query")
+        self.assertEqual(data["error"], "all queries dropped")
 
     def test_regenerate_transient_failure_returns_503(self):
         with self._patch_service(
@@ -2153,6 +2154,7 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(status, 503)
         self.assertEqual(data["outcome"], "failed_transient")
         self.assertEqual(data["failure_class"], "resolver_unavailable")
+        self.assertEqual(data["error"], "resolver 503")
 
     def test_regenerate_passes_prepend_artist_flag_to_service(self):
         from unittest.mock import patch as _patch
@@ -2169,6 +2171,30 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         kwargs = mock_gen.call_args.kwargs
         self.assertTrue(kwargs.get("prepend_artist"))
         self.assertTrue(kwargs.get("regenerate"))
+
+    def test_regenerate_passes_missing_prepend_artist_as_default(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import ServiceResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+            return_value=ServiceResult(outcome="success", plan_id=1),
+        ) as mock_gen:
+            status, _ = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        self.assertIsNone(mock_gen.call_args.kwargs.get("prepend_artist"))
+
+    def test_regenerate_rejects_string_prepend_artist(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+        ) as mock_gen:
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate",
+                {"prepend_artist": "false"})
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"], "prepend_artist must be a boolean")
+        mock_gen.assert_not_called()
 
 
 def _kwargs_to_query(kwargs: dict) -> str:

@@ -1488,6 +1488,15 @@ class TestCmdSearchPlanShow(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("9999", out)
 
+    def test_search_plan_show_missing_request_json_is_structured(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "Not found")
+        self.assertEqual(payload["request_id"], 9999)
+
     def test_search_plan_show_no_plan_at_all_human_output_visible(self):
         db, rid = self._seed_request()
         rc, out = self._run(db, rid)

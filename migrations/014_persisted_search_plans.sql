@@ -141,7 +141,12 @@ CREATE TABLE search_plan_items (
     -- runners-up). Bounded by the application before insert.
     provenance JSONB,
 
-    UNIQUE (plan_id, ordinal)
+    UNIQUE (plan_id, ordinal),
+
+    -- Composite FK target for search_log(plan_item_id, plan_id). id is
+    -- already PK; this redundant key lets the DB enforce that a logged
+    -- plan_item_id belongs to the logged plan_id.
+    UNIQUE (id, plan_id)
 );
 
 CREATE INDEX idx_search_plan_items_plan_ordinal
@@ -237,6 +242,16 @@ ALTER TABLE search_log
     -- written. Lets dashboards bucket usefulness by cycle without needing the
     -- request's current cycle.
     ADD COLUMN plan_cycle_snapshot INTEGER;
+
+ALTER TABLE search_log
+    ADD CONSTRAINT search_log_plan_request_fkey
+    FOREIGN KEY (plan_id, request_id)
+    REFERENCES search_plans (id, request_id)
+    ON DELETE SET NULL (plan_id),
+    ADD CONSTRAINT search_log_plan_item_owner_fkey
+    FOREIGN KEY (plan_item_id, plan_id)
+    REFERENCES search_plan_items (id, plan_id)
+    ON DELETE SET NULL (plan_item_id);
 
 -- Plan-aware lookup indexes. Old per-request indexes remain.
 CREATE INDEX idx_search_log_plan_item

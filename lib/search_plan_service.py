@@ -434,11 +434,12 @@ class SearchPlanService:
         equal (skip the check) — they will be replaced on the next
         generator-id bump.
         """
-        snap = existing.plan.metadata_snapshot or {}
-        try:
-            recorded = snap.get("track_count")
-        except AttributeError:
+        snap = existing.plan.metadata_snapshot
+        if snap is None:
             return False
+        recorded = getattr(snap, "track_count", None)
+        if recorded is None and isinstance(snap, dict):
+            recorded = snap.get("track_count")
         if recorded is None:
             return False
         try:
