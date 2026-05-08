@@ -69,24 +69,22 @@ class DownloadOwnershipWriter:
         """
         db = self._open_db()
         try:
-            if plan_execution is not None:
-                is_current = getattr(db, "is_request_plan_current", None)
-                if is_current is None or not is_current(
+            if plan_execution is not None and not db.is_request_plan_current(
+                request_id,
+                plan_execution.plan_id,
+                plan_execution.plan_ordinal,
+                plan_execution.cycle_count_snapshot,
+            ):
+                logger.warning(
+                    "STALE_DOWNLOAD_CLAIM request_id=%s plan_id=%s "
+                    "ordinal=%s cycle=%s; request was regenerated "
+                    "mid-flight, skipping wanted->downloading claim",
                     request_id,
                     plan_execution.plan_id,
                     plan_execution.plan_ordinal,
                     plan_execution.cycle_count_snapshot,
-                ):
-                    logger.warning(
-                        "STALE_DOWNLOAD_CLAIM request_id=%s plan_id=%s "
-                        "ordinal=%s cycle=%s; request was regenerated "
-                        "mid-flight, skipping wanted->downloading claim",
-                        request_id,
-                        plan_execution.plan_id,
-                        plan_execution.plan_ordinal,
-                        plan_execution.cycle_count_snapshot,
-                    )
-                    return False
+                )
+                return False
             return transitions.finalize_request(
                 db,
                 request_id,

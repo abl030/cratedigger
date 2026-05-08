@@ -3320,8 +3320,8 @@ class PipelineDB:
                         request_id,
                         generator_id,
                         PLAN_STATUS_ACTIVE,
-                        json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
-                        json.dumps(provenance) if provenance is not None else None,
+                        psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
+                        psycopg2.extras.Json(provenance) if provenance is not None else None,
                         now,
                     ),
                 )
@@ -3329,14 +3329,15 @@ class PipelineDB:
                 assert row is not None, "INSERT RETURNING must produce a row"
                 plan_id = int(row["id"])
 
-                for item in items:
-                    cur.execute(
-                        """
-                        INSERT INTO search_plan_items
-                            (plan_id, ordinal, strategy, query,
-                             canonical_query_key, repeat_group, provenance)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO search_plan_items
+                        (plan_id, ordinal, strategy, query,
+                         canonical_query_key, repeat_group, provenance)
+                    VALUES %s
+                    """,
+                    [
                         (
                             plan_id,
                             item.ordinal,
@@ -3344,9 +3345,11 @@ class PipelineDB:
                             item.query,
                             item.canonical_query_key,
                             item.repeat_group,
-                            json.dumps(item.provenance) if item.provenance is not None else None,
-                        ),
-                    )
+                            psycopg2.extras.Json(item.provenance) if item.provenance is not None else None,
+                        )
+                        for item in items
+                    ],
+                )
 
                 if set_active:
                     cur.execute(
@@ -3409,8 +3412,8 @@ class PipelineDB:
                 generator_id,
                 status,
                 failure_class,
-                json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
-                json.dumps(provenance) if provenance is not None else None,
+                psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
+                psycopg2.extras.Json(provenance) if provenance is not None else None,
                 error_message,
             ),
         )
@@ -3490,8 +3493,8 @@ class PipelineDB:
                         request_id,
                         generator_id,
                         PLAN_STATUS_ACTIVE,
-                        json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
-                        json.dumps(provenance) if provenance is not None else None,
+                        psycopg2.extras.Json(metadata_snapshot) if metadata_snapshot is not None else None,
+                        psycopg2.extras.Json(provenance) if provenance is not None else None,
                         now,
                     ),
                 )
@@ -3509,14 +3512,15 @@ class PipelineDB:
                         (new_plan_id, old_active_id),
                     )
 
-                for item in items:
-                    cur.execute(
-                        """
-                        INSERT INTO search_plan_items
-                            (plan_id, ordinal, strategy, query,
-                             canonical_query_key, repeat_group, provenance)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO search_plan_items
+                        (plan_id, ordinal, strategy, query,
+                         canonical_query_key, repeat_group, provenance)
+                    VALUES %s
+                    """,
+                    [
                         (
                             new_plan_id,
                             item.ordinal,
@@ -3524,9 +3528,11 @@ class PipelineDB:
                             item.query,
                             item.canonical_query_key,
                             item.repeat_group,
-                            json.dumps(item.provenance) if item.provenance is not None else None,
-                        ),
-                    )
+                            psycopg2.extras.Json(item.provenance) if item.provenance is not None else None,
+                        )
+                        for item in items
+                    ],
+                )
 
                 cur.execute(
                     """

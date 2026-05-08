@@ -335,8 +335,7 @@ def finalize_request_if_plan_current(
     successful mutation, ``False`` on stale-skip OR on guarded-write
     rejection inside ``apply_transition``.
     """
-    is_current = getattr(db, "is_request_plan_current", None)
-    if is_current is None or not is_current(
+    if not db.is_request_plan_current(
         request_id, plan_id, plan_ordinal, cycle_count_snapshot,
     ):
         logger.warning(

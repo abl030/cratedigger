@@ -304,6 +304,7 @@ def _select_active_plan_item_for_album(album, db):
     string. We do NOT call ``build_query`` here.
     """
     from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
+    from lib.pipeline_db import PLAN_STATUS_ACTIVE
 
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
@@ -316,7 +317,7 @@ def _select_active_plan_item_for_album(album, db):
         # defense in depth for anything that might reach here outside
         # ``get_wanted_searchable``.
         return None
-    if active.plan.status != "active":
+    if active.plan.status != PLAN_STATUS_ACTIVE:
         return None
     if not active.items:
         return None

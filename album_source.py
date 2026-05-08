@@ -401,32 +401,3 @@ class DatabaseSource:
         if self._db:
             self._db.close()
             self._db = None
-
-    # ------------------------------------------------------------------
-    # Search-plan snapshot helpers (U3)
-    # ------------------------------------------------------------------
-    #
-    # The plan-generation service in `lib/search_plan_service.py` consumes
-    # `ReleaseSnapshot`s built from persisted rows. Expose a thin
-    # adapter here so startup reconciliation (U4) and explicit
-    # regeneration (U8) can build a snapshot from the same source the
-    # cycle uses to read wanted rows, without coupling generation into
-    # `get_wanted()` itself.
-
-    def snapshot_from_request(self, request_id: int):
-        """Return a `ReleaseSnapshot` for one persisted request.
-
-        Lazily populates tracks via the same MB/Discogs path
-        `get_wanted()` uses when an album is missing tracks. Returns
-        ``None`` when the request does not exist.
-        """
-        from lib.release_snapshot import snapshot_from_request_row
-
-        db = self._get_db()
-        row = db.get_request(request_id)
-        if row is None:
-            return None
-        tracks = db.get_tracks(request_id)
-        if not tracks:
-            tracks = self._populate_tracks(row)
-        return snapshot_from_request_row(row, tracks)
