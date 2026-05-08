@@ -3889,6 +3889,77 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertIsNotNone(row["superseded_at"])
         self.assertEqual(row["superseded_by_plan_id"], new_id)
 
+    def test_get_active_search_plan_returns_items_in_ordinal_order(self):
+        """Single-query plan fetch returns items ordered by ordinal with
+        every column hydrated (provenance, canonical_query_key,
+        repeat_group). Guards the JSONB-aggregation rewrite of
+        ``get_active_search_plan`` against drift from the prior two-query
+        shape.
+        """
+        items = [
+            self.SearchPlanItemInput(
+                ordinal=0, strategy="primary", query="Artist Album",
+                canonical_query_key="artist album",
+                repeat_group="default",
+                provenance={"source": "deterministic", "step": 1},
+            ),
+            self.SearchPlanItemInput(
+                ordinal=1, strategy="track1", query="Artist Track 1",
+                canonical_query_key="artist track 1",
+                provenance={"source": "track", "step": 2},
+            ),
+            self.SearchPlanItemInput(
+                ordinal=2, strategy="track2", query="Artist Track 2",
+                canonical_query_key="artist track 2",
+                provenance=None,
+            ),
+        ]
+        # Insert plan items with ordinals reversed to prove ORDER BY works.
+        self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=list(reversed(items)),
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(len(active.items), 3)
+        ordinals = [it.ordinal for it in active.items]
+        self.assertEqual(ordinals, [0, 1, 2])
+        self.assertEqual(active.items[0].query, "Artist Album")
+        self.assertEqual(active.items[0].canonical_query_key, "artist album")
+        self.assertEqual(active.items[0].repeat_group, "default")
+        self.assertEqual(
+            active.items[0].provenance,
+            {"source": "deterministic", "step": 1})
+        self.assertEqual(active.items[1].strategy, "track1")
+        self.assertEqual(
+            active.items[1].provenance, {"source": "track", "step": 2})
+        self.assertIsNone(active.items[2].provenance)
+        self.assertIsNone(active.items[2].repeat_group)
+        # IDs must be present + ints (matched the prior two-query contract).
+        for it in active.items:
+            self.assertIsInstance(it.id, int)
+            self.assertGreater(it.id, 0)
+            self.assertEqual(it.plan_id, active.plan.id)
+
+    def test_get_active_search_plan_handles_zero_items(self):
+        """LEFT JOIN + jsonb_agg can mis-handle the zero-item case (NULL
+        or ``[null]``). Confirm an active plan whose items got deleted
+        out-of-band returns ``items=[]`` rather than crashing or
+        constructing a row from NULLs.
+        """
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=self._items("only"),
+        )
+        # Out-of-band deletion (production never does this; the migrator
+        # might, or a future cleanup tool).
+        self.db._execute(
+            "DELETE FROM search_plan_items WHERE plan_id = %s", (plan_id,))
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(active.plan.id, plan_id)
+        self.assertEqual(active.items, [])
+
 
 @requires_postgres
 class TestGetWantedSearchable(unittest.TestCase):

@@ -3621,6 +3621,15 @@ class PipelineDB:
         never generated, or the latest attempt failed deterministically).
         Use ``get_search_plan_inspection`` to also surface failed/superseded
         plans for human inspection.
+
+        Single-query implementation: joins ``album_requests`` →
+        ``search_plans`` → ``search_plan_items`` and aggregates items into
+        a JSONB array via ``jsonb_agg(... ORDER BY spi.ordinal)
+        FILTER (WHERE spi.id IS NOT NULL)``. The FILTER clause keeps the
+        outer LEFT JOIN safe when a plan has zero items
+        (``coalesce(..., '[]'::jsonb)`` returns an empty list rather than
+        ``[null]``). Phase 2 calls this once per wanted album per cycle,
+        so collapsing 2 RTTs to 1 saves ~1168 round-trips/cycle in prod.
         """
         cur = self._execute(
             """
@@ -3628,10 +3637,32 @@ class PipelineDB:
                    sp.id AS plan_id, sp.request_id, sp.generator_id,
                    sp.status, sp.failure_class, sp.metadata_snapshot,
                    sp.provenance, sp.error_message, sp.superseded_at,
-                   sp.superseded_by_plan_id, sp.created_at
+                   sp.superseded_by_plan_id, sp.created_at,
+                   COALESCE(
+                     jsonb_agg(
+                       jsonb_build_object(
+                         'id', spi.id,
+                         'plan_id', spi.plan_id,
+                         'ordinal', spi.ordinal,
+                         'strategy', spi.strategy,
+                         'query', spi.query,
+                         'canonical_query_key', spi.canonical_query_key,
+                         'repeat_group', spi.repeat_group,
+                         'provenance', spi.provenance
+                       )
+                       ORDER BY spi.ordinal ASC
+                     ) FILTER (WHERE spi.id IS NOT NULL),
+                     '[]'::jsonb
+                   ) AS items_json
             FROM album_requests ar
             JOIN search_plans sp ON ar.active_plan_id = sp.id
+            LEFT JOIN search_plan_items spi ON spi.plan_id = sp.id
             WHERE ar.id = %s
+            GROUP BY ar.next_plan_ordinal, ar.plan_cycle_count,
+                     sp.id, sp.request_id, sp.generator_id, sp.status,
+                     sp.failure_class, sp.metadata_snapshot, sp.provenance,
+                     sp.error_message, sp.superseded_at,
+                     sp.superseded_by_plan_id, sp.created_at
             """,
             (request_id,),
         )
@@ -3653,7 +3684,19 @@ class PipelineDB:
                 if row["superseded_by_plan_id"] is not None else None),
             created_at=row["created_at"],
         )
-        items = self._fetch_plan_items(plan.id)
+        items = [
+            SearchPlanItemRow(
+                id=int(it["id"]),
+                plan_id=int(it["plan_id"]),
+                ordinal=int(it["ordinal"]),
+                strategy=it["strategy"],
+                query=it["query"],
+                canonical_query_key=it["canonical_query_key"],
+                repeat_group=it["repeat_group"],
+                provenance=it["provenance"],
+            )
+            for it in row["items_json"]
+        ]
         return ActiveSearchPlan(
             plan=plan,
             items=items,
