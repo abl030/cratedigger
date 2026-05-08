@@ -211,6 +211,10 @@ def _make_server():
                         "exhausted": 0,
                         "errors": 1,
                     },
+                    "cursor_wraps": 0,
+                    "stale_completions": 0,
+                    "non_consuming": 1,
+                    "cache_attribution_level": "cycle_only",
                 },
                 {
                     "label": "6h",
@@ -230,6 +234,10 @@ def _make_server():
                         "exhausted": 0,
                         "errors": 0,
                     },
+                    "cursor_wraps": 0,
+                    "stale_completions": 0,
+                    "non_consuming": 0,
+                    "cache_attribution_level": "cycle_only",
                 },
             ],
         },
@@ -431,6 +439,15 @@ def _make_server():
                     "new_dirs": 75,
                 },
             ],
+        },
+        "plan_readiness": {
+            "generator_id": "search-plan/2026-05-08-1",
+            "wanted_total": 10,
+            "wanted_searchable": 7,
+            "wanted_legacy": 1,
+            "wanted_failed_deterministic": 1,
+            "wanted_failed_transient": 1,
+            "wanted_no_plan": 0,
         },
     }
     mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
@@ -1036,12 +1053,24 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
     DASHBOARD_REQUIRED_FIELDS = {
         "generated_at", "redis", "searches", "cycles", "coverage",
-        "peer_dirs",
+        "peer_dirs", "plan_readiness",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
         "searches_per_hour", "searches_per_24h", "avg_elapsed_s",
         "median_elapsed_s", "p95_elapsed_s", "max_elapsed_s", "outcomes",
+        # Persisted-search-plans rollout (U7): wrap/stale/non-consuming
+        # counts replace the exhausted-based reset signal. Cache
+        # attribution is surfaced honestly (search_log has no per-search
+        # cache columns today) so the dashboard cannot imply per-slot
+        # cache numbers exist.
+        "cursor_wraps", "stale_completions", "non_consuming",
+        "cache_attribution_level",
+    }
+    DASHBOARD_PLAN_READINESS_FIELDS = {
+        "generator_id", "wanted_total", "wanted_searchable",
+        "wanted_legacy", "wanted_failed_deterministic",
+        "wanted_failed_transient", "wanted_no_plan",
     }
     DASHBOARD_CYCLE_WINDOW_FIELDS = {
         "label", "hours", "cycles", "avg_cycle_s", "median_cycle_s",
@@ -1230,6 +1259,32 @@ class TestPipelineRouteContracts(_WebServerCase):
             data["coverage"]["top_loop_suspects"][0],
             {"reset_24h", "problem_24h"},
             "pipeline dashboard loop suspect",
+        )
+        # Persisted-search-plans plan-readiness panel (U7). Replaces
+        # exhausted-based reporting with explicit plan-state buckets.
+        _assert_required_fields(
+            self,
+            data["plan_readiness"],
+            self.DASHBOARD_PLAN_READINESS_FIELDS,
+            "pipeline dashboard plan readiness",
+        )
+        readiness = data["plan_readiness"]
+        # Sum of buckets must equal wanted_total. Off-by-one means the
+        # classifier dropped a row on the floor.
+        self.assertEqual(
+            readiness["wanted_total"],
+            (readiness["wanted_searchable"]
+             + readiness["wanted_legacy"]
+             + readiness["wanted_failed_deterministic"]
+             + readiness["wanted_failed_transient"]
+             + readiness["wanted_no_plan"]),
+            "plan_readiness buckets must sum to wanted_total",
+        )
+        # Cache attribution level on every search window is the honest
+        # surface, not a per-slot number.
+        self.assertEqual(
+            data["searches"]["windows"][0]["cache_attribution_level"],
+            "cycle_only",
         )
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {

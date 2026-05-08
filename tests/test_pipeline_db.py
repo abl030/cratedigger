@@ -1335,6 +1335,210 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
 
 
 @requires_postgres
+class TestSearchPlanReadiness(unittest.TestCase):
+    """U7: ``get_search_plan_readiness`` aggregates wanted rows into
+    plan-readiness buckets that replace exhausted-based reporting.
+
+    The classifier must be exhaustive and exclusive: every wanted row
+    belongs to exactly one bucket, the buckets sum to ``wanted_total``,
+    and ``wanted_no_plan > 0`` is the operator stop-the-deploy signal.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_wanted(self, suffix: str) -> int:
+        return self.db.add_request(
+            mb_release_id=f"plan-readiness-{suffix}",
+            artist_name="Readiness", album_title=suffix,
+            source="request",
+        )
+
+    def _items(self, *queries: str):
+        return [
+            self.SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=q,
+                canonical_query_key=q.lower(),
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def test_empty_db_returns_zeroed_buckets(self):
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness, {
+            "generator_id": "g1",
+            "wanted_total": 0,
+            "wanted_searchable": 0,
+            "wanted_legacy": 0,
+            "wanted_failed_deterministic": 0,
+            "wanted_failed_transient": 0,
+            "wanted_no_plan": 0,
+        })
+
+    def test_buckets_partition_wanted_total(self):
+        # 1 searchable, 1 legacy, 1 deterministic-failed, 1 transient,
+        # 1 no-plan.
+        rid_search = self._add_wanted("searchable")
+        rid_legacy = self._add_wanted("legacy")
+        rid_det = self._add_wanted("det_failed")
+        rid_trans = self._add_wanted("trans_failed")
+        rid_noplan = self._add_wanted("no_plan")
+        # Searchable: active plan with current generator.
+        self.db.create_successful_search_plan(
+            request_id=rid_search, generator_id="g1",
+            items=self._items("query A"))
+        # Legacy: active plan with old generator id.
+        self.db.create_successful_search_plan(
+            request_id=rid_legacy, generator_id="g0_old",
+            items=self._items("query B"))
+        # Deterministic-failed on current generator.
+        self.db.create_failed_search_plan(
+            request_id=rid_det, generator_id="g1",
+            failure_class="no_runnable_query",
+            error_message="empty",
+            transient=False,
+        )
+        # Transient-failed on current generator.
+        self.db.create_failed_search_plan(
+            request_id=rid_trans, generator_id="g1",
+            failure_class="resolver_unavailable",
+            error_message="resolver down",
+            transient=True,
+        )
+        # rid_noplan has no plans at all.
+
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness["wanted_total"], 5)
+        self.assertEqual(readiness["wanted_searchable"], 1)
+        self.assertEqual(readiness["wanted_legacy"], 1)
+        self.assertEqual(readiness["wanted_failed_deterministic"], 1)
+        self.assertEqual(readiness["wanted_failed_transient"], 1)
+        self.assertEqual(readiness["wanted_no_plan"], 1)
+        # Sum invariant.
+        self.assertEqual(
+            readiness["wanted_total"],
+            sum(readiness[k] for k in (
+                "wanted_searchable", "wanted_legacy",
+                "wanted_failed_deterministic", "wanted_failed_transient",
+                "wanted_no_plan")))
+
+    def test_old_generator_failed_plan_falls_to_no_plan(self):
+        """A failed plan on a *different* generator id does not satisfy
+        the readiness check for the current id -- treat it the same as
+        having no plan at all (startup reconciliation will retry)."""
+        rid = self._add_wanted("old_generator_failure")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g0_old",
+            failure_class="no_runnable_query",
+            error_message="historical",
+            transient=False,
+        )
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness["wanted_total"], 1)
+        self.assertEqual(readiness["wanted_no_plan"], 1)
+        self.assertEqual(readiness["wanted_failed_deterministic"], 0)
+
+
+@requires_postgres
+class TestDashboardWrapMetrics(unittest.TestCase):
+    """U7: ``cursor_update_status='wrapped'`` rows replace ``outcome=
+    'exhausted'`` as the cycle-wrap signal in dashboard search windows.
+    Historical exhausted rows still appear in the existing
+    ``outcomes.exhausted`` bucket so legacy reporting does not lie about
+    pre-cutover history.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, SearchPlanItemInput,
+        )
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="wrap-mbid",
+            artist_name="Wrap", album_title="Test",
+            source="request",
+        )
+        items = [
+            SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=f"q{i}",
+                canonical_query_key=f"k{i}",
+            )
+            for i in range(2)
+        ]
+        self.plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=items, set_active=True,
+        )
+        plan_items = self.db._execute(
+            "SELECT id, ordinal FROM search_plan_items "
+            "WHERE plan_id = %s ORDER BY ordinal", (self.plan_id,)
+        ).fetchall()
+        self.plan_items = [dict(r) for r in plan_items]
+
+    def tearDown(self):
+        self.db.close()
+
+    def _consume(self, ordinal: int, outcome: str) -> None:
+        item = self.plan_items[ordinal]
+        self.db.record_consumed_search_attempt(self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=self.plan_id,
+            plan_item_id=item["id"],
+            plan_ordinal=ordinal,
+            plan_strategy=f"slot_{ordinal}",
+            plan_canonical_query_key=f"k{ordinal}",
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query=f"q{ordinal}",
+            outcome=outcome,
+            plan_item_count=len(self.plan_items),
+            elapsed_s=1.0, result_count=0,
+            apply_scheduler_attempt=True,
+            scheduler_success=False,
+        ))
+
+    def test_wrap_count_increments_per_cycle_wrap(self):
+        # Walk through the plan twice -- two wraps expected.
+        for _ in range(2):
+            for ordinal in range(len(self.plan_items)):
+                self._consume(ordinal, "no_results")
+
+        metrics = self.db.get_pipeline_dashboard_metrics(plan_generator_id="g1")
+        windows = metrics["searches"]["windows"]
+        self.assertTrue(windows)
+        window_24h = next(w for w in windows if w["label"] == "24h")
+        self.assertEqual(window_24h["cursor_wraps"], 2)
+        # Sanity: no new exhausted rows after the cutover.
+        self.assertEqual(window_24h["outcomes"]["exhausted"], 0)
+        # Cache attribution stays cycle-only -- ``search_log`` has no
+        # per-search cache columns.
+        self.assertEqual(window_24h["cache_attribution_level"], "cycle_only")
+
+    def test_historical_exhausted_rows_still_counted(self):
+        """Pre-cutover ``outcome='exhausted'`` rows must remain visible in
+        the existing search-window bucket. The dashboard does not strip
+        them out; it only stops emitting new ones."""
+        self.db.log_search(
+            self.req_id, query="historical-exhausted",
+            elapsed_s=0.0, outcome="exhausted",
+        )
+        metrics = self.db.get_pipeline_dashboard_metrics(plan_generator_id="g1")
+        window_24h = next(
+            w for w in metrics["searches"]["windows"] if w["label"] == "24h"
+        )
+        self.assertEqual(window_24h["outcomes"]["exhausted"], 1)
+        # No wraps yet -- historical exhausted is not a wrap.
+        self.assertEqual(window_24h["cursor_wraps"], 0)
+
+
+@requires_postgres
 class TestDenylist(unittest.TestCase):
     def setUp(self):
         self.db = make_db()

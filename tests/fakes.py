@@ -2081,7 +2081,14 @@ class FakePipelineDB:
             },
         }
 
-    def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
+    def get_pipeline_dashboard_metrics(
+        self,
+        *,
+        plan_generator_id: str | None = None,
+    ) -> dict[str, Any]:
+        if plan_generator_id is None:
+            from lib.search import SEARCH_PLAN_GENERATOR_ID
+            plan_generator_id = SEARCH_PLAN_GENERATOR_ID
         peer_dirs = self.get_peer_dir_daily_metrics()
         peer_dirs["heavy_queries"] = []
         peer_dirs["heavy_query_hours"] = 24
@@ -2099,6 +2106,71 @@ class FakePipelineDB:
             },
             "coverage": {},
             "peer_dirs": peer_dirs,
+            "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
+        }
+
+    def get_search_plan_readiness(
+        self,
+        generator_id: str,
+    ) -> dict[str, Any]:
+        """Mirror of ``PipelineDB.get_search_plan_readiness`` for tests.
+
+        Walks ``self._requests`` + ``self.search_plans`` to bucket each
+        wanted row exactly once. See the live implementation in
+        ``lib/pipeline_db.py`` for bucket precedence; both must agree on
+        every transition or the dashboard contract breaks silently.
+        """
+        wanted_total = 0
+        wanted_searchable = 0
+        wanted_legacy = 0
+        wanted_failed_deterministic = 0
+        wanted_failed_transient = 0
+        wanted_no_plan = 0
+        for req in self._requests.values():
+            if req.get("status") != "wanted":
+                continue
+            wanted_total += 1
+            active_id = req.get("active_plan_id")
+            active_plan = (
+                self.search_plans.get(active_id)
+                if active_id is not None else None
+            )
+            if active_plan is not None and active_plan.generator_id == generator_id:
+                wanted_searchable += 1
+                continue
+            if active_plan is not None and active_plan.generator_id != generator_id:
+                wanted_legacy += 1
+                continue
+            # No active plan -- look for failed plans on the current
+            # generator id. Deterministic > transient (sticky).
+            req_id = req["id"]
+            has_det = any(
+                p.request_id == req_id
+                and p.generator_id == generator_id
+                and p.status == "failed_deterministic"
+                for p in self.search_plans.values()
+            )
+            if has_det:
+                wanted_failed_deterministic += 1
+                continue
+            has_trans = any(
+                p.request_id == req_id
+                and p.generator_id == generator_id
+                and p.status == "failed_transient"
+                for p in self.search_plans.values()
+            )
+            if has_trans:
+                wanted_failed_transient += 1
+                continue
+            wanted_no_plan += 1
+        return {
+            "generator_id": generator_id,
+            "wanted_total": wanted_total,
+            "wanted_searchable": wanted_searchable,
+            "wanted_legacy": wanted_legacy,
+            "wanted_failed_deterministic": wanted_failed_deterministic,
+            "wanted_failed_transient": wanted_failed_transient,
+            "wanted_no_plan": wanted_no_plan,
         }
 
     def _download_log_to_dict(self,

@@ -2493,16 +2493,30 @@ class PipelineDB:
             },
         }
 
-    def get_pipeline_dashboard_metrics(self) -> dict[str, Any]:
+    def get_pipeline_dashboard_metrics(
+        self,
+        *,
+        plan_generator_id: str | None = None,
+    ) -> dict[str, Any]:
         """Return DB-derived metrics for the Pipeline dashboard.
 
         Redis status is owned by the web cache layer; this method intentionally
         covers only persisted Postgres state: searches, cycles, and active
         request coverage.
+
+        ``plan_generator_id`` selects the search-plan generator id used to
+        bucket wanted rows in the plan-readiness panel. Defaults to
+        ``lib.search.SEARCH_PLAN_GENERATOR_ID`` so the dashboard tracks
+        whatever the running pipeline considers current. Tests can pin a
+        different id without monkey-patching the constant.
         """
+        if plan_generator_id is None:
+            from lib.search import SEARCH_PLAN_GENERATOR_ID
+            plan_generator_id = SEARCH_PLAN_GENERATOR_ID
         peer_dirs = self.get_peer_dir_daily_metrics()
         peer_dirs["heavy_queries"] = self._dashboard_peer_dir_heavy_queries()
         peer_dirs["heavy_query_hours"] = 24
+        plan_readiness = self.get_search_plan_readiness(plan_generator_id)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "searches": {
@@ -2525,6 +2539,7 @@ class PipelineDB:
             },
             "coverage": self._dashboard_coverage(),
             "peer_dirs": peer_dirs,
+            "plan_readiness": plan_readiness,
         }
 
     def _dashboard_peer_dir_heavy_queries(
@@ -2598,6 +2613,12 @@ class PipelineDB:
         }
 
     def _dashboard_search_window(self, label: str, hours: int) -> dict[str, Any]:
+        # ``exhausted`` is HISTORICAL ONLY after the persisted-search-plans
+        # cutover -- new code never writes ``outcome='exhausted'`` rows.
+        # ``cursor_wraps`` is the plan-driven equivalent: a search-log row
+        # with ``cursor_update_status='wrapped'`` is what increments
+        # ``plan_cycle_count``. Together the two fields let dashboards
+        # diff "old reset signal" vs "new wrap signal" during the rollout.
         cur = self._execute("""
             SELECT
                 COUNT(*)::int AS searches,
@@ -2612,7 +2633,10 @@ class PipelineDB:
                 COUNT(*) FILTER (WHERE outcome = 'no_match')::int AS no_match,
                 COUNT(*) FILTER (WHERE outcome = 'no_results')::int AS no_results,
                 COUNT(*) FILTER (WHERE outcome = 'exhausted')::int AS exhausted,
-                COUNT(*) FILTER (WHERE outcome IN ('timeout', 'error', 'empty_query'))::int AS errors
+                COUNT(*) FILTER (WHERE outcome IN ('timeout', 'error', 'empty_query'))::int AS errors,
+                COUNT(*) FILTER (WHERE cursor_update_status = 'wrapped')::int AS cursor_wraps,
+                COUNT(*) FILTER (WHERE cursor_update_status = 'stale')::int AS stale_completions,
+                COUNT(*) FILTER (WHERE attempt_consumed = false)::int AS non_consuming
             FROM search_log
             WHERE created_at >= NOW() - %s::interval
         """, (f"{hours} hours",))
@@ -2633,9 +2657,25 @@ class PipelineDB:
                 "found": int(row.get("found") or 0),
                 "no_match": int(row.get("no_match") or 0),
                 "no_results": int(row.get("no_results") or 0),
+                # Historical only -- preserved so legacy rows still render
+                # in their existing position. Any non-zero count for rows
+                # newer than the persisted-search-plans deploy timestamp is
+                # a regression; see docs/persisted-search-plans-rollout.md.
                 "exhausted": int(row.get("exhausted") or 0),
                 "errors": int(row.get("errors") or 0),
             },
+            # Plan-driven cycle metrics. ``cursor_wraps`` replaces the
+            # ``exhausted`` reset signal: it is one-per-cycle per request
+            # and increments ``plan_cycle_count``. ``stale_completions``
+            # are post-regeneration log-only rows. ``non_consuming`` are
+            # pre-attempt setup failures that did not advance the cursor.
+            "cursor_wraps": int(row.get("cursor_wraps") or 0),
+            "stale_completions": int(row.get("stale_completions") or 0),
+            "non_consuming": int(row.get("non_consuming") or 0),
+            # Cache attribution honesty: surface that ``search_log`` has
+            # no per-search cache columns today; only cycle-level counters
+            # exist. See ``CACHE_ATTRIBUTION_CYCLE_ONLY``.
+            "cache_attribution_level": CACHE_ATTRIBUTION_CYCLE_ONLY,
         }
 
     def _dashboard_cycle_window(self, label: str, hours: int) -> dict[str, Any]:
@@ -2900,6 +2940,106 @@ class PipelineDB:
             "matches_6h": matches_6h,
             "matches_per_hour_24h": matches_24h / 24,
             "matches_per_hour_6h": matches_6h / 6,
+        }
+
+    def get_search_plan_readiness(
+        self,
+        generator_id: str,
+    ) -> dict[str, Any]:
+        """Aggregate plan-readiness counts for the wanted bucket.
+
+        Bucket precedence (each wanted row falls into exactly one bucket):
+
+          1. ``wanted_searchable`` -- ``status='wanted'`` AND active plan
+             whose ``generator_id`` matches the current generator id.
+          2. ``wanted_legacy`` -- has an active plan but its ``generator_id``
+             differs from the current id (old-generator carryover that
+             startup reconciliation will supersede next pass).
+          3. ``wanted_failed_deterministic`` -- no active plan AND a
+             ``failed_deterministic`` plan exists for the current generator
+             id. Sticky; cannot be re-tried by reconciliation.
+          4. ``wanted_failed_transient`` -- no active plan AND a
+             ``failed_transient`` plan exists for the current generator id.
+             Reconciliation will retry next cycle.
+          5. ``wanted_no_plan`` -- no active plan AND no current-generator
+             plan rows at all. This is the stop-the-deploy signal.
+
+        ``wanted_total`` equals the sum of buckets. The total is read off
+        ``album_requests`` directly so any drift between sum and total is
+        a bug (drop-the-buckets-on-the-floor classifier mistake) and not
+        a missing row.
+
+        Read-only and dashboard-grade: one SQL query. Callers should not
+        treat any zero count as proof of post-cutover correctness; pair
+        this with ``docs/persisted-search-plans-rollout.md`` SQL spot
+        checks (active-plan FK integrity, contiguous ordinals, post-deploy
+        ``outcome='exhausted'`` rate).
+        """
+        cur = self._execute(
+            """
+            WITH wanted AS (
+                SELECT id, active_plan_id
+                FROM album_requests
+                WHERE status = 'wanted'
+            ),
+            classified AS (
+                SELECT
+                    w.id,
+                    CASE
+                        WHEN w.active_plan_id IS NOT NULL
+                             AND active_plan.generator_id = %s
+                            THEN 'wanted_searchable'
+                        WHEN w.active_plan_id IS NOT NULL
+                             AND active_plan.generator_id IS NOT NULL
+                             AND active_plan.generator_id <> %s
+                            THEN 'wanted_legacy'
+                        WHEN EXISTS (
+                            SELECT 1 FROM search_plans sp
+                            WHERE sp.request_id = w.id
+                              AND sp.generator_id = %s
+                              AND sp.status = 'failed_deterministic'
+                        )
+                            THEN 'wanted_failed_deterministic'
+                        WHEN EXISTS (
+                            SELECT 1 FROM search_plans sp
+                            WHERE sp.request_id = w.id
+                              AND sp.generator_id = %s
+                              AND sp.status = 'failed_transient'
+                        )
+                            THEN 'wanted_failed_transient'
+                        ELSE 'wanted_no_plan'
+                    END AS bucket
+                FROM wanted w
+                LEFT JOIN search_plans active_plan
+                  ON active_plan.id = w.active_plan_id
+            )
+            SELECT
+                COUNT(*)::int AS wanted_total,
+                COUNT(*) FILTER (WHERE bucket = 'wanted_searchable')::int
+                    AS wanted_searchable,
+                COUNT(*) FILTER (WHERE bucket = 'wanted_legacy')::int
+                    AS wanted_legacy,
+                COUNT(*) FILTER (WHERE bucket = 'wanted_failed_deterministic')::int
+                    AS wanted_failed_deterministic,
+                COUNT(*) FILTER (WHERE bucket = 'wanted_failed_transient')::int
+                    AS wanted_failed_transient,
+                COUNT(*) FILTER (WHERE bucket = 'wanted_no_plan')::int
+                    AS wanted_no_plan
+            FROM classified
+            """,
+            (generator_id, generator_id, generator_id, generator_id),
+        )
+        row = cur.fetchone() or {}
+        return {
+            "generator_id": generator_id,
+            "wanted_total": int(row.get("wanted_total") or 0),
+            "wanted_searchable": int(row.get("wanted_searchable") or 0),
+            "wanted_legacy": int(row.get("wanted_legacy") or 0),
+            "wanted_failed_deterministic": int(
+                row.get("wanted_failed_deterministic") or 0),
+            "wanted_failed_transient": int(
+                row.get("wanted_failed_transient") or 0),
+            "wanted_no_plan": int(row.get("wanted_no_plan") or 0),
         }
 
     def _dashboard_loop_suspects(self) -> list[dict[str, Any]]:
