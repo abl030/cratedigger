@@ -62,6 +62,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("import_jobs", table_names)
         self.assertIn("cycle_metrics", table_names)
         self.assertIn("peer_dir_observations", table_names)
+        self.assertIn("peer_dir_daily_aggregates", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
