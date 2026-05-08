@@ -132,6 +132,20 @@ class TestConfigFromIni(unittest.TestCase):
         cfg = CratediggerConfig.from_ini(ini)
         self.assertEqual(cfg.search_escalation_threshold, 5)
 
+    def test_search_plan_config_translation_uses_search_escalation_threshold(self):
+        """`search_plan_config_from_cratedigger_config` is the single source
+        the service / CLI / web all read for generation-affecting config.
+        Threshold parsed from INI must propagate verbatim into the pure
+        `SearchPlanConfig` the generator consumes."""
+        from lib.search_plan_service import (
+            search_plan_config_from_cratedigger_config,
+        )
+        ini = configparser.ConfigParser()
+        ini.read_string("[Search Settings]\nsearch_escalation_threshold = 11\n")
+        cfg = CratediggerConfig.from_ini(ini)
+        plan_cfg = search_plan_config_from_cratedigger_config(cfg)
+        self.assertEqual(plan_cfg.escalation_threshold, 11)
+
     def test_search_settings_defaults_when_section_missing(self):
         """Missing [Search Settings] section yields the documented defaults."""
         ini = configparser.ConfigParser()

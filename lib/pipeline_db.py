@@ -112,6 +112,13 @@ ADVISORY_LOCK_NAMESPACE_RELEASE = 0x52454C45
 # ``0x51554555`` = ASCII "QUEU", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_IMPORTER = 0x51554555
 
+# Per-request lock — search-plan generation / supersession / cursor
+# serialisation. Held by ``SearchPlanService`` so plan creation, supersession,
+# and the cursor-coupled writes around them never race for the same
+# ``request_id`` across CLI / web / startup. Key = ``request_id``.
+# ``0x504C414E`` = ASCII "PLAN", recognisable in ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
+
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.

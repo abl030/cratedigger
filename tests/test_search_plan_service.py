@@ -1,0 +1,498 @@
+"""Tests for `lib.search_plan_service.SearchPlanService`.
+
+Covers AE1, AE2, AE12, AE13 from the persisted-search-plans plan plus the
+edge cases enumerated in §U3:
+
+* add-time generation creates an active plan + cursor at ordinal 0
+* deterministic no-runnable-query failure is sticky and does not make the
+  request searchable
+* resolver outage records a transient failure that a later call can clear
+* CLI and web add paths converge on the same `ReleaseSnapshot` /
+  `SearchPlan` for the same release data
+* duplicate-add and explicit-regenerate semantics
+* failure preserves the previously-active successful plan
+* sanitizer redacts paths / secrets / truncates long blobs
+* generator-id is the single source of truth across CLI / web / service.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from unittest.mock import MagicMock
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from lib.config import CratediggerConfig
+from lib.pipeline_db import (
+    PLAN_STATUS_ACTIVE,
+    PLAN_STATUS_FAILED_DETERMINISTIC,
+    PLAN_STATUS_FAILED_TRANSIENT,
+    PLAN_STATUS_SUPERSEDED,
+)
+from lib.release_snapshot import (
+    ResolverFailure,
+    ResolverMetadataIncomplete,
+    snapshot_from_add_payload,
+    snapshot_from_request_row,
+)
+from lib.search import SEARCH_PLAN_GENERATOR_ID, generate_search_plan
+from lib.search_plan_service import (
+    FAILURE_CLASS_DEPENDENCY_FAILURE,
+    FAILURE_CLASS_METADATA_INCOMPLETE,
+    FAILURE_CLASS_NO_RUNNABLE_QUERY,
+    FAILURE_CLASS_RESOLVER_UNAVAILABLE,
+    MAX_ERROR_MESSAGE_BYTES,
+    RESULT_FAILED_DETERMINISTIC,
+    RESULT_FAILED_TRANSIENT,
+    RESULT_NOOP_ACTIVE_PLAN_EXISTS,
+    RESULT_REQUEST_NOT_FOUND,
+    RESULT_SUCCESS,
+    SearchPlanService,
+    sanitize_error_message,
+    sanitize_provenance,
+    search_plan_config_from_cratedigger_config,
+)
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
+
+
+def _seed_request(db: FakePipelineDB, **overrides):
+    row = make_request_row(**overrides)
+    db.seed_request(row)
+    return row
+
+
+def _ok_tracks() -> list[dict[str, object]]:
+    return [
+        {"disc_number": 1, "track_number": 1, "title": "Sister Night"},
+        {"disc_number": 1, "track_number": 2, "title": "American Hero Story"},
+        {"disc_number": 1, "track_number": 3, "title": "Martial Feats Of Comanche Horsemanship"},
+        {"disc_number": 1, "track_number": 4, "title": "Pangloss"},
+    ]
+
+
+class TestSearchPlanServiceAddTime(unittest.TestCase):
+    """AE1 + duplicate-add + empty-tracks edges for the add-time path."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def test_add_time_generation_creates_active_plan_and_initialises_cursor(self):
+        """AE1: add-time generation after tracks are persisted creates an
+        active plan and initialises the cursor at ordinal 0."""
+        _seed_request(self.db, id=1, artist_name="Trent Reznor", album_title="Watchmen", year=2019)
+        tracks = _ok_tracks()
+        self.db.set_tracks(1, tracks)
+
+        result = self.svc.generate_for_new_request(
+            1,
+            artist_name="Trent Reznor",
+            album_title="Watchmen",
+            year=2019,
+            tracks=tracks,
+            source="request",
+        )
+
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        self.assertIsNotNone(result.plan_id)
+        active = self.db.get_active_search_plan(1)
+        self.assertIsNotNone(active)
+        assert active is not None  # narrowing for pyright
+        self.assertEqual(active.plan.status, PLAN_STATUS_ACTIVE)
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertGreater(len(active.items), 0)
+
+    def test_empty_tracklist_produces_album_level_only_plan(self):
+        """A zero-track release still has runnable album-level queries."""
+        _seed_request(self.db, id=2, artist_name="Tycho", album_title="Awake", year=2014)
+
+        result = self.svc.generate_for_new_request(
+            2,
+            artist_name="Tycho",
+            album_title="Awake",
+            year=2014,
+            tracks=[],
+            source="request",
+        )
+
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        active = self.db.get_active_search_plan(2)
+        assert active is not None
+        strategies = {it.strategy for it in active.items}
+        # No track_<n> slots when there are no tracks; album-level only.
+        self.assertFalse(any(s.startswith("track_") for s in strategies))
+        self.assertIn("default", strategies)
+
+    def test_add_time_failure_records_failed_deterministic_plan(self):
+        """AE2: deterministic no-runnable-query failure stays wanted/not-searchable."""
+        _seed_request(self.db, id=3, artist_name="", album_title="", year=None)
+
+        result = self.svc.generate_for_new_request(
+            3,
+            artist_name="",
+            album_title="",
+            year=None,
+            tracks=[],
+            source="request",
+        )
+
+        self.assertEqual(result.outcome, RESULT_FAILED_DETERMINISTIC)
+        self.assertEqual(result.failure_class, FAILURE_CLASS_NO_RUNNABLE_QUERY)
+        # No active plan, but a failed_deterministic row exists.
+        self.assertIsNone(self.db.get_active_search_plan(3))
+        statuses = {p.status for p in self.db.search_plans.values()
+                    if p.request_id == 3}
+        self.assertIn(PLAN_STATUS_FAILED_DETERMINISTIC, statuses)
+        # Request still wanted (add path is repairable).
+        self.assertEqual(self.db.request(3)["status"], "wanted")
+
+
+class TestSearchPlanServiceRegenerate(unittest.TestCase):
+    """`generate_for_request` paths: no-op, regenerate, repair."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed_with_active_plan(self, request_id: int = 10) -> int:
+        _seed_request(self.db, id=request_id,
+                       artist_name="Phoebe Bridgers", album_title="Punisher",
+                       year=2020)
+        self.db.set_tracks(request_id, _ok_tracks())
+        result = self.svc.generate_for_new_request(
+            request_id,
+            artist_name="Phoebe Bridgers",
+            album_title="Punisher",
+            year=2020,
+            tracks=_ok_tracks(),
+            source="request",
+        )
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        assert result.plan_id is not None  # narrowing for pyright
+        return result.plan_id
+
+    def test_no_op_when_active_plan_already_exists(self):
+        plan_id = self._seed_with_active_plan(10)
+        again = self.svc.generate_for_request(10, regenerate=False)
+        self.assertEqual(again.outcome, RESULT_NOOP_ACTIVE_PLAN_EXISTS)
+        self.assertEqual(again.plan_id, plan_id)
+        # No second active plan.
+        active = self.db.get_active_search_plan(10)
+        assert active is not None
+        self.assertEqual(active.plan.id, plan_id)
+
+    def test_regenerate_supersedes_previous_active_plan(self):
+        """AE10-prereq: explicit regeneration replaces and preserves history."""
+        old_plan_id = self._seed_with_active_plan(10)
+        result = self.svc.generate_for_request(10, regenerate=True)
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        self.assertTrue(result.is_supersede)
+        self.assertNotEqual(result.plan_id, old_plan_id)
+        active = self.db.get_active_search_plan(10)
+        assert active is not None
+        self.assertEqual(active.plan.id, result.plan_id)
+        # Old plan flipped to superseded.
+        old = self.db.search_plans[old_plan_id]
+        self.assertEqual(old.status, PLAN_STATUS_SUPERSEDED)
+
+    def test_regeneration_failure_preserves_old_active_plan(self):
+        """Explicit regeneration that hits a deterministic generator
+        failure must NOT supersede the existing active plan."""
+        old_plan_id = self._seed_with_active_plan(10)
+        # Mutate the request to make regeneration deterministically fail.
+        self.db.request(10)["artist_name"] = ""
+        self.db.request(10)["album_title"] = ""
+        self.db._tracks[10] = []
+
+        result = self.svc.generate_for_request(10, regenerate=True)
+        self.assertEqual(result.outcome, RESULT_FAILED_DETERMINISTIC)
+        # Old active plan still active.
+        active = self.db.get_active_search_plan(10)
+        assert active is not None
+        self.assertEqual(active.plan.id, old_plan_id)
+        self.assertEqual(active.plan.status, PLAN_STATUS_ACTIVE)
+        # Failed row was recorded.
+        latest_failed = [p for p in self.db.search_plans.values()
+                         if p.request_id == 10
+                         and p.status == PLAN_STATUS_FAILED_DETERMINISTIC]
+        self.assertEqual(len(latest_failed), 1)
+
+    def test_regeneration_works_for_non_wanted_status(self):
+        """Imported / manual / downloading requests can still regenerate."""
+        self._seed_with_active_plan(11)
+        self.db.request(11)["status"] = "imported"
+        result = self.svc.generate_for_request(11, regenerate=True)
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        # Status itself is unchanged — regeneration does not flip status.
+        self.assertEqual(self.db.request(11)["status"], "imported")
+
+    def test_repair_path_when_request_has_tracks_but_no_plan(self):
+        """Interrupted add: tracks persisted, plan never written.
+        `generate_for_request` repairs without regenerate=True."""
+        _seed_request(self.db, id=12,
+                       artist_name="Caribou", album_title="Suddenly", year=2020)
+        self.db.set_tracks(12, _ok_tracks())
+        # No active plan yet.
+        self.assertIsNone(self.db.get_active_search_plan(12))
+
+        result = self.svc.generate_for_request(12, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        active = self.db.get_active_search_plan(12)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 0)
+
+    def test_old_generator_plan_is_replaced_on_implicit_call(self):
+        """generate_for_request without regenerate=True should still
+        replace plans whose generator_id != current."""
+        plan_id = self._seed_with_active_plan(13)
+        # Hand-edit the stored plan's generator_id to simulate a bump.
+        self.db.search_plans[plan_id].generator_id = "search-plan/old-1999-1"
+
+        result = self.svc.generate_for_request(13, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        self.assertTrue(result.is_supersede)
+        active = self.db.get_active_search_plan(13)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        self.assertNotEqual(active.plan.id, plan_id)
+
+    def test_request_not_found(self):
+        result = self.svc.generate_for_request(99999, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+
+
+class TestSearchPlanServiceResolver(unittest.TestCase):
+    """AE12 + metadata-incomplete edge: resolver outage / no metadata."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+
+    def test_resolver_outage_records_transient_failure(self):
+        """AE12: a resolver outage during a startup-style call records
+        `failed_transient` and a later call can succeed."""
+        _seed_request(self.db, id=20,
+                       artist_name="Rina Sawayama", album_title="SAWAYAMA",
+                       year=2020, mb_release_id="release-uuid")
+        # No tracks persisted; resolver will be consulted.
+
+        class FlakyResolver:
+            def __init__(self):
+                self.calls = 0
+
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ResolverFailure("MB API timed out")
+                return _ok_tracks()
+
+        resolver = FlakyResolver()
+        svc = SearchPlanService(self.db, self.cfg, resolver=resolver)
+
+        first = svc.generate_for_request(20, regenerate=False)
+        self.assertEqual(first.outcome, RESULT_FAILED_TRANSIENT)
+        self.assertEqual(first.failure_class,
+                         FAILURE_CLASS_RESOLVER_UNAVAILABLE)
+        self.assertIsNone(self.db.get_active_search_plan(20))
+
+        # Later retry succeeds.
+        second = svc.generate_for_request(20, regenerate=False)
+        self.assertEqual(second.outcome, RESULT_SUCCESS)
+        active = self.db.get_active_search_plan(20)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+
+    def test_metadata_incomplete_is_deterministic(self):
+        """Resolver succeeds but reports incomplete metadata → deterministic."""
+        _seed_request(self.db, id=21,
+                       artist_name="Anonymous", album_title="???",
+                       mb_release_id="release-uuid")
+
+        class EmptyResolver:
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                raise ResolverMetadataIncomplete("no usable tracks")
+
+        svc = SearchPlanService(self.db, self.cfg, resolver=EmptyResolver())
+        result = svc.generate_for_request(21, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_FAILED_DETERMINISTIC)
+        self.assertEqual(result.failure_class,
+                         FAILURE_CLASS_METADATA_INCOMPLETE)
+
+    def test_unexpected_resolver_exception_is_transient(self):
+        """A surprise exception from the resolver maps to dependency_failure."""
+        _seed_request(self.db, id=22,
+                       artist_name="Idles", album_title="Joy as an Act of Resistance",
+                       mb_release_id="release-uuid")
+
+        class BoomResolver:
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                raise RuntimeError("upstream returned 502")
+
+        svc = SearchPlanService(self.db, self.cfg, resolver=BoomResolver())
+        result = svc.generate_for_request(22, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_FAILED_TRANSIENT)
+        self.assertEqual(result.failure_class,
+                         FAILURE_CLASS_DEPENDENCY_FAILURE)
+
+
+class TestSearchPlanSnapshotEquivalence(unittest.TestCase):
+    """AE13: CLI and web add paths produce equivalent plans."""
+
+    def test_cli_and_web_paths_produce_equivalent_snapshots_and_plans(self):
+        """Snapshot and persisted plan items match between
+        `snapshot_from_add_payload` (CLI/web add) and
+        `snapshot_from_request_row` (startup/regeneration) for the same
+        release data."""
+        artist = "Big Thief"
+        title = "Two Hands"
+        year = 2019
+        tracks = _ok_tracks()
+        source = "request"
+
+        # Add-payload-style snapshot.
+        snap_add = snapshot_from_add_payload(
+            artist_name=artist, album_title=title, year=year,
+            tracks=tracks, source=source,
+        )
+        # Persisted-row-style snapshot.
+        row = make_request_row(
+            artist_name=artist, album_title=title, year=year, source=source,
+        )
+        snap_row = snapshot_from_request_row(row, tracks)
+
+        self.assertEqual(snap_add, snap_row)
+
+        # Same generator → same plan.
+        from lib.search import SearchPlanConfig
+        plan_a = generate_search_plan(snap_add, SearchPlanConfig())
+        plan_b = generate_search_plan(snap_row, SearchPlanConfig())
+        self.assertEqual(plan_a, plan_b)
+
+    def test_cli_and_web_share_generator_id_and_config_source(self):
+        """Single source of truth for generator-id and SearchPlanConfig."""
+        cfg = CratediggerConfig()
+        from lib.search_plan_service import (
+            SearchPlanService,
+            search_plan_config_from_cratedigger_config,
+        )
+
+        svc = SearchPlanService(FakePipelineDB(), cfg)
+        self.assertEqual(svc.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        plan_cfg = search_plan_config_from_cratedigger_config(cfg)
+        self.assertEqual(plan_cfg.escalation_threshold,
+                         cfg.search_escalation_threshold)
+
+
+class TestSearchPlanServiceSanitizer(unittest.TestCase):
+    """Sanitizer guards persisted error/provenance against length + secrets."""
+
+    def test_truncates_oversize_error_to_cap_with_marker(self):
+        # Whitespace-broken filler that won't match the secret-shape regex.
+        chunk = "lorem ipsum dolor sit amet "
+        long = chunk * ((MAX_ERROR_MESSAGE_BYTES // len(chunk)) + 5)
+        out = sanitize_error_message(long)
+        assert out is not None
+        self.assertLessEqual(len(out.encode("utf-8")), MAX_ERROR_MESSAGE_BYTES)
+        self.assertIn("…[truncated]", out)
+
+    def test_redacts_secret_paths(self):
+        msg = (
+            "open(/run/secrets/slskd_api_key) failed; "
+            "fallback /var/lib/cratedigger/config.ini also missing; "
+            "user home /home/abl030/.config/beets/secrets.yaml"
+        )
+        out = sanitize_error_message(msg)
+        assert out is not None
+        self.assertNotIn("/run/secrets/", out)
+        self.assertNotIn("/var/lib/cratedigger/", out)
+        self.assertNotIn("/home/abl030/", out)
+        self.assertIn("[REDACTED-PATH]", out)
+
+    def test_redacts_secret_shaped_tokens(self):
+        # 40-char base64-shaped token (would match a real API key).
+        token = "abcdEFGH1234abcdEFGH1234abcdEFGH1234abcd"
+        msg = f"connection refused token={token}"
+        out = sanitize_error_message(msg)
+        assert out is not None
+        self.assertNotIn(token, out)
+        self.assertIn("[REDACTED-SECRET]", out)
+
+    def test_passes_none_through(self):
+        self.assertIsNone(sanitize_error_message(None))
+
+    def test_provenance_dict_walked_recursively(self):
+        prov = {
+            "snapshot_signature": {"path": "/run/secrets/slskd_api_key"},
+            "messages": ["short", "/etc/passwd was missing"],
+        }
+        out = sanitize_provenance(prov)
+        assert out is not None
+        self.assertIn("[REDACTED-PATH]",
+                      out["snapshot_signature"]["path"])
+        self.assertIn("[REDACTED-PATH]", out["messages"][1])
+
+
+class TestSearchPlanConfigFromCratedigger(unittest.TestCase):
+    def test_threshold_propagates(self):
+        cfg = CratediggerConfig(search_escalation_threshold=7)
+        plan_cfg = search_plan_config_from_cratedigger_config(cfg)
+        self.assertEqual(plan_cfg.escalation_threshold, 7)
+
+    def test_default_threshold_matches_search_module_default(self):
+        cfg = CratediggerConfig()
+        plan_cfg = search_plan_config_from_cratedigger_config(cfg)
+        self.assertEqual(plan_cfg.escalation_threshold, 5)
+
+
+class TestAdvisoryLockBoundary(unittest.TestCase):
+    """The service must take the per-request PLAN advisory lock around
+    every persistence path so concurrent CLI + web + startup callers
+    cannot trip the partial-unique active-plan index."""
+
+    def test_lock_acquired_for_successful_persist(self):
+        db = FakePipelineDB()
+        _seed_request(db, id=30, artist_name="Khruangbin",
+                       album_title="Mordechai", year=2020)
+        db.set_tracks(30, _ok_tracks())
+
+        cfg = CratediggerConfig()
+        svc = SearchPlanService(db, cfg)
+        result = svc.generate_for_new_request(
+            30,
+            artist_name="Khruangbin", album_title="Mordechai",
+            year=2020, tracks=_ok_tracks(),
+        )
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_PLAN
+        self.assertIn(
+            (ADVISORY_LOCK_NAMESPACE_PLAN, 30),
+            db.advisory_lock_calls,
+        )
+
+    def test_contention_yields_transient_failure(self):
+        db = FakePipelineDB()
+        _seed_request(db, id=31, artist_name="Stereolab",
+                       album_title="Mars Audiac Quintet", year=1994)
+        db.set_tracks(31, _ok_tracks())
+        # Force the advisory lock to be unavailable.
+        db.set_advisory_lock_result(False)
+        svc = SearchPlanService(db, CratediggerConfig())
+        result = svc.generate_for_new_request(
+            31,
+            artist_name="Stereolab", album_title="Mars Audiac Quintet",
+            year=1994, tracks=_ok_tracks(),
+        )
+        self.assertEqual(result.outcome, RESULT_FAILED_TRANSIENT)
+        self.assertEqual(result.failure_class,
+                         FAILURE_CLASS_DEPENDENCY_FAILURE)
+
+
+if __name__ == "__main__":
+    unittest.main()
