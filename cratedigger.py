@@ -194,12 +194,17 @@ def _build_search_cache(
 
 
 def _select_variant_for_album(album, search_cfg, db):
-    """Choose which query variant to issue for `album` this cycle.
+    """Legacy helper — NOT used by the search executor after U5 cutover.
 
-    Pure-ish helper: reads `album_requests` + `album_tracks` (no slskd), feeds
-    the typed inputs into `lib.search.select_variant`. Returns the
-    ``SearchVariant`` and the deterministic base query so callers can
-    surface it in logs / SearchResult metadata.
+    Plan §U5 replaced runtime variant recomputation with persisted plan-item
+    execution; the executor now calls ``_select_active_plan_item_for_album``
+    instead. This wrapper is preserved only so legacy tests that exercise
+    the variant ladder semantics directly can still call it. Production
+    Phase 2 paths must not call into here.
+
+    Reads `album_requests` + `album_tracks` (no slskd), feeds the typed
+    inputs into ``lib.search.select_variant``. Returns the ``SearchVariant``
+    and the deterministic base query.
     """
     from lib.search import build_query, select_variant, SearchVariant
 
@@ -274,8 +279,91 @@ def _select_variant_for_album(album, search_cfg, db):
     return variant, base_query
 
 
+def _select_active_plan_item_for_album(album, db):
+    """Return ``(query, PlanExecutionContext)`` for the next plan-item to run.
+
+    Plan-driven replacement for ``_select_variant_for_album`` (Plan §U5).
+    Reads the request's active search plan, picks the item at
+    ``next_plan_ordinal``, and snapshots the ``plan_cycle_count`` so the
+    consumed-attempt write can detect stale completions after mid-flight
+    regeneration.
+
+    Returns ``None`` when:
+      - the album has no ``db_request_id`` (legacy flow without a pipeline
+        request — should not happen for Phase 2 input from
+        ``get_wanted_searchable``);
+      - the request has no active plan (also unexpected after U4 — but we
+        skip rather than crash);
+      - the active plan's generator id does not match
+        ``SEARCH_PLAN_GENERATOR_ID`` (defensive re-check; the Phase 2
+        filter already excludes these);
+      - the active plan has no items at the next ordinal (pathological).
+
+    The returned query is taken straight from the plan-item -- the
+    generator already produced a runnable, normalized, repeat-aware
+    string. We do NOT call ``build_query`` here.
+    """
+    from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
+
+    request_id = getattr(album, "db_request_id", None)
+    if not request_id:
+        return None
+    active = db.get_active_search_plan(request_id)
+    if active is None:
+        return None
+    if active.plan.generator_id != SEARCH_PLAN_GENERATOR_ID:
+        # Phase 2 already filters to current-generator rows; this is
+        # defense in depth for anything that might reach here outside
+        # ``get_wanted_searchable``.
+        return None
+    if active.plan.status != "active":
+        return None
+    if not active.items:
+        return None
+
+    next_ordinal = active.next_ordinal
+    item = next(
+        (it for it in active.items if it.ordinal == next_ordinal),
+        None,
+    )
+    if item is None:
+        # Cursor points at an ordinal that does not exist on this plan.
+        # Treat as un-runnable; startup reconciliation will repair it.
+        logger.warning(
+            "PLAN_ITEM_LOOKUP_MISS request_id=%s plan_id=%s next_ordinal=%s; "
+            "cursor does not point at a known plan item",
+            request_id, active.plan.id, next_ordinal,
+        )
+        return None
+    if not item.query:
+        logger.warning(
+            "PLAN_ITEM_EMPTY_QUERY request_id=%s plan_id=%s ordinal=%s",
+            request_id, active.plan.id, item.ordinal,
+        )
+        return None
+
+    return (
+        item.query,
+        PlanExecutionContext(
+            plan_id=active.plan.id,
+            plan_item_id=item.id,
+            plan_ordinal=item.ordinal,
+            plan_strategy=item.strategy,
+            plan_canonical_query_key=item.canonical_query_key,
+            plan_repeat_group=item.repeat_group,
+            plan_generator_id=active.plan.generator_id,
+            plan_item_count=len(active.items),
+            cycle_count_snapshot=active.cycle_count,
+        ),
+    )
+
+
 def search_for_album(album, ctx):
-    """Search slskd for an album. Returns SearchResult (always non-None)."""
+    """Search slskd for an album. Returns SearchResult (always non-None).
+
+    Plan-driven (U5): query selection comes from the request's active
+    persisted search plan, not from runtime variant recomputation.
+    """
     from lib.search import SearchResult
 
     album_title = album.title
@@ -284,34 +372,28 @@ def search_for_album(album, ctx):
     t0 = time.time()
 
     db = ctx.pipeline_db_source._get_db()
-    # Use ctx.cfg (typed CratediggerContext) instead of the module-global
-    # `cfg`. The parallel path (`_submit_search`) takes its config as the
-    # `search_cfg` param wired from `ctx.cfg` at the call site, and this
-    # serial path matches that convention now.
-    variant, base_query = _select_variant_for_album(album, ctx.cfg, db)
-    query = variant.query
-
-    if variant.kind == "exhausted":
-        # No slskd round-trip — this is the cycle that flips to manual in U6.
-        logger.info(
-            f"Variant ladder exhausted for '{artist_name} - {album_title}'; "
-            f"recording exhaustion without searching"
-        )
+    selection = _select_active_plan_item_for_album(album, db)
+    if selection is None:
+        # No active current plan / no runnable item. After U4 reconciliation
+        # this should be very rare; emit empty_query so the SearchResult
+        # carrier is well-typed and the executor's bookkeeping stays
+        # consistent. _log_search_result will record this as a
+        # non-consuming pre-attempt failure (no plan context).
+        logger.warning(
+            f"No active plan for '{artist_name} - {album_title}'; "
+            f"skipping slskd search and recording non-consuming telemetry")
         return SearchResult(
-            album_id=album_id, success=False, query=base_query or "",
-            elapsed_s=0.0, outcome="exhausted",
-            variant_tag=variant.tag,
+            album_id=album_id, success=False, query="",
+            outcome="empty_query",
+            variant_tag=None,
+            plan_execution=None,
         )
-
-    if not query:
-        logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
-        return SearchResult(
-            album_id=album_id, success=False, outcome="empty_query",
-            variant_tag=variant.tag,
-        )
+    query, plan_execution = selection
+    variant_tag = plan_execution.plan_strategy
 
     logger.info(f"Searching for album: {query} "
-                f"(from '{artist_name} - {album_title}', variant={variant.tag})")
+                f"(from '{artist_name} - {album_title}', "
+                f"variant={variant_tag}, ordinal={plan_execution.plan_ordinal})")
     try:
         search = slskd.searches.search_text(
             searchText=query,
@@ -323,11 +405,13 @@ def search_for_album(album, ctx):
             fileLimit=cfg.search_file_limit,
         )
     except Exception:
+        # Pre-accepted-search failure: non-consuming (Plan §AE7).
         logger.exception(f"Failed to perform search via SLSKD: {query}")
         return SearchResult(
             album_id=album_id, success=False, query=query,
             elapsed_s=time.time() - t0, outcome="error",
-            variant_tag=variant.tag,
+            variant_tag=variant_tag,
+            plan_execution=plan_execution,
         )
 
     # Wait for slskd to process the search. Searches go through:
@@ -356,7 +440,8 @@ def search_for_album(album, ctx):
         return SearchResult(
             album_id=album_id, success=False, query=query,
             result_count=0, elapsed_s=elapsed, outcome="no_results",
-            variant_tag=variant.tag, final_state=final_state,
+            variant_tag=variant_tag, final_state=final_state,
+            plan_execution=plan_execution,
         )
 
     filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
@@ -374,8 +459,9 @@ def search_for_album(album, ctx):
         query=query,
         result_count=len(search_results),
         elapsed_s=elapsed,
-        variant_tag=variant.tag,
+        variant_tag=variant_tag,
         final_state=final_state,
+        plan_execution=plan_execution,
     )
     # Reuse the same merge path as the parallel pipeline
     _merge_search_result(result, ctx)
@@ -385,40 +471,40 @@ def search_for_album(album, ctx):
 def _submit_search(album, variant, search_cfg, slskd_client):
     """Submit a search to slskd and return the search ID (no waiting).
 
-    slskd has a SemaphoreSlim(1,1) on POST /searches — only one submission
-    at a time. The semaphore releases after the search is queued (~100ms),
-    so we submit sequentially but wait for results in parallel.
+    Legacy entry point: takes a ``SearchVariant``. Used by tests and by the
+    legacy serial path. After U5, production parallel execution submits
+    with a query+strategy pair derived from the active plan-item via
+    ``_submit_plan_search``; this wrapper delegates so the wire-level
+    behavior stays identical.
+    """
+    return _submit_plan_search(
+        album, variant.query, variant.tag, search_cfg, slskd_client,
+    )
 
-    The caller is responsible for:
-      - selecting the variant (so the variant tag is known regardless of
-        outcome — see findings #9 and #18 in ce-code-review run
-        20260430-051904-682683b5)
-      - short-circuiting variant.kind == "exhausted" without calling here
-      - guarding against an empty `variant.query` if it ever happens
 
-    Returns (search_id, query, album_id, variant_tag) on success.
-    Returns None on submission failure — the caller still has `variant.tag`
-    available to record the failure with the right metadata.
+def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
+    """Submit a plan-item search to slskd and return ``(search_id, query, album_id, tag)``.
 
-    Variant-selection currency invariant:
-        Variant selection happens at the caller (submit-time). The
-        sequence submit→collect→log is strictly ordered for a single
-        album, so the variant chosen by the caller is what
-        `_log_search_result` will persist.
+    slskd has a SemaphoreSlim(1,1) on POST /searches — one submission at a
+    time. The semaphore releases after the search is queued (~100ms), so we
+    submit sequentially but wait for results in parallel.
+
+    Returns ``None`` on submission failure (Plan §AE7 pre-attempt failure):
+    the caller already has the plan-execution context to record a
+    non-consuming telemetry row.
     """
     import requests
 
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
-    query = variant.query
     if not query:
         # Defensive: caller should have caught this, but never submit empty.
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
         return None
 
     logger.info(f"Submitting search: {query} "
-                f"(from '{artist_name} - {album_title}', variant={variant.tag})")
+                f"(from '{artist_name} - {album_title}', variant={strategy_tag})")
 
     # Retry on 429 (rate limit) or 409 (semaphore busy) with backoff.
     # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
@@ -433,7 +519,7 @@ def _submit_search(album, variant, search_cfg, slskd_client):
                 responseLimit=search_cfg.search_response_limit,
                 fileLimit=search_cfg.search_file_limit,
             )
-            return (search["id"], query, album_id, variant.tag)
+            return (search["id"], query, album_id, strategy_tag)
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status in (429, 409) and attempt < 5:
@@ -632,7 +718,31 @@ def _merge_search_result(result, ctx):
 
 
 def _log_search_result(album, result, ctx) -> None:
-    """Persist search outcome to search_log and record_attempt on failure."""
+    """Persist a search outcome via the plan-aware DB seams (Plan §U5).
+
+    Routes every SearchResult through one of two atomic DB methods:
+
+      * ``record_consumed_search_attempt`` for accepted-search outcomes
+        (found, no_results, no_match, error after acceptance, collection
+        crash). Atomically inserts the search_log row AND advances/wraps
+        the cursor, with a stale-completion guard against mid-flight
+        regeneration.
+
+      * ``record_non_consuming_search_attempt`` for pre-attempt failures
+        (slskd submit failed, no plan/empty_query). Logs and applies
+        scheduler backoff but never advances the cursor.
+
+    No new ``outcome='exhausted'`` rows are emitted by this seam; plan
+    wrap on the final ordinal increments ``plan_cycle_count`` instead
+    (the consumed-attempt write owns that bookkeeping).
+    """
+    import json as _json
+
+    from lib.pipeline_db import (
+        ConsumedAttemptInput,
+        NonConsumingAttemptInput,
+    )
+
     # Per-cycle watchdog instrumentation (issue #212). Every SearchResult
     # passes through here, so this is the single increment site for both
     # the parallel pipeline and the serial fallback.
@@ -642,12 +752,14 @@ def _log_search_result(album, result, ctx) -> None:
     if not request_id:
         return
     db = ctx.pipeline_db_source._get_db()
-    # Plan U5 contract: outcomes where slskd actually ran but produced 0 hits
-    # ("no_results", "no_match") write candidates=[] (empty list, not NULL) so
-    # downstream readers can distinguish "search ran, found nothing" from
-    # "search never produced a candidate concept" (error, timeout, exhausted,
-    # empty_query — those write NULL).
+    plan_execution = getattr(result, "plan_execution", None)
     outcome = result.outcome or "error"
+
+    # Candidate JSONB: same contract as before — outcomes where slskd
+    # actually ran but produced 0 hits ("no_results", "no_match") write
+    # candidates=[] (empty list, not NULL) so downstream readers can
+    # distinguish "search ran, found nothing" from "search never produced
+    # a candidate concept" (error, timeout, empty_query — those write NULL).
     OUTCOMES_WITH_CANDIDATE_CONCEPT = ("no_results", "no_match", "found")
     if result.candidates:
         top: list | None = top_candidates(result.candidates)
@@ -655,40 +767,137 @@ def _log_search_result(album, result, ctx) -> None:
         top = []
     else:
         top = None
-    db.log_search(
-        request_id=request_id,
-        query=result.query or None,
-        result_count=result.result_count,
-        elapsed_s=result.elapsed_s or None,
-        outcome=outcome,
-        candidates=top,
-        variant=result.variant_tag,
-        final_state=result.final_state,
-        browse_time_s=result.browse_time_s,
-        match_time_s=result.match_time_s,
-        peers_browsed=result.peers_browsed,
-        peers_browsed_lazy=result.peers_browsed_lazy,
-        fanout_waves=result.fanout_waves,
+    candidates_json = (
+        _json.dumps([_candidate_to_jsonable(c) for c in top])
+        if top is not None else None
     )
-    # Increment search_attempts + backoff for any non-found outcome.
-    # Exhausted variants do not increment — the counter is reset below so
-    # the variant ladder wraps back to default on the next cycle.
-    if result.outcome not in ("found", "exhausted"):
-        db.record_attempt(request_id, "search")
 
-    # Variant ladder exhausted → reset ``search_attempts`` so the ladder
-    # wraps back to default on the next cycle. The request stays
-    # ``wanted``; the standard ``next_retry_after`` cooldown still governs
-    # when the next search runs. Soulseek peers come and go, so cycling
-    # the variants again is more useful than parking the request for
-    # operator triage. The ``search_log`` row above (with
-    # ``outcome='exhausted'``, ``variant='exhausted'``) is the audit trail.
-    if result.outcome == "exhausted":
-        logger.info(
-            f"Variant ladder exhausted for request {request_id}; "
-            f"resetting search_attempts to wrap"
+    # An attempt is "consumed" iff the executor reached an accepted slskd
+    # search id (or terminal slskd state). Concretely: outcome is one of
+    # found / no_results / no_match / error_after_accept (the parallel
+    # path only sets outcome="error" on a *collection* crash; pre-submit
+    # errors set outcome="error" but plan_execution may still be present).
+    # The pre-attempt path is identified by the absence of post-accept
+    # signals: query was never submitted (query=="") OR result_count is
+    # None and no slskd telemetry present. We branch on the call site,
+    # which sets ``result.success`` truthfully and uses outcomes coming
+    # from `_collect_search_results` for accepted searches.
+    is_consumed = _is_consumed_outcome(result, plan_execution)
+
+    if is_consumed and plan_execution is not None:
+        scheduler_success = (outcome == "found")
+        try:
+            db.record_consumed_search_attempt(
+                ConsumedAttemptInput(
+                    request_id=request_id,
+                    plan_id=plan_execution.plan_id,
+                    plan_item_id=plan_execution.plan_item_id,
+                    plan_ordinal=plan_execution.plan_ordinal,
+                    plan_strategy=plan_execution.plan_strategy,
+                    plan_canonical_query_key=(
+                        plan_execution.plan_canonical_query_key),
+                    plan_repeat_group=plan_execution.plan_repeat_group,
+                    plan_generator_id=plan_execution.plan_generator_id,
+                    plan_item_count=plan_execution.plan_item_count,
+                    query=result.query or "",
+                    outcome=outcome,
+                    result_count=result.result_count,
+                    elapsed_s=result.elapsed_s or None,
+                    candidates_json=candidates_json,
+                    variant=result.variant_tag,
+                    final_state=result.final_state,
+                    browse_time_s=result.browse_time_s,
+                    match_time_s=result.match_time_s,
+                    peers_browsed=result.peers_browsed,
+                    peers_browsed_lazy=result.peers_browsed_lazy,
+                    fanout_waves=result.fanout_waves,
+                    apply_scheduler_attempt=True,
+                    scheduler_success=scheduler_success,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "record_consumed_search_attempt failed for request %s "
+                "(plan_id=%s ordinal=%s outcome=%s)",
+                request_id, plan_execution.plan_id,
+                plan_execution.plan_ordinal, outcome,
+            )
+        return
+
+    # Non-consuming pre-attempt path.
+    plan_id = plan_execution.plan_id if plan_execution else None
+    plan_item_id = plan_execution.plan_item_id if plan_execution else None
+    plan_ordinal = plan_execution.plan_ordinal if plan_execution else None
+    plan_strategy = plan_execution.plan_strategy if plan_execution else None
+    plan_canonical_query_key = (
+        plan_execution.plan_canonical_query_key if plan_execution else None)
+    plan_repeat_group = (
+        plan_execution.plan_repeat_group if plan_execution else None)
+    plan_generator_id = (
+        plan_execution.plan_generator_id if plan_execution else None)
+    try:
+        db.record_non_consuming_search_attempt(
+            NonConsumingAttemptInput(
+                request_id=request_id,
+                outcome=outcome,
+                plan_id=plan_id,
+                plan_item_id=plan_item_id,
+                plan_ordinal=plan_ordinal,
+                plan_strategy=plan_strategy,
+                plan_canonical_query_key=plan_canonical_query_key,
+                plan_repeat_group=plan_repeat_group,
+                plan_generator_id=plan_generator_id,
+                query=result.query or None,
+                result_count=result.result_count,
+                elapsed_s=result.elapsed_s or None,
+                final_state=result.final_state,
+                apply_scheduler_attempt=True,
+            )
         )
-        db.reset_search_attempts(request_id)
+    except Exception:
+        logger.exception(
+            "record_non_consuming_search_attempt failed for request %s "
+            "(outcome=%s)", request_id, outcome,
+        )
+
+
+def _candidate_to_jsonable(c: Any) -> dict[str, Any]:
+    """Convert a CandidateScore (msgspec.Struct) to a plain dict for JSONB."""
+    import msgspec
+    return msgspec.to_builtins(c)
+
+
+def _is_consumed_outcome(result: Any, plan_execution: Any) -> bool:
+    """Decide whether this SearchResult represents an accepted-search slot.
+
+    Plan §U5 boundary: the slot is consumed once slskd accepted the
+    search id (or reached a terminal state) -- even if browse / match /
+    enqueue later yields no_match, error, or enqueue failure.
+
+    Pre-attempt failures (plan lookup miss, slskd submit error, empty
+    query) are non-consuming. Distinguishing them from accepted-search
+    failures is done via:
+      * outcomes ``no_results``, ``no_match``, ``found`` always imply
+        slskd accepted the search and produced a terminal state.
+      * outcome ``error`` is ambiguous; the executor disambiguates by
+        setting a non-None ``final_state`` only for paths that ran
+        through ``_collect_search_results`` (real slskd terminal state)
+        OR for the collection-crash path (synthetic
+        ``final_state="collection_crash"``). Pre-submit errors leave
+        ``final_state=None``.
+      * outcome ``empty_query`` is always non-consuming.
+      * outcome ``exhausted`` is legacy (no new emissions in U5+); if
+        somehow encountered, treat as non-consuming so the cursor is
+        not advanced.
+    """
+    outcome = (result.outcome or "").strip()
+    if outcome in ("found", "no_results", "no_match"):
+        return True
+    if outcome in ("empty_query", "exhausted"):
+        return False
+    if outcome == "error":
+        return result.final_state is not None
+    return False
 
 
 def _apply_find_download_result(
@@ -786,14 +995,20 @@ def _search_and_queue_parallel(albums, ctx):
     logger.info(f"Pipelined search: {total} albums, {max_inflight} in flight")
     wall_start = time.time()
 
+    # Map of inflight `pool.submit` future -> plan_execution context. The
+    # owner thread re-attaches plan_execution to the SearchResult when the
+    # collect future returns; this avoids threading the snapshot through
+    # `_collect_search_results` (whose worker has no DB handle).
+    inflight_plan_execution: dict[Any, Any] = {}
+
     def _submit_next() -> tuple[Any, Any] | None:
         """Submit the next album from the queue. Returns (future, album) or None.
 
-        Variant selection happens HERE, not inside ``_submit_search``. This
-        ensures every code path — exhausted, empty_query, slskd error — has
-        access to the chosen ``variant.tag`` so the persisted forensic row
-        always records which variant was attempted (findings #9 and #18 in
-        ce-code-review run 20260430-051904-682683b5).
+        Plan-driven (U5): picks the next plan-item from the request's
+        active persisted plan and snapshots cycle_count for the
+        consumed-attempt write. ``inflight_plan_execution`` carries the
+        snapshot from submit time through to log-emit time so the search
+        log row reflects the plan-context chosen at submit.
 
         Issue #212 removed the cycle-entry deadline gate. Bounded runtime
         comes from two layers now: the per-search progress watchdog inside
@@ -805,58 +1020,61 @@ def _search_and_queue_parallel(albums, ctx):
         while album_queue:
             album = album_queue.pop(0)
             db = ctx.pipeline_db_source._get_db()
-            variant, base_query = _select_variant_for_album(album, search_cfg, db)
+            selection = _select_active_plan_item_for_album(album, db)
 
-            if variant.kind == "exhausted":
-                # Variant ladder exhausted — emit a SearchResult inline, no
-                # slskd round-trip. U6 will flip the request to manual.
-                logger.info(
-                    f"Variant ladder exhausted for '{album.artist_name} - {album.title}'; "
-                    f"will record exhaustion without searching"
+            if selection is None:
+                # No active current plan — emit non-consuming pre-attempt
+                # telemetry and skip slskd. After U4 reconciliation this
+                # should be very rare for a row that came out of
+                # ``get_wanted_searchable``.
+                logger.warning(
+                    f"No active plan for '{album.artist_name} - {album.title}'; "
+                    f"skipping slskd search"
                 )
                 sr = SearchResult(
                     album_id=album.id, success=False,
-                    query=base_query or "", elapsed_s=0.0, outcome="exhausted",
-                    variant_tag=variant.tag,
-                )
-                _log_search_result(album, sr, ctx)
-                failed_search.append(album)
-                continue
-
-            if not variant.query:
-                # No buildable query at all (no artist/title) — record
-                # empty_query with the chosen variant tag so forensics can
-                # still tell which variant was attempted.
-                sr = SearchResult(
-                    album_id=album.id, success=False,
-                    query=base_query or "",
+                    query="",
                     outcome="empty_query",
-                    variant_tag=variant.tag,
+                    variant_tag=None,
+                    plan_execution=None,
                 )
                 _log_search_result(album, sr, ctx)
                 failed_search.append(album)
                 continue
 
-            submit_result = _submit_search(album, variant, search_cfg, ctx.slskd)
+            query, plan_execution = selection
+            submit_result = _submit_plan_search(
+                album, query, plan_execution.plan_strategy,
+                search_cfg, ctx.slskd,
+            )
             if submit_result is None:
-                # slskd round-trip failed — preserve variant_tag in the log.
+                # slskd round-trip failed BEFORE search was accepted ->
+                # non-consuming pre-attempt failure (Plan §AE7).
                 sr = SearchResult(
                     album_id=album.id, success=False,
-                    query=variant.query,
+                    query=query,
                     outcome="error",
-                    variant_tag=variant.tag,
+                    variant_tag=plan_execution.plan_strategy,
+                    plan_execution=plan_execution,
                 )
                 _log_search_result(album, sr, ctx)
                 failed_search.append(album)
                 continue
 
-            search_id, query, album_id, variant_tag = submit_result
+            search_id, sub_query, album_id, variant_tag = submit_result
             future = pool.submit(
-                _collect_search_results, search_id, query, album_id, search_cfg, ctx.slskd,
-                variant_tag,
+                _collect_search_results, search_id, sub_query, album_id,
+                search_cfg, ctx.slskd, variant_tag,
             )
+            inflight_plan_execution[future] = plan_execution
             return (future, album)
         return None
+
+    def _attach_plan_execution(future, result) -> None:
+        """Re-attach the submit-time plan_execution onto a returned result."""
+        plan_exec = inflight_plan_execution.pop(future, None)
+        if plan_exec is not None and getattr(result, "plan_execution", None) is None:
+            result.plan_execution = plan_exec
 
     find_pool: ThreadPoolExecutor | None = None
     find_inflight: dict[Any, tuple[Any, Any]] = {}
@@ -951,11 +1169,30 @@ def _search_and_queue_parallel(albums, ctx):
                         result = future.result()
                     except Exception:
                         logger.exception(f"Search collection crashed for {album.title}")
+                        # Collection crashed AFTER the search was submitted
+                        # and accepted by slskd. Per Plan §U5 attempt-outcome
+                        # contract this consumes the slot — attach the
+                        # plan_execution snapshot so _log_search_result
+                        # writes a consumed accepted-stage row.
                         from lib.search import SearchResult
-                        sr = SearchResult(album_id=album.id, success=False, outcome="error")
+                        plan_exec = inflight_plan_execution.pop(future, None)
+                        # ``final_state="collection_crash"`` discriminates
+                        # this consumed-after-acceptance path from
+                        # pre-submit errors (which leave final_state=None
+                        # and plan_execution=None or attached but
+                        # without a final_state).
+                        sr = SearchResult(
+                            album_id=album.id, success=False, outcome="error",
+                            variant_tag=(
+                                plan_exec.plan_strategy
+                                if plan_exec is not None else None),
+                            plan_execution=plan_exec,
+                            final_state="collection_crash",
+                        )
                         _log_search_result(album, sr, ctx)
                         failed_search.append(album)
                     else:
+                        _attach_plan_execution(future, result)
                         done_count = (
                             len(grab_list)
                             + len(failed_grab)

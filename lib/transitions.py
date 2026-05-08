@@ -313,6 +313,43 @@ def finalize_request(
     )
 
 
+def finalize_request_if_plan_current(
+    db: "PipelineDB",
+    request_id: int,
+    transition: RequestTransition,
+    *,
+    plan_id: int,
+    plan_ordinal: int,
+    cycle_count_snapshot: int,
+) -> bool:
+    """Plan-aware ``finalize_request`` for search-execution-driven mutations.
+
+    Stale-completion guard (Plan §U5 / §AE14). Rejects the transition with
+    a STALE_REQUEST_TRANSITION log and returns ``False`` if the request's
+    active plan/ordinal/cycle no longer matches what the executor recorded
+    at submit time. Used by any search-execution path that mutates
+    ``album_requests`` status outside of ``record_consumed_search_attempt``
+    (the consumed-attempt method has its own stale guard).
+
+    Returns the same bool semantics as ``finalize_request``: ``True`` on
+    successful mutation, ``False`` on stale-skip OR on guarded-write
+    rejection inside ``apply_transition``.
+    """
+    is_current = getattr(db, "is_request_plan_current", None)
+    if is_current is None or not is_current(
+        request_id, plan_id, plan_ordinal, cycle_count_snapshot,
+    ):
+        logger.warning(
+            "STALE_REQUEST_TRANSITION request_id=%s target=%s plan_id=%s "
+            "ordinal=%s cycle=%s; request was regenerated mid-flight, "
+            "skipping search-execution-driven status transition",
+            request_id, transition.target_status,
+            plan_id, plan_ordinal, cycle_count_snapshot,
+        )
+        return False
+    return finalize_request(db, request_id, transition)
+
+
 @dataclass(frozen=True)
 class TransitionSideEffects:
     """What side effects a state transition requires.

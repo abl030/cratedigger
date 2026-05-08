@@ -821,6 +821,60 @@ class TestFakeGetWantedSearchable(unittest.TestCase):
         self.assertEqual(db.get_wanted_searchable("g1"), [])
 
 
+class TestFakeIsRequestPlanCurrent(unittest.TestCase):
+    """Stale-completion guard helper used by U5 ownership/transition gates."""
+
+    def _make_active(self, db, rid, gen="g1"):
+        from lib.pipeline_db import SearchPlanItemInput
+        return db.create_successful_search_plan(
+            request_id=rid, generator_id=gen,
+            items=[
+                SearchPlanItemInput(ordinal=0, strategy="default", query="Q0"),
+                SearchPlanItemInput(ordinal=1, strategy="default", query="Q1"),
+            ],
+        )
+
+    def test_current_state_returns_true(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1")
+        plan_id = self._make_active(db, rid)
+        self.assertTrue(db.is_request_plan_current(rid, plan_id, 0, 0))
+
+    def test_different_plan_id_is_stale(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1")
+        self._make_active(db, rid)
+        self.assertFalse(db.is_request_plan_current(rid, 999, 0, 0))
+
+    def test_advanced_ordinal_is_stale_for_old_ordinal(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1")
+        plan_id = self._make_active(db, rid)
+        db.update_request_fields(rid, next_plan_ordinal=1)
+        self.assertFalse(db.is_request_plan_current(rid, plan_id, 0, 0))
+        self.assertTrue(db.is_request_plan_current(rid, plan_id, 1, 0))
+
+    def test_cycle_advanced_is_stale_for_old_cycle(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1")
+        plan_id = self._make_active(db, rid)
+        db.update_request_fields(rid, plan_cycle_count=1)
+        self.assertFalse(db.is_request_plan_current(rid, plan_id, 0, 0))
+        self.assertTrue(db.is_request_plan_current(rid, plan_id, 0, 1))
+
+    def test_unknown_request_is_stale(self):
+        db = FakePipelineDB()
+        self.assertFalse(db.is_request_plan_current(99999, 1, 0, 0))
+
+
 class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
     """Lightweight signature parity check between PipelineDB and
     FakePipelineDB for U1 methods. Catches drift when a real DB method
@@ -837,6 +891,7 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
         "get_search_plan_inspection",
         "record_consumed_search_attempt",
         "record_non_consuming_search_attempt",
+        "is_request_plan_current",
     )
 
     def test_fake_method_signatures_match_real(self):

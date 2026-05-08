@@ -86,6 +86,72 @@ class SearchResult:
     # #212). Diagnostic only — outcome classification still reflects what
     # was harvested, not the watchdog.
     watchdog_fired: bool = False
+    # U5 plan-execution context. Carries the plan-item the executor ran
+    # plus the cycle-count snapshot taken at selection time. The snapshot
+    # is the consumed-attempt guard: at log time the DB compares it to the
+    # request's current plan_cycle_count to detect stale completions after
+    # mid-flight regeneration. None for legacy / no-plan code paths.
+    plan_execution: "PlanExecutionContext | None" = None
+
+
+@dataclass(frozen=True)
+class PlanExecutionContext:
+    """Snapshot of the active plan-item the executor selected for a search.
+
+    Frozen and immutable — captured once in the owner thread when the
+    executor reads the request's active plan, then carried through the
+    in-flight ``SearchResult`` and downstream ownership claims so the DB
+    can validate that the executing plan/ordinal/cycle still match the
+    request's active state at log/claim time.
+    """
+
+    plan_id: int
+    plan_item_id: int
+    plan_ordinal: int
+    plan_strategy: str
+    plan_canonical_query_key: str | None
+    plan_repeat_group: str | None
+    plan_generator_id: str
+    plan_item_count: int
+    cycle_count_snapshot: int
+
+
+def is_plan_execution_current(
+    request_row: dict[str, Any] | None,
+    plan_execution: "PlanExecutionContext | None",
+) -> bool:
+    """Return True iff the request's active plan still matches the executed plan.
+
+    Pure — facts in, decision out. Used as a stale-completion guard before
+    any active-state mutation driven by an in-flight search (download
+    ownership claims, status transitions, request-level cursor writes that
+    are NOT routed through ``record_consumed_search_attempt``).
+
+    A plan-execution-less request_row is never current with no plan_execution
+    (returns False). When ``plan_execution`` is None we treat the call as
+    "non-plan-aware" and return True so legacy paths still work; the only
+    real-world callers of this guard are search-execution-driven mutations
+    that always have plan context.
+    """
+    if plan_execution is None:
+        return True
+    if request_row is None:
+        return False
+    active_plan_id = request_row.get("active_plan_id")
+    if active_plan_id != plan_execution.plan_id:
+        return False
+    next_ordinal = request_row.get("next_plan_ordinal")
+    if next_ordinal is None:
+        return False
+    if int(next_ordinal) != plan_execution.plan_ordinal:
+        return False
+    cycle_count = request_row.get("plan_cycle_count")
+    if cycle_count is None:
+        return False
+    if int(cycle_count) != plan_execution.cycle_count_snapshot:
+        return False
+    return True
+
 
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.
@@ -500,8 +566,12 @@ def select_variant(
 #   - repeat-group identity for the intentional repeated-default slots
 #   - explicit deterministic generation-failure result (not an empty plan)
 #
-# `select_variant()` and `build_query()` remain the runtime executor's
-# entry point until U5 cuts over. This generator is additive.
+# U5 cutover note: the search executor now calls
+# ``cratedigger._select_active_plan_item_for_album`` instead of
+# ``select_variant()``/``build_query()``. ``select_variant`` and
+# ``build_query`` remain in this module for non-executor callers (CLI smoke
+# tools, legacy tests, generator parity checks); do NOT reintroduce them on
+# the search execution path.
 # ---------------------------------------------------------------------------
 
 

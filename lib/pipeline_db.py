@@ -3209,6 +3209,46 @@ class PipelineDB:
             cycle_count=int(row["plan_cycle_count"]),
         )
 
+    def is_request_plan_current(
+        self,
+        request_id: int,
+        plan_id: int,
+        plan_ordinal: int,
+        cycle_count_snapshot: int,
+    ) -> bool:
+        """Stale-completion guard for active-state mutations.
+
+        Returns True iff the request still points at the given plan, the
+        cursor is still at the given ordinal, AND the plan_cycle_count
+        still equals the snapshot the executor took at selection time.
+
+        Used by ``lib.enqueue``, ``lib.download_ownership``, and
+        ``lib.transitions`` to avoid claiming download ownership / mutating
+        request status from a search completion that finished after the
+        request was regenerated mid-flight (Plan §AE14 stale-completion
+        contract). The atomic log+cursor write inside
+        ``record_consumed_search_attempt`` is independent of this helper —
+        callers do BOTH the search-log write and the active-state mutation
+        guard.
+        """
+        cur = self._execute(
+            """
+            SELECT active_plan_id, next_plan_ordinal, plan_cycle_count
+            FROM album_requests WHERE id = %s
+            """,
+            (request_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        if row["active_plan_id"] != plan_id:
+            return False
+        if int(row["next_plan_ordinal"]) != plan_ordinal:
+            return False
+        if int(row["plan_cycle_count"]) != cycle_count_snapshot:
+            return False
+        return True
+
     def _fetch_plan_items(self, plan_id: int) -> list[SearchPlanItemRow]:
         cur = self._execute(
             """

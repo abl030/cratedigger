@@ -2647,6 +2647,25 @@ class FakePipelineDB:
             cycle_count=int(row.get("plan_cycle_count") or 0),
         )
 
+    def is_request_plan_current(
+        self,
+        request_id: int,
+        plan_id: int,
+        plan_ordinal: int,
+        cycle_count_snapshot: int,
+    ) -> bool:
+        """Mirror of ``PipelineDB.is_request_plan_current`` (U5)."""
+        row = self._requests.get(request_id)
+        if row is None:
+            return False
+        if row.get("active_plan_id") != plan_id:
+            return False
+        if int(row.get("next_plan_ordinal") or 0) != plan_ordinal:
+            return False
+        if int(row.get("plan_cycle_count") or 0) != cycle_count_snapshot:
+            return False
+        return True
+
     def list_wanted_for_plan_reconciliation(
         self,
     ) -> list[WantedReconciliationCandidate]:

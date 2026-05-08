@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from lib import transitions
+
+if TYPE_CHECKING:
+    from lib.search import PlanExecutionContext
 
 logger = logging.getLogger("cratedigger")
 
@@ -46,10 +49,44 @@ class DownloadOwnershipWriter:
         if close is not None:
             close()
 
-    def claim_downloading(self, request_id: int, state_json: str) -> bool:
-        """Guarded wanted -> downloading claim with planned download state."""
+    def claim_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        plan_execution: "PlanExecutionContext | None" = None,
+    ) -> bool:
+        """Guarded wanted -> downloading claim with planned download state.
+
+        When ``plan_execution`` is supplied (search-execution-driven claim
+        post-U5), this also validates that the request's active plan is
+        still the executing plan/ordinal/cycle. Stale completions (the
+        request was regenerated mid-flight after this search was
+        accepted) skip the claim with a STALE_DOWNLOAD_CLAIM log.
+        Plan §U5 stale-completion contract: log against the executed old
+        plan (handled by ``_log_search_result``), do NOT mutate active
+        request status.
+        """
         db = self._open_db()
         try:
+            if plan_execution is not None:
+                is_current = getattr(db, "is_request_plan_current", None)
+                if is_current is None or not is_current(
+                    request_id,
+                    plan_execution.plan_id,
+                    plan_execution.plan_ordinal,
+                    plan_execution.cycle_count_snapshot,
+                ):
+                    logger.warning(
+                        "STALE_DOWNLOAD_CLAIM request_id=%s plan_id=%s "
+                        "ordinal=%s cycle=%s; request was regenerated "
+                        "mid-flight, skipping wanted->downloading claim",
+                        request_id,
+                        plan_execution.plan_id,
+                        plan_execution.plan_ordinal,
+                        plan_execution.cycle_count_snapshot,
+                    )
+                    return False
             return transitions.finalize_request(
                 db,
                 request_id,
