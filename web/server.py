@@ -235,6 +235,10 @@ class Handler(BaseHTTPRequestHandler):
         **_imports_routes.POST_ROUTES,
     }
 
+    _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
+        *getattr(_pipeline_routes, "POST_PATTERNS", []),
+    ]
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         log.info(format % args)
 
@@ -347,6 +351,13 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length)) if length else {}
                 fn(self, body)  # type: ignore[operator]
                 return
+            for pattern, fn in self._FUNC_POST_PATTERNS:
+                m = pattern.match(path)
+                if m:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    fn(self, body, *m.groups())  # type: ignore[operator]
+                    return
             self._error("Not found", 404)
         except Exception as e:
             log.exception("POST %s failed", path)
