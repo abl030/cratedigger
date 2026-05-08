@@ -12,6 +12,7 @@ Usage:
 
 import hashlib
 import json
+import logging
 import os
 import zlib
 from contextlib import contextmanager
@@ -39,6 +40,8 @@ from lib.import_queue import (
 from lib.quality import (CooldownConfig, SpectralMeasurement, V0ProbeEvidence,
                          should_cooldown)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
 
@@ -741,11 +744,24 @@ class PipelineDB:
             yield acquired
         finally:
             if acquired:
-                with self.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT pg_advisory_unlock(%s, %s)", (namespace, key)
+                # Swallow unlock errors so they cannot mask the original
+                # exception from the ``with`` body. PostgreSQL releases
+                # session-level advisory locks on connection death anyway,
+                # so a transient cursor/connection failure here cannot
+                # leak the lock beyond the session.
+                try:
+                    with self.conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_advisory_unlock(%s, %s)",
+                            (namespace, key),
+                        )
+                        cur.fetchone()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "advisory_unlock(%s, %s) failed; lock will be "
+                        "released at session end",
+                        namespace, key,
                     )
-                    cur.fetchone()
 
     # --- import_jobs queue ---
 

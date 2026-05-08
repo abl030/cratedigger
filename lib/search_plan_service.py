@@ -139,22 +139,52 @@ def sanitize_provenance(provenance: dict[str, Any] | None) -> dict[str, Any] | N
     Generator provenance is generator-controlled and small. We still
     sanitize string leaves so a future generator that surfaces (say) the
     resolver URL it attempted cannot leak secrets via the same boundary.
+
+    Hardened against pathological structures: cycles are replaced with
+    ``"[CYCLE]"`` and depth beyond ``_SANITIZE_MAX_DEPTH`` becomes
+    ``"[TRUNCATED]"`` instead of recursing without bound.
     """
     if provenance is None:
         return None
-    return _sanitize_obj(provenance)
+    return _sanitize_obj(provenance, _depth=0, _seen=set())
 
 
-def _sanitize_obj(value: Any) -> Any:
+# Defence-in-depth caps for sanitiser recursion. Real generator
+# provenance is shallow (~3 levels); 10 is well above realistic cases
+# yet far below Python's ~1000-frame default recursion limit.
+_SANITIZE_MAX_DEPTH = 10
+_CYCLE_MARKER = "[CYCLE]"
+_TRUNCATED_MARKER = "[TRUNCATED]"
+
+
+def _sanitize_obj(value: Any, *, _depth: int, _seen: set[int]) -> Any:
+    if _depth > _SANITIZE_MAX_DEPTH:
+        return _TRUNCATED_MARKER
     if isinstance(value, str):
         cleaned = sanitize_error_message(value)
         return cleaned if cleaned is not None else value
-    if isinstance(value, dict):
-        return {k: _sanitize_obj(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_obj(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_sanitize_obj(v) for v in value)
+    if isinstance(value, (dict, list, tuple)):
+        ident = id(value)
+        if ident in _seen:
+            return _CYCLE_MARKER
+        _seen.add(ident)
+        try:
+            if isinstance(value, dict):
+                return {
+                    k: _sanitize_obj(v, _depth=_depth + 1, _seen=_seen)
+                    for k, v in value.items()
+                }
+            if isinstance(value, list):
+                return [
+                    _sanitize_obj(v, _depth=_depth + 1, _seen=_seen)
+                    for v in value
+                ]
+            return tuple(
+                _sanitize_obj(v, _depth=_depth + 1, _seen=_seen)
+                for v in value
+            )
+        finally:
+            _seen.discard(ident)
     return value
 
 

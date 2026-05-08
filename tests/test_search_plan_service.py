@@ -438,6 +438,35 @@ class TestSearchPlanServiceSanitizer(unittest.TestCase):
                       out["snapshot_signature"]["path"])
         self.assertIn("[REDACTED-PATH]", out["messages"][1])
 
+    def test_self_referential_dict_does_not_recurse_forever(self):
+        """A self-referential provenance dict must not blow the stack;
+        the cycle is replaced with a sentinel string."""
+        prov: dict[str, object] = {"name": "loop"}
+        prov["self"] = prov
+        # Must not raise RecursionError.
+        out = sanitize_provenance(prov)
+        assert out is not None
+        # The original level was sanitized; the cycle marker appears
+        # somewhere inside the structure.
+        flat = repr(out)
+        self.assertIn("[CYCLE]", flat)
+
+    def test_deeply_nested_dict_is_truncated(self):
+        """Excessive nesting depth must be truncated rather than recursing
+        without bound."""
+        # Build a 30-deep dict; sanitizer should truncate beyond its cap.
+        deep: dict[str, object] = {}
+        cur: dict[str, object] = deep
+        for _ in range(30):
+            inner: dict[str, object] = {}
+            cur["next"] = inner
+            cur = inner
+        cur["leaf"] = "value"
+        out = sanitize_provenance(deep)
+        assert out is not None
+        flat = repr(out)
+        self.assertIn("[TRUNCATED]", flat)
+
 
 class TestSearchPlanConfigFromCratedigger(unittest.TestCase):
     def test_threshold_propagates(self):
