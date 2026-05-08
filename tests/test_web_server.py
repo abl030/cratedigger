@@ -2108,7 +2108,29 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
             status, data = self._post(
                 "/api/pipeline/9999/search-plan/regenerate", {})
         self.assertEqual(status, 404)
+        # 404 body must carry the same structured shape as 422/503 so
+        # clients can introspect outcome / plan_id without status-code
+        # branching (#8). plan_id is None on the not-found path.
         self.assertIn("error", data)
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertIn("plan_id", data)
+        self.assertIsNone(data["plan_id"])
+        self.assertEqual(data["request_id"], 9999)
+
+    def test_regenerate_noop_returns_200_with_noop_outcome(self):
+        """#7: NOOP outcome from the service surfaces as 200 with the
+        outcome string and the existing plan_id, not as a generic 200."""
+        with self._patch_service(
+                outcome="noop_active_plan_exists",
+                plan_id=77, is_supersede=False):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REGEN_REQUIRED_FIELDS,
+                                "search-plan regenerate noop response")
+        self.assertEqual(data["outcome"], "noop_active_plan_exists")
+        self.assertEqual(data["plan_id"], 77)
+        self.assertFalse(data["is_supersede"])
 
     def test_regenerate_deterministic_failure_returns_422(self):
         with self._patch_service(

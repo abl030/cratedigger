@@ -551,7 +551,11 @@ def post_pipeline_search_plan_regenerate(
         payload["executable"] = False
 
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        h._error("Not found", 404)
+        # Symmetric body shape with 422 / 503: clients expect to see
+        # request_id / outcome / plan_id (None) / failure_class /
+        # error_message even on the not-found path.
+        payload["error"] = "Not found"
+        h._json(payload, status=404)
         return
     if result.outcome == RESULT_FAILED_DETERMINISTIC:
         h._json(payload, status=422)
