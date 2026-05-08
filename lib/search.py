@@ -9,12 +9,9 @@ Replacing the first character with * bypasses the filter:
   "Beatles" → "*eatles" (17786 results vs 0).
 
 The wildcarded form is the default. It bypasses server-side bans but
-is silently dropped by ~95% of peer clients on the network — many
-older Soulseek/Nicotine+/museek+ clients don't index wildcarded
-terms (live A/B for "the wiggles 1991": 241 hits un-wildcarded vs
-14 hits wildcarded). The escalation ladder therefore retries the
-un-wildcarded form once base/year cycles fail, before falling back
-to per-track queries.
+many older Soulseek/Nicotine+/museek+ clients don't index wildcarded
+terms, so the escalation ladder retries the un-wildcarded form once
+base/year cycles fail, before falling back to per-track queries.
 
 Pure functions — no I/O, no external dependencies.
 """
@@ -78,6 +75,9 @@ class SearchResult:
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.
 MAX_SEARCH_TOKENS = 4
+# Empirical from search_log peer-dir fanout: keep this list narrow and add
+# only words that repeatedly dominate expensive broad searches.
+LOW_ENTROPY_QUERY_TOKENS = {"the", "you", "from", "and"}
 
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
@@ -101,6 +101,40 @@ def strip_short_tokens(tokens):
     """
     long = [t for t in tokens if len(t) > 2]
     return long if long else tokens  # keep originals if ALL are short
+
+
+def _normalize_query_tokens(
+    tokens: list[str],
+    *,
+    preserve_all_low_entropy: bool = False,
+) -> list[str]:
+    """Drop low-entropy tokens and case-insensitive repeats."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        key = token.lower()
+        if key in LOW_ENTROPY_QUERY_TOKENS:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(token)
+
+    if normalized or not preserve_all_low_entropy:
+        return normalized
+
+    # Artist names that are only low-entropy words ("The The", "You You")
+    # are still real artist identity. Preserve one case-insensitive copy
+    # rather than erasing the artist side of the query entirely.
+    fallback: list[str] = []
+    seen.clear()
+    for token in tokens:
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        fallback.append(token)
+    return fallback
 
 
 def wildcard_artist_tokens(artist_tokens):
@@ -159,11 +193,16 @@ def _longest_artist_token(
         return None
 
     excluded = excluded_tokens or set()
-    tokens = [t for t in cleaned.split() if len(t) > 2]
+    tokens = _normalize_query_tokens(
+        [t for t in cleaned.split() if len(t) > 2],
+        preserve_all_low_entropy=True,
+    )
     candidates = [t for t in tokens if t.lower() not in excluded]
     if candidates:
         return max(candidates, key=len)
-    if tokens:
+    # If every useful artist token is the current title token, do not append
+    # it back and produce duplicates like "Fall Fall".
+    if tokens and not excluded:
         return max(tokens, key=len)
     return None
 
@@ -198,6 +237,14 @@ def build_query(
     # Strip short tokens from each
     artist_tokens = strip_short_tokens(artist_tokens)
     title_tokens = strip_short_tokens(title_tokens)
+
+    # Drop very low-entropy search terms ("the", "you") and repeated tokens
+    # before wildcarding/capping so they do not consume Soulseek query slots.
+    artist_tokens = _normalize_query_tokens(
+        artist_tokens,
+        preserve_all_low_entropy=True,
+    )
+    title_tokens = _normalize_query_tokens(title_tokens)
 
     # Drop title tokens that duplicate artist tokens (case-insensitive).
     # e.g. "The Castiles - The Castiles Live" → artist has "Castiles",
@@ -278,12 +325,13 @@ def _per_track_queries(
     tokens are short), then cap to ``MAX_SEARCH_TOKENS``. The result is a
     list of ready-to-issue Soulseek query strings, one per track, in
     source-tracklist order. Single-token track queries get the longest
-    cleaned artist token appended for extra entropy, e.g. "Sweet Dallas".
+    distinct cleaned artist token appended for extra entropy, e.g.
+    "Sweet Dallas", or are skipped when no such artist token exists.
 
     Cleaning rules:
       - Empty queries (titles that clean to nothing alpha) are skipped.
-      - One-token queries are enriched with the longest artist token when
-        available because bare one-word titles are too broad.
+      - One-token queries are enriched with the longest distinct artist token
+        when available; otherwise they are skipped as too broad.
       - Identical tokenised queries are deduplicated case-insensitively
         so duplicate tracklist entries (e.g. two ``Archie's Theme`` tracks
         on the Wiggles 1991 album) don't burn two cycles on the same
@@ -300,6 +348,7 @@ def _per_track_queries(
         cleaned = strip_special_chars(title)
         tokens = cleaned.split()
         tokens = strip_short_tokens(tokens)
+        tokens = _normalize_query_tokens(tokens)
         if not tokens:
             continue
         tokens = cap_tokens(tokens)
@@ -310,6 +359,8 @@ def _per_track_queries(
             )
             if artist_token:
                 tokens = tokens + [artist_token]
+            else:
+                continue
         query = " ".join(tokens)
         if not query:
             continue

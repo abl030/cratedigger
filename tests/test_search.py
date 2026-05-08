@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.search import (
     build_query, strip_special_chars, strip_short_tokens,
     wildcard_artist_tokens, cap_tokens,
-    _per_track_queries, select_variant,
+    _normalize_query_tokens, _per_track_queries, select_variant,
 )
 
 
@@ -117,27 +117,50 @@ class TestCapTokens(unittest.TestCase):
         self.assertEqual(result, ["Mountain", "Goats", "Tallahassee", "Extra"])
 
 
+class TestNormalizeQueryTokens(unittest.TestCase):
+
+    def test_normalizes_tokens(self):
+        cases = [
+            ("empty", [], []),
+            ("all_low_entropy", ["The", "you", "From", "and"], []),
+            ("case_dedupes", ["Love", "love", "LOVE"], ["Love"]),
+            ("stopword_and_dedupe", ["The", "Love", "love", "from"], ["Love"]),
+            ("preserves_order", ["One", "Two", "one", "Three"], ["One", "Two", "Three"]),
+        ]
+        for name, tokens, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(_normalize_query_tokens(tokens), expected)
+
+    def test_can_preserve_all_low_entropy_identity(self):
+        cases = [
+            (["The", "the"], ["The"]),
+            (["The", "You"], ["The", "You"]),
+        ]
+        for tokens, expected in cases:
+            with self.subTest(tokens=tokens):
+                self.assertEqual(
+                    _normalize_query_tokens(
+                        tokens,
+                        preserve_all_low_entropy=True,
+                    ),
+                    expected,
+                )
+
+
 class TestBuildQuery(unittest.TestCase):
 
     def test_basic(self):
         q = build_query("The Mountain Goats", "Tallahassee")
-        # "The" stripped (<=2? no, 3 chars)... actually "The" is 3 chars, stays
-        # Artist: The Mountain Goats → *he *ountain *oats
-        # Title: Tallahassee
-        # Total 4 tokens, at cap
-        self.assertEqual(q, "*he *ountain *oats Tallahassee")
+        # "The" has too little search entropy and is stripped before wildcarding.
+        self.assertEqual(q, "*ountain *oats Tallahassee")
 
     def test_beatles(self):
         q = build_query("The Beatles", "Abbey Road")
-        # *he *eatles Abbey Road — 4 tokens
-        self.assertEqual(q, "*he *eatles Abbey Road")
+        self.assertEqual(q, "*eatles Abbey Road")
 
     def test_afi(self):
         q = build_query("AFI", "Sing the Sorrow")
-        # AFI → *FI (short tokens in title: "the" stays at 3 chars)
-        # *FI Sing Sorrow — "the" dropped as <=2? No, "the" is 3.
-        # *FI Sing the Sorrow — 4 tokens
-        self.assertEqual(q, "*FI Sing the Sorrow")
+        self.assertEqual(q, "*FI Sing Sorrow")
 
     def test_long_title_caps_tokens(self):
         q = build_query("Animal Collective", "Merriweather Post Pavilion")
@@ -171,6 +194,10 @@ class TestBuildQuery(unittest.TestCase):
 
     def test_returns_none_for_empty(self):
         q = build_query("", "")
+        self.assertIsNone(q)
+
+    def test_returns_none_when_title_normalization_empties_query(self):
+        q = build_query("Various Artists", "The You")
         self.assertIsNone(q)
 
     def test_kanye(self):
@@ -235,16 +262,36 @@ class TestBuildQuery(unittest.TestCase):
         # wildcard_artist=False: artist prepended but NOT wildcarded.
         # Used by the un-wildcarded escalation tier — the wildcarded form
         # bypasses Soulseek's artist banlist but is silently dropped by many
-        # peer clients, costing ~95% of recall.
+        # peer clients.
         q = build_query("The Wiggles", "The Wiggles", wildcard_artist=False)
-        self.assertEqual(q, "The Wiggles")
+        self.assertEqual(q, "Wiggles")
+        q = build_query("Duran Duran", "Duran Duran", wildcard_artist=False)
+        self.assertEqual(q, "Duran")
 
     def test_wildcard_artist_false_non_self_titled(self):
         q = build_query(
             "The Beatles", "Abbey Road", wildcard_artist=False,
         )
-        self.assertEqual(q, "The Beatles Abbey Road")
+        self.assertEqual(q, "Beatles Abbey Road")
         self.assertNotIn("*eatles", q or "")
+
+    def test_low_entropy_title_tokens_dropped(self):
+        q = build_query("Videotape", "The Moon")
+        self.assertEqual(q, "*ideotape Moon")
+        q = build_query("Turnstyle", "You Know")
+        self.assertEqual(q, "*urnstyle Know")
+        q = build_query("John & Jehn", "And Run")
+        self.assertEqual(q, "*ohn *ehn Run")
+
+    def test_repeated_title_tokens_deduped(self):
+        q = build_query("Kanye West", "Love Love Love")
+        self.assertEqual(q, "*anye *est Love")
+
+    def test_all_low_entropy_artist_tokens_preserved(self):
+        q = build_query("The The", "Soul Mining")
+        self.assertEqual(q, "*he Soul Mining")
+        q = build_query("You You", "Album")
+        self.assertEqual(q, "*ou Album")
 
 
 class TestPerTrackQueries(unittest.TestCase):
@@ -254,7 +301,7 @@ class TestPerTrackQueries(unittest.TestCase):
     tracks. The album-match scoring step (sub-count gate + filename ratio
     + cross-check) disambiguates wrong albums after slskd responses come
     back, so we want maximal recall per query. Single-token titles append
-    one literal artist token for entropy.
+    one distinct literal artist token for entropy or are skipped.
     """
 
     def test_basic_titles_in_original_order(self):
@@ -269,7 +316,7 @@ class TestPerTrackQueries(unittest.TestCase):
         self.assertEqual(out, [
             "Get Ready Wiggle",
             "Rock-A-Bye Your Bear",
-            "Dorothy the Dinosaur",
+            "Dorothy Dinosaur",
         ])
 
     def test_strips_punctuation(self):
@@ -282,7 +329,7 @@ class TestPerTrackQueries(unittest.TestCase):
         out = _per_track_queries([
             "Archie's Theme", "ARCHIE'S theme", "Glub Glub Train",
         ])
-        self.assertEqual(out, ["Archie Theme", "Glub Glub Train"])
+        self.assertEqual(out, ["Archie Theme", "Glub Train"])
 
     def test_skips_titles_that_clean_to_empty(self):
         # "??" → no alpha after strip_special_chars → query empty → skip
@@ -312,8 +359,8 @@ class TestPerTrackQueries(unittest.TestCase):
 
     def test_enriches_single_token_titles_with_artist_token(self):
         # Bare one-word track searches like "Sweet" or "Tallahassee" are too
-        # broad; append the longest artist token. Ties keep source order, so
-        # "Dallas Crane" contributes "Dallas".
+        # broad when the artist can add distinct entropy. Ties keep source
+        # order, so "Dallas Crane" contributes "Dallas".
         out = _per_track_queries([
             "Sweet",
             "Twenty Four Seven",
@@ -331,6 +378,41 @@ class TestPerTrackQueries(unittest.TestCase):
         out = _per_track_queries(["Tallahassee"], artist_name="The Mountain Goats")
         self.assertEqual(out, ["Tallahassee Mountain"])
 
+    def test_low_entropy_track_tokens_are_dropped_before_enrichment(self):
+        out = _per_track_queries([
+            "You Know",
+            "From You",
+            "The Truth",
+            "The Fall",
+            "And Run",
+        ], artist_name="The Beatles")
+        self.assertEqual(out, [
+            "Know Beatles",
+            "Truth Beatles",
+            "Fall Beatles",
+            "Run Beatles",
+        ])
+
+    def test_repeated_track_tokens_are_deduped_before_enrichment(self):
+        out = _per_track_queries(["Love Love Love"], artist_name="Big Thief")
+        self.assertEqual(out, ["Love Thief"])
+
+    def test_repeated_track_tokens_skip_when_no_artist_entropy_remains(self):
+        out = _per_track_queries(["Lord Lord Lord"], artist_name="Ye")
+        self.assertEqual(out, [])
+
+    def test_repeated_track_tokens_skip_when_artist_is_same_token(self):
+        out = _per_track_queries(["Love Love Love"], artist_name="Love")
+        self.assertEqual(out, [])
+
+    def test_single_token_artist_entropy_must_be_distinct(self):
+        out = _per_track_queries(["Fall"], artist_name="The Fall")
+        self.assertEqual(out, [])
+
+    def test_single_token_track_skips_without_distinct_artist_entropy(self):
+        out = _per_track_queries(["Moon"], artist_name="Various Artists")
+        self.assertEqual(out, [])
+
 
 class TestSelectVariant(unittest.TestCase):
     """Variant generator ladder — pure decision logic.
@@ -343,8 +425,7 @@ class TestSelectVariant(unittest.TestCase):
       pool drained            → exhausted
 
     The wildcarded default form bypasses Soulseek's per-peer artist banlist
-    but is silently dropped by ~95% of peer clients (live A/B test:
-    `the wiggles 1991` → 241 hits vs `*he *iggles 1991` → 14 hits). The
+    but is silently dropped by many peer clients. The
     un-wildcarded tiers re-acquire that recall before the per-track tier
     fans out to peers who only share single tracks.
     """
@@ -363,13 +444,13 @@ class TestSelectVariant(unittest.TestCase):
                 v = select_variant(
                     search_attempts=attempts,
                     threshold=5,
-                    base_query="*he *iggles",
-                    base_query_unwild="The Wiggles",
+                    base_query="*iggles",
+                    base_query_unwild="Wiggles",
                     year="1991",
                     track_titles=self.WIGGLES_TITLES,
                 )
                 self.assertEqual(v.kind, "default")
-                self.assertEqual(v.query, "*he *iggles")
+                self.assertEqual(v.query, "*iggles")
                 self.assertEqual(v.tag, "default")
                 self.assertIsNone(v.slice_index)
 
@@ -378,13 +459,13 @@ class TestSelectVariant(unittest.TestCase):
         v = select_variant(
             search_attempts=5,
             threshold=5,
-            base_query="*he *iggles",
-            base_query_unwild="The Wiggles",
+            base_query="*iggles",
+            base_query_unwild="Wiggles",
             year="1991",
             track_titles=self.WIGGLES_TITLES,
         )
         self.assertEqual(v.kind, "unwild")
-        self.assertEqual(v.query, "The Wiggles")
+        self.assertEqual(v.query, "Wiggles")
         self.assertEqual(v.tag, "unwild")
         self.assertIsNone(v.slice_index)
 
@@ -392,13 +473,13 @@ class TestSelectVariant(unittest.TestCase):
         v = select_variant(
             search_attempts=6,
             threshold=5,
-            base_query="*he *iggles",
-            base_query_unwild="The Wiggles",
+            base_query="*iggles",
+            base_query_unwild="Wiggles",
             year="1991",
             track_titles=self.WIGGLES_TITLES,
         )
         self.assertEqual(v.kind, "unwild_year")
-        self.assertEqual(v.query, "The Wiggles 1991")
+        self.assertEqual(v.query, "Wiggles 1991")
         self.assertEqual(v.tag, "unwild_year")
 
     def test_unwild_year_uses_4char_prefix(self):
@@ -418,8 +499,8 @@ class TestSelectVariant(unittest.TestCase):
         v = select_variant(
             search_attempts=7,
             threshold=5,
-            base_query="*he *iggles",
-            base_query_unwild="The Wiggles",
+            base_query="*iggles",
+            base_query_unwild="Wiggles",
             year="1991",
             track_titles=self.WIGGLES_TITLES,
         )
@@ -435,8 +516,8 @@ class TestSelectVariant(unittest.TestCase):
         cases = [
             (7, "track_0", 0, "Get Ready Wiggle"),
             (8, "track_1", 1, "Rock-A-Bye Your Bear"),
-            (9, "track_2", 2, "Dorothy the Dinosaur"),
-            (10, "track_3", 3, "Mischief the Monkey"),
+            (9, "track_2", 2, "Dorothy Dinosaur"),
+            (10, "track_3", 3, "Mischief Monkey"),
             (11, "exhausted", None, None),
         ]
         for attempts, expected_tag, expected_slice, expected_query in cases:
@@ -444,8 +525,8 @@ class TestSelectVariant(unittest.TestCase):
                 v = select_variant(
                     search_attempts=attempts,
                     threshold=5,
-                    base_query="*he *iggles",
-                    base_query_unwild="The Wiggles",
+                    base_query="*iggles",
+                    base_query_unwild="Wiggles",
                     year="1991",
                     track_titles=self.WIGGLES_TITLES,
                 )
@@ -637,7 +718,7 @@ class TestSelectVariant(unittest.TestCase):
         cases = [
             (7, "track_0", "Get Ready Wiggle"),
             (8, "track_1", "Archie Theme"),
-            (9, "track_2", "Glub Glub Train"),
+            (9, "track_2", "Glub Train"),
             (10, "exhausted", None),
         ]
         for attempts, expected_tag, expected_query in cases:
