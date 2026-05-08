@@ -1033,6 +1033,50 @@ class TestFakeSlskdAPI(unittest.TestCase):
             ("user1", "Music\\Broken"),
         ])
 
+    def test_user_status_default_is_online(self):
+        """Unset users default to Online so legacy tests stay green."""
+        slskd = FakeSlskdAPI()
+
+        result = slskd.users.status("never_set")
+
+        self.assertEqual(result["presence"], "Online")
+        self.assertEqual(slskd.users.status_calls, ["never_set"])
+
+    def test_user_status_returns_configured_presence(self):
+        slskd = FakeSlskdAPI()
+        slskd.users.set_status("alice", "Online")
+        slskd.users.set_status("bob", "Away")
+        slskd.users.set_status("carol", "Offline")
+
+        self.assertEqual(slskd.users.status("alice")["presence"], "Online")
+        self.assertEqual(slskd.users.status("bob")["presence"], "Away")
+        self.assertEqual(slskd.users.status("carol")["presence"], "Offline")
+        self.assertEqual(
+            slskd.users.status_calls, ["alice", "bob", "carol"],
+        )
+
+    def test_user_status_raises_configured_error(self):
+        slskd = FakeSlskdAPI()
+        boom = RuntimeError("slskd unreachable")
+        slskd.users.set_status_error("flaky", boom)
+
+        with self.assertRaises(RuntimeError):
+            slskd.users.status("flaky")
+        # The call is still recorded so tests can assert ordering.
+        self.assertEqual(slskd.users.status_calls, ["flaky"])
+
+    def test_user_status_payload_shape_matches_slskd_api(self):
+        """Returned dict mirrors slskd-api UserStatus TypedDict shape:
+        {presence: str, isPrivileged: bool}."""
+        slskd = FakeSlskdAPI()
+        slskd.users.set_status("alice", "Online")
+
+        result = slskd.users.status("alice")
+
+        self.assertIn("presence", result)
+        self.assertIn("isPrivileged", result)
+        self.assertIsInstance(result["isPrivileged"], bool)
+
 
 class TestFakeSlskdSearches(unittest.TestCase):
     """Self-test for the FakeSlskdSearches stub introduced in U5."""
