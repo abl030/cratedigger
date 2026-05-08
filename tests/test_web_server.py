@@ -1857,6 +1857,43 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response")
 
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_runs_plan_generation_after_set_tracks(self, mock_get_release):
+        """Web add path generates a search plan after `set_tracks()`,
+        consistent with the CLI add path. Failures must not break the
+        HTTP response."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        mock_get_release.return_value = {
+            "release_group_id": "rg-1",
+            "artist_id": "artist-1",
+            "artist_name": "Tycho",
+            "title": "Awake",
+            "year": 2014,
+            "country": "US",
+            "tracks": [
+                {"title": "Awake", "track_number": 1, "disc_number": 1},
+                {"title": "Montana", "track_number": 2, "disc_number": 1},
+                {"title": "L", "track_number": 3, "disc_number": 1},
+                {"title": "Apogee", "track_number": 4, "disc_number": 1},
+            ],
+        }
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "abc-plan-1"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add response (plan)")
+        new_id = data["id"]
+        active = fake_db.get_active_search_plan(new_id)
+        self.assertIsNotNone(active)
+        assert active is not None
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(active.next_ordinal, 0)
+
     def test_pipeline_add_exists_contract(self):
         self.mock_db.get_request_by_mb_release_id.return_value = {
             "id": 502,
@@ -1868,6 +1905,26 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    def test_pipeline_add_duplicate_does_not_regenerate(self):
+        """Duplicate add returns the existing request without generating
+        a second plan."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        # Pre-seed an existing request matching the release id.
+        fake_db.add_request(
+            mb_release_id="abc-dupe",
+            artist_name="Dupe", album_title="Existing", source="request",
+        )
+        before = len(fake_db.search_plans)
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "abc-dupe"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(len(fake_db.search_plans), before)
 
     @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_contract(self, mock_get_release):

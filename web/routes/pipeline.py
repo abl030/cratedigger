@@ -40,6 +40,36 @@ from web import cache as cache_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
+def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
+                              tracks, source):
+    """Run shared plan generation after `set_tracks()` on the add path.
+
+    Failures are recorded but never bubble up — the request is repairable
+    via startup reconciliation or explicit regeneration. This keeps the
+    add API contract stable: a 200 response means the request landed,
+    even if plan generation needs another attempt.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import SearchPlanService
+    s = _server()
+    try:
+        svc = SearchPlanService(s._db(), read_runtime_config())
+        svc.generate_for_new_request(
+            req_id,
+            artist_name=artist_name,
+            album_title=album_title,
+            year=year,
+            tracks=tracks or [],
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never fail the HTTP request because plan generation hiccupped.
+        logger.warning(
+            "post_pipeline_add: plan generation failed for request %s: %s",
+            req_id, exc,
+        )
+
+
 def _server():
     """Deferred import to avoid circular deps."""
     from web import server
@@ -539,6 +569,15 @@ def post_pipeline_add(h, body: dict) -> None:
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
 
+        _generate_plan_after_add(
+            req_id,
+            artist_name=release["artist_name"],
+            album_title=release["title"],
+            year=release.get("year"),
+            tracks=release.get("tracks") or [],
+            source=source,
+        )
+
         h._json({
             "status": "added",
             "id": req_id,
@@ -576,6 +615,15 @@ def post_pipeline_add(h, body: dict) -> None:
 
     if release.get("tracks"):
         s._db().set_tracks(req_id, release["tracks"])
+
+    _generate_plan_after_add(
+        req_id,
+        artist_name=release["artist_name"],
+        album_title=release["title"],
+        year=release.get("year"),
+        tracks=release.get("tracks") or [],
+        source=source,
+    )
 
     h._json({
         "status": "added",
@@ -717,6 +765,14 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
+        _generate_plan_after_add(
+            req_id,
+            artist_name=release["artist_name"],
+            album_title=release["title"],
+            year=release.get("year"),
+            tracks=release.get("tracks") or [],
+            source="request",
+        )
         # Newly added request — status is already 'wanted', set quality override
         transitions.finalize_request(
             s._db(),

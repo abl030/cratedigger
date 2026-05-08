@@ -75,6 +75,22 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(len(tracks), 3)
 
     @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_add_with_mbid_creates_active_search_plan(self, mock_fetch):
+        """Plan generation runs after `set_tracks()` on the CLI add path."""
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+        args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
+        pipeline_cli.cmd_add(self.db, args)
+
+        req = self.db.get_request_by_mb_release_id("44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        assert req is not None
+        active = self.db.get_active_search_plan(req["id"])
+        assert active is not None
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertGreater(len(active.items), 0)
+
+    @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_duplicate_skipped(self, mock_fetch):
         self.db.add_request(
             mb_release_id="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
@@ -83,6 +99,49 @@ class TestCmdAdd(unittest.TestCase):
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
         pipeline_cli.cmd_add(self.db, args)
         mock_fetch.assert_not_called()
+
+
+class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
+    """Fake-backed tests for the plan-generation seam on the CLI add path.
+
+    These run without TEST_DB_DSN so the CLI/web parity contract is
+    enforced even on environments where the ephemeral PG isn't bootstrapped.
+    """
+
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_cli_add_calls_search_plan_service(self, mock_fetch):
+        from tests.fakes import FakePipelineDB
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+
+        db = FakePipelineDB()
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(db, args)
+        # FakePipelineDB.add_request increments id; first add → id=1.
+        active = db.get_active_search_plan(1)
+        self.assertIsNotNone(active)
+        assert active is not None
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_cli_add_duplicate_does_not_regenerate(self, mock_fetch):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        # Pre-seed a duplicate request with the same release id.
+        db.add_request(
+            mb_release_id="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
+            artist_name="A", album_title="B", source="request",
+        )
+        before_plan_count = len(db.search_plans)
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(db, args)
+        mock_fetch.assert_not_called()
+        # No new plan rows for the duplicate path.
+        self.assertEqual(len(db.search_plans), before_plan_count)
 
 
 @unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")

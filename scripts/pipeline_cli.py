@@ -189,6 +189,49 @@ def cmd_add(db, args):
     return _cmd_add_mb(db, release_id, source)
 
 
+def _build_search_plan_service(db):
+    """Construct a `SearchPlanService` against the runtime config.
+
+    CLI / web / startup all share the same source so generator-id and
+    `SearchPlanConfig` cannot drift between paths.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import SearchPlanService
+    return SearchPlanService(db, read_runtime_config())
+
+
+def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
+                              tracks, source):
+    """Run plan generation for a freshly-added request.
+
+    Failures are non-fatal: a deterministic / transient failure is
+    recorded as a `search_plans` row and the CLI prints a one-liner so
+    the operator knows the request is wanted-but-not-searchable until
+    repaired.
+    """
+    from lib.search_plan_service import (
+        RESULT_FAILED_DETERMINISTIC,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_SUCCESS,
+    )
+
+    svc = _build_search_plan_service(db)
+    result = svc.generate_for_new_request(
+        req_id,
+        artist_name=artist_name,
+        album_title=album_title,
+        year=year,
+        tracks=tracks,
+        source=source,
+    )
+    if result.outcome == RESULT_SUCCESS:
+        print(f"  Plan: active id={result.plan_id}")
+    elif result.outcome == RESULT_FAILED_DETERMINISTIC:
+        print(f"  Plan: FAILED ({result.failure_class}); request not searchable")
+    elif result.outcome == RESULT_FAILED_TRANSIENT:
+        print(f"  Plan: TRANSIENT FAIL ({result.failure_class}); will retry")
+
+
 def _cmd_add_mb(db, mbid, source):
     """Add a MusicBrainz release to the pipeline."""
     existing = db.get_request_by_release_id(mbid)
@@ -227,6 +270,14 @@ def _cmd_add_mb(db, mbid, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {artist_name} - {release.get('title')} ({len(tracks)} tracks)")
+    _generate_plan_after_add(
+        db, req_id,
+        artist_name=artist_name,
+        album_title=release.get("title", "Unknown"),
+        year=year,
+        tracks=tracks,
+        source=source,
+    )
 
 
 def _cmd_add_discogs(db, discogs_id, source):
@@ -260,6 +311,14 @@ def _cmd_add_discogs(db, discogs_id, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {release['artist_name']} - {release['title']} ({len(tracks)} tracks)")
+    _generate_plan_after_add(
+        db, req_id,
+        artist_name=release["artist_name"],
+        album_title=release["title"],
+        year=release.get("year"),
+        tracks=tracks,
+        source=source,
+    )
 
 
 def cmd_status(db, args):
