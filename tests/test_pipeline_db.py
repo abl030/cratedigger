@@ -37,7 +37,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["peer_dir_observations", "cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in ["peer_dir_daily_aggregates", "peer_dir_observations", "cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -62,6 +62,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("import_jobs", table_names)
         self.assertIn("cycle_metrics", table_names)
         self.assertIn("peer_dir_observations", table_names)
+        self.assertIn("peer_dir_daily_aggregates", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
@@ -4820,6 +4821,399 @@ class TestSearchPlanStats(unittest.TestCase):
         self.assertEqual(slot0.consumed_attempts, 1)
         self.assertEqual(slot0.non_consuming_attempts, 1)
         self.assertEqual(slot0.stale_completion_attempts, 0)
+
+
+@requires_postgres
+class TestPeerDirDailyAggregatesLazyFill(unittest.TestCase):
+    """U2: ``get_peer_dir_daily_metrics`` lazy-fills the
+    ``peer_dir_daily_aggregates`` cache with completed-day rows and
+    computes today live, while preserving the public response shape.
+    """
+
+    # Pinned response shape (regression contract). Today's row is keyed
+    # by ``date`` and the keys per-day must match exactly. ``totals``
+    # keys must match exactly.
+    _DAY_KEYS = {"date", "new_combos", "new_peers", "new_dirs"}
+    _TOTALS_KEYS = {
+        "known_combos", "known_peers", "known_dirs",
+        "new_24h", "cold_seen_24h", "days_with_new", "tracked_since",
+    }
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    # -- helpers ----------------------------------------------------------
+
+    def _today_perth(self):
+        """Return today's Perth-local date as the DB sees it."""
+        cur = self.db._execute(
+            "SELECT (NOW() AT TIME ZONE 'Australia/Perth')::date AS d"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row["d"]
+
+    def _cache_count(self) -> int:
+        cur = self.db._execute(
+            "SELECT COUNT(*)::int AS n FROM peer_dir_daily_aggregates"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    def _cache_rows(self):
+        cur = self.db._execute(
+            "SELECT day, new_combos, new_peers, new_dirs "
+            "FROM peer_dir_daily_aggregates ORDER BY day"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def _seed_cache(self, day, *, new_combos: int, new_peers: int,
+                    new_dirs: int):
+        """Direct INSERT bypassing the lazy-fill — used to assert that
+        a populated cache prevents recompute."""
+        self.db._execute(
+            """
+            INSERT INTO peer_dir_daily_aggregates
+                (day, new_combos, new_peers, new_dirs)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (day, new_combos, new_peers, new_dirs),
+        )
+        self.db.conn.commit()
+
+    def _assert_response_shape(self, resp: dict):
+        self.assertIsInstance(resp, dict)
+        self.assertIn("days", resp)
+        self.assertIn("totals", resp)
+        self.assertIsInstance(resp["days"], list)
+        self.assertIsInstance(resp["totals"], dict)
+        self.assertEqual(set(resp["totals"].keys()), self._TOTALS_KEYS)
+        for day in resp["days"]:
+            self.assertEqual(set(day.keys()), self._DAY_KEYS)
+
+    # -- tests ------------------------------------------------------------
+
+    def test_happy_path_empty_cache_backfills_completed_days(self):
+        """First call backfills 13 completed-day rows and computes today
+        live."""
+        today = self._today_perth()
+        # Seed observations across 14 distinct Perth-local days. We use
+        # 12:00 UTC for each `observed_at` so the Perth-local date never
+        # straddles midnight and the bucketing is deterministic.
+        for offset in range(14):
+            day_perth = today - timedelta(days=offset)
+            ts = datetime(
+                day_perth.year, day_perth.month, day_perth.day,
+                4, 0, 0, tzinfo=timezone.utc,
+            )  # 12:00 Perth = 04:00 UTC
+            self.db.record_peer_dir_observations(
+                [(f"u{offset}", f"d{offset}")],
+                observed_at=ts,
+            )
+
+        self.assertEqual(self._cache_count(), 0)
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        self._assert_response_shape(resp)
+        # 13 completed-day rows cached (today is live, never cached).
+        self.assertEqual(self._cache_count(), 13)
+        cache_days = {row["day"] for row in self._cache_rows()}
+        self.assertNotIn(today, cache_days)
+        for offset in range(1, 14):
+            self.assertIn(today - timedelta(days=offset), cache_days)
+        # Days array has 14 entries, ordered by date DESC (today first).
+        self.assertEqual(len(resp["days"]), 14)
+        self.assertEqual(resp["days"][0]["date"], today.isoformat())
+        # Each seeded day should have exactly 1 new_combo (one obs).
+        for day in resp["days"]:
+            self.assertEqual(day["new_combos"], 1)
+            self.assertEqual(day["new_peers"], 1)
+            self.assertEqual(day["new_dirs"], 1)
+        # Totals reflect the 14 inserted observations.
+        self.assertEqual(resp["totals"]["known_combos"], 14)
+
+    def test_cache_hit_does_not_recompute(self):
+        """When all completed days are present in the cache, the method
+        does not insert any new cache rows."""
+        today = self._today_perth()
+        # Seed a cache row for every completed day in the 14-day window.
+        for offset in range(1, 14):
+            self._seed_cache(
+                today - timedelta(days=offset),
+                new_combos=offset, new_peers=offset, new_dirs=offset,
+            )
+        # Add one observation today so the live-today computation runs.
+        self.db.record_peer_dir_observations(
+            [("today_user", "today_dir")],
+        )
+        before = self._cache_count()
+        self.assertEqual(before, 13)
+
+        resp1 = self.db.get_peer_dir_daily_metrics(days=14)
+        after1 = self._cache_count()
+        self.assertEqual(after1, before, "cache must not grow on hit")
+        # Cache rows should match what we seeded.
+        self._assert_response_shape(resp1)
+        # Today's row from live-compute (1 observation).
+        self.assertEqual(resp1["days"][0]["date"], today.isoformat())
+        self.assertEqual(resp1["days"][0]["new_combos"], 1)
+        # Yesterday's row from cache.
+        yesterday = today - timedelta(days=1)
+        ydict = next(d for d in resp1["days"]
+                     if d["date"] == yesterday.isoformat())
+        self.assertEqual(ydict["new_combos"], 1)
+
+        # Second call must also be a hit.
+        resp2 = self.db.get_peer_dir_daily_metrics(days=14)
+        self.assertEqual(self._cache_count(), before)
+        self.assertEqual(resp1["days"], resp2["days"])
+
+    def test_day_rollover_backfills_only_new_completed_day(self):
+        """When the cache covers all but the most-recent completed day,
+        the next call backfills exactly that one day."""
+        today = self._today_perth()
+        # Seed observations for the most-recent completed day only.
+        yesterday = today - timedelta(days=1)
+        ts = datetime(
+            yesterday.year, yesterday.month, yesterday.day,
+            4, 0, 0, tzinfo=timezone.utc,
+        )
+        self.db.record_peer_dir_observations(
+            [("yu", "yd")],
+            observed_at=ts,
+        )
+        # Seed all OTHER completed days as cache rows so only yesterday
+        # is the missing day.
+        for offset in range(2, 14):
+            self._seed_cache(
+                today - timedelta(days=offset),
+                new_combos=0, new_peers=0, new_dirs=0,
+            )
+        before = self._cache_count()
+        self.assertEqual(before, 12)
+
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        self._assert_response_shape(resp)
+        after = self._cache_count()
+        self.assertEqual(after, 13, "yesterday must be backfilled")
+        # The newly-inserted row matches yesterday's observation count.
+        rows = {row["day"]: row for row in self._cache_rows()}
+        self.assertIn(yesterday, rows)
+        self.assertEqual(rows[yesterday]["new_combos"], 1)
+
+    def test_today_only_observations_no_completed_day_inserts(self):
+        """Observations only for today → cache stays empty for today; if
+        no completed days have observations, gap-day rows still get
+        written for completed days (zero rows) — both behaviours match
+        the design (today is live; missing completed days backfill)."""
+        today = self._today_perth()
+        self.db.record_peer_dir_observations(
+            [("u", "d")],
+        )
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        self._assert_response_shape(resp)
+        # Today's row reflects the observation; completed days are zero.
+        self.assertEqual(resp["days"][0]["date"], today.isoformat())
+        self.assertEqual(resp["days"][0]["new_combos"], 1)
+        for day in resp["days"][1:]:
+            self.assertEqual(day["new_combos"], 0)
+        # No row in the cache table for today.
+        cache_days = {row["day"] for row in self._cache_rows()}
+        self.assertNotIn(today, cache_days)
+
+    def test_empty_observations_yields_zeros_no_errors(self):
+        """Zero observations entirely → response shows zeros across the
+        14-day window and the method does not crash."""
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        self._assert_response_shape(resp)
+        self.assertEqual(len(resp["days"]), 14)
+        for day in resp["days"]:
+            self.assertEqual(day["new_combos"], 0)
+            self.assertEqual(day["new_peers"], 0)
+            self.assertEqual(day["new_dirs"], 0)
+        self.assertEqual(resp["totals"]["known_combos"], 0)
+        self.assertIsNone(resp["totals"]["tracked_since"])
+
+    def test_gap_day_in_middle_writes_zero_row(self):
+        """A completed day with no observations gets a (0, 0, 0) cache
+        row inserted, and subsequent reads hit that zero row."""
+        today = self._today_perth()
+        # Seed observations on days -2 and -5 only; day -3 and -4 are
+        # gap days within the 14-day window.
+        for offset in (2, 5):
+            day_perth = today - timedelta(days=offset)
+            ts = datetime(
+                day_perth.year, day_perth.month, day_perth.day,
+                4, 0, 0, tzinfo=timezone.utc,
+            )
+            self.db.record_peer_dir_observations(
+                [(f"u{offset}", f"d{offset}")],
+                observed_at=ts,
+            )
+        resp1 = self.db.get_peer_dir_daily_metrics(days=14)
+        # 13 completed-day rows backfilled (gap days = zero rows).
+        self.assertEqual(self._cache_count(), 13)
+        cache = {row["day"]: row for row in self._cache_rows()}
+        for offset in (3, 4):  # gap days
+            day = today - timedelta(days=offset)
+            self.assertIn(day, cache)
+            self.assertEqual(cache[day]["new_combos"], 0)
+            self.assertEqual(cache[day]["new_peers"], 0)
+            self.assertEqual(cache[day]["new_dirs"], 0)
+        # Subsequent call must be a cache hit (no new rows).
+        before = self._cache_count()
+        resp2 = self.db.get_peer_dir_daily_metrics(days=14)
+        self.assertEqual(self._cache_count(), before)
+        self.assertEqual(resp1["days"], resp2["days"])
+
+    def test_perth_day_boundary_western_edge(self):
+        """An observation late in the Perth day must land in that
+        Perth-local day's bucket, not the following day."""
+        today = self._today_perth()
+        # Pick a clearly-completed day (3 days ago).
+        target_day = today - timedelta(days=3)
+        # 23:55 Perth on target_day = 15:55 UTC on target_day.
+        ts = datetime(
+            target_day.year, target_day.month, target_day.day,
+            15, 55, 0, tzinfo=timezone.utc,
+        )
+        self.db.record_peer_dir_observations(
+            [("edge_u", "edge_d")],
+            observed_at=ts,
+        )
+        self.db.get_peer_dir_daily_metrics(days=14)
+        cache = {row["day"]: row for row in self._cache_rows()}
+        self.assertIn(target_day, cache)
+        self.assertEqual(cache[target_day]["new_combos"], 1)
+        # The next day (target_day + 1) must have a (0, 0, 0) cache row.
+        next_day = target_day + timedelta(days=1)
+        if next_day < today:
+            self.assertIn(next_day, cache)
+            self.assertEqual(cache[next_day]["new_combos"], 0)
+
+    def test_perth_midnight_lands_in_today_live(self):
+        """An observation timestamped just after Perth midnight (i.e.
+        late UTC the previous day) must show up in today's live-row
+        count, not in yesterday's cache row.
+
+        The test is authoritative: we synthesise an observation at
+        ``today_perth 00:30 Perth`` (= ``yesterday_utc 16:30 UTC``) and
+        assert it lands in today's bucket.
+        """
+        today = self._today_perth()
+        # 00:30 Perth on today = 16:30 UTC the prior calendar day.
+        ts = datetime(
+            today.year, today.month, today.day,
+            0, 30, 0, tzinfo=timezone.utc,
+        ) - timedelta(hours=8)
+        # Skip if the synthesised UTC ts is in the future — protects
+        # against running this test in the first 30 min of Perth-time
+        # midnight. (Rare edge.)
+        if ts > datetime.now(timezone.utc):
+            self.skipTest("synthesised timestamp is in the future")
+        self.db.record_peer_dir_observations(
+            [("midnight_u", "midnight_d")],
+            observed_at=ts,
+        )
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        # Today's live row picks up this observation.
+        self.assertEqual(resp["days"][0]["date"], today.isoformat())
+        self.assertEqual(resp["days"][0]["new_combos"], 1)
+        # Yesterday's cache row is zero (the obs was past midnight Perth).
+        yesterday = today - timedelta(days=1)
+        cache = {row["day"]: row for row in self._cache_rows()}
+        self.assertIn(yesterday, cache)
+        self.assertEqual(cache[yesterday]["new_combos"], 0)
+
+    def test_concurrent_backfill_is_race_safe(self):
+        """Two simulated concurrent callers backfilling the same days
+        must not duplicate rows — ``ON CONFLICT DO NOTHING`` makes the
+        second insert a no-op. Both calls return the same response."""
+        today = self._today_perth()
+        # Seed observations across a few completed days.
+        for offset in (2, 4, 7):
+            day_perth = today - timedelta(days=offset)
+            ts = datetime(
+                day_perth.year, day_perth.month, day_perth.day,
+                4, 0, 0, tzinfo=timezone.utc,
+            )
+            self.db.record_peer_dir_observations(
+                [(f"u{offset}", f"d{offset}")],
+                observed_at=ts,
+            )
+        # Open a second PipelineDB connection to simulate concurrency.
+        from lib import pipeline_db
+        db2 = pipeline_db.PipelineDB(TEST_DSN)
+        try:
+            resp1 = self.db.get_peer_dir_daily_metrics(days=14)
+            # Second caller — cache is now populated; must be a no-op.
+            before = self._cache_count()
+            resp2 = db2.get_peer_dir_daily_metrics(days=14)
+            after = self._cache_count()
+            self.assertEqual(before, after)
+            self.assertEqual(resp1["days"], resp2["days"])
+            self.assertEqual(resp1["totals"], resp2["totals"])
+        finally:
+            db2.close()
+
+    def test_db_error_during_backfill_propagates(self):
+        """A DB error during the backfill INSERT propagates as an
+        exception — the method does not return a partial dict."""
+        # Seed an observation so backfill is attempted.
+        ts = datetime.now(timezone.utc) - timedelta(days=2)
+        self.db.record_peer_dir_observations(
+            [("err_u", "err_d")],
+            observed_at=ts,
+        )
+        # Patch ``execute_values`` on the psycopg2.extras module so the
+        # backfill INSERT raises. This is the only external entry point
+        # the method uses for the bulk write.
+        boom = RuntimeError("simulated backfill failure")
+
+        def explode(*_args, **_kwargs):
+            raise boom
+
+        with patch.object(
+            psycopg2_extras_module(), "execute_values", explode,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.db.get_peer_dir_daily_metrics(days=14)
+            self.assertIs(ctx.exception, boom)
+
+    def test_response_shape_pinned_keys_regression(self):
+        """The response dict must keep its exact shape — pin every key
+        so future drift surfaces as a test failure."""
+        # Mix of empty-window and seeded data.
+        ts = datetime.now(timezone.utc) - timedelta(hours=2)
+        self.db.record_peer_dir_observations(
+            [("pin_u", "pin_d")],
+            observed_at=ts,
+        )
+        resp = self.db.get_peer_dir_daily_metrics(days=14)
+        self.assertEqual(set(resp.keys()), {"days", "totals"})
+        self.assertEqual(set(resp["totals"].keys()), self._TOTALS_KEYS)
+        self.assertEqual(len(resp["days"]), 14)
+        for day in resp["days"]:
+            self.assertEqual(set(day.keys()), self._DAY_KEYS)
+            self.assertIsInstance(day["date"], str)
+            self.assertIsInstance(day["new_combos"], int)
+            self.assertIsInstance(day["new_peers"], int)
+            self.assertIsInstance(day["new_dirs"], int)
+        # Returned dict must be mutable (caller adds heavy_queries).
+        resp["totals"]["heavy_queries"] = []
+        self.assertIn("heavy_queries", resp["totals"])
+
+
+def psycopg2_extras_module():
+    """Resolve the ``psycopg2.extras`` module the way ``pipeline_db``
+    uses it, so the patch in
+    ``test_db_error_during_backfill_propagates`` targets the same
+    callable the production code resolves at call time."""
+    import psycopg2.extras as _extras
+    return _extras
 
 
 if __name__ == "__main__":

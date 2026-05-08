@@ -2639,8 +2639,174 @@ class PipelineDB:
         return len(set(combo_hashes) - existing)
 
     def get_peer_dir_daily_metrics(self, days: int = 14) -> dict[str, Any]:
-        """Return first-seen peer/directory trend metrics for the dashboard."""
+        """Return first-seen peer/directory trend metrics for the dashboard.
+
+        Completed-day buckets are read from (and lazy-filled into) the
+        ``peer_dir_daily_aggregates`` cache table so a populated cache
+        collapses the per-day breakdown to cheap PK lookups. Today's
+        Perth-local row is always recomputed live from a 1-day-bounded
+        slice of ``peer_dir_observations`` -- it is mutable until Perth
+        midnight and so is never cached.
+
+        Cache PK is the Perth-local date, matching the existing
+        ``(first_seen_at AT TIME ZONE 'Australia/Perth')::date``
+        bucketing. Backfill runs under the connection's autocommit with
+        ``INSERT ... ON CONFLICT (day) DO NOTHING``; each row is
+        independently idempotent so concurrent dashboard requests
+        cannot duplicate or corrupt cache entries.
+        """
         clamped_days = max(1, min(int(days), 90))
+
+        # Single source of truth for "today" in Perth-local terms. All
+        # subsequent date math derives from this row so a Perth-midnight
+        # rollover mid-call cannot split bucketing across boundaries.
+        bounds_cur = self._execute("""
+            SELECT
+                (NOW() AT TIME ZONE 'Australia/Perth')::date AS today_perth,
+                date_trunc(
+                    'day', NOW() AT TIME ZONE 'Australia/Perth'
+                ) AT TIME ZONE 'Australia/Perth' AS today_perth_start_utc
+        """)
+        bounds_row = bounds_cur.fetchone()
+        assert bounds_row is not None, "NOW()-based query must return a row"
+        today_perth = bounds_row["today_perth"]
+        today_perth_start_utc = bounds_row["today_perth_start_utc"]
+        window_start_perth = today_perth - timedelta(days=clamped_days - 1)
+        completed_window_end = today_perth - timedelta(days=1)
+
+        # Phase 1: read whatever the cache already has for the
+        # completed-day portion of the window.
+        cached_rows: dict[Any, dict[str, int]] = {}
+        if completed_window_end >= window_start_perth:
+            cur = self._execute(
+                """
+                SELECT day, new_combos, new_peers, new_dirs
+                FROM peer_dir_daily_aggregates
+                WHERE day BETWEEN %s AND %s
+                """,
+                (window_start_perth, completed_window_end),
+            )
+            for row in cur.fetchall():
+                cached_rows[row["day"]] = {
+                    "new_combos": int(row["new_combos"]),
+                    "new_peers": int(row["new_peers"]),
+                    "new_dirs": int(row["new_dirs"]),
+                }
+
+        # Phase 2: detect missing completed days (every Perth-local date
+        # in [window_start, today - 1] not represented in the cache).
+        missing_days: list[Any] = []
+        if completed_window_end >= window_start_perth:
+            day_cursor = window_start_perth
+            while day_cursor <= completed_window_end:
+                if day_cursor not in cached_rows:
+                    missing_days.append(day_cursor)
+                day_cursor = day_cursor + timedelta(days=1)
+
+        # Phase 3: lazy-fill any missing completed days. One bounded
+        # GROUP BY query covers all missing days; execute_values writes
+        # them in a single round-trip with ON CONFLICT DO NOTHING.
+        if missing_days:
+            agg_cur = self._execute(
+                """
+                SELECT
+                    (first_seen_at AT TIME ZONE 'Australia/Perth')::date AS day,
+                    COUNT(*)::int AS new_combos,
+                    COUNT(DISTINCT username_hash)::int AS new_peers,
+                    COUNT(DISTINCT dir_hash)::int AS new_dirs
+                FROM peer_dir_observations
+                WHERE first_seen_at >= %s
+                  AND first_seen_at < %s
+                  AND (first_seen_at AT TIME ZONE 'Australia/Perth')::date
+                      = ANY(%s)
+                GROUP BY 1
+                """,
+                (
+                    # UTC pre-filter: earliest possible UTC instant for
+                    # any Perth date in the missing-day list is
+                    # (min_day 00:00 Perth) -- 8h. Use a 1-hour buffer
+                    # to absorb any IANA edge case.
+                    datetime.combine(
+                        min(missing_days),
+                        datetime.min.time(),
+                        tzinfo=timezone.utc,
+                    ) - timedelta(hours=9),
+                    today_perth_start_utc,
+                    list(missing_days),
+                ),
+            )
+            agg_by_day = {
+                row["day"]: row for row in agg_cur.fetchall()
+            }
+            insert_rows = [
+                (
+                    day,
+                    int((agg_by_day.get(day) or {}).get("new_combos") or 0),
+                    int((agg_by_day.get(day) or {}).get("new_peers") or 0),
+                    int((agg_by_day.get(day) or {}).get("new_dirs") or 0),
+                )
+                for day in missing_days
+            ]
+
+            self._ensure_conn()
+            with self.conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO peer_dir_daily_aggregates
+                        (day, new_combos, new_peers, new_dirs)
+                    VALUES %s
+                    ON CONFLICT (day) DO NOTHING
+                    """,
+                    insert_rows,
+                )
+
+            # Re-read the cache for the full completed window. execute_values
+            # + ON CONFLICT DO NOTHING does not reliably return conflicting
+            # rows, so a re-read is the contractually clean way to merge
+            # whatever a concurrent caller may have inserted concurrently.
+            cur = self._execute(
+                """
+                SELECT day, new_combos, new_peers, new_dirs
+                FROM peer_dir_daily_aggregates
+                WHERE day BETWEEN %s AND %s
+                """,
+                (window_start_perth, completed_window_end),
+            )
+            cached_rows = {
+                row["day"]: {
+                    "new_combos": int(row["new_combos"]),
+                    "new_peers": int(row["new_peers"]),
+                    "new_dirs": int(row["new_dirs"]),
+                }
+                for row in cur.fetchall()
+            }
+
+        # Phase 4: today's row -- live, 1-day-bounded query. The UTC
+        # pre-filter lets idx_peer_dir_observations_first_seen prune
+        # most rows before the timezone cast; the Perth-date predicate
+        # pins boundary correctness.
+        today_cur = self._execute(
+            """
+            SELECT
+                COUNT(*)::int AS new_combos,
+                COUNT(DISTINCT username_hash)::int AS new_peers,
+                COUNT(DISTINCT dir_hash)::int AS new_dirs
+            FROM peer_dir_observations
+            WHERE first_seen_at >= %s - INTERVAL '1 hour'
+              AND (first_seen_at AT TIME ZONE 'Australia/Perth')::date = %s
+            """,
+            (today_perth_start_utc, today_perth),
+        )
+        today_row = today_cur.fetchone() or {}
+        today_metrics = {
+            "new_combos": int(today_row.get("new_combos") or 0),
+            "new_peers": int(today_row.get("new_peers") or 0),
+            "new_dirs": int(today_row.get("new_dirs") or 0),
+        }
+
+        # Phase 5: totals query (Q1) -- unchanged. Lifetime aggregates
+        # are intrinsically full-scan and out of scope for this plan.
         totals_cur = self._execute("""
             SELECT
                 COUNT(*)::int AS known_combos,
@@ -2659,35 +2825,29 @@ class PipelineDB:
         """)
         totals_row = totals_cur.fetchone() or {}
 
-        days_cur = self._execute("""
-            WITH day_series AS (
-                SELECT generate_series(
-                    (NOW() AT TIME ZONE 'Australia/Perth')::date - (%s::int - 1),
-                    (NOW() AT TIME ZONE 'Australia/Perth')::date,
-                    INTERVAL '1 day'
-                )::date AS day
-            ),
-            first_seen AS (
-                SELECT
-                    (first_seen_at AT TIME ZONE 'Australia/Perth')::date AS day,
-                    COUNT(*)::int AS new_combos,
-                    COUNT(DISTINCT username_hash)::int AS new_peers,
-                    COUNT(DISTINCT dir_hash)::int AS new_dirs
-                FROM peer_dir_observations
-                WHERE first_seen_at >= NOW() - %s::interval
-                GROUP BY 1
-            )
-            SELECT
-                to_char(day_series.day, 'YYYY-MM-DD') AS date,
-                COALESCE(first_seen.new_combos, 0)::int AS new_combos,
-                COALESCE(first_seen.new_peers, 0)::int AS new_peers,
-                COALESCE(first_seen.new_dirs, 0)::int AS new_dirs
-            FROM day_series
-            LEFT JOIN first_seen ON first_seen.day = day_series.day
-            ORDER BY day_series.day DESC
-        """, (clamped_days, f"{clamped_days + 1} days"))
+        # Phase 6: merge cached completed days + today's live row into
+        # the existing response shape. Days array is ordered DESC by
+        # date (today first), matching the legacy query's
+        # ``ORDER BY day_series.day DESC``.
+        day_dicts: list[dict[str, Any]] = []
+        day_cursor = today_perth
+        while day_cursor >= window_start_perth:
+            if day_cursor == today_perth:
+                metrics = today_metrics
+            else:
+                metrics = cached_rows.get(day_cursor) or {
+                    "new_combos": 0, "new_peers": 0, "new_dirs": 0,
+                }
+            day_dicts.append({
+                "date": day_cursor.isoformat(),
+                "new_combos": int(metrics["new_combos"]),
+                "new_peers": int(metrics["new_peers"]),
+                "new_dirs": int(metrics["new_dirs"]),
+            })
+            day_cursor = day_cursor - timedelta(days=1)
+
         return {
-            "days": [dict(row) for row in days_cur.fetchall()],
+            "days": day_dicts,
             "totals": {
                 "known_combos": int(totals_row.get("known_combos") or 0),
                 "known_peers": int(totals_row.get("known_peers") or 0),
