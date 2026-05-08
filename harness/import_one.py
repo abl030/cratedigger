@@ -524,7 +524,7 @@ def _get_folder_bitrates(folder_path,
                  "-select_streams", "a:0",
                  "-show_entries", "stream=bit_rate",
                  "-of", "csv=p=0", fpath],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, errors="replace", timeout=30,
             )
             br_str = result.stdout.strip().rstrip(",")
             # VBR MP3s return N/A for stream bitrate — fall back to format
@@ -533,7 +533,7 @@ def _get_folder_bitrates(folder_path,
                     ["ffprobe", "-v", "error",
                      "-show_entries", "format=bit_rate",
                      "-of", "csv=p=0", fpath],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True, text=True, errors="replace", timeout=30,
                 )
                 br_str = result.stdout.strip().rstrip(",")
             if br_str and br_str.isdigit():
@@ -580,7 +580,7 @@ def _ffprobe_audio_codec_name(fpath: str) -> str | None:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_name", "-of", "json", fpath],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, errors="replace", timeout=10)
         if result.returncode != 0:
             return None
         payload: object = json.loads(result.stdout or "{}")
@@ -686,7 +686,8 @@ def _temp_v0_probe(
             ]
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=300)
+                    cmd, capture_output=True, text=True, errors="replace",
+                    timeout=300)
             except subprocess.TimeoutExpired:
                 failed += 1
                 continue
@@ -768,8 +769,12 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
                *spec.metadata_args,
                "-y", temp_out_path]
         try:
+            # errors="replace" so non-UTF-8 bytes in ffmpeg stderr (e.g.
+            # CP1252-tagged FLAC Vorbis comments echoed in verbose output)
+            # don't raise UnicodeDecodeError during capture and crash the
+            # whole import — request 580 (78 Saab — Crossed Lines) hit this.
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=300)
+                                    errors="replace", timeout=300)
         except subprocess.TimeoutExpired:
             print(f"  [FAIL] {fname}: ffmpeg timed out after 300s",
                   file=sys.stderr)
@@ -817,7 +822,8 @@ def run_import(path, mb_release_id):
 
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid,
+        stderr=subprocess.PIPE, text=True, errors="replace",
+        preexec_fn=os.setsid,
         env=beets_subprocess_env(),
     )
     assert proc.stdin is not None

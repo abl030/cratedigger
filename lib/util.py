@@ -213,7 +213,8 @@ def repair_mp3_headers(folder_path: str) -> None:
             filepath = os.path.join(root, f)
             try:
                 result = sp.run(["mp3val", "-f", "-nb", filepath],
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True,
+                                errors="replace", timeout=60)
                 if "FIXED" in result.stdout:
                     logger.info(f"MP3VAL: fixed {f}")
             except FileNotFoundError:
@@ -293,7 +294,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
             result = sp.run(
                 ["ffmpeg", "-v", "error", "-i", filepath,
                  "-map", "0:a", "-f", "null", "-"],
-                capture_output=True, text=True, timeout=300
+                capture_output=True, text=True, errors="replace", timeout=300
             )
             ffmpeg_returncode = result.returncode
             stderr = result.stderr.strip()
@@ -301,13 +302,15 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                 logger.info(f"AUDIO_CHECK: fixing unset MD5: {display}")
                 fix = sp.run(
                     ["flac", "-f", "--verify", filepath],
-                    capture_output=True, text=True, timeout=300,
+                    capture_output=True, text=True, errors="replace",
+                    timeout=300,
                 )
                 if fix.returncode == 0:
                     retest = sp.run(
                         ["ffmpeg", "-v", "error", "-i", filepath,
                          "-map", "0:a", "-f", "null", "-"],
-                        capture_output=True, text=True, timeout=300,
+                        capture_output=True, text=True, errors="replace",
+                        timeout=300,
                     )
                     ffmpeg_returncode = retest.returncode
                     stderr = retest.stderr.strip()
