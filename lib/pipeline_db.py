@@ -1657,6 +1657,48 @@ class PipelineDB:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def set_downloading_if_plan_current(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        plan_id: int,
+        plan_ordinal: int,
+        cycle_count_snapshot: int,
+    ) -> bool:
+        """Atomic plan-aware ``set_downloading`` for stale-completion guard.
+
+        Equivalent to ``set_downloading`` but additionally requires the
+        request's ``active_plan_id`` / ``next_plan_ordinal`` /
+        ``plan_cycle_count`` to still match the snapshot the executor
+        captured at search-submit time. The single UPDATE eliminates the
+        TOCTOU window between a separate currentness check and the
+        wanted->downloading flip.
+
+        Returns True iff the UPDATE matched and downloading was claimed.
+        Returns False on any of: status no longer 'wanted', plan
+        regenerated (active_plan_id mismatch), cursor advanced (ordinal
+        mismatch), cycle bumped (cycle_count mismatch).
+        """
+        now = datetime.now(timezone.utc)
+        cur = self._execute("""
+            UPDATE album_requests
+            SET status = 'downloading',
+                active_download_state = %s::jsonb,
+                last_attempt_at = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND status = 'wanted'
+              AND active_plan_id = %s
+              AND next_plan_ordinal = %s
+              AND plan_cycle_count = %s
+        """, (
+            state_json, now, now, request_id,
+            plan_id, plan_ordinal, cycle_count_snapshot,
+        ))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def update_download_state(self, request_id: int, state_json: str) -> None:
         """Rewrite active_download_state without changing status or attempt counters."""
         now = datetime.now(timezone.utc)

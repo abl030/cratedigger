@@ -1301,6 +1301,37 @@ class FakePipelineDB:
         self.status_history.append((request_id, "downloading"))
         return True
 
+    def set_downloading_if_plan_current(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        plan_id: int,
+        plan_ordinal: int,
+        cycle_count_snapshot: int,
+    ) -> bool:
+        """Mirror of ``PipelineDB.set_downloading_if_plan_current``.
+
+        Atomic plan-aware claim; refuses if status moved off ``wanted``
+        OR the plan/ordinal/cycle no longer match the snapshot.
+        """
+        row = self._requests.get(request_id)
+        if row is None or row["status"] != "wanted":
+            return False
+        if row.get("active_plan_id") != plan_id:
+            return False
+        if int(row.get("next_plan_ordinal") or 0) != plan_ordinal:
+            return False
+        if int(row.get("plan_cycle_count") or 0) != cycle_count_snapshot:
+            return False
+        now = _utcnow()
+        row["status"] = "downloading"
+        row["active_download_state"] = state_json
+        row["last_attempt_at"] = now
+        row["updated_at"] = now
+        self.status_history.append((request_id, "downloading"))
+        return True
+
     def clear_download_state(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row:

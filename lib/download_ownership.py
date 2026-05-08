@@ -59,10 +59,15 @@ class DownloadOwnershipWriter:
         """Guarded wanted -> downloading claim with planned download state.
 
         When ``plan_execution`` is supplied (search-execution-driven
-        claim), this also validates that the request's active plan is
-        still the executing plan/ordinal/cycle. Stale completions (the
-        request was regenerated mid-flight after this search was
-        accepted) skip the claim with a STALE_DOWNLOAD_CLAIM log.
+        claim), the wanted->downloading flip and the plan-currentness
+        check happen in a single atomic UPDATE
+        (``set_downloading_if_plan_current``). This eliminates the
+        TOCTOU window where a regenerate could land between a separate
+        currentness probe and the status flip.
+
+        Stale completions (the request was regenerated mid-flight after
+        this search was accepted) skip the claim with a
+        STALE_DOWNLOAD_CLAIM log.
 
         Stale-completion contract: log against the executed old plan
         (handled by ``_log_search_result``); do NOT mutate active request
@@ -70,22 +75,26 @@ class DownloadOwnershipWriter:
         """
         db = self._open_db()
         try:
-            if plan_execution is not None and not db.is_request_plan_current(
-                request_id,
-                plan_execution.plan_id,
-                plan_execution.plan_ordinal,
-                plan_execution.cycle_count_snapshot,
-            ):
-                logger.warning(
-                    "STALE_DOWNLOAD_CLAIM request_id=%s plan_id=%s "
-                    "ordinal=%s cycle=%s; request was regenerated "
-                    "mid-flight, skipping wanted->downloading claim",
+            if plan_execution is not None:
+                claimed = bool(db.set_downloading_if_plan_current(
                     request_id,
-                    plan_execution.plan_id,
-                    plan_execution.plan_ordinal,
-                    plan_execution.cycle_count_snapshot,
-                )
-                return False
+                    state_json,
+                    plan_id=plan_execution.plan_id,
+                    plan_ordinal=plan_execution.plan_ordinal,
+                    cycle_count_snapshot=plan_execution.cycle_count_snapshot,
+                ))
+                if not claimed:
+                    logger.warning(
+                        "STALE_DOWNLOAD_CLAIM request_id=%s plan_id=%s "
+                        "ordinal=%s cycle=%s; request was regenerated "
+                        "mid-flight or already non-wanted, skipping "
+                        "wanted->downloading claim",
+                        request_id,
+                        plan_execution.plan_id,
+                        plan_execution.plan_ordinal,
+                        plan_execution.cycle_count_snapshot,
+                    )
+                return claimed
             return transitions.finalize_request(
                 db,
                 request_id,
