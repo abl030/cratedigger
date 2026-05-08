@@ -76,6 +76,10 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "current_lossless_source_v0_probe_median_bitrate": None,
         "active_download_state": None,
         "manual_reason": None,
+        # U1 persisted-search-plans cursor fields (migration 014).
+        "active_plan_id": None,
+        "next_plan_ordinal": 0,
+        "plan_cycle_count": 0,
         "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }

@@ -187,6 +187,209 @@ class BadAudioHashRow:
     reported_at: datetime  # tz-aware
 
 
+# ---------------------------------------------------------------------------
+# Search-plan types (U1 of feat: persisted search plans)
+# ---------------------------------------------------------------------------
+#
+# These are @dataclass (not msgspec.Struct) because they round-trip between
+# Python and PostgreSQL only -- their inputs are constructed entirely in our
+# typed Python code (the plan generator, persistence service, executor) and
+# they never cross JSON. The JSONB blobs they carry (metadata_snapshot,
+# provenance) are dict[str, object]; sanitization/bounding is the
+# application's responsibility before insert.
+
+# Plan status domain matches the CHECK constraint on search_plans.status in
+# migrations/014_persisted_search_plans.sql.
+PLAN_STATUS_ACTIVE = "active"
+PLAN_STATUS_SUPERSEDED = "superseded"
+PLAN_STATUS_FAILED_DETERMINISTIC = "failed_deterministic"
+PLAN_STATUS_FAILED_TRANSIENT = "failed_transient"
+
+# search_log.execution_stage values.
+SEARCH_LOG_STAGE_PRE_ATTEMPT = "pre_attempt"
+SEARCH_LOG_STAGE_ACCEPTED = "accepted"
+SEARCH_LOG_STAGE_STALE_COMPLETION = "stale_completion"
+SEARCH_LOG_STAGE_RECONCILIATION = "reconciliation"
+
+# search_log.cursor_update_status values.
+CURSOR_UPDATE_ADVANCED = "advanced"
+CURSOR_UPDATE_WRAPPED = "wrapped"
+CURSOR_UPDATE_UNCHANGED = "unchanged"
+CURSOR_UPDATE_STALE = "stale"
+
+
+@dataclass(frozen=True)
+class SearchPlanItemInput:
+    """One runnable plan item before insert.
+
+    ``ordinal`` is assigned by the caller (typically the generator);
+    ``record_consumed_search_attempt`` reads ``next_plan_ordinal`` off the
+    request row to know which item to advance from.
+    """
+    ordinal: int
+    strategy: str
+    query: str
+    canonical_query_key: str | None = None
+    repeat_group: str | None = None
+    provenance: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class SearchPlanItemRow:
+    """One ``search_plan_items`` row read back from the DB."""
+    id: int
+    plan_id: int
+    ordinal: int
+    strategy: str
+    query: str
+    canonical_query_key: str | None
+    repeat_group: str | None
+    provenance: dict[str, object] | None
+
+
+@dataclass(frozen=True)
+class SearchPlanRow:
+    """One ``search_plans`` row read back from the DB."""
+    id: int
+    request_id: int
+    generator_id: str
+    status: str
+    failure_class: str | None
+    metadata_snapshot: dict[str, object] | None
+    provenance: dict[str, object] | None
+    error_message: str | None
+    superseded_at: datetime | None
+    superseded_by_plan_id: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ActiveSearchPlan:
+    """Active plan + items + cursor state for one request.
+
+    Returned by ``get_active_search_plan``; consumers use it to know which
+    plan/ordinal to execute next without joining tables themselves.
+    """
+    plan: SearchPlanRow
+    items: list[SearchPlanItemRow]
+    next_ordinal: int
+    cycle_count: int
+
+
+@dataclass(frozen=True)
+class WantedReconciliationCandidate:
+    """One row from ``list_wanted_for_plan_reconciliation``.
+
+    All-wanted scan output: every wanted request paired with its current
+    active plan id (NULL when missing) and current generator id (NULL
+    when there is no active plan). Startup decides whether to generate /
+    regenerate / skip per-row.
+    """
+    request_id: int
+    active_plan_id: int | None
+    active_plan_generator_id: str | None
+    next_plan_ordinal: int
+    plan_cycle_count: int
+
+
+@dataclass(frozen=True)
+class SearchPlanInspection:
+    """Aggregate plan view for one request (CLI/API inspection).
+
+    Includes the current active plan (if any), the most recent failed
+    deterministic / transient attempt for the same generator, the count
+    of superseded plans, and a count of legacy search_log rows that
+    pre-date persisted plans (NULL plan_id).
+    """
+    request_id: int
+    active: ActiveSearchPlan | None
+    latest_failed_deterministic: SearchPlanRow | None
+    latest_failed_transient: SearchPlanRow | None
+    superseded_count: int
+    legacy_search_log_count: int
+
+
+@dataclass(frozen=True)
+class ConsumedAttemptInput:
+    """Input contract for ``record_consumed_search_attempt``.
+
+    The executor builds this from the plan-item it ran plus the slskd /
+    browse / match telemetry that was historically passed to log_search.
+    The DB method then does the guarded log-insert + cursor-advance in one
+    transaction.
+    """
+    request_id: int
+    plan_id: int
+    plan_item_id: int
+    plan_ordinal: int
+    plan_strategy: str
+    plan_canonical_query_key: str | None
+    plan_repeat_group: str | None
+    plan_generator_id: str
+    query: str
+    outcome: str
+    result_count: int | None = None
+    elapsed_s: float | None = None
+    candidates_json: str | None = None
+    variant: str | None = None
+    final_state: str | None = None
+    browse_time_s: float = 0.0
+    match_time_s: float = 0.0
+    peers_browsed: int = 0
+    peers_browsed_lazy: int = 0
+    fanout_waves: int = 0
+    # Plan-item count required by wrap detection. The executor reads it
+    # from the active plan it executed; passing it explicitly avoids a
+    # second SELECT inside the transaction.
+    plan_item_count: int = 0
+    # Whether to record a scheduler/backoff write for this consumed
+    # outcome. found/enqueued is True with `success=True`; no_match /
+    # no_results / error is True with `success=False`. Caller decides.
+    apply_scheduler_attempt: bool = False
+    scheduler_success: bool = False
+
+
+@dataclass(frozen=True)
+class NonConsumingAttemptInput:
+    """Input contract for ``record_non_consuming_search_attempt``.
+
+    Pre-attempt / setup-failure rows. Plan context fields are optional
+    because the failure may have happened before the executor resolved
+    a plan/item -- but when known, capture them so dashboards can
+    attribute the failure.
+    """
+    request_id: int
+    outcome: str
+    plan_id: int | None = None
+    plan_item_id: int | None = None
+    plan_ordinal: int | None = None
+    plan_strategy: str | None = None
+    plan_canonical_query_key: str | None = None
+    plan_repeat_group: str | None = None
+    plan_generator_id: str | None = None
+    query: str | None = None
+    result_count: int | None = None
+    elapsed_s: float | None = None
+    final_state: str | None = None
+    error_message: str | None = None
+    apply_scheduler_attempt: bool = True
+
+
+@dataclass(frozen=True)
+class ConsumedAttemptResult:
+    """Outcome of ``record_consumed_search_attempt``.
+
+    Tells the caller whether the cursor advanced, wrapped, or was treated
+    as stale because the request had been regenerated mid-flight. The log
+    row is always written (so usefulness stats stay complete).
+    """
+    search_log_id: int
+    cursor_update_status: str
+    new_next_ordinal: int
+    new_cycle_count: int
+    is_stale: bool
+
+
 @dataclass(frozen=True)
 class RequestV0ProbeStateUpdate:
     """Typed update for current comparable lossless-source V0 probe state."""
@@ -2662,6 +2865,798 @@ class PipelineDB:
             f"{cfg.failure_threshold} consecutive failures",
         )
         return True
+
+    # ----------------------------------------------------------------
+    # Persisted search plans (U1 of feat: persisted search plans)
+    # ----------------------------------------------------------------
+    #
+    # All plan DDL lives in migrations/014_persisted_search_plans.sql.
+    # These methods read/write only -- never CREATE/ALTER. The
+    # consumed-attempt method (`record_consumed_search_attempt`) is the
+    # one intentional exception to PipelineDB's autocommit rule: it must
+    # log + advance cursor in one transaction. See the method docstring.
+
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+        set_active: bool = True,
+    ) -> int:
+        """Create a successful plan + items; optionally make it the active
+        plan and reset the request's cursor/cycle.
+
+        Items must be non-empty (successful plans by contract carry at least
+        one runnable slot); the CHECK + UNIQUE constraints in migration 014
+        enforce non-empty queries and unique ``(plan, ordinal)``.
+
+        Runs in a single transaction so the plan, its items, and the cursor
+        update either all land or none do. Used by add-time generation,
+        startup reconciliation, and explicit regeneration. Callers that need
+        to supersede an existing active plan should call
+        ``supersede_search_plan_with_replacement`` instead -- it takes the
+        same shape and additionally flips the old active plan and updates
+        the request cursor/cycle to point at the new one.
+        """
+        if not items:
+            raise ValueError(
+                "create_successful_search_plan requires at least one item; "
+                "use create_failed_search_plan for empty results.")
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO search_plans
+                        (request_id, generator_id, status,
+                         metadata_snapshot, provenance, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        request_id,
+                        generator_id,
+                        PLAN_STATUS_ACTIVE,
+                        json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
+                        json.dumps(provenance) if provenance is not None else None,
+                        now,
+                    ),
+                )
+                row = cur.fetchone()
+                assert row is not None, "INSERT RETURNING must produce a row"
+                plan_id = int(row["id"])
+
+                for item in items:
+                    cur.execute(
+                        """
+                        INSERT INTO search_plan_items
+                            (plan_id, ordinal, strategy, query,
+                             canonical_query_key, repeat_group, provenance)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            plan_id,
+                            item.ordinal,
+                            item.strategy,
+                            item.query,
+                            item.canonical_query_key,
+                            item.repeat_group,
+                            json.dumps(item.provenance) if item.provenance is not None else None,
+                        ),
+                    )
+
+                if set_active:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET active_plan_id = %s,
+                            next_plan_ordinal = 0,
+                            plan_cycle_count = 0,
+                            updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (plan_id, now, request_id),
+                    )
+            self.conn.commit()
+            return plan_id
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int:
+        """Persist one generation failure attempt.
+
+        ``transient=False`` -> deterministic sticky failure (no runnable
+        query, missing required metadata): request stays wanted but is not
+        searchable until a successful plan replaces it.
+
+        ``transient=True`` -> retryable (resolver outage, etc.): startup
+        reconciliation will retry on a later cycle.
+
+        Either way, the request's existing active plan (if any) is left
+        untouched -- failed regeneration must not disable a previously
+        good plan (Plan §Currentness Model).
+        """
+        status = (
+            PLAN_STATUS_FAILED_TRANSIENT if transient
+            else PLAN_STATUS_FAILED_DETERMINISTIC
+        )
+        cur = self._execute(
+            """
+            INSERT INTO search_plans
+                (request_id, generator_id, status, failure_class,
+                 metadata_snapshot, provenance, error_message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                request_id,
+                generator_id,
+                status,
+                failure_class,
+                json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
+                json.dumps(provenance) if provenance is not None else None,
+                error_message,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None, "INSERT RETURNING must produce a row"
+        return int(row["id"])
+
+    def supersede_search_plan_with_replacement(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int:
+        """Create a new successful plan AND replace the existing active plan
+        for this request, atomically.
+
+        The previous active plan (if any) is flipped to status='superseded'
+        with ``superseded_at`` and ``superseded_by_plan_id`` populated. The
+        request's cursor/cycle is reset to ``(0, 0)`` and ``active_plan_id``
+        repointed at the new plan.
+
+        Used by explicit regeneration and by startup reconciliation when an
+        old-generator plan is being replaced. Falls back to
+        ``create_successful_search_plan(set_active=True)`` semantics when
+        the request has no active plan yet.
+        """
+        if not items:
+            raise ValueError(
+                "supersede_search_plan_with_replacement requires items.")
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                # Read current active plan id under the lock implied by the
+                # transaction; NULL means "no replacement, just create+activate".
+                cur.execute(
+                    "SELECT active_plan_id FROM album_requests WHERE id = %s "
+                    "FOR UPDATE",
+                    (request_id,),
+                )
+                req_row = cur.fetchone()
+                if req_row is None:
+                    raise ValueError(
+                        f"request {request_id} not found")
+                old_active_id = req_row["active_plan_id"]
+
+                # Detach the old active plan first so the partial unique
+                # index "one active per request" lets us insert the new
+                # active row.
+                if old_active_id is not None:
+                    cur.execute(
+                        """
+                        UPDATE search_plans
+                        SET status = %s,
+                            superseded_at = %s
+                        WHERE id = %s
+                        """,
+                        (PLAN_STATUS_SUPERSEDED, now, old_active_id),
+                    )
+
+                cur.execute(
+                    """
+                    INSERT INTO search_plans
+                        (request_id, generator_id, status,
+                         metadata_snapshot, provenance, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        request_id,
+                        generator_id,
+                        PLAN_STATUS_ACTIVE,
+                        json.dumps(metadata_snapshot) if metadata_snapshot is not None else None,
+                        json.dumps(provenance) if provenance is not None else None,
+                        now,
+                    ),
+                )
+                new_row = cur.fetchone()
+                assert new_row is not None
+                new_plan_id = int(new_row["id"])
+
+                if old_active_id is not None:
+                    cur.execute(
+                        """
+                        UPDATE search_plans
+                        SET superseded_by_plan_id = %s
+                        WHERE id = %s
+                        """,
+                        (new_plan_id, old_active_id),
+                    )
+
+                for item in items:
+                    cur.execute(
+                        """
+                        INSERT INTO search_plan_items
+                            (plan_id, ordinal, strategy, query,
+                             canonical_query_key, repeat_group, provenance)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            new_plan_id,
+                            item.ordinal,
+                            item.strategy,
+                            item.query,
+                            item.canonical_query_key,
+                            item.repeat_group,
+                            json.dumps(item.provenance) if item.provenance is not None else None,
+                        ),
+                    )
+
+                cur.execute(
+                    """
+                    UPDATE album_requests
+                    SET active_plan_id = %s,
+                        next_plan_ordinal = 0,
+                        plan_cycle_count = 0,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (new_plan_id, now, request_id),
+                )
+            self.conn.commit()
+            return new_plan_id
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def get_active_search_plan(
+        self,
+        request_id: int,
+    ) -> ActiveSearchPlan | None:
+        """Return the active plan + items + cursor state for one request.
+
+        Returns ``None`` when the request has no active plan (either it was
+        never generated, or the latest attempt failed deterministically).
+        Use ``get_search_plan_inspection`` to also surface failed/superseded
+        plans for human inspection.
+        """
+        cur = self._execute(
+            """
+            SELECT ar.next_plan_ordinal, ar.plan_cycle_count,
+                   sp.id AS plan_id, sp.request_id, sp.generator_id,
+                   sp.status, sp.failure_class, sp.metadata_snapshot,
+                   sp.provenance, sp.error_message, sp.superseded_at,
+                   sp.superseded_by_plan_id, sp.created_at
+            FROM album_requests ar
+            JOIN search_plans sp ON ar.active_plan_id = sp.id
+            WHERE ar.id = %s
+            """,
+            (request_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        plan = SearchPlanRow(
+            id=int(row["plan_id"]),
+            request_id=int(row["request_id"]),
+            generator_id=row["generator_id"],
+            status=row["status"],
+            failure_class=row["failure_class"],
+            metadata_snapshot=row["metadata_snapshot"],
+            provenance=row["provenance"],
+            error_message=row["error_message"],
+            superseded_at=row["superseded_at"],
+            superseded_by_plan_id=(
+                int(row["superseded_by_plan_id"])
+                if row["superseded_by_plan_id"] is not None else None),
+            created_at=row["created_at"],
+        )
+        items = self._fetch_plan_items(plan.id)
+        return ActiveSearchPlan(
+            plan=plan,
+            items=items,
+            next_ordinal=int(row["next_plan_ordinal"]),
+            cycle_count=int(row["plan_cycle_count"]),
+        )
+
+    def _fetch_plan_items(self, plan_id: int) -> list[SearchPlanItemRow]:
+        cur = self._execute(
+            """
+            SELECT id, plan_id, ordinal, strategy, query,
+                   canonical_query_key, repeat_group, provenance
+            FROM search_plan_items
+            WHERE plan_id = %s
+            ORDER BY ordinal ASC
+            """,
+            (plan_id,),
+        )
+        return [
+            SearchPlanItemRow(
+                id=int(r["id"]),
+                plan_id=int(r["plan_id"]),
+                ordinal=int(r["ordinal"]),
+                strategy=r["strategy"],
+                query=r["query"],
+                canonical_query_key=r["canonical_query_key"],
+                repeat_group=r["repeat_group"],
+                provenance=r["provenance"],
+            )
+            for r in cur.fetchall()
+        ]
+
+    def list_wanted_for_plan_reconciliation(
+        self,
+    ) -> list[WantedReconciliationCandidate]:
+        """All-wanted scan for startup reconciliation.
+
+        Ignores ``next_retry_after`` and the page-size limit that
+        ``get_wanted`` applies. Used once per startup to decide which
+        wanted rows need a generated/regenerated plan -- callers must
+        compare ``active_plan_generator_id`` to the current generator id
+        themselves.
+        """
+        cur = self._execute(
+            """
+            SELECT ar.id AS request_id, ar.active_plan_id,
+                   ar.next_plan_ordinal, ar.plan_cycle_count,
+                   sp.generator_id AS active_plan_generator_id
+            FROM album_requests ar
+            LEFT JOIN search_plans sp ON ar.active_plan_id = sp.id
+            WHERE ar.status = 'wanted'
+            ORDER BY ar.id
+            """
+        )
+        return [
+            WantedReconciliationCandidate(
+                request_id=int(r["request_id"]),
+                active_plan_id=(
+                    int(r["active_plan_id"])
+                    if r["active_plan_id"] is not None else None),
+                active_plan_generator_id=r["active_plan_generator_id"],
+                next_plan_ordinal=int(r["next_plan_ordinal"]),
+                plan_cycle_count=int(r["plan_cycle_count"]),
+            )
+            for r in cur.fetchall()
+        ]
+
+    def get_search_plan_inspection(
+        self,
+        request_id: int,
+    ) -> SearchPlanInspection:
+        """Aggregate read for CLI/API inspection.
+
+        Returns the active plan (with items + cursor), the latest
+        deterministic and transient failed attempts (most recent of each),
+        the count of superseded plans, and the count of historical
+        search_log rows for this request that pre-date persisted plans.
+        """
+        active = self.get_active_search_plan(request_id)
+
+        def _latest(status: str) -> SearchPlanRow | None:
+            cur = self._execute(
+                """
+                SELECT id, request_id, generator_id, status, failure_class,
+                       metadata_snapshot, provenance, error_message,
+                       superseded_at, superseded_by_plan_id, created_at
+                FROM search_plans
+                WHERE request_id = %s AND status = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (request_id, status),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return SearchPlanRow(
+                id=int(row["id"]),
+                request_id=int(row["request_id"]),
+                generator_id=row["generator_id"],
+                status=row["status"],
+                failure_class=row["failure_class"],
+                metadata_snapshot=row["metadata_snapshot"],
+                provenance=row["provenance"],
+                error_message=row["error_message"],
+                superseded_at=row["superseded_at"],
+                superseded_by_plan_id=(
+                    int(row["superseded_by_plan_id"])
+                    if row["superseded_by_plan_id"] is not None else None),
+                created_at=row["created_at"],
+            )
+
+        latest_det = _latest(PLAN_STATUS_FAILED_DETERMINISTIC)
+        latest_trans = _latest(PLAN_STATUS_FAILED_TRANSIENT)
+
+        sup_cur = self._execute(
+            "SELECT COUNT(*) AS c FROM search_plans "
+            "WHERE request_id = %s AND status = %s",
+            (request_id, PLAN_STATUS_SUPERSEDED),
+        )
+        sup_row = sup_cur.fetchone()
+        superseded_count = int(sup_row["c"]) if sup_row is not None else 0
+
+        legacy_cur = self._execute(
+            "SELECT COUNT(*) AS c FROM search_log "
+            "WHERE request_id = %s AND plan_id IS NULL",
+            (request_id,),
+        )
+        legacy_row = legacy_cur.fetchone()
+        legacy_count = int(legacy_row["c"]) if legacy_row is not None else 0
+
+        return SearchPlanInspection(
+            request_id=request_id,
+            active=active,
+            latest_failed_deterministic=latest_det,
+            latest_failed_transient=latest_trans,
+            superseded_count=superseded_count,
+            legacy_search_log_count=legacy_count,
+        )
+
+    def record_consumed_search_attempt(
+        self,
+        attempt: ConsumedAttemptInput,
+    ) -> ConsumedAttemptResult:
+        """Atomically log a consumed search attempt and advance/wrap cursor.
+
+        This is the one intentional exception to PipelineDB's
+        ``autocommit=True`` rule. The transaction does:
+
+          1. Re-read the request's ``active_plan_id`` and
+             ``next_plan_ordinal`` ``FOR UPDATE``.
+          2. Insert one ``search_log`` row carrying full plan context and
+             a ``plan_cycle_snapshot``.
+          3. If the executing plan/ordinal still match the active state:
+             advance ordinal (or wrap to 0 + cycle++) and stamp
+             ``cursor_update_status`` accordingly; flagged ``advanced``
+             or ``wrapped`` on the log row.
+          4. Otherwise: leave the cursor alone, flag the log row as
+             ``stale`` with ``stale_reason='regenerated'`` and
+             ``execution_stage='stale_completion'``.
+
+        Either every write commits or none do. Callers must NOT separately
+        call ``log_search`` for the same accepted attempt -- this method
+        is the consumed-attempt seam.
+
+        ``apply_scheduler_attempt=True`` increments ``search_attempts`` and
+        sets backoff inside the same transaction, so the legacy
+        ``search_attempts`` field stays a scheduler-only counter.
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    "SELECT active_plan_id, next_plan_ordinal, "
+                    "       plan_cycle_count "
+                    "FROM album_requests WHERE id = %s FOR UPDATE",
+                    (attempt.request_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError(
+                        f"request {attempt.request_id} not found")
+                active_plan_id = row["active_plan_id"]
+                next_ordinal = int(row["next_plan_ordinal"])
+                cycle_count = int(row["plan_cycle_count"])
+
+                is_stale = (
+                    active_plan_id != attempt.plan_id
+                    or next_ordinal != attempt.plan_ordinal
+                )
+
+                if is_stale:
+                    cursor_update_status = CURSOR_UPDATE_STALE
+                    execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
+                    stale_reason = "regenerated"
+                    new_next_ordinal = next_ordinal
+                    new_cycle = cycle_count
+                else:
+                    execution_stage = SEARCH_LOG_STAGE_ACCEPTED
+                    stale_reason = None
+                    plan_item_count = max(int(attempt.plan_item_count), 0)
+                    if plan_item_count == 0:
+                        # Pathological: caller said no items. Treat as
+                        # advanced-without-wrap to avoid /0 wrap math; the
+                        # generator's CHECK + service contract should
+                        # prevent this in practice.
+                        cursor_update_status = CURSOR_UPDATE_ADVANCED
+                        new_next_ordinal = next_ordinal + 1
+                        new_cycle = cycle_count
+                    elif attempt.plan_ordinal >= plan_item_count - 1:
+                        cursor_update_status = CURSOR_UPDATE_WRAPPED
+                        new_next_ordinal = 0
+                        new_cycle = cycle_count + 1
+                    else:
+                        cursor_update_status = CURSOR_UPDATE_ADVANCED
+                        new_next_ordinal = next_ordinal + 1
+                        new_cycle = cycle_count
+
+                cur.execute(
+                    """
+                    INSERT INTO search_log (
+                        request_id, query, result_count, elapsed_s, outcome,
+                        candidates, variant, final_state,
+                        browse_time_s, match_time_s,
+                        peers_browsed, peers_browsed_lazy, fanout_waves,
+                        plan_id, plan_item_id, plan_ordinal,
+                        plan_strategy, plan_canonical_query_key,
+                        plan_repeat_group, plan_generator_id,
+                        execution_stage, attempt_consumed,
+                        cursor_update_status, stale_reason,
+                        plan_cycle_snapshot
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        attempt.request_id,
+                        attempt.query,
+                        attempt.result_count,
+                        attempt.elapsed_s,
+                        attempt.outcome,
+                        attempt.candidates_json,
+                        attempt.variant,
+                        attempt.final_state,
+                        attempt.browse_time_s,
+                        attempt.match_time_s,
+                        attempt.peers_browsed,
+                        attempt.peers_browsed_lazy,
+                        attempt.fanout_waves,
+                        attempt.plan_id,
+                        attempt.plan_item_id,
+                        attempt.plan_ordinal,
+                        attempt.plan_strategy,
+                        attempt.plan_canonical_query_key,
+                        attempt.plan_repeat_group,
+                        attempt.plan_generator_id,
+                        execution_stage,
+                        True,  # attempt_consumed
+                        cursor_update_status,
+                        stale_reason,
+                        cycle_count,  # plan_cycle_snapshot reflects pre-write cycle
+                    ),
+                )
+                log_row = cur.fetchone()
+                assert log_row is not None
+                search_log_id = int(log_row["id"])
+
+                # Cursor + scheduler/backoff writes only when not stale.
+                if not is_stale:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET next_plan_ordinal = %s,
+                            plan_cycle_count = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (new_next_ordinal, new_cycle, now,
+                         attempt.request_id),
+                    )
+
+                    if (
+                        attempt.apply_scheduler_attempt
+                        and not attempt.scheduler_success
+                    ):
+                        cur.execute(
+                            """
+                            UPDATE album_requests
+                            SET search_attempts = COALESCE(search_attempts, 0) + 1,
+                                last_attempt_at = %s,
+                                updated_at = %s
+                            WHERE id = %s
+                            RETURNING search_attempts
+                            """,
+                            (now, now, attempt.request_id),
+                        )
+                        s_row = cur.fetchone()
+                        assert s_row is not None
+                        new_count = int(s_row["search_attempts"])
+                        backoff_minutes = min(
+                            BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+                            BACKOFF_MAX_MINUTES,
+                        )
+                        cur.execute(
+                            "UPDATE album_requests "
+                            "SET next_retry_after = %s WHERE id = %s",
+                            (now + timedelta(minutes=backoff_minutes),
+                             attempt.request_id),
+                        )
+                    elif (
+                        attempt.apply_scheduler_attempt
+                        and attempt.scheduler_success
+                    ):
+                        # Reset retry-pacing on a useful slot. We do not
+                        # reset attempt counters -- those are forensic.
+                        cur.execute(
+                            "UPDATE album_requests "
+                            "SET last_attempt_at = %s, updated_at = %s "
+                            "WHERE id = %s",
+                            (now, now, attempt.request_id),
+                        )
+
+            self.conn.commit()
+            return ConsumedAttemptResult(
+                search_log_id=search_log_id,
+                cursor_update_status=cursor_update_status,
+                new_next_ordinal=new_next_ordinal,
+                new_cycle_count=new_cycle,
+                is_stale=is_stale,
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def record_non_consuming_search_attempt(
+        self,
+        attempt: NonConsumingAttemptInput,
+    ) -> int:
+        """Record a pre-attempt / setup-failure search_log row.
+
+        Always non-consuming -- cursor and cycle are never touched. Plan
+        context fields are nullable because the failure may have happened
+        before the executor resolved a plan/item. When
+        ``apply_scheduler_attempt=True`` this also increments
+        ``search_attempts`` and applies exponential backoff so a stuck
+        request cannot spin.
+
+        Returns the new ``search_log.id``.
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    "SELECT plan_cycle_count "
+                    "FROM album_requests WHERE id = %s FOR UPDATE",
+                    (attempt.request_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError(
+                        f"request {attempt.request_id} not found")
+                cycle_snapshot = int(row["plan_cycle_count"])
+
+                cur.execute(
+                    """
+                    INSERT INTO search_log (
+                        request_id, query, result_count, elapsed_s, outcome,
+                        final_state,
+                        plan_id, plan_item_id, plan_ordinal,
+                        plan_strategy, plan_canonical_query_key,
+                        plan_repeat_group, plan_generator_id,
+                        execution_stage, attempt_consumed,
+                        cursor_update_status, plan_cycle_snapshot
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        attempt.request_id,
+                        attempt.query,
+                        attempt.result_count,
+                        attempt.elapsed_s,
+                        attempt.outcome,
+                        attempt.final_state,
+                        attempt.plan_id,
+                        attempt.plan_item_id,
+                        attempt.plan_ordinal,
+                        attempt.plan_strategy,
+                        attempt.plan_canonical_query_key,
+                        attempt.plan_repeat_group,
+                        attempt.plan_generator_id,
+                        SEARCH_LOG_STAGE_PRE_ATTEMPT,
+                        False,  # attempt_consumed
+                        CURSOR_UPDATE_UNCHANGED,
+                        cycle_snapshot,
+                    ),
+                )
+                log_row = cur.fetchone()
+                assert log_row is not None
+                search_log_id = int(log_row["id"])
+
+                if attempt.apply_scheduler_attempt:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET search_attempts = COALESCE(search_attempts, 0) + 1,
+                            last_attempt_at = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                        RETURNING search_attempts
+                        """,
+                        (now, now, attempt.request_id),
+                    )
+                    s_row = cur.fetchone()
+                    assert s_row is not None
+                    new_count = int(s_row["search_attempts"])
+                    backoff_minutes = min(
+                        BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+                        BACKOFF_MAX_MINUTES,
+                    )
+                    cur.execute(
+                        "UPDATE album_requests "
+                        "SET next_retry_after = %s WHERE id = %s",
+                        (now + timedelta(minutes=backoff_minutes),
+                         attempt.request_id),
+                    )
+            self.conn.commit()
+            return search_log_id
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
 
     # --- Retry logic ---
 

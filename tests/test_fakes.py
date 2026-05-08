@@ -413,6 +413,366 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertIsNone(row["manual_reason"])
 
 
+# ---------------------------------------------------------------------------
+# Persisted search plans (U1) — fake parity
+# ---------------------------------------------------------------------------
+
+
+class TestFakePipelineDBSearchPlans(unittest.TestCase):
+    """FakePipelineDB mirrors the U1 plan methods with the same semantics
+    so tests that exercise plan generation, reconciliation, consumed
+    attempts, and stale completions can run without a real Postgres.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(
+                ordinal=i,
+                strategy=f"slot_{i}",
+                query=q,
+                canonical_query_key=q.lower(),
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def test_successful_plan_sets_active_and_resets_cursor(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.id, plan_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(len(active.items), 2)
+        self.assertEqual(active.items[0].ordinal, 0)
+        self.assertEqual(active.items[1].ordinal, 1)
+        self.assertEqual(db.request(rid)["active_plan_id"], plan_id)
+
+    def test_failed_deterministic_plan_keeps_request_unsearchable(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.assertIsNone(db.get_active_search_plan(rid))
+        self.assertEqual(
+            db.search_plans[plan_id].status, "failed_deterministic")
+        self.assertEqual(db.request(rid)["status"], "wanted")
+        self.assertIsNone(db.request(rid)["active_plan_id"])
+
+    def test_failed_transient_plan_is_visible_and_not_sticky(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        pid = db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        self.assertEqual(db.search_plans[pid].status, "failed_transient")
+
+    def test_supersede_replaces_active_and_resets_cursor(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        first = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        # Move cursor away from (0, 0) so we can prove reset.
+        db.update_request_fields(rid, next_plan_ordinal=1, plan_cycle_count=4)
+        new_id = db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id="g2",
+            items=self._items("Q2"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.id, new_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        # Old plan is superseded with a back-link.
+        old = db.search_plans[first]
+        self.assertEqual(old.status, "superseded")
+        self.assertIsNotNone(old.superseded_at)
+        self.assertEqual(old.superseded_by_plan_id, new_id)
+
+    def test_list_wanted_for_plan_reconciliation_ignores_pagination(self):
+        db = FakePipelineDB()
+        rid_planned = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="planned",
+        )
+        rid_unplanned = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="unplanned",
+        )
+        rid_imported = db.add_request(
+            artist_name="A", album_title="D", source="request",
+            mb_release_id="imported",
+        )
+        db.update_status(rid_imported, "imported")
+        db.create_successful_search_plan(
+            request_id=rid_planned, generator_id="g1",
+            items=self._items("Q"),
+        )
+        rows = db.list_wanted_for_plan_reconciliation()
+        rids = {r.request_id for r in rows}
+        self.assertEqual(rids, {rid_planned, rid_unplanned})
+        by_id = {r.request_id: r for r in rows}
+        self.assertEqual(by_id[rid_planned].active_plan_generator_id, "g1")
+        self.assertIsNone(by_id[rid_unplanned].active_plan_generator_id)
+
+    def test_inspection_returns_active_failed_superseded_legacy(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        # Legacy log row (no plan context).
+        db.log_search(rid, query="legacy", outcome="error")
+        det = db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        trans = db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        new_id = db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id="g2",
+            items=self._items("Q1"),
+        )
+        info = db.get_search_plan_inspection(rid)
+        assert info.active is not None
+        self.assertEqual(info.active.plan.id, new_id)
+        assert info.latest_failed_deterministic is not None
+        self.assertEqual(info.latest_failed_deterministic.id, det)
+        assert info.latest_failed_transient is not None
+        self.assertEqual(info.latest_failed_transient.id, trans)
+        self.assertEqual(info.superseded_count, 1)
+        self.assertEqual(info.legacy_search_log_count, 1)
+
+    def test_consumed_attempt_advances_cursor_and_writes_log(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="no_match", plan_item_count=2,
+            apply_scheduler_attempt=True, scheduler_success=False,
+        ))
+        self.assertEqual(result.cursor_update_status, "advanced")
+        self.assertEqual(result.new_next_ordinal, 1)
+        self.assertEqual(result.new_cycle_count, 0)
+        self.assertFalse(result.is_stale)
+        self.assertEqual(db.request(rid)["next_plan_ordinal"], 1)
+        # Log row carries plan context + cycle snapshot.
+        log = db.search_logs[0]
+        self.assertEqual(log.plan_id, plan_id)
+        self.assertEqual(log.plan_ordinal, 0)
+        self.assertEqual(log.execution_stage, "accepted")
+        self.assertTrue(log.attempt_consumed)
+        self.assertEqual(log.cursor_update_status, "advanced")
+        self.assertEqual(log.plan_cycle_snapshot, 0)
+        # Scheduler/backoff applied.
+        self.assertEqual(db.request(rid)["search_attempts"], 1)
+        self.assertIsNotNone(db.request(rid)["next_retry_after"])
+
+    def test_consumed_attempt_wraps_at_final_ordinal_and_increments_cycle(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        db.update_request_fields(rid, next_plan_ordinal=1)
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[1].id, plan_ordinal=1,
+            plan_strategy="slot_1", plan_canonical_query_key="q1",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q1",
+            outcome="found", plan_item_count=2,
+            apply_scheduler_attempt=True, scheduler_success=True,
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(result.new_next_ordinal, 0)
+        self.assertEqual(result.new_cycle_count, 1)
+        self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
+        # success path doesn't bump search_attempts.
+        self.assertEqual(db.request(rid)["search_attempts"], 0)
+
+    def test_consumed_attempt_stale_when_request_already_advanced(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        # Mid-flight regeneration / out-of-band advance.
+        db.update_request_fields(rid, next_plan_ordinal=1)
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="found", plan_item_count=2,
+            apply_scheduler_attempt=True, scheduler_success=True,
+        ))
+        self.assertTrue(result.is_stale)
+        self.assertEqual(result.cursor_update_status, "stale")
+        # Cursor unchanged.
+        self.assertEqual(db.request(rid)["next_plan_ordinal"], 1)
+        # Log row is still inserted, marked stale.
+        log = db.search_logs[0]
+        self.assertEqual(log.execution_stage, "stale_completion")
+        self.assertEqual(log.cursor_update_status, "stale")
+        self.assertEqual(log.stale_reason, "regenerated")
+        # No scheduler bump on stale.
+        self.assertEqual(db.request(rid)["search_attempts"], 0)
+
+    def test_consumed_attempt_rolls_back_on_validation_failure(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        # plan_item_id 999_999 does not belong to plan_id; the fake mirrors
+        # the real DB FK violation by raising. Either way, no log row may
+        # land and the cursor must stay put.
+        with self.assertRaises(Exception):
+            db.record_consumed_search_attempt(ConsumedAttemptInput(
+                request_id=rid, plan_id=plan_id,
+                plan_item_id=999999, plan_ordinal=0,
+                plan_strategy="slot_0", plan_canonical_query_key="q0",
+                plan_repeat_group=None, plan_generator_id="g1",
+                query="Q0", outcome="no_match", plan_item_count=1,
+            ))
+        self.assertEqual(db.search_logs, [])
+        self.assertEqual(db.request(rid)["next_plan_ordinal"], 0)
+
+    def test_non_consuming_logs_and_applies_backoff(self):
+        from lib.pipeline_db import NonConsumingAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        log_id = db.record_non_consuming_search_attempt(
+            NonConsumingAttemptInput(
+                request_id=rid, outcome="error",
+                error_message="slskd 503",
+                apply_scheduler_attempt=True,
+            )
+        )
+        self.assertGreater(log_id, 0)
+        log = db.search_logs[0]
+        self.assertEqual(log.execution_stage, "pre_attempt")
+        self.assertFalse(log.attempt_consumed)
+        self.assertEqual(log.cursor_update_status, "unchanged")
+        self.assertEqual(db.request(rid)["next_plan_ordinal"], 0)
+        self.assertEqual(db.request(rid)["search_attempts"], 1)
+        self.assertIsNotNone(db.request(rid)["next_retry_after"])
+
+    def test_request_delete_cascades_plans_and_items(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        # Make sure items are present pre-delete.
+        self.assertTrue(any(
+            it.plan_id == plan_id for it in db.search_plan_items.values()))
+        db.delete_request(rid)
+        self.assertNotIn(plan_id, db.search_plans)
+        self.assertFalse(any(
+            it.plan_id == plan_id for it in db.search_plan_items.values()))
+
+
+class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
+    """Lightweight signature parity check between PipelineDB and
+    FakePipelineDB for U1 methods. Catches drift when a real DB method
+    grows a new keyword and the fake forgets to mirror it.
+    """
+
+    METHODS = (
+        "create_successful_search_plan",
+        "create_failed_search_plan",
+        "supersede_search_plan_with_replacement",
+        "get_active_search_plan",
+        "list_wanted_for_plan_reconciliation",
+        "get_search_plan_inspection",
+        "record_consumed_search_attempt",
+        "record_non_consuming_search_attempt",
+    )
+
+    def test_fake_method_signatures_match_real(self):
+        for name in self.METHODS:
+            with self.subTest(method=name):
+                real_sig = inspect.signature(
+                    getattr(PipelineDB, name))
+                fake_sig = inspect.signature(
+                    getattr(FakePipelineDB, name))
+                self.assertEqual(
+                    list(real_sig.parameters.keys()),
+                    list(fake_sig.parameters.keys()),
+                    f"FakePipelineDB.{name} drifted from "
+                    f"PipelineDB.{name}",
+                )
+
+
 class TestFakeSlskdAPI(unittest.TestCase):
     def test_get_downloads_returns_queued_snapshots(self):
         first = [{"username": "user1", "directories": [{"files": []}]}]

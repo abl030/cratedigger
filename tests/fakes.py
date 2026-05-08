@@ -29,10 +29,22 @@ from lib.import_queue import (
     validate_payload,
     validate_status,
 )
-from lib.pipeline_db import (BACKOFF_BASE_MINUTES, BACKOFF_MAX_MINUTES,
-                             BadAudioHashInput, BadAudioHashRow,
+from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
+                             BACKOFF_MAX_MINUTES, BadAudioHashInput,
+                             BadAudioHashRow, ConsumedAttemptInput,
+                             ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
+                             CURSOR_UPDATE_STALE, CURSOR_UPDATE_UNCHANGED,
+                             CURSOR_UPDATE_WRAPPED, NonConsumingAttemptInput,
+                             PLAN_STATUS_ACTIVE, PLAN_STATUS_FAILED_DETERMINISTIC,
+                             PLAN_STATUS_FAILED_TRANSIENT,
+                             PLAN_STATUS_SUPERSEDED,
                              RequestSpectralStateUpdate,
-                             RequestV0ProbeStateUpdate)
+                             RequestV0ProbeStateUpdate, SEARCH_LOG_STAGE_ACCEPTED,
+                             SEARCH_LOG_STAGE_PRE_ATTEMPT,
+                             SEARCH_LOG_STAGE_STALE_COMPLETION,
+                             SearchPlanInspection, SearchPlanItemInput,
+                             SearchPlanItemRow, SearchPlanRow,
+                             WantedReconciliationCandidate)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -118,6 +130,50 @@ class SearchLogRow:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
+    # U1 persisted-search-plans plan-context fields. All nullable; rows
+    # written via ``log_search`` keep them None to mirror historical /
+    # legacy production rows.
+    plan_id: int | None = None
+    plan_item_id: int | None = None
+    plan_ordinal: int | None = None
+    plan_strategy: str | None = None
+    plan_canonical_query_key: str | None = None
+    plan_repeat_group: str | None = None
+    plan_generator_id: str | None = None
+    execution_stage: str | None = None
+    attempt_consumed: bool | None = None
+    cursor_update_status: str | None = None
+    stale_reason: str | None = None
+    plan_cycle_snapshot: int | None = None
+
+
+@dataclass
+class _FakeSearchPlanRow:
+    """In-memory mirror of a search_plans row."""
+    id: int
+    request_id: int
+    generator_id: str
+    status: str
+    failure_class: str | None = None
+    metadata_snapshot: dict[str, Any] | None = None
+    provenance: dict[str, Any] | None = None
+    error_message: str | None = None
+    superseded_at: datetime | None = None
+    superseded_by_plan_id: int | None = None
+    created_at: datetime = field(default_factory=_utcnow)
+
+
+@dataclass
+class _FakeSearchPlanItemRow:
+    """In-memory mirror of a search_plan_items row."""
+    id: int
+    plan_id: int
+    ordinal: int
+    strategy: str
+    query: str
+    canonical_query_key: str | None = None
+    repeat_group: str | None = None
+    provenance: dict[str, Any] | None = None
 
 
 @dataclass
@@ -567,6 +623,11 @@ class FakePipelineDB:
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
             bool | Callable[[int, int], bool]) = True
+        # U1 persisted-search-plans state.
+        self.search_plans: dict[int, _FakeSearchPlanRow] = {}
+        self.search_plan_items: dict[int, _FakeSearchPlanItemRow] = {}
+        self._next_search_plan_id = 0
+        self._next_search_plan_item_id = 0
 
     # --- Seeding ---
 
@@ -1675,6 +1736,10 @@ class FakePipelineDB:
             "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
             "manual_reason": None,
+            # U1 persisted-search-plans cursor fields.
+            "active_plan_id": None,
+            "next_plan_ordinal": 0,
+            "plan_cycle_count": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -1697,6 +1762,18 @@ class FakePipelineDB:
             e for e in self.search_logs if e.request_id != request_id]
         self.denylist = [
             e for e in self.denylist if e.request_id != request_id]
+        # U1: cascade plans + items with the request, mirroring the real
+        # ON DELETE CASCADE FKs from migration 014.
+        plan_ids_to_drop = [
+            pid for pid, plan in self.search_plans.items()
+            if plan.request_id == request_id
+        ]
+        for pid in plan_ids_to_drop:
+            self.search_plans.pop(pid, None)
+        self.search_plan_items = {
+            iid: item for iid, item in self.search_plan_items.items()
+            if item.plan_id not in plan_ids_to_drop
+        }
 
     def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Return wanted requests past their retry gate, fresh/manual rows first.
@@ -2295,6 +2372,21 @@ class FakePipelineDB:
             "peers_browsed": entry.peers_browsed,
             "peers_browsed_lazy": entry.peers_browsed_lazy,
             "fanout_waves": entry.fanout_waves,
+            # U1 plan-context fields. Mirror the real DB SELECT shape -- a
+            # historical row writes through ``log_search`` keeps these as
+            # None so legacy tests stay green.
+            "plan_id": entry.plan_id,
+            "plan_item_id": entry.plan_item_id,
+            "plan_ordinal": entry.plan_ordinal,
+            "plan_strategy": entry.plan_strategy,
+            "plan_canonical_query_key": entry.plan_canonical_query_key,
+            "plan_repeat_group": entry.plan_repeat_group,
+            "plan_generator_id": entry.plan_generator_id,
+            "execution_stage": entry.execution_stage,
+            "attempt_consumed": entry.attempt_consumed,
+            "cursor_update_status": entry.cursor_update_status,
+            "stale_reason": entry.stale_reason,
+            "plan_cycle_snapshot": entry.plan_cycle_snapshot,
         }
 
     # --- User cooldowns ---
@@ -2333,6 +2425,450 @@ class FakePipelineDB:
             }
             for c in rows
         ]
+
+    # --- Persisted search plans (U1) ---
+
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        set_active: bool = True,
+    ) -> int:
+        if not items:
+            raise ValueError(
+                "create_successful_search_plan requires at least one item; "
+                "use create_failed_search_plan for empty results.")
+        if request_id not in self._requests:
+            raise ValueError(f"request {request_id} not found")
+        # Mirror the partial unique index "one active plan per request".
+        if set_active:
+            for existing in self.search_plans.values():
+                if (existing.request_id == request_id
+                        and existing.status == PLAN_STATUS_ACTIVE):
+                    raise ValueError(
+                        f"request {request_id} already has an active plan; "
+                        "use supersede_search_plan_with_replacement to replace it")
+        # Snapshot per-item ordinals are unique by definition of the input
+        # ordering; mirror the (plan, ordinal) UNIQUE constraint.
+        seen_ords: set[int] = set()
+        for it in items:
+            if it.ordinal in seen_ords:
+                raise ValueError(
+                    f"duplicate plan ordinal {it.ordinal}")
+            if not it.query.strip():
+                raise ValueError("plan items require non-empty queries")
+            seen_ords.add(it.ordinal)
+
+        self._next_search_plan_id += 1
+        plan_id = self._next_search_plan_id
+        self.search_plans[plan_id] = _FakeSearchPlanRow(
+            id=plan_id,
+            request_id=request_id,
+            generator_id=generator_id,
+            status=PLAN_STATUS_ACTIVE,
+            metadata_snapshot=copy.deepcopy(metadata_snapshot)
+                if metadata_snapshot is not None else None,
+            provenance=copy.deepcopy(provenance)
+                if provenance is not None else None,
+        )
+        for it in items:
+            self._next_search_plan_item_id += 1
+            self.search_plan_items[self._next_search_plan_item_id] = (
+                _FakeSearchPlanItemRow(
+                    id=self._next_search_plan_item_id,
+                    plan_id=plan_id,
+                    ordinal=it.ordinal,
+                    strategy=it.strategy,
+                    query=it.query,
+                    canonical_query_key=it.canonical_query_key,
+                    repeat_group=it.repeat_group,
+                    provenance=copy.deepcopy(it.provenance)
+                        if it.provenance is not None else None,
+                )
+            )
+        if set_active:
+            row = self._requests[request_id]
+            row["active_plan_id"] = plan_id
+            row["next_plan_ordinal"] = 0
+            row["plan_cycle_count"] = 0
+            row["updated_at"] = _utcnow()
+        return plan_id
+
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+        metadata_snapshot: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> int:
+        if request_id not in self._requests:
+            raise ValueError(f"request {request_id} not found")
+        status = (
+            PLAN_STATUS_FAILED_TRANSIENT if transient
+            else PLAN_STATUS_FAILED_DETERMINISTIC
+        )
+        self._next_search_plan_id += 1
+        plan_id = self._next_search_plan_id
+        self.search_plans[plan_id] = _FakeSearchPlanRow(
+            id=plan_id,
+            request_id=request_id,
+            generator_id=generator_id,
+            status=status,
+            failure_class=failure_class,
+            error_message=error_message,
+            metadata_snapshot=copy.deepcopy(metadata_snapshot)
+                if metadata_snapshot is not None else None,
+            provenance=copy.deepcopy(provenance)
+                if provenance is not None else None,
+        )
+        return plan_id
+
+    def supersede_search_plan_with_replacement(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> int:
+        if not items:
+            raise ValueError(
+                "supersede_search_plan_with_replacement requires items.")
+        if request_id not in self._requests:
+            raise ValueError(f"request {request_id} not found")
+        row = self._requests[request_id]
+        old_id = row.get("active_plan_id")
+        now = _utcnow()
+        if old_id is not None:
+            old = self.search_plans.get(old_id)
+            if old is not None:
+                old.status = PLAN_STATUS_SUPERSEDED
+                old.superseded_at = now
+
+        # Bypass the "no active plan" guard since we just demoted the old one.
+        self._next_search_plan_id += 1
+        new_id = self._next_search_plan_id
+        self.search_plans[new_id] = _FakeSearchPlanRow(
+            id=new_id,
+            request_id=request_id,
+            generator_id=generator_id,
+            status=PLAN_STATUS_ACTIVE,
+            metadata_snapshot=copy.deepcopy(metadata_snapshot)
+                if metadata_snapshot is not None else None,
+            provenance=copy.deepcopy(provenance)
+                if provenance is not None else None,
+        )
+        for it in items:
+            self._next_search_plan_item_id += 1
+            self.search_plan_items[self._next_search_plan_item_id] = (
+                _FakeSearchPlanItemRow(
+                    id=self._next_search_plan_item_id,
+                    plan_id=new_id,
+                    ordinal=it.ordinal,
+                    strategy=it.strategy,
+                    query=it.query,
+                    canonical_query_key=it.canonical_query_key,
+                    repeat_group=it.repeat_group,
+                    provenance=copy.deepcopy(it.provenance)
+                        if it.provenance is not None else None,
+                )
+            )
+        if old_id is not None:
+            old = self.search_plans.get(old_id)
+            if old is not None:
+                old.superseded_by_plan_id = new_id
+        row["active_plan_id"] = new_id
+        row["next_plan_ordinal"] = 0
+        row["plan_cycle_count"] = 0
+        row["updated_at"] = now
+        return new_id
+
+    def _items_for_plan(self, plan_id: int) -> list[SearchPlanItemRow]:
+        rows = [
+            it for it in self.search_plan_items.values()
+            if it.plan_id == plan_id
+        ]
+        rows.sort(key=lambda r: r.ordinal)
+        return [
+            SearchPlanItemRow(
+                id=r.id,
+                plan_id=r.plan_id,
+                ordinal=r.ordinal,
+                strategy=r.strategy,
+                query=r.query,
+                canonical_query_key=r.canonical_query_key,
+                repeat_group=r.repeat_group,
+                provenance=copy.deepcopy(r.provenance),
+            )
+            for r in rows
+        ]
+
+    def _plan_to_row(self, plan: _FakeSearchPlanRow) -> SearchPlanRow:
+        return SearchPlanRow(
+            id=plan.id,
+            request_id=plan.request_id,
+            generator_id=plan.generator_id,
+            status=plan.status,
+            failure_class=plan.failure_class,
+            metadata_snapshot=copy.deepcopy(plan.metadata_snapshot),
+            provenance=copy.deepcopy(plan.provenance),
+            error_message=plan.error_message,
+            superseded_at=plan.superseded_at,
+            superseded_by_plan_id=plan.superseded_by_plan_id,
+            created_at=plan.created_at,
+        )
+
+    def get_active_search_plan(
+        self,
+        request_id: int,
+    ) -> ActiveSearchPlan | None:
+        row = self._requests.get(request_id)
+        if row is None:
+            return None
+        plan_id = row.get("active_plan_id")
+        if plan_id is None:
+            return None
+        plan = self.search_plans.get(plan_id)
+        if plan is None:
+            return None
+        return ActiveSearchPlan(
+            plan=self._plan_to_row(plan),
+            items=self._items_for_plan(plan_id),
+            next_ordinal=int(row.get("next_plan_ordinal") or 0),
+            cycle_count=int(row.get("plan_cycle_count") or 0),
+        )
+
+    def list_wanted_for_plan_reconciliation(
+        self,
+    ) -> list[WantedReconciliationCandidate]:
+        out: list[WantedReconciliationCandidate] = []
+        for rid in sorted(self._requests.keys()):
+            r = self._requests[rid]
+            if r.get("status") != "wanted":
+                continue
+            plan_id = r.get("active_plan_id")
+            gen_id: str | None = None
+            if plan_id is not None:
+                plan = self.search_plans.get(plan_id)
+                if plan is not None:
+                    gen_id = plan.generator_id
+            out.append(WantedReconciliationCandidate(
+                request_id=rid,
+                active_plan_id=plan_id,
+                active_plan_generator_id=gen_id,
+                next_plan_ordinal=int(r.get("next_plan_ordinal") or 0),
+                plan_cycle_count=int(r.get("plan_cycle_count") or 0),
+            ))
+        return out
+
+    def get_search_plan_inspection(
+        self,
+        request_id: int,
+    ) -> SearchPlanInspection:
+        active = self.get_active_search_plan(request_id)
+
+        def _latest(status: str) -> SearchPlanRow | None:
+            matches = [
+                p for p in self.search_plans.values()
+                if p.request_id == request_id and p.status == status
+            ]
+            if not matches:
+                return None
+            matches.sort(key=lambda p: (p.created_at, p.id), reverse=True)
+            return self._plan_to_row(matches[0])
+
+        superseded = sum(
+            1 for p in self.search_plans.values()
+            if p.request_id == request_id
+            and p.status == PLAN_STATUS_SUPERSEDED
+        )
+        legacy = sum(
+            1 for r in self.search_logs
+            if r.request_id == request_id and r.plan_id is None
+        )
+        return SearchPlanInspection(
+            request_id=request_id,
+            active=active,
+            latest_failed_deterministic=_latest(
+                PLAN_STATUS_FAILED_DETERMINISTIC),
+            latest_failed_transient=_latest(PLAN_STATUS_FAILED_TRANSIENT),
+            superseded_count=superseded,
+            legacy_search_log_count=legacy,
+        )
+
+    def record_consumed_search_attempt(
+        self,
+        attempt: ConsumedAttemptInput,
+    ) -> ConsumedAttemptResult:
+        row = self._requests.get(attempt.request_id)
+        if row is None:
+            raise ValueError(f"request {attempt.request_id} not found")
+
+        active_plan_id = row.get("active_plan_id")
+        next_ordinal = int(row.get("next_plan_ordinal") or 0)
+        cycle_count = int(row.get("plan_cycle_count") or 0)
+        is_stale = (
+            active_plan_id != attempt.plan_id
+            or next_ordinal != attempt.plan_ordinal
+        )
+
+        # Snapshot pre-write so a partial mutation can be unwound on
+        # validation failure, mirroring the real DB transaction.
+        snapshot_request = copy.deepcopy(row)
+        snapshot_log_count = len(self.search_logs)
+        snapshot_next_id = self._next_search_log_id
+
+        try:
+            if is_stale:
+                cursor_update_status = CURSOR_UPDATE_STALE
+                execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
+                stale_reason: str | None = "regenerated"
+                new_next_ordinal = next_ordinal
+                new_cycle = cycle_count
+            else:
+                # Validate plan_item_id belongs to the executing plan.
+                item = self.search_plan_items.get(attempt.plan_item_id)
+                if item is None or item.plan_id != attempt.plan_id:
+                    raise ValueError(
+                        f"plan_item_id={attempt.plan_item_id} does not "
+                        f"belong to plan_id={attempt.plan_id}")
+                execution_stage = SEARCH_LOG_STAGE_ACCEPTED
+                stale_reason = None
+                count = max(int(attempt.plan_item_count), 0)
+                if count == 0:
+                    cursor_update_status = CURSOR_UPDATE_ADVANCED
+                    new_next_ordinal = next_ordinal + 1
+                    new_cycle = cycle_count
+                elif attempt.plan_ordinal >= count - 1:
+                    cursor_update_status = CURSOR_UPDATE_WRAPPED
+                    new_next_ordinal = 0
+                    new_cycle = cycle_count + 1
+                else:
+                    cursor_update_status = CURSOR_UPDATE_ADVANCED
+                    new_next_ordinal = next_ordinal + 1
+                    new_cycle = cycle_count
+
+            self._next_search_log_id += 1
+            log_id = self._next_search_log_id
+            self.search_logs.append(SearchLogRow(
+                request_id=attempt.request_id,
+                query=attempt.query,
+                result_count=attempt.result_count,
+                elapsed_s=attempt.elapsed_s,
+                outcome=attempt.outcome,
+                id=log_id,
+                candidates=attempt.candidates_json,
+                variant=attempt.variant,
+                final_state=attempt.final_state,
+                browse_time_s=attempt.browse_time_s,
+                match_time_s=attempt.match_time_s,
+                peers_browsed=attempt.peers_browsed,
+                peers_browsed_lazy=attempt.peers_browsed_lazy,
+                fanout_waves=attempt.fanout_waves,
+                plan_id=attempt.plan_id,
+                plan_item_id=attempt.plan_item_id,
+                plan_ordinal=attempt.plan_ordinal,
+                plan_strategy=attempt.plan_strategy,
+                plan_canonical_query_key=attempt.plan_canonical_query_key,
+                plan_repeat_group=attempt.plan_repeat_group,
+                plan_generator_id=attempt.plan_generator_id,
+                execution_stage=execution_stage,
+                attempt_consumed=True,
+                cursor_update_status=cursor_update_status,
+                stale_reason=stale_reason,
+                plan_cycle_snapshot=cycle_count,
+            ))
+
+            now = _utcnow()
+            if not is_stale:
+                row["next_plan_ordinal"] = new_next_ordinal
+                row["plan_cycle_count"] = new_cycle
+                row["updated_at"] = now
+                if (
+                    attempt.apply_scheduler_attempt
+                    and not attempt.scheduler_success
+                ):
+                    new_count = (row.get("search_attempts") or 0) + 1
+                    row["search_attempts"] = new_count
+                    row["last_attempt_at"] = now
+                    backoff_minutes = min(
+                        BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+                        BACKOFF_MAX_MINUTES,
+                    )
+                    row["next_retry_after"] = (
+                        now + timedelta(minutes=backoff_minutes))
+                elif (
+                    attempt.apply_scheduler_attempt
+                    and attempt.scheduler_success
+                ):
+                    row["last_attempt_at"] = now
+            return ConsumedAttemptResult(
+                search_log_id=log_id,
+                cursor_update_status=cursor_update_status,
+                new_next_ordinal=new_next_ordinal,
+                new_cycle_count=new_cycle,
+                is_stale=is_stale,
+            )
+        except Exception:
+            # Roll back the partial mutation so test assertions can prove
+            # "log-without-cursor or cursor-without-log" never happens.
+            self._requests[attempt.request_id] = snapshot_request
+            self.search_logs = self.search_logs[:snapshot_log_count]
+            self._next_search_log_id = snapshot_next_id
+            raise
+
+    def record_non_consuming_search_attempt(
+        self,
+        attempt: NonConsumingAttemptInput,
+    ) -> int:
+        row = self._requests.get(attempt.request_id)
+        if row is None:
+            raise ValueError(f"request {attempt.request_id} not found")
+        cycle_snapshot = int(row.get("plan_cycle_count") or 0)
+        self._next_search_log_id += 1
+        log_id = self._next_search_log_id
+        self.search_logs.append(SearchLogRow(
+            request_id=attempt.request_id,
+            query=attempt.query,
+            result_count=attempt.result_count,
+            elapsed_s=attempt.elapsed_s,
+            outcome=attempt.outcome,
+            id=log_id,
+            final_state=attempt.final_state,
+            plan_id=attempt.plan_id,
+            plan_item_id=attempt.plan_item_id,
+            plan_ordinal=attempt.plan_ordinal,
+            plan_strategy=attempt.plan_strategy,
+            plan_canonical_query_key=attempt.plan_canonical_query_key,
+            plan_repeat_group=attempt.plan_repeat_group,
+            plan_generator_id=attempt.plan_generator_id,
+            execution_stage=SEARCH_LOG_STAGE_PRE_ATTEMPT,
+            attempt_consumed=False,
+            cursor_update_status=CURSOR_UPDATE_UNCHANGED,
+            plan_cycle_snapshot=cycle_snapshot,
+        ))
+        if attempt.apply_scheduler_attempt:
+            now = _utcnow()
+            new_count = (row.get("search_attempts") or 0) + 1
+            row["search_attempts"] = new_count
+            row["last_attempt_at"] = now
+            backoff_minutes = min(
+                BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+                BACKOFF_MAX_MINUTES,
+            )
+            row["next_retry_after"] = now + timedelta(
+                minutes=backoff_minutes)
+            row["updated_at"] = now
+        return log_id
 
     def assert_log(self, test: Any, index: int, **expected: Any) -> None:
         """Assert fields on a download_log entry at the given index.
