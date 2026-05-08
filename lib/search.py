@@ -20,10 +20,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+
+
+# ---------------------------------------------------------------------------
+# Persisted search-plan generator id.
+#
+# This constant is the ONLY automatic invalidation key for persisted plans
+# (per docs/plans/2026-05-08-001-feat-persisted-search-plans-plan.md).
+# Any change that affects generator output — token rules, strategy ladder,
+# repeat-group identity, dedupe behavior, provenance shape — MUST bump this
+# string. U3 (service) and U4 (reconciliation) read this to decide whether
+# a stored plan is current.
+#
+# Format is free-form, but keep it short and stable. Use a date+seq tag.
+# ---------------------------------------------------------------------------
+SEARCH_PLAN_GENERATOR_ID = "search-plan/2026-05-08-1"
 
 
 @dataclass
@@ -472,4 +487,466 @@ def select_variant(
         query=queries[track_idx],
         tag=f"track_{track_idx}",
         slice_index=track_idx,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pure search-plan generator (U2 — persisted search plans plan).
+#
+# Replaces cycle-index variant selection with a deterministic, materialized
+# plan list. Same album-level behavior as `select_variant()`, plus:
+#   - bounded provenance (omitted candidates with reasons, dedupe losers)
+#   - canonical query keys for usefulness aggregation
+#   - repeat-group identity for the intentional repeated-default slots
+#   - explicit deterministic generation-failure result (not an empty plan)
+#
+# `select_variant()` and `build_query()` remain the runtime executor's
+# entry point until U5 cuts over. This generator is additive.
+# ---------------------------------------------------------------------------
+
+
+# Strategy labels used on plan items. Aligned with current `select_variant()`
+# tags so search-log forensics stay readable across the cutover.
+_STRATEGY_DEFAULT = "default"
+_STRATEGY_UNWILD = "unwild"
+_STRATEGY_UNWILD_YEAR = "unwild_year"
+
+
+# Maximum number of per-track slots in a generated plan. Mirrors the
+# "Up to 3 track slots" requirement from §U2.
+MAX_TRACK_SLOTS_PER_PLAN = 3
+
+
+# Plan-status values. Kept as string literals so they round-trip cleanly
+# through JSONB at the persistence layer (U1/U3).
+PLAN_STATUS_SUCCESS = "success"
+PLAN_STATUS_GENERATION_FAILED = "generation_failed"
+
+
+@dataclass(frozen=True)
+class ReleaseSnapshot:
+    """Pure input value to `generate_search_plan`.
+
+    A snapshot of release metadata at generation time. Resolver/DB I/O happens
+    in U3 — the generator only reads this value. `redownload` is exposed as a
+    snapshot field so callers can record it; it does not affect generator
+    behavior in this unit (album-level slot ladder is the same for both
+    request and redownload sources), but it is part of the snapshot contract
+    and must be preserved into provenance for debuggability.
+
+    `prepend_artist` is a generation-affecting config knob — moving it onto
+    the snapshot keeps the function pure (no implicit module/global config
+    reads).
+    """
+
+    artist_name: str
+    title: str
+    year: str | None
+    track_titles: tuple[str, ...]
+    redownload: bool = False
+    prepend_artist: bool = False
+
+
+@dataclass(frozen=True)
+class SearchPlanConfig:
+    """Generation-affecting config for `generate_search_plan`.
+
+    Bumping any field's effective semantics requires bumping
+    `SEARCH_PLAN_GENERATOR_ID`.
+    """
+
+    escalation_threshold: int = 5
+    max_track_slots: int = MAX_TRACK_SLOTS_PER_PLAN
+
+
+@dataclass(frozen=True)
+class SearchPlanItem:
+    """One ordered plan slot.
+
+    Pure-Python value type. Persistence (U1) will translate this into a row
+    on `search_plan_items`; the executor (U5) will read these in order.
+
+    `strategy` is one of `default` | `unwild` | `unwild_year` | `track_<idx>`.
+    `canonical_query_key` is the lowercased / whitespace-collapsed query and
+    is the aggregation key for usefulness stats. `repeat_group` marks slots
+    that share intentional repeat identity — repeated-default slots all share
+    the same repeat_group, while non-default slots have their strategy as
+    their repeat_group.
+    """
+
+    ordinal: int
+    strategy: str
+    query: str
+    canonical_query_key: str
+    repeat_group: str
+    # Per-item provenance (e.g. source_track_index for track slots, repeat
+    # ordinal within the repeat group for default slots). Bounded — small
+    # JSON-serialisable dict.
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    """Materialized plan output of `generate_search_plan`.
+
+    On success, `items` is a non-empty ordered list. On deterministic
+    generation failure (no runnable artist/title/track query), `status` is
+    `generation_failed` and `items` is empty; `failure_reason` is set and
+    `provenance` carries the input snapshot signature.
+    """
+
+    generator_id: str
+    status: str  # PLAN_STATUS_SUCCESS | PLAN_STATUS_GENERATION_FAILED
+    items: tuple[SearchPlanItem, ...]
+    # Plan-level provenance:
+    #   - `omitted_candidates`: list of {strategy, reason, ...} entries for
+    #     candidates that were generated but not emitted as runnable items
+    #     (e.g. unwild_year skipped because year unknown, track tier skipped
+    #     because single-track album, track candidates beyond max_track_slots).
+    #   - `dedupe_losers`: list of {winner_strategy, loser_strategy,
+    #     canonical_query_key, would_have_been_ordinal} for cross-strategy
+    #     canonical-key collisions resolved in favor of the earlier slot.
+    #   - `dropped_low_entropy_tokens`: case-insensitive set of low-entropy
+    #     tokens that were dropped from any candidate, recorded once at the
+    #     plan level so callers can audit `the/you/from/and` removal without
+    #     digging into per-item provenance.
+    #   - `snapshot_signature`: small subset of input (artist, title, year,
+    #     track_count, redownload) so failed plans remain debuggable.
+    provenance: dict[str, Any] = field(default_factory=dict)
+    failure_reason: str | None = None
+
+
+# Candidates the generator considered before deciding which became runnable
+# items. Internal scratch type; never serialised.
+@dataclass
+class _Candidate:
+    strategy: str
+    repeat_group: str
+    query: str | None  # None when generation produced no runnable query
+    omit_reason: str | None  # None when query is runnable
+    extra_provenance: dict[str, Any] = field(default_factory=dict)
+
+
+def _canonical_query_key(query: str) -> str:
+    """Canonical key for usefulness aggregation and dedupe.
+
+    Lowercase + whitespace-collapsed. Keep this deliberately simple — any
+    change to canonicalisation must bump `SEARCH_PLAN_GENERATOR_ID`.
+    """
+    return " ".join(query.lower().split())
+
+
+def _has_dropped_low_entropy(*token_lists: list[str]) -> set[str]:
+    """Return the lowercased low-entropy tokens that appear in any source list.
+
+    Used purely for plan-level provenance: we want to record that the
+    generator dropped (e.g.) `the` from a candidate, even though the
+    drop happens inside `_normalize_query_tokens`. The presence check is
+    case-insensitive.
+    """
+    dropped: set[str] = set()
+    for tokens in token_lists:
+        for tok in tokens:
+            key = tok.lower()
+            if key in LOW_ENTROPY_QUERY_TOKENS:
+                dropped.add(key)
+    return dropped
+
+
+def _per_track_candidates(
+    track_titles: list[str],
+    artist_name: str,
+) -> list[tuple[int, str]]:
+    """Return runnable per-track queries paired with source-track index.
+
+    Mirrors `_per_track_queries()` semantics — same cleaning, same enrichment,
+    same low-entropy drops, same case-insensitive dedupe — but preserves the
+    source-track index so the generator can rank stably by token count then
+    char count then original track order.
+    """
+    seen_lower: set[str] = set()
+    out: list[tuple[int, str]] = []
+    for src_idx, title in enumerate(track_titles):
+        cleaned = strip_special_chars(title)
+        tokens = cleaned.split()
+        tokens = strip_short_tokens(tokens)
+        tokens = _normalize_query_tokens(tokens)
+        if not tokens:
+            continue
+        tokens = cap_tokens(tokens)
+        if len(tokens) == 1:
+            artist_token = _longest_artist_token(
+                artist_name,
+                excluded_tokens={tokens[0].lower()},
+            )
+            if artist_token:
+                tokens = tokens + [artist_token]
+            else:
+                continue
+        query = " ".join(tokens)
+        if not query:
+            continue
+        key = query.lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        out.append((src_idx, query))
+    return out
+
+
+def generate_search_plan(
+    snapshot: ReleaseSnapshot,
+    config: SearchPlanConfig,
+) -> SearchPlan:
+    """Generate the deterministic search plan for one release.
+
+    Pure function: same input → same output. No I/O. The result is the
+    materialized executor schedule for the release, in slot order.
+
+    Slot ordering:
+      1. `escalation_threshold` repeated `default` slots (intentional repeats,
+         shared `repeat_group`, distinct ordinals).
+      2. One `unwild` slot.
+      3. One `unwild_year` slot ONLY when year is known
+         (per `_year_is_known()`).
+      4. Up to `max_track_slots` track slots (default 3) drawn from the
+         per-track candidates ranked by:
+           a. useful-token count desc
+           b. character count desc
+           c. source-track index asc
+         Multi-track albums only — single-track and zero-track inputs skip
+         the track tier entirely.
+
+    Cross-strategy dedupe: when a non-default candidate produces the same
+    canonical query as an earlier slot, the earlier one wins and the loser
+    is recorded in plan-level provenance with the ordinal it would have had.
+    Repeated-default slots are NOT deduped against each other — they share
+    intentional repeat-group identity.
+
+    Generation failure: when artist/title is unrunnable AND no per-track
+    candidate is runnable, returns `PLAN_STATUS_GENERATION_FAILED` with
+    populated provenance, NOT an empty success plan.
+    """
+    artist = snapshot.artist_name
+    title = snapshot.title
+    year = snapshot.year
+    track_titles = list(snapshot.track_titles)
+    prepend_artist = snapshot.prepend_artist
+
+    # --- Build the candidate ladder up front ----------------------------
+    # We construct candidates for every potential slot, runnable or not, so
+    # provenance can carry the omission reason. Collapse to runnable items
+    # at the end.
+
+    # Track which low-entropy tokens were ever present in raw inputs, so the
+    # plan can record the drop set even though the drop happens inside
+    # _normalize_query_tokens. We tokenise on whitespace post-strip-special
+    # to mirror the helper pipeline.
+    all_input_tokens: list[list[str]] = []
+    all_input_tokens.append(strip_special_chars(artist).split())
+    all_input_tokens.append(strip_special_chars(title).split())
+    for t in track_titles:
+        all_input_tokens.append(strip_special_chars(t).split())
+    dropped_low_entropy = _has_dropped_low_entropy(*all_input_tokens)
+
+    base_query = build_query(artist, title, prepend_artist=prepend_artist)
+    base_query_unwild = build_query(
+        artist, title, prepend_artist=prepend_artist, wildcard_artist=False,
+    )
+
+    candidates: list[_Candidate] = []
+
+    # 1. Repeated default slots
+    threshold = max(0, config.escalation_threshold)
+    for repeat_idx in range(threshold):
+        if base_query:
+            candidates.append(_Candidate(
+                strategy=_STRATEGY_DEFAULT,
+                repeat_group=_STRATEGY_DEFAULT,
+                query=base_query,
+                omit_reason=None,
+                extra_provenance={"repeat_index": repeat_idx},
+            ))
+        else:
+            candidates.append(_Candidate(
+                strategy=_STRATEGY_DEFAULT,
+                repeat_group=_STRATEGY_DEFAULT,
+                query=None,
+                omit_reason="empty_base_query",
+                extra_provenance={"repeat_index": repeat_idx},
+            ))
+
+    # 2. Unwild slot
+    if base_query_unwild:
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_UNWILD,
+            repeat_group=_STRATEGY_UNWILD,
+            query=base_query_unwild,
+            omit_reason=None,
+        ))
+    else:
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_UNWILD,
+            repeat_group=_STRATEGY_UNWILD,
+            query=None,
+            omit_reason="empty_unwild_query",
+        ))
+
+    # 3. Unwild_year slot — only when year is known
+    year_known = _year_is_known(year)
+    if year_known and base_query_unwild:
+        # year_known guarantees year is not None and 4-digit-prefixed.
+        assert year is not None  # type checker
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_UNWILD_YEAR,
+            repeat_group=_STRATEGY_UNWILD_YEAR,
+            query=f"{base_query_unwild} {year[:4]}",
+            omit_reason=None,
+            extra_provenance={"year": year[:4]},
+        ))
+    else:
+        reason = "year_unknown" if not year_known else "empty_unwild_query"
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_UNWILD_YEAR,
+            repeat_group=_STRATEGY_UNWILD_YEAR,
+            query=None,
+            omit_reason=reason,
+        ))
+
+    # 4. Track candidates — multi-track albums only
+    per_track_pairs = _per_track_candidates(track_titles, artist)
+    track_omissions: list[dict[str, Any]] = []
+
+    if len(track_titles) <= 1:
+        # Don't emit any track slots; record the structural skip once.
+        if track_titles:
+            track_omissions.append({
+                "strategy": "track_*",
+                "reason": "single_track_album",
+            })
+    elif not per_track_pairs:
+        track_omissions.append({
+            "strategy": "track_*",
+            "reason": "no_runnable_track_queries",
+        })
+    else:
+        # Rank by token count desc, char count desc, source index asc.
+        # Source index is the natural tiebreaker for stable ordering.
+        ranked = sorted(
+            per_track_pairs,
+            key=lambda pair: (
+                -len(pair[1].split()),
+                -len(pair[1]),
+                pair[0],
+            ),
+        )
+        chosen = ranked[: config.max_track_slots]
+        omitted = ranked[config.max_track_slots:]
+        # Record omitted track candidates for plan-level provenance.
+        for src_idx, q in omitted:
+            track_omissions.append({
+                "strategy": "track_excess",
+                "reason": "exceeded_max_track_slots",
+                "source_track_index": src_idx,
+                "query": q,
+                "canonical_query_key": _canonical_query_key(q),
+            })
+        # The track slot index is the *plan-side* ordinal among track slots
+        # (0..max_track_slots-1), not the source-track-index. This matches
+        # the existing `track_<idx>` strategy label semantics where idx is
+        # an executor cycle position.
+        for plan_track_idx, (src_idx, q) in enumerate(chosen):
+            candidates.append(_Candidate(
+                strategy=f"track_{plan_track_idx}",
+                repeat_group=f"track_{plan_track_idx}",
+                query=q,
+                omit_reason=None,
+                extra_provenance={
+                    "source_track_index": src_idx,
+                    "track_slot_index": plan_track_idx,
+                },
+            ))
+
+    # --- Resolve candidates into runnable items + provenance ------------
+    runnable: list[SearchPlanItem] = []
+    omitted_candidates: list[dict[str, Any]] = []
+    dedupe_losers: list[dict[str, Any]] = []
+    # Map canonical_query_key -> (winner_strategy, winner_ordinal). Default
+    # slots are tracked by their shared repeat_group so multiple default
+    # slots are NOT considered duplicates of each other.
+    seen_keys: dict[str, tuple[str, int]] = {}
+
+    next_ordinal = 0
+    for cand in candidates:
+        if cand.query is None:
+            omitted_candidates.append({
+                "strategy": cand.strategy,
+                "reason": cand.omit_reason or "unknown",
+                **cand.extra_provenance,
+            })
+            continue
+        key = _canonical_query_key(cand.query)
+        is_default_repeat = cand.repeat_group == _STRATEGY_DEFAULT
+        prior = seen_keys.get(key)
+        if prior is not None and not is_default_repeat:
+            # Cross-strategy duplicate. Keep earlier slot, record loser.
+            winner_strategy, _winner_ordinal = prior
+            dedupe_losers.append({
+                "winner_strategy": winner_strategy,
+                "loser_strategy": cand.strategy,
+                "canonical_query_key": key,
+                "would_have_been_ordinal": next_ordinal,
+            })
+            continue
+
+        item = SearchPlanItem(
+            ordinal=next_ordinal,
+            strategy=cand.strategy,
+            query=cand.query,
+            canonical_query_key=key,
+            repeat_group=cand.repeat_group,
+            provenance=dict(cand.extra_provenance),
+        )
+        runnable.append(item)
+        # Only record default key once — repeated defaults share identity but
+        # do NOT block other strategies that produce the same key (rare but
+        # possible if title equals artist token).
+        if not is_default_repeat or key not in seen_keys:
+            seen_keys[key] = (cand.strategy, next_ordinal)
+        next_ordinal += 1
+
+    omitted_candidates.extend(track_omissions)
+
+    snapshot_signature = {
+        "artist_name": artist,
+        "title": title,
+        "year": year,
+        "track_count": len(track_titles),
+        "redownload": snapshot.redownload,
+    }
+
+    base_provenance: dict[str, Any] = {
+        "omitted_candidates": omitted_candidates,
+        "dedupe_losers": dedupe_losers,
+        "dropped_low_entropy_tokens": sorted(dropped_low_entropy),
+        "snapshot_signature": snapshot_signature,
+    }
+
+    if not runnable:
+        # Deterministic generation failure: no runnable artist/title/track
+        # query. This is sticky for the current generator id (U3).
+        return SearchPlan(
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            status=PLAN_STATUS_GENERATION_FAILED,
+            items=(),
+            provenance=base_provenance,
+            failure_reason="no_runnable_query",
+        )
+
+    return SearchPlan(
+        generator_id=SEARCH_PLAN_GENERATOR_ID,
+        status=PLAN_STATUS_SUCCESS,
+        items=tuple(runnable),
+        provenance=base_provenance,
+        failure_reason=None,
     )
