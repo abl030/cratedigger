@@ -671,6 +671,94 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         self.assertEqual(db.recorded_attempts, [(1, "download")])
         self.assertIsNotNone(db.request(1)["next_retry_after"])
 
+    def test_verified_no_acceptance_writes_user_offline_download_log(self):
+        """When ``slskd_enqueue_with_outcome`` returns ``rejected`` and
+        verification confirms no transfer landed, ``try_enqueue`` must
+        write a ``download_log`` row recording the failed attempt — so
+        the failure is surfaced in the web UI / pipeline-cli immediately
+        rather than silently disappearing into a status flip."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(
+            cfg=cfg,
+            db=db,
+            slskd=FakeSlskdAPI(downloads=[]),
+        )
+        # Route pipeline_db_source -> same FakePipelineDB so the download_log
+        # write is observable (in production both seams connect to the same
+        # Postgres; in this fixture they're independent unless wired here).
+        ctx.pipeline_db_source._get_db.return_value = db  # type: ignore[attr-defined]
+        users = ["pooyork"]
+        results = _make_results(users)
+        file_dir = "musiclibrary\\Mercury Rev\\Deserter's Songs"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        # One log row, attributed to the rejected user.
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.request_id, 1)
+        self.assertEqual(log.soulseek_username, "pooyork")
+        self.assertEqual(log.filetype, "flac")
+        self.assertEqual(log.outcome, "user_offline")
+        assert log.error_message is not None
+        self.assertIn("offline", log.error_message.lower())
+
+    def test_rejected_enqueue_with_visible_transfer_does_not_log(self):
+        """When the rejected outcome leaves a visible transfer (the
+        residual-claim safety net), the request stays in ``downloading``
+        and no ``download_log`` row should be written — the attempt is
+        not yet a verified failure."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\u00\\Album"
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{"directory": file_dir, "files": [
+                {"filename": "Music\\u00\\Album\\01.flac", "id": "transfer-1"},
+            ]}],
+        }])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        # Verified-no-acceptance failed; claim left for recovery — no log.
+        self.assertEqual(db.download_logs, [])
+
     def test_rejected_enqueue_with_visible_transfer_stays_downloading(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()

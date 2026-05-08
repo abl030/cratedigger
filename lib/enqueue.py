@@ -923,6 +923,21 @@ def try_enqueue(
                         downloads=owned,
                         candidates=tuple(accumulated),
                     )
+                # Verified-no-acceptance: surface the rejection in
+                # download_log so the failure is visible immediately
+                # rather than disappearing into a silent status flip.
+                # Today the only path that produces a verified rejection
+                # is a peer-offline classification from
+                # slskd_enqueue_with_outcome (see _is_user_offline_http_error).
+                if claim.request_id is not None:
+                    db = ctx.pipeline_db_source._get_db()
+                    db.log_download(
+                        request_id=claim.request_id,
+                        soulseek_username=username,
+                        filetype=allowed_filetype,
+                        outcome="user_offline",
+                        error_message="user offline at enqueue",
+                    )
             elif claim.claimed:
                 owned = _leave_claim_for_poll_recovery(
                     claim,
