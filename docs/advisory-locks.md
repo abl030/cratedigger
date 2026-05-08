@@ -319,7 +319,11 @@ session and returns False — revisit the ordering rules.
 | Force/manual outer | `lib/import_dispatch.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe | `lib/pipeline_db.py` | `enqueue_import_job` | unique index | `dedupe_key` |
-| Plan generation | `lib/search_plan_service.py` | `SearchPlanService._generate_locked` | PLAN | `request_id` |
+| Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
+
+Plan generation acquires the PLAN lock before reading the request,
+building the snapshot, invoking the generator, and persisting the
+replacement plan/cursor state.
 
 Every acquire site carries a comment linking back here. Line numbers
 are intentionally omitted — grep for `advisory_lock(` to find them.

@@ -189,6 +189,8 @@ def _make_server():
     ]
 
     mock_db.get_search_history.return_value = []
+    mock_db.get_search_plan_stats_history.return_value = []
+    mock_db.get_legacy_search_log_summary.return_value = (0, [])
     mock_db.get_pipeline_dashboard_metrics.return_value = {
         "generated_at": "2026-05-05T00:00:00+00:00",
         "searches": {
@@ -1770,6 +1772,9 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         self.mock_db.get_request.return_value = make_request_row(
             id=request_id, status=request_status,
         )
+        self.mock_db.get_search_history.reset_mock()
+        self.mock_db.get_legacy_search_log_summary.reset_mock()
+        self.mock_db.get_search_plan_stats_history.reset_mock()
         self.mock_db.get_search_plan_inspection.return_value = (
             SearchPlanInspection(
                 request_id=request_id,
@@ -1779,8 +1784,9 @@ class TestPipelineSearchPlanContract(_WebServerCase):
                 superseded_count=superseded_count,
                 legacy_search_log_count=legacy_log_count,
             ))
-        self.mock_db.get_search_history.return_value = (
-            legacy_head_history or [])
+        self.mock_db.get_legacy_search_log_summary.return_value = (
+            legacy_log_count, legacy_head_history or [])
+        self.mock_db.get_search_plan_stats_history.return_value = []
         empty_bucket = SearchPlanStatsBucket(
             slots=[], query_groups=[], legacy_bucket=None,
             cache_attribution_level=CACHE_ATTRIBUTION_CYCLE_ONLY,
@@ -1854,7 +1860,8 @@ class TestPipelineSearchPlanContract(_WebServerCase):
             id=100, status="imported", min_bitrate=320,
             imported_path="/mnt/virtio/Music/Beets/Test",
         )
-        self.mock_db.get_search_history.return_value = []
+        self.mock_db.get_legacy_search_log_summary.return_value = (0, [])
+        self.mock_db.get_search_plan_stats_history.return_value = []
         self.mock_db.get_search_plan_inspection.reset_mock(
             return_value=True, side_effect=True)
         self.mock_db.get_search_plan_stats.reset_mock(
@@ -1937,7 +1944,11 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         _assert_required_fields(
             self, data["legacy_logs"], self.LEGACY_LOGS_REQUIRED_FIELDS,
             "search-plan legacy_logs")
-        self.assertEqual(data["legacy_logs"]["count"], 2)
+        self.assertEqual(data["legacy_logs"]["count"], 5)
+        self.mock_db.get_legacy_search_log_summary.assert_called_once_with(
+            100, limit=5)
+        self.mock_db.get_search_plan_stats_history.assert_called_once_with(100)
+        self.mock_db.get_search_history.assert_not_called()
         for row in data["legacy_logs"]["head"]:
             _assert_required_fields(
                 self, row, self.LEGACY_HEAD_REQUIRED_FIELDS,

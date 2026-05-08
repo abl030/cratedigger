@@ -401,6 +401,7 @@ class DryRunPlanClassification:
     request_id: int
     latest_failed_deterministic_generator_id: str | None
     latest_failed_transient_generator_id: str | None
+    latest_failed_transient_created_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -2453,6 +2454,50 @@ class PipelineDB:
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
 
+    def get_search_plan_stats_history(
+        self, request_id: int,
+    ) -> list[dict[str, object]]:
+        """Projection-only search_log rows needed for search-plan stats.
+
+        Intentionally excludes candidates JSONB so inspection endpoints do
+        not deserialize every candidate blob just to compute aggregate stats.
+        """
+        cur = self._execute("""
+            SELECT id, request_id, query, result_count, elapsed_s, outcome,
+                   variant, final_state, browse_time_s, match_time_s,
+                   peers_browsed, peers_browsed_lazy, fanout_waves,
+                   plan_id, plan_item_id, plan_ordinal, plan_strategy,
+                   plan_canonical_query_key, plan_repeat_group,
+                   plan_generator_id, execution_stage, attempt_consumed,
+                   cursor_update_status, stale_reason, plan_cycle_snapshot,
+                   created_at
+            FROM search_log
+            WHERE request_id = %s
+            ORDER BY id DESC
+        """, (request_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_legacy_search_log_summary(
+        self, request_id: int, *, limit: int,
+    ) -> tuple[int, list[dict[str, object]]]:
+        """Return count + bounded head sample of legacy search_log rows."""
+        count_cur = self._execute("""
+            SELECT COUNT(*) AS c
+            FROM search_log
+            WHERE request_id = %s AND plan_id IS NULL
+        """, (request_id,))
+        count_row = count_cur.fetchone()
+        count = int(count_row["c"]) if count_row is not None else 0
+        head_cur = self._execute("""
+            SELECT id, request_id, query, result_count, elapsed_s, outcome,
+                   variant, final_state, created_at
+            FROM search_log
+            WHERE request_id = %s AND plan_id IS NULL
+            ORDER BY id DESC
+            LIMIT %s
+        """, (request_id, int(limit)))
+        return count, [dict(r) for r in head_cur.fetchall()]
+
     def get_search_history_batch(self, request_ids: list[int]) -> dict[int, list[dict[str, object]]]:
         """Batch fetch search history for multiple request IDs.
 
@@ -4006,7 +4051,7 @@ class PipelineDB:
         cur = self._execute(
             """
             SELECT DISTINCT ON (request_id, status)
-                   request_id, status, generator_id
+                   request_id, status, generator_id, created_at
             FROM search_plans
             WHERE request_id = ANY(%s)
               AND status IN (%s, %s)
@@ -4028,6 +4073,8 @@ class PipelineDB:
                         "generator_id"],
                     latest_failed_transient_generator_id=current
                         .latest_failed_transient_generator_id,
+                    latest_failed_transient_created_at=current
+                        .latest_failed_transient_created_at,
                 )
             elif r["status"] == PLAN_STATUS_FAILED_TRANSIENT:
                 out[rid] = DryRunPlanClassification(
@@ -4036,6 +4083,7 @@ class PipelineDB:
                         .latest_failed_deterministic_generator_id,
                     latest_failed_transient_generator_id=r[
                         "generator_id"],
+                    latest_failed_transient_created_at=r["created_at"],
                 )
         return out
 

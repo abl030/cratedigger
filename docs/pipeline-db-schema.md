@@ -273,7 +273,7 @@ distinguishable in `search_log`:
   `cursor_update_status='wrapped'` — final ordinal; cursor wrapped to
   0 and `plan_cycle_count` incremented. **This replaces
   `outcome='exhausted'`** as the cycle-wrap signal.
-- `execution_stage='stale_completion'`, `attempt_consumed=true`,
+- `execution_stage='stale_completion'`, `attempt_consumed=false`,
   `cursor_update_status='stale'`, `stale_reason=<tag>` — a regeneration
   superseded the active plan after the search was submitted. Log-only;
   active cursor / status / scheduling are not mutated.

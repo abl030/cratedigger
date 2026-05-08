@@ -4059,6 +4059,30 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             p for p in db.search_plans.values() if p.request_id == rid]
         self.assertEqual(len(plans_for_req_2), 1)
 
+    def test_live_reconciliation_uses_batch_classification_for_sticky_failures(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_det = self._seed_wanted(db, "sticky-det")
+        db.create_failed_search_plan(
+            request_id=rid_det, generator_id="g-test",
+            failure_class="no_runnable_query", transient=False)
+        rid_trans = self._seed_wanted(db, "sticky-trans")
+        db.create_failed_search_plan(
+            request_id=rid_trans, generator_id="g-test",
+            failure_class="resolver_unavailable", transient=True)
+
+        service = self._service(db)
+        service.generate_for_request = MagicMock(  # type: ignore[method-assign]
+            side_effect=AssertionError("sticky failures should not inspect"))
+
+        summary = reconcile_search_plans(
+            db, service, generator_id="g-test")
+
+        self.assertEqual(summary.deterministic_failed, 1)
+        self.assertEqual(summary.retryable_failed, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        service.generate_for_request.assert_not_called()
+
     def test_per_row_exception_does_not_stop_other_rows(self):
         """One row's generation exception must not block reconciliation."""
         from lib.startup_reconciliation import reconcile_search_plans

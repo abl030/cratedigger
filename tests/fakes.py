@@ -2438,6 +2438,39 @@ class FakePipelineDB:
             if e.request_id == request_id
         ]
 
+    def get_search_plan_stats_history(
+        self, request_id: int,
+    ) -> list[dict[str, object]]:
+        rows = self.get_search_history(request_id)
+        return [
+            {k: v for k, v in row.items() if k != "candidates"}
+            for row in rows
+        ]
+
+    def get_legacy_search_log_summary(
+        self, request_id: int, *, limit: int,
+    ) -> tuple[int, list[dict[str, object]]]:
+        legacy = [
+            self._search_log_to_dict(e)
+            for e in reversed(self.search_logs)
+            if e.request_id == request_id and e.plan_id is None
+        ]
+        head = [
+            {
+                "id": row.get("id"),
+                "request_id": row.get("request_id"),
+                "query": row.get("query"),
+                "result_count": row.get("result_count"),
+                "elapsed_s": row.get("elapsed_s"),
+                "outcome": row.get("outcome"),
+                "variant": row.get("variant"),
+                "final_state": row.get("final_state"),
+                "created_at": row.get("created_at"),
+            }
+            for row in legacy[:limit]
+        ]
+        return len(legacy), head
+
     def get_search_history_batch(
         self, request_ids: list[int],
     ) -> dict[int, list[dict[str, object]]]:
@@ -2839,6 +2872,7 @@ class FakePipelineDB:
                 request_id=int(rid),
                 latest_failed_deterministic_generator_id=None,
                 latest_failed_transient_generator_id=None,
+                latest_failed_transient_created_at=None,
             )
             for rid in request_ids
         }
@@ -2861,6 +2895,8 @@ class FakePipelineDB:
                     det_matches[0].generator_id if det_matches else None),
                 latest_failed_transient_generator_id=(
                     trans_matches[0].generator_id if trans_matches else None),
+                latest_failed_transient_created_at=(
+                    trans_matches[0].created_at if trans_matches else None),
             )
         return out
 

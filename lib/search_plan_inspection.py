@@ -42,7 +42,11 @@ class _DBLike(Protocol):
         self, request_id: int,
     ) -> SearchPlanInspection: ...
 
-    def get_search_history(
+    def get_legacy_search_log_summary(
+        self, request_id: int, *, limit: int,
+    ) -> tuple[int, list[dict[str, Any]]]: ...
+
+    def get_search_plan_stats_history(
         self, request_id: int,
     ) -> list[dict[str, Any]]: ...
 
@@ -127,22 +131,6 @@ def _legacy_log_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _legacy_logs_for_request(
-    history: list[dict[str, Any]],
-    *,
-    limit: int,
-) -> tuple[int, list[dict[str, Any]]]:
-    """Return (count, head sample) of plan-less search_log rows.
-
-    ``history`` is the newest-first list returned by
-    ``PipelineDB.get_search_history``. We filter to rows where
-    ``plan_id`` is None so plan-aware rows don't drown out the legacy
-    bucket.
-    """
-    legacy = [r for r in history if r.get("plan_id") is None]
-    return len(legacy), [_legacy_log_row_to_dict(r) for r in legacy[:limit]]
-
-
 def _stats_group_to_dict(
     group: SearchPlanStatsGroup,
 ) -> dict[str, Any]:
@@ -222,11 +210,10 @@ def build_inspection_payload(
         return RequestNotFound(request_id=request_id)
 
     inspection = db.get_search_plan_inspection(request_id)
-    history = db.get_search_history(request_id)
-
-    legacy_count, legacy_head = _legacy_logs_for_request(
-        history, limit=legacy_log_head_limit,
+    legacy_count, legacy_rows = db.get_legacy_search_log_summary(
+        request_id, limit=legacy_log_head_limit,
     )
+    legacy_head = [_legacy_log_row_to_dict(r) for r in legacy_rows]
 
     active_dict: dict[str, Any] | None = None
     active_plan_generator_id: str | None = None
@@ -288,9 +275,10 @@ def build_inspection_payload(
         # Stats include both current-active-plan rows and historical
         # plan rows (superseded + legacy) so dashboards can answer "is
         # this slot still useful" and "was this slot useful before".
-        # Pass `history` to skip a second fetch of search_log.
+        # Use a projection-only fetch to avoid deserializing candidates JSONB.
+        stats_history = db.get_search_plan_stats_history(request_id)
         stats = db.get_search_plan_stats(
-            request_id, current_only=False, prefetched_history=history,
+            request_id, current_only=False, prefetched_history=stats_history,
         )
         payload["stats"] = _stats_to_dict(stats)
     return payload

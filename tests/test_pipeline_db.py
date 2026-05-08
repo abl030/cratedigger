@@ -4053,6 +4053,8 @@ class TestListSearchPlanClassificationForRequests(unittest.TestCase):
             result[rid_b].latest_failed_deterministic_generator_id)
         self.assertEqual(
             result[rid_b].latest_failed_transient_generator_id, "g-new")
+        self.assertIsNotNone(
+            result[rid_b].latest_failed_transient_created_at)
 
         self.assertEqual(
             result[rid_c].latest_failed_deterministic_generator_id, "g-det")
@@ -4097,6 +4099,10 @@ class TestListSearchPlanClassificationForRequests(unittest.TestCase):
         self.assertEqual(
             entry.latest_failed_transient_generator_id,
             trans.generator_id if trans is not None else None,
+        )
+        self.assertEqual(
+            entry.latest_failed_transient_created_at,
+            trans.created_at if trans is not None else None,
         )
 
 

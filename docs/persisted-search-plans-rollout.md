@@ -119,42 +119,42 @@ migrate unit, so a failed migration blocks the app from coming up
 against an inconsistent schema.
 
 `migrations/014_persisted_search_plans.sql` adds the
-`search_plans` and `search_plan_items` tables, three nullable cursor
-columns on `album_requests` (`active_plan_id`, `next_plan_ordinal`,
-`plan_cycle_count`), and twelve nullable plan-context columns on
-`search_log`. It is fully additive: old code can ignore the new
-tables and columns.
+`search_plans` and `search_plan_items` tables, one nullable active-plan
+pointer on `album_requests` (`active_plan_id`), two non-null cursor
+counters (`next_plan_ordinal`, `plan_cycle_count`) with default 0, and
+twelve nullable plan-context columns on `search_log`. It is fully
+additive: old code can ignore the new tables and columns.
 
 ### 2.2 Verify migration application
 
 ```bash
 # 014 is the new top of the migration ladder.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT version, applied_at FROM schema_migrations
-ORDER BY version DESC LIMIT 5"'
+ORDER BY version DESC LIMIT 5\""
 
 # Plan tables exist with the expected indexes / constraints.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT relname FROM pg_class
-WHERE relname IN (\"search_plans\",\"search_plan_items\")
-  AND relkind = \"r\""'
+WHERE relname IN ('search_plans','search_plan_items')
+  AND relkind = 'r'\""
 
 # Request cursor fields exist.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT column_name, data_type, is_nullable, column_default
 FROM information_schema.columns
-WHERE table_name = \"album_requests\"
-  AND column_name IN (\"active_plan_id\",\"next_plan_ordinal\",\"plan_cycle_count\")
-ORDER BY column_name"'
+WHERE table_name = 'album_requests'
+  AND column_name IN ('active_plan_id','next_plan_ordinal','plan_cycle_count')
+ORDER BY column_name\""
 
 # search_log plan-context fields exist.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT column_name, data_type, is_nullable
 FROM information_schema.columns
-WHERE table_name = \"search_log\"
-  AND column_name LIKE 'plan_%'
-   OR column_name IN (\"execution_stage\",\"attempt_consumed\",\"cursor_update_status\",\"stale_reason\")
-ORDER BY column_name"'
+WHERE table_name = 'search_log'
+  AND (column_name LIKE 'plan_%'
+       OR column_name IN ('execution_stage','attempt_consumed','cursor_update_status','stale_reason'))
+ORDER BY column_name\""
 ```
 
 ### 2.3 Plan-table integrity after first reconciliation
@@ -164,32 +164,32 @@ verify the relational invariants the migration constraints enforce:
 
 ```bash
 # Plan-table row counts.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT
   (SELECT COUNT(*) FROM search_plans)        AS plans,
   (SELECT COUNT(*) FROM search_plan_items)   AS plan_items,
-  (SELECT COUNT(*) FROM search_plans WHERE status=\"active\")        AS active_plans,
-  (SELECT COUNT(*) FROM search_plans WHERE status=\"superseded\")    AS superseded_plans,
-  (SELECT COUNT(*) FROM search_plans WHERE status=\"failed_deterministic\") AS failed_det,
-  (SELECT COUNT(*) FROM search_plans WHERE status=\"failed_transient\")     AS failed_trans"'
+  (SELECT COUNT(*) FROM search_plans WHERE status='active')        AS active_plans,
+  (SELECT COUNT(*) FROM search_plans WHERE status='superseded')    AS superseded_plans,
+  (SELECT COUNT(*) FROM search_plans WHERE status='failed_deterministic') AS failed_det,
+  (SELECT COUNT(*) FROM search_plans WHERE status='failed_transient')     AS failed_trans\""
 
 # Active-plan FK integrity. Should return 0.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT COUNT(*) AS dangling_active_plan_ids
 FROM album_requests r
 LEFT JOIN search_plans p ON r.active_plan_id = p.id
-WHERE r.active_plan_id IS NOT NULL AND p.id IS NULL"'
+WHERE r.active_plan_id IS NOT NULL AND p.id IS NULL\""
 
 # Active-plan ownership. Should return 0 (every active_plan must
 # belong to its own request).
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT COUNT(*) AS misowned_active_plans
 FROM album_requests r
 JOIN search_plans p ON r.active_plan_id = p.id
-WHERE p.request_id <> r.id"'
+WHERE p.request_id <> r.id\""
 
 # Contiguous ordinals on every plan. Every row should have ok=t.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT plan_id,
        COUNT(*) AS items,
        MAX(ordinal) AS max_ordinal,
@@ -197,16 +197,16 @@ SELECT plan_id,
 FROM search_plan_items
 GROUP BY plan_id
 HAVING (MAX(ordinal) + 1) <> COUNT(*)
-LIMIT 20"'
+LIMIT 20\""
 
 # Wanted rows with no plan + no current-generator failure record.
 # Should be 0 after reconciliation runs at least once. Non-zero is a
 # stop-the-deploy signal -- inspect those rows individually.
-ssh doc2 'pipeline-cli query "
+ssh doc2 "pipeline-cli query \"
 SELECT COUNT(*) AS unclassified_wanted
 FROM album_requests
-WHERE status = \"wanted\"
-  AND active_plan_id IS NULL"'
+WHERE status = 'wanted'
+  AND active_plan_id IS NULL\""
 ```
 
 ---

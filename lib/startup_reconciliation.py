@@ -48,6 +48,7 @@ from lib.search_plan_service import (
     RESULT_SUCCESS,
     SearchPlanService,
     ServiceResult,
+    _within_retry_window,
 )
 
 if TYPE_CHECKING:
@@ -198,23 +199,21 @@ def reconcile_search_plans(
     candidates = list(db.list_wanted_for_plan_reconciliation())
     wanted_total = len(candidates)
 
-    # Dry-run path: pre-fetch failed-plan classification for every
-    # wanted row in one query rather than calling
-    # ``get_search_plan_inspection`` per row (5 queries × N rows). On
-    # cold deploys with ~600 wanted, this collapses ~2920 round-trips
-    # into 2 (the all-wanted scan + this batch). Live runs do not need
-    # the batch because they call the service to repair, not the
-    # classifier.
-    dry_run_classifications: "dict[int, DryRunPlanClassification]" = {}
-    if dry_run and candidates:
+    # Pre-fetch failed-plan classification for rows without an active
+    # plan. Dry-run uses it to stay read-only; live reconciliation uses
+    # it to avoid re-inspecting sticky deterministic / recent transient
+    # failures every cycle.
+    plan_classifications: "dict[int, DryRunPlanClassification]" = {}
+    if candidates:
         # Only request rows that actually need classification: rows
         # without an active plan. Rows with an active plan are
-        # classified purely from candidate fields.
+        # classified from candidate fields or passed through the service
+        # for track-count drift checks.
         needing_classification = [
             c.request_id for c in candidates if c.active_plan_id is None
         ]
         if needing_classification:
-            dry_run_classifications = (
+            plan_classifications = (
                 db.list_search_plan_classification_for_requests(
                     needing_classification)
             )
@@ -232,9 +231,8 @@ def reconcile_search_plans(
             outcome = _reconcile_one(
                 db, service, candidate,
                 generator_id=generator_id, dry_run=dry_run,
-                dry_run_classification=(
-                    dry_run_classifications.get(candidate.request_id)
-                    if dry_run else None),
+                plan_classification=plan_classifications.get(
+                    candidate.request_id),
             )
         except Exception as exc:  # noqa: BLE001 — per-row isolation
             # Per-row isolation: one row's exception must not stop the
@@ -302,7 +300,7 @@ def _reconcile_one(
     *,
     generator_id: str,
     dry_run: bool,
-    dry_run_classification: "DryRunPlanClassification | None" = None,
+    plan_classification: "DryRunPlanClassification | None" = None,
 ) -> str:
     """Classify and (when not dry-run) repair one wanted row.
 
@@ -324,7 +322,7 @@ def _reconcile_one(
     if dry_run:
         return _classify_dry_run(
             db, candidate, generator_id=generator_id,
-            classification=dry_run_classification,
+            classification=plan_classification,
         )
 
     assert service is not None  # _ checked at function entry
@@ -333,6 +331,11 @@ def _reconcile_one(
         and candidate.active_plan_generator_id is not None
         and candidate.active_plan_generator_id != generator_id
     )
+    if candidate.active_plan_id is None:
+        shortcut = _classify_live_sticky_failure(
+            plan_classification, generator_id=generator_id)
+        if shortcut is not None:
+            return shortcut
 
     # No current-generator active plan: ask the service to repair.
     # ``regenerate=False`` means: no-op when an active *current* plan
@@ -368,6 +371,24 @@ def _reconcile_one(
         request_id, result.outcome,
     )
     return "retryable_failed"
+
+
+def _classify_live_sticky_failure(
+    classification: "DryRunPlanClassification | None",
+    *,
+    generator_id: str,
+) -> str | None:
+    if classification is None:
+        return None
+    if classification.latest_failed_deterministic_generator_id == generator_id:
+        return "deterministic_failed"
+    if (
+        classification.latest_failed_transient_generator_id == generator_id
+        and _within_retry_window(
+            classification.latest_failed_transient_created_at)
+    ):
+        return "retryable_failed"
+    return None
 
 
 def _classify_dry_run(
