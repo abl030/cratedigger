@@ -2,6 +2,69 @@
 
 Cratedigger can overlap Soulseek searches to cut cycle time significantly.
 
+## Plan-driven execution (post-2026-05 cutover)
+
+Search execution is plan-driven. Phase 2 selects wanted rows via
+`PipelineDB.get_wanted_searchable(SEARCH_PLAN_GENERATOR_ID, ...)`, which
+only returns wanted rows whose **active plan's `generator_id` matches
+the current generator id**. Rows without an active current-generator
+plan (no plan, old-generator carryover, deterministic-failed,
+transient-failed) are skipped this cycle and surfaced through the
+startup reconciliation summary log instead — see
+`docs/persisted-search-plans-rollout.md`.
+
+For each selected row, the executor reads the active plan's
+`next_plan_ordinal` item and runs that query. The legacy "compute
+variant from `search_attempts`" path is gone:
+
+- `search_attempts` is **scheduler/backoff-only** now. It records retry
+  history, but never selects which query to issue and never resets on
+  plan wrap.
+- Variant selection from `search_attempts` is removed. Strategy labels
+  on `search_log.variant` are sourced from the plan item that actually
+  ran.
+- Plan wrap replaces `outcome='exhausted'`. The consumed-attempt DB
+  method sets `cursor_update_status='wrapped'` and increments
+  `plan_cycle_count` on the request when the final ordinal completes.
+  See `docs/pipeline-db-schema.md` for the full plan/cursor schema.
+
+### Pre-attempt vs accepted-search consumption boundary
+
+A plan ordinal **consumes a slot** when slskd accepts the search (or
+returns a terminal state). The consumed-attempt DB method then logs
+the search-log row and atomically advances or wraps the cursor.
+
+A submission/setup failure **before** slskd accepts the search is
+**non-consuming**: the executor writes a `search_log` row with
+`execution_stage='pre_attempt'`, `attempt_consumed=false`,
+`cursor_update_status='unchanged'`, applies retry/backoff so the
+request cannot spin hot, and leaves the cursor untouched. The slot is
+re-tried next cycle.
+
+### Stale-completion guards
+
+A successful regeneration mid-flight rewrites the active plan and
+resets the cursor. The original search may complete after that — its
+plan id / ordinal / cycle snapshot no longer match the request's
+active state. The executor's atomic log+cursor DB method detects this
+and writes a stale-completion row (`execution_stage='stale_completion'`,
+`cursor_update_status='stale'`, `stale_reason=<tag>`) without mutating
+the active cursor.
+
+The same guard is enforced beyond cursor updates so a stale
+found/enqueued completion cannot claim download ownership or move the
+request status:
+
+- `lib/enqueue.py` — claim guard during enqueue.
+- `lib/download_ownership.py` — ownership guard before transferring a
+  request to `downloading`.
+- `lib/transitions.py` — guard on status transitions originating from
+  search execution.
+
+The result: stale completions are audit-only. Active request state
+(scheduler/backoff, status, downloads) is only mutated by the
+plan/ordinal that the request currently points at.
+
 ## Problem
 
 Searching is the slowest part of the pipeline. Each search fires an slskd API call, sleeps 5 seconds (slskd needs time to register the search), then polls for results. With 10 albums, this takes ~20 minutes sequentially because each search blocks until results arrive before the next one starts.

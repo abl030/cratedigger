@@ -302,15 +302,45 @@ mp3 v0,mp3 320,flac 24/192,flac 24/96,flac 24/48,flac 16/44.1,flac,alac,aac,opus
 
 ### Search loop tunables
 
-Three Nix options control the slskd search window and the variant escalation ladder. All live under `services.cratedigger.searchSettings.*` and render into `[Search Settings]` in `config.ini`. See [`docs/pipeline-db-schema.md`](docs/pipeline-db-schema.md#search_log) for what the variants do; see GitHub issue #196 for the long-term plan to escape these caps entirely.
+Three Nix options control the slskd search window and the plan-driven
+escalation ladder. All live under `services.cratedigger.searchSettings.*`
+and render into `[Search Settings]` in `config.ini`. See
+[`docs/pipeline-db-schema.md`](docs/pipeline-db-schema.md#persisted-search-plans-migration-014)
+for the full plan/cursor schema and
+[`docs/parallel-search.md`](docs/parallel-search.md#plan-driven-execution-post-2026-05-cutover)
+for how Phase 2 picks the next slot.
 
 | Option | Default | Maps to | What it caps |
 |--------|---------|---------|--------------|
 | `searchResponseLimit` | `1000` | slskd `responseLimit` | Number of peer responses slskd buffers per search. Raising this gives the matcher more peer diversity. Caps at this value when peers stop responding. |
 | `searchFileLimit` | `50000` | slskd `fileLimit` | Total files across all peer responses. Multi-disc / OST / compilation searches fill this fast (each peer holds 50+ tracks); the slskd-api default of 10000 terminates such searches in ~3s, possibly before the right peer responds. |
-| `searchEscalationThreshold` | `5` | (cratedigger only) | After this many failed cycles the variant ladder kicks in: V1 (year-augmented) → V4 (rotating 3-token track-name slices) → exhausted → wrap. See `lib/search.py:select_variant`. |
+| `searchEscalationThreshold` | `5` | (cratedigger only) | Number of repeated default slots the generator emits at the head of every plan before stepping into `unwild`, optional `unwild_year`, and up to three track slots. See `lib/search.py` (`SEARCH_PLAN_GENERATOR_ID` and the pure plan generator). |
 
 **What you cannot tune from here**: the per-search `searchTimeout` is fixed at 30s by slskd itself (see `cfg.search_timeout` in `config.ini`, but slskd ignores values above 30000ms). The dominant cycle cost is searches running to that timeout because vague variants don't fill the response/file caps. Issue #196 tracks options to remove this ceiling.
+
+### Inspecting and regenerating a request's search plan
+
+```bash
+# Read-only: show the active plan, cursor, cycle count, items, and
+# legacy logs for a request.
+pipeline-cli search-plan show <request_id>            # human output
+pipeline-cli search-plan show <request_id> --json     # machine output
+
+# Mutating: regenerate the plan from current metadata. Allowed for any
+# status; only `wanted` requests with a successful current plan are
+# executable. A successful regeneration resets cursor / cycle to 0 --
+# don't run this on active requests just to inspect.
+pipeline-cli search-plan regenerate <request_id>
+```
+
+API equivalents (`/api/pipeline/<id>/search-plan` GET,
+`/api/pipeline/<id>/search-plan/regenerate` POST) live in
+`web/routes/pipeline.py`. The dashboard summary at
+`/api/pipeline/dashboard` exposes plan-readiness counts (searchable /
+legacy / failed-deterministic / failed-transient / no-plan) and
+plan-driven cycle-wrap metrics in addition to the historical search
+outcomes. See [`docs/persisted-search-plans-rollout.md`](docs/persisted-search-plans-rollout.md)
+for operator verification.
 
 ## Audit trail
 
