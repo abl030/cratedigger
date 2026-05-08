@@ -12,9 +12,17 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
+from zoneinfo import ZoneInfo
 import msgspec
+
+# Single source of truth for Perth-local bucketing inside the fake.
+# Mirrors `(first_seen_at AT TIME ZONE 'Australia/Perth')::date` in
+# `lib/pipeline_db.py::get_peer_dir_daily_metrics` (U2). Using UTC
+# bucketing instead would silently disagree with prod by 8h at the
+# day boundary -- the regression U3 fixes.
+_PERTH_TZ = ZoneInfo("Australia/Perth")
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -633,6 +641,11 @@ class FakePipelineDB:
         self.search_logs: list[SearchLogRow] = []
         self.cycle_metrics: list[dict[str, Any]] = []
         self.peer_dir_observations: dict[str, dict[str, Any]] = {}
+        # U3: lazy-fill cache mirroring `peer_dir_daily_aggregates`. Keyed
+        # by Perth-local date; values are the cached completed-day tuple.
+        # Today's row is never stored here -- it is recomputed live every
+        # call, matching the real method's contract.
+        self.peer_dir_daily_aggregates: dict[date, dict[str, int]] = {}
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
@@ -2115,18 +2128,79 @@ class FakePipelineDB:
         return new_count
 
     def get_peer_dir_daily_metrics(self, days: int = 14) -> dict[str, Any]:
+        """Mirror ``PipelineDB.get_peer_dir_daily_metrics`` lazy-fill.
+
+        Completed Perth-local days come from
+        ``self.peer_dir_daily_aggregates`` when present, otherwise are
+        computed from ``self.peer_dir_observations`` and stored. Today's
+        Perth-local row is always recomputed live -- never cached. This
+        matches the immutability invariant baked into migration 015.
+
+        Bucketing uses Perth-local date (``Australia/Perth``), not UTC.
+        The pre-U3 fake bucketed by UTC date and silently disagreed
+        with the real method on the 8-hour offset.
+        """
         clamped_days = max(1, min(int(days), 90))
         rows = list(self.peer_dir_observations.values())
-        return {
-            "days": [
-                {
-                    "date": (_utcnow() - timedelta(days=idx)).date().isoformat(),
-                    "new_combos": 0,
-                    "new_peers": 0,
-                    "new_dirs": 0,
+
+        today_perth = _utcnow().astimezone(_PERTH_TZ).date()
+        window_start = today_perth - timedelta(days=clamped_days - 1)
+        completed_window_end = today_perth - timedelta(days=1)
+
+        # Phase 1: bucket all observations by Perth-local date so we can
+        # both lazy-fill missing completed days and compute today's row.
+        observations_by_day: dict[date, list[dict[str, Any]]] = {}
+        for row in rows:
+            ts = row["first_seen_at"]
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            day = ts.astimezone(_PERTH_TZ).date()
+            observations_by_day.setdefault(day, []).append(row)
+
+        def _aggregate(day_rows: list[dict[str, Any]]) -> dict[str, int]:
+            return {
+                "new_combos": len(day_rows),
+                "new_peers": len({r["username_hash"] for r in day_rows}),
+                "new_dirs": len({r["dir_hash"] for r in day_rows}),
+            }
+
+        # Phase 2: lazy-fill completed days that aren't in the cache.
+        # Re-aggregating an already-cached day is exactly what the real
+        # method's ``ON CONFLICT DO NOTHING`` avoids -- so the fake
+        # likewise leaves cached rows alone.
+        if completed_window_end >= window_start:
+            cursor = window_start
+            while cursor <= completed_window_end:
+                if cursor not in self.peer_dir_daily_aggregates:
+                    day_rows = observations_by_day.get(cursor, [])
+                    self.peer_dir_daily_aggregates[cursor] = _aggregate(
+                        day_rows
+                    )
+                cursor = cursor + timedelta(days=1)
+
+        # Phase 3: today's row is always live.
+        today_metrics = _aggregate(observations_by_day.get(today_perth, []))
+
+        # Phase 4: assemble days array, today first (DESC).
+        day_dicts: list[dict[str, Any]] = []
+        cursor = today_perth
+        while cursor >= window_start:
+            if cursor == today_perth:
+                metrics = today_metrics
+            else:
+                metrics = self.peer_dir_daily_aggregates.get(cursor) or {
+                    "new_combos": 0, "new_peers": 0, "new_dirs": 0,
                 }
-                for idx in range(clamped_days)
-            ],
+            day_dicts.append({
+                "date": cursor.isoformat(),
+                "new_combos": int(metrics["new_combos"]),
+                "new_peers": int(metrics["new_peers"]),
+                "new_dirs": int(metrics["new_dirs"]),
+            })
+            cursor = cursor - timedelta(days=1)
+
+        return {
+            "days": day_dicts,
             "totals": {
                 "known_combos": len(rows),
                 "known_peers": len({row["username_hash"] for row in rows}),
