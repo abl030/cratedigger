@@ -366,6 +366,34 @@ def _planned_downloads(
     ]
 
 
+def _peer_is_online_for_enqueue(username: str, ctx: CratediggerContext) -> bool:
+    """Probe slskd's user-status endpoint just before enqueue to avoid
+    issuing a doomed enqueue against a peer who has gone offline since
+    we cached their browse data.
+
+    Returns False ONLY when slskd reports ``presence == "Offline"``.
+    ``Online`` and ``Away`` both return True (away peers can still serve
+    uploads). On any exception (transient slskd error, unknown user,
+    network blip), fall through and return True — slskd_enqueue_with_outcome
+    classifies a real peer-offline rejection via the response body.
+    """
+    try:
+        status = ctx.slskd.users.status(username)
+    except Exception:
+        logger.debug(
+            "users.status probe raised for %s; falling through to enqueue",
+            username,
+            exc_info=True,
+        )
+        return True
+    presence = ""
+    if isinstance(status, dict):
+        presence_value = status.get("presence")
+        if isinstance(presence_value, str):
+            presence = presence_value
+    return presence != "Offline"
+
+
 def _planned_grab_entry(
     album: Any,
     files: list[DownloadFile],
@@ -863,6 +891,13 @@ def try_enqueue(
                 album_name,
                 username,
                 allowed_filetype,
+            )
+            continue
+        if not _peer_is_online_for_enqueue(username, ctx):
+            logger.info(
+                "peer offline at enqueue: skipping %s for album %s",
+                username,
+                album_id,
             )
             continue
         claim = _claim_initial_download_ownership(
