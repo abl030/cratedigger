@@ -2766,6 +2766,50 @@ class FakePipelineDB:
             legacy_search_log_count=legacy,
         )
 
+    def get_search_plan_stats(
+        self,
+        request_id: int,
+        *,
+        current_only: bool = True,
+    ):
+        """Mirror of ``PipelineDB.get_search_plan_stats``.
+
+        Re-uses the production aggregation helper so the fake stays in
+        lock-step with PostgreSQL behavior — the only thing that
+        differs is where the rows come from.
+        """
+        from lib.pipeline_db import _build_stats_bucket, SearchPlanStats
+        active = self.get_active_search_plan(request_id)
+        active_plan_id = active.plan.id if active is not None else None
+
+        history = self.get_search_history(request_id)
+        plan_aware = [r for r in history if r.get("plan_id") is not None]
+        legacy = [r for r in history if r.get("plan_id") is None]
+        current_rows = (
+            [r for r in plan_aware if r.get("plan_id") == active_plan_id]
+            if active_plan_id is not None else []
+        )
+        if current_only:
+            other_rows: list[dict[str, Any]] = []
+            other_legacy: list[dict[str, Any]] = []
+        else:
+            other_rows = [r for r in plan_aware
+                          if r.get("plan_id") != active_plan_id]
+            other_legacy = legacy
+        current_bucket = _build_stats_bucket(
+            plan_aware_rows=current_rows, legacy_rows=[],
+            include_legacy_bucket=False,
+        )
+        other_bucket = _build_stats_bucket(
+            plan_aware_rows=other_rows, legacy_rows=other_legacy,
+            include_legacy_bucket=True,
+        )
+        return SearchPlanStats(
+            request_id=request_id,
+            current=current_bucket,
+            superseded_and_legacy=other_bucket,
+        )
+
     def record_consumed_search_attempt(
         self,
         attempt: ConsumedAttemptInput,

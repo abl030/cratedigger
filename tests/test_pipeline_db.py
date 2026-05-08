@@ -4165,5 +4165,175 @@ class TestPersistedSearchPlanLifecycleEdgeCases(unittest.TestCase):
         self.assertEqual(req["plan_cycle_count"], 0)
 
 
+@requires_postgres
+class TestSearchPlanStats(unittest.TestCase):
+    """U8: ``get_search_plan_stats`` aggregates plan-aware search_log
+    rows into per-slot and per-query-group usefulness stats. Cache
+    attribution is ``cycle_only`` because there are no per-search
+    cache columns on ``search_log`` today.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, NonConsumingAttemptInput,
+            SearchPlanItemInput,
+        )
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.NonConsumingAttemptInput = NonConsumingAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="stats-mbid",
+            artist_name="Stats", album_title="Test",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _make_plan(self, *, ordinals: int = 2, generator_id: str = "g1"):
+        items = [
+            self.SearchPlanItemInput(
+                ordinal=i, strategy="default" if i == 0 else f"strategy_{i}",
+                query=f"q{i}", canonical_query_key=f"k{i}",
+                repeat_group="default-3" if i == 0 else None,
+            )
+            for i in range(ordinals)
+        ]
+        return self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id=generator_id,
+            items=items, set_active=True,
+        )
+
+    def _consume(self, plan_id, plan_item_id, ordinal, strategy, query,
+                 *, outcome, plan_item_count, **kw):
+        attempt = self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=plan_id, plan_item_id=plan_item_id,
+            plan_ordinal=ordinal, plan_strategy=strategy,
+            plan_canonical_query_key=kw.pop(
+                "canonical_query_key", f"k{ordinal}"),
+            plan_repeat_group=kw.pop("repeat_group", None),
+            plan_generator_id="g1",
+            query=query, outcome=outcome,
+            plan_item_count=plan_item_count,
+            elapsed_s=kw.pop("elapsed_s", 1.0),
+            result_count=kw.pop("result_count", 0),
+            browse_time_s=kw.pop("browse_time_s", 0.5),
+            match_time_s=kw.pop("match_time_s", 0.25),
+            peers_browsed=kw.pop("peers_browsed", 4),
+            peers_browsed_lazy=kw.pop("peers_browsed_lazy", 1),
+            fanout_waves=kw.pop("fanout_waves", 1),
+            apply_scheduler_attempt=kw.pop("apply_scheduler_attempt", True),
+            scheduler_success=kw.pop("scheduler_success", False),
+        )
+        return self.db.record_consumed_search_attempt(attempt)
+
+    def _items_for(self, plan_id):
+        cur = self.db._execute(
+            "SELECT id, ordinal, strategy, canonical_query_key, "
+            "repeat_group FROM search_plan_items WHERE plan_id = %s "
+            "ORDER BY ordinal",
+            (plan_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def test_stats_groups_by_slot_and_query_group(self):
+        plan_id = self._make_plan(ordinals=2)
+        items = self._items_for(plan_id)
+        # Run two attempts on slot 0, one on slot 1.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="no_match", plan_item_count=2,
+                      repeat_group="default-3")
+        self._consume(plan_id, items[1]["id"], 1, "strategy_1", "q1",
+                      outcome="found", plan_item_count=2,
+                      result_count=5, elapsed_s=2.0)
+        # After wrap, slot 0 again.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="no_results", plan_item_count=2,
+                      repeat_group="default-3")
+
+        stats = self.db.get_search_plan_stats(self.req_id)
+        slots = stats.current.slots
+        self.assertEqual(len(slots), 2)
+        # Slots are ordered by ordinal.
+        self.assertEqual(slots[0].identity["ordinal"], 0)
+        self.assertEqual(slots[0].attempts, 2)
+        self.assertEqual(slots[0].consumed_attempts, 2)
+        self.assertEqual(
+            slots[0].outcome_counts,
+            {"no_match": 1, "no_results": 1})
+        self.assertEqual(slots[1].identity["ordinal"], 1)
+        self.assertEqual(slots[1].attempts, 1)
+        self.assertEqual(slots[1].outcome_counts, {"found": 1})
+        # Cache attribution is honest about cycle-only counters.
+        self.assertEqual(stats.current.cache_attribution_level, "cycle_only")
+        self.assertFalse(stats.current.cache_per_search_available)
+        # Query groups exist with stable (repeat_group, key) order.
+        # ordinal-1 has no repeat_group (sorts first as ""),
+        # ordinal-0 carries "default-3".
+        order = [
+            (g.identity["repeat_group"] or "",
+             g.identity["canonical_query_key"] or "")
+            for g in stats.current.query_groups
+        ]
+        self.assertEqual(order, sorted(order))
+
+    def test_stats_includes_legacy_bucket_when_current_only_false(self):
+        # One legacy log without plan context.
+        self.db.log_search(
+            request_id=self.req_id, query="legacy",
+            outcome="no_match", variant="v1",
+        )
+        plan_id = self._make_plan(ordinals=1)
+        items = self._items_for(plan_id)
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="found", plan_item_count=1,
+                      repeat_group="default-3")
+
+        # Default current_only=True: no legacy in current cohort,
+        # legacy bucket only appears in superseded_and_legacy when
+        # current_only=False.
+        stats_current = self.db.get_search_plan_stats(self.req_id)
+        self.assertIsNone(stats_current.current.legacy_bucket)
+        self.assertEqual(
+            stats_current.superseded_and_legacy.slots, [])
+        self.assertIsNone(
+            stats_current.superseded_and_legacy.legacy_bucket)
+
+        stats_full = self.db.get_search_plan_stats(
+            self.req_id, current_only=False)
+        self.assertIsNotNone(stats_full.superseded_and_legacy.legacy_bucket)
+        legacy = stats_full.superseded_and_legacy.legacy_bucket
+        assert legacy is not None
+        self.assertEqual(legacy.attempts, 1)
+        self.assertEqual(legacy.identity, {"kind": "legacy"})
+
+    def test_stats_counts_non_consuming_pre_attempt_rows(self):
+        plan_id = self._make_plan(ordinals=1)
+        items = self._items_for(plan_id)
+        # Pre-attempt failure: non-consuming.
+        self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id, outcome="empty_query",
+                plan_id=plan_id, plan_item_id=items[0]["id"],
+                plan_ordinal=0, plan_strategy="default",
+                plan_canonical_query_key="k0", plan_repeat_group=None,
+                plan_generator_id="g1", query="",
+            ))
+        # Consumed attempt that yields a found.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="found", plan_item_count=1)
+
+        stats = self.db.get_search_plan_stats(self.req_id)
+        # Both rows live on slot 0; non-consuming counted separately.
+        self.assertEqual(len(stats.current.slots), 1)
+        slot0 = stats.current.slots[0]
+        self.assertEqual(slot0.attempts, 2)
+        self.assertEqual(slot0.consumed_attempts, 1)
+        self.assertEqual(slot0.non_consuming_attempts, 1)
+        self.assertEqual(slot0.stale_completion_attempts, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

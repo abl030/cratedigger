@@ -316,6 +316,78 @@ class SearchPlanInspection:
     legacy_search_log_count: int
 
 
+# ---------------------------------------------------------------------
+# Search-plan usefulness stats (U8)
+# ---------------------------------------------------------------------
+#
+# Cache attribution honesty: the on-disk schema today only attributes
+# cache hits/misses at the *cycle* level (`cycle_metrics.cache_pos_hits`
+# and friends — see `migrations/011_cycle_metrics.sql`). Search_log has
+# no `cache_*` columns, so we cannot honestly say "this slot caused N
+# hits". Stats expose ``cache_attribution_level='cycle_only'`` and
+# ``cache_per_search_available=False`` rather than implying per-slot
+# cache data exists when it does not.
+
+CACHE_ATTRIBUTION_PER_SEARCH = "per_search"
+CACHE_ATTRIBUTION_CYCLE_ONLY = "cycle_only"
+
+
+@dataclass(frozen=True)
+class SearchPlanStatsGroup:
+    """One per-slot or per-query-group usefulness aggregate.
+
+    The shape is the same for both grouping levels — slot grouping uses
+    ``(plan_id, ordinal, strategy)`` as identity, query-group grouping
+    uses ``(plan_id, repeat_group, canonical_query_key)``. The
+    ``identity`` dict carries whichever of those keys apply for that row
+    so dashboards can render either grouping.
+    """
+    identity: dict[str, object]
+    attempts: int
+    consumed_attempts: int
+    non_consuming_attempts: int
+    stale_completion_attempts: int
+    outcome_counts: dict[str, int]
+    elapsed_s_mean: float | None
+    elapsed_s_p95: float | None
+    result_count_mean: float | None
+    browse_time_s_mean: float | None
+    match_time_s_mean: float | None
+    peers_browsed_mean: float | None
+    fanout_waves_mean: float | None
+    last_seen_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SearchPlanStatsBucket:
+    """Stats for one cohort of plan-aware search_log rows.
+
+    Two buckets are returned per request: ``current`` (the active plan)
+    and ``superseded_and_legacy`` (every plan the request used to have
+    plus a separate ``legacy_bucket`` for pre-plan rows).
+    """
+    slots: list[SearchPlanStatsGroup]
+    query_groups: list[SearchPlanStatsGroup]
+    legacy_bucket: SearchPlanStatsGroup | None
+    cache_attribution_level: str
+    cache_per_search_available: bool
+
+
+@dataclass(frozen=True)
+class SearchPlanStats:
+    """Per-request usefulness stats payload.
+
+    ``current`` covers only the active plan (when one exists). Its
+    ``legacy_bucket`` is always None — legacy rows belong to history.
+    ``superseded_and_legacy`` covers every plan that ever existed for
+    this request, plus a populated ``legacy_bucket`` if there are any
+    rows without plan context.
+    """
+    request_id: int
+    current: SearchPlanStatsBucket
+    superseded_and_legacy: SearchPlanStatsBucket
+
+
 @dataclass(frozen=True)
 class ConsumedAttemptInput:
     """Input contract for ``record_consumed_search_attempt``.
@@ -421,6 +493,182 @@ class RequestV0ProbeStateUpdate:
                 self.current_lossless_source.median_bitrate_kbps
             )
         return fields
+
+
+# ---------------------------------------------------------------------
+# Search-plan stats aggregation helpers (U8)
+# ---------------------------------------------------------------------
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    """Linear-interpolation percentile. Tiny + dependency-free.
+
+    Returns None on empty input. The stats payload renders None as
+    "n/a" so callers don't need a special-case.
+    """
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return float(s[0])
+    rank = (pct / 100.0) * (len(s) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(s) - 1)
+    frac = rank - lo
+    return float(s[lo] + (s[hi] - s[lo]) * frac)
+
+
+def _mean(values: list[float]) -> float | None:
+    return float(sum(values) / len(values)) if values else None
+
+
+def _row_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _aggregate_group(
+    rows: list[dict[str, Any]], identity: dict[str, object],
+) -> "SearchPlanStatsGroup":
+    """Aggregate one cohort of search_log rows into a stats group.
+
+    Counts attempts/outcomes, computes mean/p95 elapsed, and means for
+    result_count + browse/match/peers/fanout. Stale and pre-attempt
+    rows are tracked separately so dashboards can distinguish "noisy
+    setup failures" from "useful slot work".
+    """
+    elapsed_vals = [
+        float(r["elapsed_s"]) for r in rows
+        if r.get("elapsed_s") is not None
+    ]
+    result_counts = [
+        float(r["result_count"]) for r in rows
+        if r.get("result_count") is not None
+    ]
+    browse_vals = [
+        float(r["browse_time_s"]) for r in rows
+        if r.get("browse_time_s") is not None
+    ]
+    match_vals = [
+        float(r["match_time_s"]) for r in rows
+        if r.get("match_time_s") is not None
+    ]
+    peers_vals = [
+        float(int(r.get("peers_browsed") or 0)
+              + int(r.get("peers_browsed_lazy") or 0))
+        for r in rows
+    ]
+    fanout_vals = [
+        float(r["fanout_waves"]) for r in rows
+        if r.get("fanout_waves") is not None
+    ]
+    outcome_counts: dict[str, int] = {}
+    consumed = 0
+    non_consuming = 0
+    stale = 0
+    last_seen: datetime | None = None
+    for r in rows:
+        outcome = r.get("outcome") or "unknown"
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if r.get("attempt_consumed") is True:
+            consumed += 1
+        if r.get("attempt_consumed") is False:
+            non_consuming += 1
+        if r.get("cursor_update_status") == CURSOR_UPDATE_STALE:
+            stale += 1
+        ts = _row_dt(r.get("created_at"))
+        if ts is not None and (last_seen is None or ts > last_seen):
+            last_seen = ts
+    return SearchPlanStatsGroup(
+        identity=identity,
+        attempts=len(rows),
+        consumed_attempts=consumed,
+        non_consuming_attempts=non_consuming,
+        stale_completion_attempts=stale,
+        outcome_counts=outcome_counts,
+        elapsed_s_mean=_mean(elapsed_vals),
+        elapsed_s_p95=_percentile(elapsed_vals, 95),
+        result_count_mean=_mean(result_counts),
+        browse_time_s_mean=_mean(browse_vals),
+        match_time_s_mean=_mean(match_vals),
+        peers_browsed_mean=_mean(peers_vals) if rows else None,
+        fanout_waves_mean=_mean(fanout_vals),
+        last_seen_at=last_seen,
+    )
+
+
+def _build_stats_bucket(
+    *,
+    plan_aware_rows: list[dict[str, Any]],
+    legacy_rows: list[dict[str, Any]],
+    include_legacy_bucket: bool,
+) -> "SearchPlanStatsBucket":
+    """Group plan-aware rows by slot + query-group, render legacy bucket.
+
+    Slot grouping is sorted by (plan_id, ordinal); query-group
+    grouping is sorted by (plan_id, repeat_group, canonical_query_key).
+    Sort order is stable so dashboard rendering is deterministic.
+    """
+    slot_groups: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    qg_groups: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    for r in plan_aware_rows:
+        slot_key = (
+            r.get("plan_id"), r.get("plan_ordinal"), r.get("plan_strategy"),
+        )
+        slot_groups.setdefault(slot_key, []).append(r)
+        qg_key = (
+            r.get("plan_id"), r.get("plan_repeat_group"),
+            r.get("plan_canonical_query_key"),
+        )
+        qg_groups.setdefault(qg_key, []).append(r)
+    slots: list[SearchPlanStatsGroup] = []
+    for key in sorted(
+        slot_groups,
+        key=lambda k: (
+            k[0] if k[0] is not None else -1,
+            k[1] if k[1] is not None else -1,
+            k[2] or "",
+        ),
+    ):
+        plan_id, ordinal, strategy = key
+        slots.append(_aggregate_group(slot_groups[key], identity={
+            "plan_id": plan_id, "ordinal": ordinal, "strategy": strategy,
+        }))
+    query_groups: list[SearchPlanStatsGroup] = []
+    for key in sorted(
+        qg_groups,
+        key=lambda k: (
+            k[0] if k[0] is not None else -1,
+            k[1] or "",
+            k[2] or "",
+        ),
+    ):
+        plan_id, repeat_group, canonical_query_key = key
+        query_groups.append(_aggregate_group(qg_groups[key], identity={
+            "plan_id": plan_id, "repeat_group": repeat_group,
+            "canonical_query_key": canonical_query_key,
+        }))
+    legacy_bucket: SearchPlanStatsGroup | None = None
+    if include_legacy_bucket and legacy_rows:
+        legacy_bucket = _aggregate_group(legacy_rows, identity={
+            "kind": "legacy",
+        })
+    return SearchPlanStatsBucket(
+        slots=slots,
+        query_groups=query_groups,
+        legacy_bucket=legacy_bucket,
+        cache_attribution_level=CACHE_ATTRIBUTION_CYCLE_ONLY,
+        cache_per_search_available=False,
+    )
 
 
 class PipelineDB:
@@ -3428,6 +3676,66 @@ class PipelineDB:
             latest_failed_transient=latest_trans,
             superseded_count=superseded_count,
             legacy_search_log_count=legacy_count,
+        )
+
+    def get_search_plan_stats(
+        self,
+        request_id: int,
+        *,
+        current_only: bool = True,
+    ) -> SearchPlanStats:
+        """Aggregate plan-aware ``search_log`` rows into usefulness stats.
+
+        Two grouping levels per cohort:
+          * **slots** keyed by ``(plan_id, ordinal, strategy)`` —
+            ordinal-ordered.
+          * **query_groups** keyed by ``(plan_id, repeat_group,
+            canonical_query_key)`` — stable order by
+            ``(repeat_group, canonical_query_key)``.
+
+        ``current_only=True`` (default) returns the active-plan cohort
+        in ``current`` and an empty ``superseded_and_legacy`` cohort.
+        ``current_only=False`` populates both cohorts from every plan
+        the request ever had plus a ``legacy_bucket`` for pre-plan rows.
+
+        Cache attribution is reported as ``cycle_only`` because
+        ``search_log`` has no per-search cache columns today (cache
+        counters live on ``cycle_metrics`` — see
+        ``migrations/011_cycle_metrics.sql``). If a future migration
+        adds them, flip ``cache_per_search_available=True`` here.
+        """
+        active = self.get_active_search_plan(request_id)
+        active_plan_id = active.plan.id if active is not None else None
+
+        history = self.get_search_history(request_id)
+
+        plan_aware = [r for r in history if r.get("plan_id") is not None]
+        legacy = [r for r in history if r.get("plan_id") is None]
+
+        current_rows = (
+            [r for r in plan_aware if r.get("plan_id") == active_plan_id]
+            if active_plan_id is not None else []
+        )
+        if current_only:
+            other_rows: list[dict[str, object]] = []
+            other_legacy: list[dict[str, object]] = []
+        else:
+            other_rows = [r for r in plan_aware
+                          if r.get("plan_id") != active_plan_id]
+            other_legacy = legacy
+
+        current_bucket = _build_stats_bucket(
+            plan_aware_rows=current_rows, legacy_rows=[],
+            include_legacy_bucket=False,
+        )
+        other_bucket = _build_stats_bucket(
+            plan_aware_rows=other_rows, legacy_rows=other_legacy,
+            include_legacy_bucket=True,
+        )
+        return SearchPlanStats(
+            request_id=request_id,
+            current=current_bucket,
+            superseded_and_legacy=other_bucket,
         )
 
     def record_consumed_search_attempt(
