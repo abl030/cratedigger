@@ -366,6 +366,34 @@ def _planned_downloads(
     ]
 
 
+def _peer_is_online_for_enqueue(username: str, ctx: CratediggerContext) -> bool:
+    """Probe slskd's user-status endpoint just before enqueue to avoid
+    issuing a doomed enqueue against a peer who has gone offline since
+    we cached their browse data.
+
+    Returns False ONLY when slskd reports ``presence == "Offline"``.
+    ``Online`` and ``Away`` both return True (away peers can still serve
+    uploads). On any exception (transient slskd error, unknown user,
+    network blip), fall through and return True — slskd_enqueue_with_outcome
+    classifies a real peer-offline rejection via the response body.
+    """
+    try:
+        status = ctx.slskd.users.status(username)
+    except Exception:
+        logger.debug(
+            "users.status probe raised for %s; falling through to enqueue",
+            username,
+            exc_info=True,
+        )
+        return True
+    presence = ""
+    if isinstance(status, dict):
+        presence_value = status.get("presence")
+        if isinstance(presence_value, str):
+            presence = presence_value
+    return presence != "Offline"
+
+
 def _planned_grab_entry(
     album: Any,
     files: list[DownloadFile],
@@ -865,6 +893,13 @@ def try_enqueue(
                 allowed_filetype,
             )
             continue
+        if not _peer_is_online_for_enqueue(username, ctx):
+            logger.info(
+                "peer offline at enqueue: skipping %s for album %s",
+                username,
+                album_id,
+            )
+            continue
         claim = _claim_initial_download_ownership(
             album,
             _planned_downloads(
@@ -922,6 +957,21 @@ def try_enqueue(
                         matched=True,
                         downloads=owned,
                         candidates=tuple(accumulated),
+                    )
+                # Verified-no-acceptance: surface the rejection in
+                # download_log so the failure is visible immediately
+                # rather than disappearing into a silent status flip.
+                # Today the only path that produces a verified rejection
+                # is a peer-offline classification from
+                # slskd_enqueue_with_outcome (see _is_user_offline_http_error).
+                if claim.request_id is not None:
+                    db = ctx.pipeline_db_source._get_db()
+                    db.log_download(
+                        request_id=claim.request_id,
+                        soulseek_username=username,
+                        filetype=allowed_filetype,
+                        outcome="user_offline",
+                        error_message="user offline at enqueue",
                     )
             elif claim.claimed:
                 owned = _leave_claim_for_poll_recovery(

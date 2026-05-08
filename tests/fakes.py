@@ -265,6 +265,9 @@ class FakeSlskdUsers:
         self._directories: dict[tuple[str, str], list[Any]] = {}
         self._directory_errors: dict[tuple[str, str], Exception] = {}
         self._directory_delays: dict[tuple[str, str], float] = {}
+        self.status_calls: list[str] = []
+        self._statuses: dict[str, str] = {}
+        self._status_errors: dict[str, Exception] = {}
         # Optional concurrency probe — set to a callable taking a +/-1 delta to
         # observe in-flight count (used by fan-out concurrency-cap tests).
         self.in_flight_probe: Callable[[int], None] | None = None
@@ -313,6 +316,29 @@ class FakeSlskdUsers:
         finally:
             if self.in_flight_probe is not None:
                 self.in_flight_probe(-1)
+
+    def set_status(self, username: str, presence: str) -> None:
+        """Configure the presence returned by ``status(username)``.
+
+        ``presence`` is the slskd-api ``UserPresence`` value -- one of
+        ``"Online"``, ``"Away"``, ``"Offline"``.
+        """
+        self._statuses[username] = presence
+
+    def set_status_error(self, username: str, error: Exception) -> None:
+        """Configure ``status(username)`` to raise ``error``."""
+        self._status_errors[username] = error
+
+    def status(self, username: str) -> dict[str, Any]:
+        """Mirror slskd-api ``UsersApi.status`` shape: ``{"presence": ...,
+        "isPrivileged": False}``. Default presence is ``"Online"`` so legacy
+        tests that don't configure status stay green."""
+        self.status_calls.append(username)
+        configured_error = self._status_errors.get(username)
+        if configured_error is not None:
+            raise configured_error
+        presence = self._statuses.get(username, "Online")
+        return {"presence": presence, "isPrivileged": False}
 
 
 @dataclass

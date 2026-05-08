@@ -671,6 +671,270 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         self.assertEqual(db.recorded_attempts, [(1, "download")])
         self.assertIsNotNone(db.request(1)["next_retry_after"])
 
+    def test_offline_presence_skips_enqueue_without_claim(self):
+        """When ``users.status`` reports the matched peer as ``Offline``,
+        ``try_enqueue`` must skip the enqueue entirely — no claim, no
+        ``download_log`` row, no ``transfers.enqueue`` call."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status("u00", "Offline")
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = _match_for("u00", "Music\\u00\\Album")
+        enqueue_mock = MagicMock()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue_mock):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        # Probe was consulted; enqueue was never called.
+        self.assertEqual(slskd.users.status_calls, ["u00"])
+        enqueue_mock.assert_not_called()
+        # Request stayed wanted; no claim made; no log written.
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.download_logs, [])
+        self.assertFalse(attempt.matched)
+
+    def test_online_presence_proceeds_to_enqueue(self):
+        """``Online`` presence is a no-op — enqueue runs as before."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status("u00", "Online")
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = _match_for("u00", "Music\\u00\\Album")
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="accepted",
+                     downloads=[DownloadFile(
+                         filename="Music\\u00\\Album\\01.flac",
+                         id="tid-1",
+                         file_dir="Music\\u00\\Album",
+                         username="u00",
+                         size=123,
+                     )],
+                 ),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertEqual(slskd.users.status_calls, ["u00"])
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+
+    def test_away_presence_treated_as_online(self):
+        """``Away`` peers can still serve uploads — proceed to enqueue."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status("u00", "Away")
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = _match_for("u00", "Music\\u00\\Album")
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="accepted",
+                     downloads=[DownloadFile(
+                         filename="Music\\u00\\Album\\01.flac",
+                         id="tid-1",
+                         file_dir="Music\\u00\\Album",
+                         username="u00",
+                         size=123,
+                     )],
+                 ),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+
+    def test_status_exception_falls_through_to_enqueue(self):
+        """If the probe raises, fall through to enqueue. The user-offline
+        classification in ``slskd_enqueue_with_outcome`` is the safety
+        net for the actual offline case."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status_error("u00", RuntimeError("status endpoint flaky"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = _match_for("u00", "Music\\u00\\Album")
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="accepted",
+                     downloads=[DownloadFile(
+                         filename="Music\\u00\\Album\\01.flac",
+                         id="tid-1",
+                         file_dir="Music\\u00\\Album",
+                         username="u00",
+                         size=123,
+                     )],
+                 ),
+             ):
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+
+    def test_offline_first_user_falls_through_to_online_second(self):
+        """Two ranked users: A offline, B online. Probe both; enqueue only
+        B; A never claimed."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[])
+        slskd.users.set_status("u00", "Offline")
+        slskd.users.set_status("u01", "Online")
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+
+        def match_side_effect(_tracks, _allowed_filetype, _file_dirs, ctx, *, username, **_kwargs):
+            return _match_for(username, f"Music\\{username}\\Album")
+
+        # Each user gets its own match.
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match",
+                   side_effect=lambda *a, **kw: _match_for(
+                       kw.get("username", a[3] if len(a) > 3 else "u00"),
+                       f"Music\\{kw.get('username', 'u00')}\\Album",
+                   )), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="accepted",
+                     downloads=[DownloadFile(
+                         filename="Music\\u01\\Album\\01.flac",
+                         id="tid-1",
+                         file_dir="Music\\u01\\Album",
+                         username="u01",
+                         size=123,
+                     )],
+                 ),
+             ) as enq:
+            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        self.assertEqual(slskd.users.status_calls, ["u00", "u01"])
+        # enqueue called once, for u01
+        self.assertEqual(enq.call_count, 1)
+        called_username = enq.call_args.kwargs.get("username") or enq.call_args.args[0]
+        self.assertEqual(called_username, "u01")
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        # No download_log row written for the offline skip.
+        self.assertEqual(db.download_logs, [])
+
+    def test_verified_no_acceptance_writes_user_offline_download_log(self):
+        """When ``slskd_enqueue_with_outcome`` returns ``rejected`` and
+        verification confirms no transfer landed, ``try_enqueue`` must
+        write a ``download_log`` row recording the failed attempt — so
+        the failure is surfaced in the web UI / pipeline-cli immediately
+        rather than silently disappearing into a status flip."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(
+            cfg=cfg,
+            db=db,
+            slskd=FakeSlskdAPI(downloads=[]),
+        )
+        # Route pipeline_db_source -> same FakePipelineDB so the download_log
+        # write is observable (in production both seams connect to the same
+        # Postgres; in this fixture they're independent unless wired here).
+        ctx.pipeline_db_source._get_db.return_value = db  # type: ignore[attr-defined]
+        users = ["pooyork"]
+        results = _make_results(users)
+        file_dir = "musiclibrary\\Mercury Rev\\Deserter's Songs"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        # One log row, attributed to the rejected user.
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.request_id, 1)
+        self.assertEqual(log.soulseek_username, "pooyork")
+        self.assertEqual(log.filetype, "flac")
+        self.assertEqual(log.outcome, "user_offline")
+        assert log.error_message is not None
+        self.assertIn("offline", log.error_message.lower())
+
+    def test_rejected_enqueue_with_visible_transfer_does_not_log(self):
+        """When the rejected outcome leaves a visible transfer (the
+        residual-claim safety net), the request stays in ``downloading``
+        and no ``download_log`` row should be written — the attempt is
+        not yet a verified failure."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\u00\\Album"
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{"directory": file_dir, "files": [
+                {"filename": "Music\\u00\\Album\\01.flac", "id": "transfer-1"},
+            ]}],
+        }])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00"]
+        results = _make_results(users)
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.check_for_match", return_value=match), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            try_enqueue(_make_tracks(), results, "flac", ctx)
+
+        # Verified-no-acceptance failed; claim left for recovery — no log.
+        self.assertEqual(db.download_logs, [])
+
     def test_rejected_enqueue_with_visible_transfer_stays_downloading(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()
