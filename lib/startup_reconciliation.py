@@ -1,4 +1,4 @@
-"""Startup search-plan reconciliation (U4).
+"""Startup search-plan reconciliation.
 
 Runs once per Cratedigger cycle, BEFORE Phase 2 search execution. Walks
 every wanted request (ignoring ``next_retry_after`` and the page-size

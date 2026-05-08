@@ -1,22 +1,10 @@
-"""Read-only inspection renderer for persisted search plans (U6).
+"""Read-only inspection renderer for persisted search plans.
 
 Both the CLI (``pipeline-cli search-plan show``) and the web API
 (``GET /api/pipeline/<id>/search-plan``) call into this module so the
-operator-facing surfaces stay in lock-step. The renderer is split into
-two pure functions:
-
-* :func:`build_inspection_payload` — pulls the inspection rows off the
-  pipeline DB (via ``get_request`` + ``get_search_plan_inspection`` +
-  ``get_search_history``), distinguishes the currentness states from
-  the plan §Currentness Model, and returns a JSON-friendly ``dict``.
-* :func:`render_human_lines` — turns that payload into a list of
-  human-readable lines for the CLI text output.
-
-The payload shape is the API contract. Add a key here, update the
-contract test in ``tests/test_web_server.py``.
-
-The renderer is read-only. Regeneration / mutation surfaces ship in
-U8.
+operator-facing surfaces stay in lock-step. The payload shape is the
+API contract: add a key here, update the contract test in
+``tests/test_web_server.py``.
 """
 
 from __future__ import annotations
@@ -59,6 +47,7 @@ class _DBLike(Protocol):
 
     def get_search_plan_stats(
         self, request_id: int, *, current_only: bool = ...,
+        prefetched_history: list[dict[str, Any]] | None = ...,
     ) -> SearchPlanStats: ...
 
 
@@ -146,8 +135,8 @@ def _legacy_logs_for_request(
 
     ``history`` is the newest-first list returned by
     ``PipelineDB.get_search_history``. We filter to rows where
-    ``plan_id`` is None so plan-aware rows (U5+) don't drown out the
-    legacy bucket.
+    ``plan_id`` is None so plan-aware rows don't drown out the legacy
+    bucket.
     """
     legacy = [r for r in history if r.get("plan_id") is None]
     return len(legacy), [_legacy_log_row_to_dict(r) for r in legacy[:limit]]
@@ -298,7 +287,10 @@ def build_inspection_payload(
         # Stats include both current-active-plan rows and historical
         # plan rows (superseded + legacy) so dashboards can answer "is
         # this slot still useful" and "was this slot useful before".
-        stats = db.get_search_plan_stats(request_id, current_only=False)
+        # Pass `history` to skip a second fetch of search_log.
+        stats = db.get_search_plan_stats(
+            request_id, current_only=False, prefetched_history=history,
+        )
         payload["stats"] = _stats_to_dict(stats)
     return payload
 

@@ -58,14 +58,15 @@ class DownloadOwnershipWriter:
     ) -> bool:
         """Guarded wanted -> downloading claim with planned download state.
 
-        When ``plan_execution`` is supplied (search-execution-driven claim
-        post-U5), this also validates that the request's active plan is
+        When ``plan_execution`` is supplied (search-execution-driven
+        claim), this also validates that the request's active plan is
         still the executing plan/ordinal/cycle. Stale completions (the
         request was regenerated mid-flight after this search was
         accepted) skip the claim with a STALE_DOWNLOAD_CLAIM log.
-        Plan §U5 stale-completion contract: log against the executed old
-        plan (handled by ``_log_search_result``), do NOT mutate active
-        request status.
+
+        Stale-completion contract: log against the executed old plan
+        (handled by ``_log_search_result``); do NOT mutate active request
+        status.
         """
         db = self._open_db()
         try:

@@ -47,6 +47,7 @@ from lib.release_snapshot import (
     snapshot_from_request_row,
 )
 from lib.search import (
+    FAILURE_CLASS_NO_RUNNABLE_QUERY,
     PLAN_STATUS_GENERATION_FAILED,
     PLAN_STATUS_SUCCESS,
     SEARCH_PLAN_GENERATOR_ID,
@@ -61,7 +62,8 @@ logger = logging.getLogger(__name__)
 # Failure-class strings (mirror migration 014's CHECK constraint and the
 # constants in `lib/pipeline_db.py`). Defined here so callers can branch
 # on the service result without importing pipeline_db directly.
-FAILURE_CLASS_NO_RUNNABLE_QUERY = "no_runnable_query"
+# `FAILURE_CLASS_NO_RUNNABLE_QUERY` is owned by `lib.search` (the generator
+# is the producer); the others are service-layer classifications.
 FAILURE_CLASS_METADATA_INCOMPLETE = "metadata_incomplete"
 FAILURE_CLASS_RESOLVER_UNAVAILABLE = "resolver_unavailable"
 FAILURE_CLASS_DEPENDENCY_FAILURE = "dependency_failure"
@@ -256,7 +258,7 @@ class SearchPlanService:
         Successful regeneration calls
         ``supersede_search_plan_with_replacement``. Failed regeneration
         records the failed attempt without superseding the prior active
-        plan (Plan §Currentness Model).
+        plan.
         """
         # Read request row + tracks. Both reads are cheap and may be
         # used to decide no-op short-circuit before taking the lock.

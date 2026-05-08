@@ -2843,6 +2843,7 @@ class FakePipelineDB:
         request_id: int,
         *,
         current_only: bool = True,
+        prefetched_history: list[dict[str, Any]] | None = None,
     ):
         """Mirror of ``PipelineDB.get_search_plan_stats``.
 
@@ -2854,7 +2855,8 @@ class FakePipelineDB:
         active = self.get_active_search_plan(request_id)
         active_plan_id = active.plan.id if active is not None else None
 
-        history = self.get_search_history(request_id)
+        history = (prefetched_history if prefetched_history is not None
+                   else self.get_search_history(request_id))
         plan_aware = [r for r in history if r.get("plan_id") is not None]
         legacy = [r for r in history if r.get("plan_id") is None]
         current_rows = (

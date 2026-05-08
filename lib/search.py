@@ -27,17 +27,11 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Persisted search-plan generator id.
-#
-# This constant is the ONLY automatic invalidation key for persisted plans
-# (per docs/plans/2026-05-08-001-feat-persisted-search-plans-plan.md).
-# Any change that affects generator output — token rules, strategy ladder,
-# repeat-group identity, dedupe behavior, provenance shape — MUST bump this
-# string. U3 (service) and U4 (reconciliation) read this to decide whether
-# a stored plan is current.
-#
-# Format is free-form, but keep it short and stable. Use a date+seq tag.
-# ---------------------------------------------------------------------------
+# Persisted search-plan generator id — the ONLY automatic invalidation key
+# for stored plans. Any change that affects generator output (token rules,
+# strategy ladder, repeat-group identity, dedupe behavior, provenance shape)
+# MUST bump this string. The plan-generation service and startup
+# reconciliation read it to decide whether a stored plan is current.
 SEARCH_PLAN_GENERATOR_ID = "search-plan/2026-05-08-1"
 
 
@@ -61,15 +55,8 @@ class SearchResult:
     elapsed_s: float = 0.0
     # found, no_match, no_results, timeout, error, empty_query, exhausted
     outcome: str = ""
-    # U5 forensic capture (search-escalation-and-forensics):
-    # - candidates: per-(user, dir, filetype) match scores collected from
-    #   `find_download` → `_apply_find_download_result`. Persisted to
-    #   `search_log.candidates` JSONB after top-20 truncation.
-    # - variant_tag: "default" | "v1_year" | "v4_tracks_<idx>" | "exhausted",
-    #   produced by `select_variant`. Persisted to `search_log.variant`.
-    # - final_state: slskd's terminal state string ("Completed",
-    #   "TimedOut", "ResponseLimitReached", "Errored"...). Persisted to
-    #   `search_log.final_state`.
+    # Forensic capture persisted to search_log: candidates JSONB (top-20
+    # match scores from find_download), variant tag, slskd terminal state.
     candidates: tuple[CandidateScore, ...] = ()
     variant_tag: str | None = None
     final_state: str | None = None
@@ -86,11 +73,11 @@ class SearchResult:
     # #212). Diagnostic only — outcome classification still reflects what
     # was harvested, not the watchdog.
     watchdog_fired: bool = False
-    # U5 plan-execution context. Carries the plan-item the executor ran
-    # plus the cycle-count snapshot taken at selection time. The snapshot
-    # is the consumed-attempt guard: at log time the DB compares it to the
-    # request's current plan_cycle_count to detect stale completions after
-    # mid-flight regeneration. None for legacy / no-plan code paths.
+    # Plan-item snapshot the executor ran, plus the cycle-count taken at
+    # selection time. The cycle snapshot is the stale-completion guard: at
+    # log time the DB compares it to the request's current plan_cycle_count
+    # to detect completions after mid-flight regeneration. None for
+    # legacy / no-plan code paths.
     plan_execution: "PlanExecutionContext | None" = None
 
 
@@ -557,7 +544,7 @@ def select_variant(
 
 
 # ---------------------------------------------------------------------------
-# Pure search-plan generator (U2 — persisted search plans plan).
+# Pure search-plan generator.
 #
 # Replaces cycle-index variant selection with a deterministic, materialized
 # plan list. Same album-level behavior as `select_variant()`, plus:
@@ -566,12 +553,10 @@ def select_variant(
 #   - repeat-group identity for the intentional repeated-default slots
 #   - explicit deterministic generation-failure result (not an empty plan)
 #
-# U5 cutover note: the search executor now calls
-# ``cratedigger._select_active_plan_item_for_album`` instead of
-# ``select_variant()``/``build_query()``. ``select_variant`` and
-# ``build_query`` remain in this module for non-executor callers (CLI smoke
-# tools, legacy tests, generator parity checks); do NOT reintroduce them on
-# the search execution path.
+# `select_variant` / `build_query` remain in this module for non-executor
+# callers (CLI smoke tools, generator parity tests). Do NOT reintroduce them
+# on the search execution path — `cratedigger._select_active_plan_item_for_album`
+# is authoritative.
 # ---------------------------------------------------------------------------
 
 
@@ -582,30 +567,30 @@ _STRATEGY_UNWILD = "unwild"
 _STRATEGY_UNWILD_YEAR = "unwild_year"
 
 
-# Maximum number of per-track slots in a generated plan. Mirrors the
-# "Up to 3 track slots" requirement from §U2.
 MAX_TRACK_SLOTS_PER_PLAN = 3
 
 
-# Plan-status values. Kept as string literals so they round-trip cleanly
-# through JSONB at the persistence layer (U1/U3).
+# Plan-status values. String literals so they round-trip cleanly through
+# JSONB at the persistence layer.
 PLAN_STATUS_SUCCESS = "success"
 PLAN_STATUS_GENERATION_FAILED = "generation_failed"
+
+# Generator-output failure class. Mirrored in lib/search_plan_service.py
+# alongside the service-layer failure classes (resolver_unavailable etc.).
+FAILURE_CLASS_NO_RUNNABLE_QUERY = "no_runnable_query"
 
 
 @dataclass(frozen=True)
 class ReleaseSnapshot:
     """Pure input value to `generate_search_plan`.
 
-    A snapshot of release metadata at generation time. Resolver/DB I/O happens
-    in U3 — the generator only reads this value. `redownload` is exposed as a
-    snapshot field so callers can record it; it does not affect generator
-    behavior in this unit (album-level slot ladder is the same for both
-    request and redownload sources), but it is part of the snapshot contract
-    and must be preserved into provenance for debuggability.
+    A snapshot of release metadata at generation time. The generator only
+    reads this value — resolver/DB I/O happens in the service layer.
+    `redownload` is preserved into provenance for debuggability but does
+    not affect the generated ladder.
 
-    `prepend_artist` is a generation-affecting config knob — moving it onto
-    the snapshot keeps the function pure (no implicit module/global config
+    `prepend_artist` is a generation-affecting config knob carried on the
+    snapshot so the function stays pure (no implicit module/global config
     reads).
     """
 
@@ -632,9 +617,6 @@ class SearchPlanConfig:
 @dataclass(frozen=True)
 class SearchPlanItem:
     """One ordered plan slot.
-
-    Pure-Python value type. Persistence (U1) will translate this into a row
-    on `search_plan_items`; the executor (U5) will read these in order.
 
     `strategy` is one of `default` | `unwild` | `unwild_year` | `track_<idx>`.
     `canonical_query_key` is the lowercased / whitespace-collapsed query and
@@ -960,7 +942,7 @@ def generate_search_plan(
         prior = seen_keys.get(key)
         if prior is not None and not is_default_repeat:
             # Cross-strategy duplicate. Keep earlier slot, record loser.
-            winner_strategy, _winner_ordinal = prior
+            winner_strategy, _ = prior
             dedupe_losers.append({
                 "winner_strategy": winner_strategy,
                 "loser_strategy": cand.strategy,
@@ -1003,14 +985,12 @@ def generate_search_plan(
     }
 
     if not runnable:
-        # Deterministic generation failure: no runnable artist/title/track
-        # query. This is sticky for the current generator id (U3).
         return SearchPlan(
             generator_id=SEARCH_PLAN_GENERATOR_ID,
             status=PLAN_STATUS_GENERATION_FAILED,
             items=(),
             provenance=base_provenance,
-            failure_reason="no_runnable_query",
+            failure_reason=FAILURE_CLASS_NO_RUNNABLE_QUERY,
         )
 
     return SearchPlan(

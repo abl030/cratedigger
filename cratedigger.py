@@ -194,12 +194,12 @@ def _build_search_cache(
 
 
 def _select_variant_for_album(album, search_cfg, db):
-    """Legacy helper — NOT used by the search executor after U5 cutover.
+    """Legacy helper — NOT used by the search executor after the plan cutover.
 
-    Plan §U5 replaced runtime variant recomputation with persisted plan-item
-    execution; the executor now calls ``_select_active_plan_item_for_album``
-    instead. This wrapper is preserved only so legacy tests that exercise
-    the variant ladder semantics directly can still call it. Production
+    Persisted plan-item execution replaced runtime variant recomputation;
+    the executor now calls ``_select_active_plan_item_for_album``. This
+    wrapper is preserved only so legacy tests that exercise the variant
+    ladder semantics directly can still call it. Production
     Phase 2 paths must not call into here.
 
     Reads `album_requests` + `album_tracks` (no slskd), feeds the typed
@@ -282,7 +282,7 @@ def _select_variant_for_album(album, search_cfg, db):
 def _select_active_plan_item_for_album(album, db):
     """Return ``(query, PlanExecutionContext)`` for the next plan-item to run.
 
-    Plan-driven replacement for ``_select_variant_for_album`` (Plan §U5).
+    Plan-driven replacement for ``_select_variant_for_album``.
     Reads the request's active search plan, picks the item at
     ``next_plan_ordinal``, and snapshots the ``plan_cycle_count`` so the
     consumed-attempt write can detect stale completions after mid-flight
@@ -406,7 +406,7 @@ def search_for_album(album, ctx):
             fileLimit=cfg.search_file_limit,
         )
     except Exception:
-        # Pre-accepted-search failure: non-consuming (Plan §AE7).
+        # Pre-accepted-search failure: non-consuming.
         logger.exception(f"Failed to perform search via SLSKD: {query}")
         return SearchResult(
             album_id=album_id, success=False, query=query,
@@ -490,7 +490,7 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
     time. The semaphore releases after the search is queued (~100ms), so we
     submit sequentially but wait for results in parallel.
 
-    Returns ``None`` on submission failure (Plan §AE7 pre-attempt failure):
+    Returns ``None`` on submission failure (pre-attempt, non-consuming):
     the caller already has the plan-execution context to record a
     non-consuming telemetry row.
     """
@@ -719,7 +719,7 @@ def _merge_search_result(result, ctx):
 
 
 def _log_search_result(album, result, ctx) -> None:
-    """Persist a search outcome via the plan-aware DB seams (Plan §U5).
+    """Persist a search outcome via the plan-aware DB seams.
 
     Routes every SearchResult through one of two atomic DB methods:
 
@@ -826,28 +826,23 @@ def _log_search_result(album, result, ctx) -> None:
         return
 
     # Non-consuming pre-attempt path.
-    plan_id = plan_execution.plan_id if plan_execution else None
-    plan_item_id = plan_execution.plan_item_id if plan_execution else None
-    plan_ordinal = plan_execution.plan_ordinal if plan_execution else None
-    plan_strategy = plan_execution.plan_strategy if plan_execution else None
-    plan_canonical_query_key = (
-        plan_execution.plan_canonical_query_key if plan_execution else None)
-    plan_repeat_group = (
-        plan_execution.plan_repeat_group if plan_execution else None)
-    plan_generator_id = (
-        plan_execution.plan_generator_id if plan_execution else None)
+    plan_kwargs: dict[str, Any] = {}
+    if plan_execution is not None:
+        plan_kwargs = {
+            "plan_id": plan_execution.plan_id,
+            "plan_item_id": plan_execution.plan_item_id,
+            "plan_ordinal": plan_execution.plan_ordinal,
+            "plan_strategy": plan_execution.plan_strategy,
+            "plan_canonical_query_key": plan_execution.plan_canonical_query_key,
+            "plan_repeat_group": plan_execution.plan_repeat_group,
+            "plan_generator_id": plan_execution.plan_generator_id,
+        }
     try:
         db.record_non_consuming_search_attempt(
             NonConsumingAttemptInput(
                 request_id=request_id,
                 outcome=outcome,
-                plan_id=plan_id,
-                plan_item_id=plan_item_id,
-                plan_ordinal=plan_ordinal,
-                plan_strategy=plan_strategy,
-                plan_canonical_query_key=plan_canonical_query_key,
-                plan_repeat_group=plan_repeat_group,
-                plan_generator_id=plan_generator_id,
+                **plan_kwargs,
                 query=result.query or None,
                 result_count=result.result_count,
                 elapsed_s=result.elapsed_s or None,
@@ -871,8 +866,8 @@ def _candidate_to_jsonable(c: Any) -> dict[str, Any]:
 def _is_consumed_outcome(result: Any, plan_execution: Any) -> bool:
     """Decide whether this SearchResult represents an accepted-search slot.
 
-    Plan §U5 boundary: the slot is consumed once slskd accepted the
-    search id (or reached a terminal state) -- even if browse / match /
+    Consumption boundary: the slot is consumed once slskd accepted the
+    search id (or reached a terminal state) — even if browse / match /
     enqueue later yields no_match, error, or enqueue failure.
 
     Pre-attempt failures (plan lookup miss, slskd submit error, empty
@@ -1050,7 +1045,7 @@ def _search_and_queue_parallel(albums, ctx):
             )
             if submit_result is None:
                 # slskd round-trip failed BEFORE search was accepted ->
-                # non-consuming pre-attempt failure (Plan §AE7).
+                # non-consuming pre-attempt failure.
                 sr = SearchResult(
                     album_id=album.id, success=False,
                     query=query,
@@ -1171,7 +1166,7 @@ def _search_and_queue_parallel(albums, ctx):
                     except Exception:
                         logger.exception(f"Search collection crashed for {album.title}")
                         # Collection crashed AFTER the search was submitted
-                        # and accepted by slskd. Per Plan §U5 attempt-outcome
+                        # and accepted by slskd. Per the attempt-outcome
                         # contract this consumes the slot — attach the
                         # plan_execution snapshot so _log_search_result
                         # writes a consumed accepted-stage row.

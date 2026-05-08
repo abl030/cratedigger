@@ -195,7 +195,7 @@ class BadAudioHashRow:
 
 
 # ---------------------------------------------------------------------------
-# Search-plan types (U1 of feat: persisted search plans)
+# Search-plan types
 # ---------------------------------------------------------------------------
 #
 # These are @dataclass (not msgspec.Struct) because they round-trip between
@@ -3262,7 +3262,7 @@ class PipelineDB:
         return True
 
     # ----------------------------------------------------------------
-    # Persisted search plans (U1 of feat: persisted search plans)
+    # Persisted search plans
     # ----------------------------------------------------------------
     #
     # All plan DDL lives in migrations/014_persisted_search_plans.sql.
@@ -3393,7 +3393,7 @@ class PipelineDB:
 
         Either way, the request's existing active plan (if any) is left
         untouched -- failed regeneration must not disable a previously
-        good plan (Plan §Currentness Model).
+        good plan.
         """
         status = (
             PLAN_STATUS_FAILED_TRANSIENT if transient
@@ -3619,7 +3619,7 @@ class PipelineDB:
         Used by ``lib.enqueue``, ``lib.download_ownership``, and
         ``lib.transitions`` to avoid claiming download ownership / mutating
         request status from a search completion that finished after the
-        request was regenerated mid-flight (Plan §AE14 stale-completion
+        request was regenerated mid-flight (stale-completion
         contract). The atomic log+cursor write inside
         ``record_consumed_search_attempt`` is independent of this helper —
         callers do BOTH the search-log write and the active-state mutation
@@ -3829,6 +3829,7 @@ class PipelineDB:
         request_id: int,
         *,
         current_only: bool = True,
+        prefetched_history: list[dict[str, object]] | None = None,
     ) -> SearchPlanStats:
         """Aggregate plan-aware ``search_log`` rows into usefulness stats.
 
@@ -3853,7 +3854,8 @@ class PipelineDB:
         active = self.get_active_search_plan(request_id)
         active_plan_id = active.plan.id if active is not None else None
 
-        history = self.get_search_history(request_id)
+        history = (prefetched_history if prefetched_history is not None
+                   else self.get_search_history(request_id))
 
         plan_aware = [r for r in history if r.get("plan_id") is not None]
         legacy = [r for r in history if r.get("plan_id") is None]

@@ -324,7 +324,7 @@ def finalize_request_if_plan_current(
 ) -> bool:
     """Plan-aware ``finalize_request`` for search-execution-driven mutations.
 
-    Stale-completion guard (Plan §U5 / §AE14). Rejects the transition with
+    Stale-completion guard. Rejects the transition with
     a STALE_REQUEST_TRANSITION log and returns ``False`` if the request's
     active plan/ordinal/cycle no longer matches what the executor recorded
     at submit time. Used by any search-execution path that mutates
