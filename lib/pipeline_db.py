@@ -446,6 +446,10 @@ class ConsumedAttemptInput:
     # from the active plan it executed; passing it explicitly avoids a
     # second SELECT inside the transaction.
     plan_item_count: int = 0
+    # The request-level cycle count captured when this plan item was
+    # selected. A same-plan/same-ordinal completion after wrap or
+    # regeneration is stale even when the cursor ordinal matches again.
+    cycle_count_snapshot: int = 0
     # Whether to record a scheduler/backoff write for this consumed
     # outcome. found/enqueued is True with `success=True`; no_match /
     # no_results / error is True with `success=False`. Caller decides.
@@ -3852,9 +3856,16 @@ class PipelineDB:
         """
         cur = self._execute(
             """
-            SELECT ar.id AS request_id, ar.active_plan_id,
+            SELECT ar.id AS request_id,
+                   CASE
+                     WHEN sp.status = 'active' THEN ar.active_plan_id
+                     ELSE NULL
+                   END AS active_plan_id,
                    ar.next_plan_ordinal, ar.plan_cycle_count,
-                   sp.generator_id AS active_plan_generator_id
+                   CASE
+                     WHEN sp.status = 'active' THEN sp.generator_id
+                     ELSE NULL
+                   END AS active_plan_generator_id
             FROM album_requests ar
             LEFT JOIN search_plans sp ON ar.active_plan_id = sp.id
             WHERE ar.status = 'wanted'
@@ -4133,6 +4144,7 @@ class PipelineDB:
                 is_stale = (
                     active_plan_id != attempt.plan_id
                     or next_ordinal != attempt.plan_ordinal
+                    or cycle_count != attempt.cycle_count_snapshot
                 )
 
                 if is_stale:
@@ -4211,10 +4223,10 @@ class PipelineDB:
                         attempt.plan_repeat_group,
                         attempt.plan_generator_id,
                         execution_stage,
-                        True,  # attempt_consumed
+                        not is_stale,
                         cursor_update_status,
                         stale_reason,
-                        cycle_count,  # plan_cycle_snapshot reflects pre-write cycle
+                        attempt.cycle_count_snapshot,
                     ),
                 )
                 log_row = cur.fetchone()

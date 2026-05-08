@@ -312,10 +312,14 @@ def _reconcile_one(
     """
     request_id = candidate.request_id
 
-    # Fast path: row already has an active plan on the current generator.
+    # Dry-run fast path: row already has an active plan on the current
+    # generator. Live reconciliation still calls the service so it can
+    # repair current plans whose persisted snapshot is now stale, such as
+    # a plan generated before all tracks were attached.
     if (candidate.active_plan_id is not None
             and candidate.active_plan_generator_id == generator_id):
-        return "active_current"
+        if dry_run:
+            return "active_current"
 
     if dry_run:
         return _classify_dry_run(
@@ -339,7 +343,7 @@ def _reconcile_one(
     )
 
     if result.outcome == RESULT_SUCCESS:
-        if had_old_generator_active or result.is_supersede:
+        if had_old_generator_active:
             return "old_generator_replaced"
         return "generated"
     if result.outcome == RESULT_NOOP_ACTIVE_PLAN_EXISTS:

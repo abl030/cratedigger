@@ -2782,8 +2782,10 @@ class FakePipelineDB:
             gen_id: str | None = None
             if plan_id is not None:
                 plan = self.search_plans.get(plan_id)
-                if plan is not None:
+                if plan is not None and plan.status == PLAN_STATUS_ACTIVE:
                     gen_id = plan.generator_id
+                else:
+                    plan_id = None
             out.append(WantedReconciliationCandidate(
                 request_id=rid,
                 active_plan_id=plan_id,
@@ -2974,6 +2976,7 @@ class FakePipelineDB:
         is_stale = (
             active_plan_id != attempt.plan_id
             or next_ordinal != attempt.plan_ordinal
+            or cycle_count != attempt.cycle_count_snapshot
         )
 
         # Snapshot pre-write so a partial mutation can be unwound on
@@ -3037,10 +3040,10 @@ class FakePipelineDB:
                 plan_repeat_group=attempt.plan_repeat_group,
                 plan_generator_id=attempt.plan_generator_id,
                 execution_stage=execution_stage,
-                attempt_consumed=True,
+                attempt_consumed=not is_stale,
                 cursor_update_status=cursor_update_status,
                 stale_reason=stale_reason,
-                plan_cycle_snapshot=cycle_count,
+                plan_cycle_snapshot=attempt.cycle_count_snapshot,
             ))
 
             now = _utcnow()

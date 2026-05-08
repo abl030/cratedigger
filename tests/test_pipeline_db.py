@@ -1487,6 +1487,8 @@ class TestDashboardWrapMetrics(unittest.TestCase):
 
     def _consume(self, ordinal: int, outcome: str) -> None:
         item = self.plan_items[ordinal]
+        req = self.db.get_request(self.req_id)
+        assert req is not None
         self.db.record_consumed_search_attempt(self.ConsumedAttemptInput(
             request_id=self.req_id,
             plan_id=self.plan_id,
@@ -1499,6 +1501,7 @@ class TestDashboardWrapMetrics(unittest.TestCase):
             query=f"q{ordinal}",
             outcome=outcome,
             plan_item_count=len(self.plan_items),
+            cycle_count_snapshot=int(req["plan_cycle_count"]),
             elapsed_s=1.0, result_count=0,
             apply_scheduler_attempt=True,
             scheduler_success=False,
@@ -4242,6 +4245,26 @@ class TestPersistedSearchPlanReconciliation(unittest.TestCase):
         self.assertIsNone(by_id[rid_backoff].active_plan_id)
         self.assertIsNone(by_id[rid_backoff].active_plan_generator_id)
 
+    def test_reconciliation_candidate_ignores_non_active_plan_pointer(self):
+        rid = self._add("recon-malformed")
+        failed_id = self.db.create_failed_search_plan(
+            request_id=rid,
+            generator_id="g1",
+            failure_class="no_runnable_query",
+            error_message="failed",
+            transient=False,
+        )
+        self.db._execute(
+            "UPDATE album_requests SET active_plan_id = %s WHERE id = %s",
+            (failed_id, rid),
+        )
+
+        rows = self.db.list_wanted_for_plan_reconciliation()
+        by_id = {r.request_id: r for r in rows}
+        self.assertIn(rid, by_id)
+        self.assertIsNone(by_id[rid].active_plan_id)
+        self.assertIsNone(by_id[rid].active_plan_generator_id)
+
 
 @requires_postgres
 class TestPersistedSearchPlanInspection(unittest.TestCase):
@@ -4413,10 +4436,28 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         rows = self.db.get_search_history(self.req_id)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["execution_stage"], "stale_completion")
+        self.assertFalse(rows[0]["attempt_consumed"])
         self.assertEqual(rows[0]["cursor_update_status"], "stale")
         self.assertEqual(rows[0]["stale_reason"], "regenerated")
         # No scheduler/backoff bump on stale.
         self.assertEqual(req["search_attempts"], 0)
+
+    def test_stale_when_cycle_count_does_not_match(self):
+        self.db._execute(
+            "UPDATE album_requests SET plan_cycle_count = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(0))
+        self.assertTrue(result.is_stale)
+        self.assertEqual(result.cursor_update_status, "stale")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 1)
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows[0]["execution_stage"], "stale_completion")
+        self.assertFalse(rows[0]["attempt_consumed"])
+        self.assertEqual(rows[0]["plan_cycle_snapshot"], 0)
 
     def test_stale_when_plan_id_does_not_match(self):
         # Regenerate -- new plan, cursor reset.
@@ -4608,6 +4649,8 @@ class TestSearchPlanStats(unittest.TestCase):
 
     def _consume(self, plan_id, plan_item_id, ordinal, strategy, query,
                  *, outcome, plan_item_count, **kw):
+        req = self.db.get_request(self.req_id)
+        assert req is not None
         attempt = self.ConsumedAttemptInput(
             request_id=self.req_id,
             plan_id=plan_id, plan_item_id=plan_item_id,
@@ -4618,6 +4661,8 @@ class TestSearchPlanStats(unittest.TestCase):
             plan_generator_id="g1",
             query=query, outcome=outcome,
             plan_item_count=plan_item_count,
+            cycle_count_snapshot=kw.pop(
+                "cycle_count_snapshot", int(req["plan_cycle_count"])),
             elapsed_s=kw.pop("elapsed_s", 1.0),
             result_count=kw.pop("result_count", 0),
             browse_time_s=kw.pop("browse_time_s", 0.5),

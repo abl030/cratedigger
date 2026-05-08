@@ -669,10 +669,43 @@ class TestFakePipelineDBSearchPlans(unittest.TestCase):
         # Log row is still inserted, marked stale.
         log = db.search_logs[0]
         self.assertEqual(log.execution_stage, "stale_completion")
+        self.assertFalse(log.attempt_consumed)
         self.assertEqual(log.cursor_update_status, "stale")
         self.assertEqual(log.stale_reason, "regenerated")
         # No scheduler bump on stale.
         self.assertEqual(db.request(rid)["search_attempts"], 0)
+
+    def test_consumed_attempt_stale_when_cycle_changed(self):
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        db.update_request_fields(rid, plan_cycle_count=1)
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="found", plan_item_count=1,
+            cycle_count_snapshot=0,
+            apply_scheduler_attempt=True, scheduler_success=True,
+        ))
+
+        self.assertTrue(result.is_stale)
+        self.assertEqual(result.cursor_update_status, "stale")
+        self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
+        log = db.search_logs[0]
+        self.assertEqual(log.execution_stage, "stale_completion")
+        self.assertFalse(log.attempt_consumed)
+        self.assertEqual(log.plan_cycle_snapshot, 0)
 
     def test_consumed_attempt_rolls_back_on_validation_failure(self):
         from lib.pipeline_db import ConsumedAttemptInput

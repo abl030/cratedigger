@@ -3244,6 +3244,41 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(request["plan_cycle_count"], 0)
         self.assertEqual(request["search_attempts"], 1)
 
+    def test_serial_collection_error_after_accept_is_consumed(self):
+        """Once slskd returns a search id, polling/collection failures still
+        consume the plan slot through the atomic consumed-attempt seam."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(search_id=42, state="Completed", responses=[])
+        slskd.searches.search_responses = MagicMock(
+            side_effect=RuntimeError("response collection failed"))
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-collect", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(
+            request_id=rid, mb_release_id="mbid-collect")
+        self._seed_plan(db, rid, items=[("default", "*iggles Album")])
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.outcome, "error")
+        self.assertEqual(result.final_state, "collection_crash")
+        row = db.search_logs[0]
+        self.assertEqual(row.execution_stage, "accepted")
+        self.assertTrue(row.attempt_consumed)
+        self.assertEqual(row.cursor_update_status, "wrapped")
+        self.assertEqual(row.final_state, "collection_crash")
+        self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
+
 
 class TestVariantSelectFallbackObservability(unittest.TestCase):
     """Finding #14: VARIANT_SELECT_FALLBACK log line is the observability hook
@@ -3933,6 +3968,38 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         self.assertEqual(active.cycle_count, 0)
         self.assertEqual(summary.generated, 1)
 
+    def test_active_current_plan_with_partial_track_snapshot_is_replanned(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(
+            db,
+            "partial-current",
+            tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "Song One"},
+                {"disc_number": 1, "track_number": 2, "title": "Song Two"},
+            ],
+        )
+        old_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="old q")],
+            metadata_snapshot={"track_count": 1},
+        )
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-current"),
+        )
+
+        self.assertEqual(summary.generated, 1)
+        self.assertEqual(summary.active_current, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertNotEqual(active.plan.id, old_id)
+        self.assertEqual(db.search_plans[old_id].status, "superseded")
+        self.assertEqual(active.plan.metadata_snapshot["track_count"], 2)
+
     def test_old_generator_rows_supersede_to_current_with_cursor_reset(self):
         from lib.pipeline_db import SearchPlanItemInput
         from lib.startup_reconciliation import reconcile_search_plans
@@ -3979,9 +4046,8 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         self.assertEqual(len(plans_for_req), 1)
         self.assertEqual(plans_for_req[0].status, "failed_deterministic")
 
-        # Second pass: the row is still classified correctly. The
-        # service no-ops on the existing failure record (or re-records
-        # an identical one) -- either way the row is NOT unclassified.
+        # Second pass: the row is still classified correctly and service
+        # stickiness prevents appending another identical failed row.
         summary2 = reconcile_search_plans(
             db, self._service(db), generator_id="g-test",
         )
@@ -3989,6 +4055,9 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         self.assertEqual(summary2.unclassified_no_plan, 0)
         self.assertEqual(summary2.wanted_total, 1)
         self.assertEqual(summary2.deterministic_failed, 1)
+        plans_for_req_2 = [
+            p for p in db.search_plans.values() if p.request_id == rid]
+        self.assertEqual(len(plans_for_req_2), 1)
 
     def test_per_row_exception_does_not_stop_other_rows(self):
         """One row's generation exception must not block reconciliation."""
@@ -4023,13 +4092,17 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         from lib.startup_reconciliation import reconcile_search_plans
         from lib.pipeline_db import SearchPlanItemInput
         db = FakePipelineDB()
-        # 1 active-current, 1 generated, 1 old-gen-replaced, 1 det-failed.
+        # 1 active-current, 1 generated, 1 old-gen-replaced, 1 det-failed,
+        # 1 malformed active_plan_id that points at a non-active plan.
         rid_a = self._seed_wanted(db, "a")
         db.create_successful_search_plan(
             request_id=rid_a, generator_id="g-current",
             items=[SearchPlanItemInput(
                 ordinal=0, strategy="default", query="q")],
         )
+        db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-current",
+            failure_class="historical", transient=False)
         self._seed_wanted(db, "b")  # generated
         rid_c = self._seed_wanted(db, "c")
         db.create_successful_search_plan(
@@ -4042,15 +4115,20 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             artist_name="", album_title="",
             mb_release_id="d", source="request",
         )
+        rid_e = self._seed_wanted(db, "e")
+        malformed_id = db.create_failed_search_plan(
+            request_id=rid_e, generator_id="g-current",
+            failure_class="old failure", transient=False)
+        db.update_request_fields(rid_e, active_plan_id=malformed_id)
 
         summary = reconcile_search_plans(
             db, self._service(db, generator_id="g-current"),
         )
-        self.assertEqual(summary.wanted_total, 4)
+        self.assertEqual(summary.wanted_total, 5)
         self.assertEqual(summary.active_current, 1)
         self.assertEqual(summary.generated, 1)
         self.assertEqual(summary.old_generator_replaced, 1)
-        self.assertEqual(summary.deterministic_failed, 1)
+        self.assertEqual(summary.deterministic_failed, 2)
         self.assertEqual(summary.unclassified_no_plan, 0)
         self.assertEqual(summary.total_classified, summary.wanted_total)
         self.assertTrue(summary.is_ready)

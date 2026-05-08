@@ -261,7 +261,7 @@ class SearchPlanService:
         year: object,
         tracks: list[dict[str, Any]],
         source: str = "request",
-        prepend_artist: bool = False,
+        prepend_artist: bool | None = None,
     ) -> ServiceResult:
         """Generate a plan for a freshly-added request.
 
@@ -271,22 +271,29 @@ class SearchPlanService:
         roll back the request — startup reconciliation or explicit
         regeneration can repair it later.
         """
-        snapshot = snapshot_from_add_payload(
-            artist_name=artist_name,
-            album_title=album_title,
-            year=year,
-            tracks=tracks,
-            source=source,
-            prepend_artist=prepend_artist,
-        )
-        return self._persist(request_id, snapshot, regenerate=False)
+        prepend = self._resolve_prepend_artist(prepend_artist)
+        with self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_PLAN, request_id,
+        ) as acquired:
+            # See docs/advisory-locks.md (PLAN namespace).
+            if not acquired:
+                return self._lock_contention_result()
+            snapshot = snapshot_from_add_payload(
+                artist_name=artist_name,
+                album_title=album_title,
+                year=year,
+                tracks=tracks,
+                source=source,
+                prepend_artist=prepend,
+            )
+            return self._persist(request_id, snapshot, regenerate=False)
 
     def generate_for_request(
         self,
         request_id: int,
         *,
         regenerate: bool = False,
-        prepend_artist: bool = False,
+        prepend_artist: bool | None = None,
     ) -> ServiceResult:
         """Generate / regenerate a plan from persisted request state.
 
@@ -300,8 +307,28 @@ class SearchPlanService:
         records the failed attempt without superseding the prior active
         plan.
         """
-        # Read request row + tracks. Both reads are cheap and may be
-        # used to decide no-op short-circuit before taking the lock.
+        prepend = self._resolve_prepend_artist(prepend_artist)
+        with self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_PLAN, request_id,
+        ) as acquired:
+            # See docs/advisory-locks.md (PLAN namespace).
+            if not acquired:
+                return self._lock_contention_result()
+            return self._generate_for_request_locked(
+                request_id, regenerate=regenerate,
+                prepend_artist=prepend,
+            )
+
+    def _generate_for_request_locked(
+        self,
+        request_id: int,
+        *,
+        regenerate: bool,
+        prepend_artist: bool,
+    ) -> ServiceResult:
+        # Read request row + tracks under the per-request PLAN lock so
+        # snapshot construction, generation, and persistence see one
+        # serialized view of request state.
         row = self.db.get_request(request_id)
         if row is None:
             return ServiceResult(
@@ -499,26 +526,24 @@ class SearchPlanService:
         plan = generate_search_plan(snapshot, self.plan_config)
         metadata_snapshot = _metadata_snapshot_from_snapshot(snapshot)
 
-        with self.db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_PLAN, request_id,
-        ) as acquired:
-            # See docs/advisory-locks.md (PLAN namespace).
-            if not acquired:
-                # Another caller is already generating for this request.
-                # Treat as transient so the next cycle retries.
-                return self._record_failure(
-                    request_id,
-                    failure_class=FAILURE_CLASS_DEPENDENCY_FAILURE,
-                    transient=True,
-                    error_message="advisory_lock held; another plan generation in progress",
-                    snapshot=snapshot,
-                    metadata_snapshot=metadata_snapshot,
-                )
+        return self._persist_locked(
+            request_id, plan, snapshot, metadata_snapshot,
+            regenerate=regenerate,
+        )
 
-            return self._persist_locked(
-                request_id, plan, snapshot, metadata_snapshot,
-                regenerate=regenerate,
-            )
+    def _resolve_prepend_artist(self, explicit: bool | None) -> bool:
+        if explicit is not None:
+            return bool(explicit)
+        return bool(getattr(self.config, "album_prepend_artist", False))
+
+    def _lock_contention_result(self) -> ServiceResult:
+        return ServiceResult(
+            outcome=RESULT_FAILED_TRANSIENT,
+            failure_class=FAILURE_CLASS_DEPENDENCY_FAILURE,
+            error_message=(
+                "advisory_lock held; another plan generation in progress"
+            ),
+        )
 
     def _persist_locked(
         self,

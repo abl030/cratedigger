@@ -423,19 +423,34 @@ def search_for_album(album, ctx):
     # legitimately slow searches and starving the pipeline — see
     # 2026-05-02 regression).
     final_state: str | None = None
-    while True:
-        state_resp = slskd.searches.state(search["id"], False)
-        state = state_resp["state"]
-        final_state = state
-        if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
-            break
-        time.sleep(1)
+    try:
+        while True:
+            state_resp = slskd.searches.state(search["id"], False)
+            state = state_resp["state"]
+            final_state = state
+            if (
+                "Completed" in state
+                or ("InProgress" not in state and "Queued" not in state)
+            ):
+                break
+            time.sleep(1)
 
-    search_results = slskd.searches.search_responses(search["id"])
-    elapsed = time.time() - t0
-    logger.info(f"Search returned {len(search_results)} results")
-    if cfg.delete_searches:
-        slskd.searches.delete(search["id"])
+        search_results = slskd.searches.search_responses(search["id"])
+        elapsed = time.time() - t0
+        logger.info(f"Search returned {len(search_results)} results")
+        if cfg.delete_searches:
+            slskd.searches.delete(search["id"])
+    except Exception:
+        # slskd already accepted this search id. Treat collection failures
+        # as consumed attempts so the cursor and telemetry stay in lockstep.
+        logger.exception(
+            f"Failed to collect search results via SLSKD: {query}")
+        return SearchResult(
+            album_id=album_id, success=False, query=query,
+            elapsed_s=time.time() - t0, outcome="error",
+            variant_tag=variant_tag, final_state="collection_crash",
+            plan_execution=plan_execution,
+        )
 
     if not len(search_results) > 0:
         return SearchResult(
@@ -800,6 +815,8 @@ def _log_search_result(album, result, ctx) -> None:
                     plan_repeat_group=plan_execution.plan_repeat_group,
                     plan_generator_id=plan_execution.plan_generator_id,
                     plan_item_count=plan_execution.plan_item_count,
+                    cycle_count_snapshot=(
+                        plan_execution.cycle_count_snapshot),
                     query=result.query or "",
                     outcome=outcome,
                     result_count=result.result_count,
