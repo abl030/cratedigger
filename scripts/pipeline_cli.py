@@ -189,6 +189,49 @@ def cmd_add(db, args):
     return _cmd_add_mb(db, release_id, source)
 
 
+def _build_search_plan_service(db):
+    """Construct a `SearchPlanService` against the runtime config.
+
+    CLI / web / startup all share the same source so generator-id and
+    `SearchPlanConfig` cannot drift between paths.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import SearchPlanService
+    return SearchPlanService(db, read_runtime_config())
+
+
+def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
+                              tracks, source):
+    """Run plan generation for a freshly-added request.
+
+    Failures are non-fatal: a deterministic / transient failure is
+    recorded as a `search_plans` row and the CLI prints a one-liner so
+    the operator knows the request is wanted-but-not-searchable until
+    repaired.
+    """
+    from lib.search_plan_service import (
+        RESULT_FAILED_DETERMINISTIC,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_SUCCESS,
+    )
+
+    svc = _build_search_plan_service(db)
+    result = svc.generate_for_new_request(
+        req_id,
+        artist_name=artist_name,
+        album_title=album_title,
+        year=year,
+        tracks=tracks,
+        source=source,
+    )
+    if result.outcome == RESULT_SUCCESS:
+        print(f"  Plan: active id={result.plan_id}")
+    elif result.outcome == RESULT_FAILED_DETERMINISTIC:
+        print(f"  Plan: FAILED ({result.failure_class}); request not searchable")
+    elif result.outcome == RESULT_FAILED_TRANSIENT:
+        print(f"  Plan: TRANSIENT FAIL ({result.failure_class}); will retry")
+
+
 def _cmd_add_mb(db, mbid, source):
     """Add a MusicBrainz release to the pipeline."""
     existing = db.get_request_by_release_id(mbid)
@@ -227,6 +270,14 @@ def _cmd_add_mb(db, mbid, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {artist_name} - {release.get('title')} ({len(tracks)} tracks)")
+    _generate_plan_after_add(
+        db, req_id,
+        artist_name=artist_name,
+        album_title=release.get("title", "Unknown"),
+        year=year,
+        tracks=tracks,
+        source=source,
+    )
 
 
 def _cmd_add_discogs(db, discogs_id, source):
@@ -260,6 +311,14 @@ def _cmd_add_discogs(db, discogs_id, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {release['artist_name']} - {release['title']} ({len(tracks)} tracks)")
+    _generate_plan_after_add(
+        db, req_id,
+        artist_name=release["artist_name"],
+        album_title=release["title"],
+        year=release.get("year"),
+        tracks=tracks,
+        source=source,
+    )
 
 
 def cmd_status(db, args):
@@ -1469,6 +1528,134 @@ def cmd_wrong_match_preview_backfill(db, args):
     return 0
 
 
+def cmd_search_plan_show(db, args):
+    """U6: read-only `pipeline-cli search-plan show <id>`.
+
+    Default: human-readable text including the U8 stats section. Pass
+    ``--no-stats`` to suppress stats (useful for legacy assertions /
+    scripts that want only the static plan dump). ``--json``: same
+    payload the web route emits, useful for scripting / future
+    dashboard parity. Exit code 2 on missing request, 0 on found.
+    """
+    from lib.search_plan_inspection import (
+        RequestNotFound,
+        build_inspection_payload,
+        render_human_lines,
+    )
+
+    include_stats = not getattr(args, "no_stats", False)
+    payload = build_inspection_payload(
+        db, int(args.id), include_stats=include_stats)
+    if isinstance(payload, RequestNotFound):
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "error": "Not found",
+                "request_id": payload.request_id,
+            }, indent=2, sort_keys=True))
+            return 2
+        print(f"  Request {payload.request_id} not found.")
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+        return 0
+    for line in render_human_lines(payload):
+        print(line)
+    return 0
+
+
+def cmd_search_plan_regenerate(db, args):
+    """U8: ``pipeline-cli search-plan regenerate <request_id>``.
+
+    Wraps ``SearchPlanService.generate_for_request(regenerate=True)``
+    so the CLI never hand-rolls plan persistence. Allowed for any
+    request status, but only ``wanted`` requests with a successful
+    active plan are executable — the output makes that explicit.
+
+    Exit codes:
+      * 0 — ``RESULT_SUCCESS`` or ``RESULT_NOOP_ACTIVE_PLAN_EXISTS``
+        (the latter only when called without ``--regenerate``-style
+        force; the service treats explicit regeneration as always
+        attempting).
+      * 2 — ``RESULT_REQUEST_NOT_FOUND`` (matches search-plan show).
+      * 3 — ``RESULT_FAILED_DETERMINISTIC`` (sticky failure; old
+        active plan preserved).
+      * 4 — ``RESULT_FAILED_TRANSIENT`` (retryable; old active plan
+        preserved).
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_FAILED_DETERMINISTIC,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_NOOP_ACTIVE_PLAN_EXISTS,
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SUCCESS,
+        SearchPlanService,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.generate_for_request(
+        int(args.id),
+        regenerate=True,
+        prepend_artist=bool(getattr(args, "prepend_artist", False)),
+    )
+
+    payload = {
+        "request_id": int(args.id),
+        "outcome": result.outcome,
+        "plan_id": result.plan_id,
+        "is_supersede": result.is_supersede,
+        "failure_class": result.failure_class,
+        "error_message": result.error_message,
+    }
+    # Add an executability hint so operators don't misread "200 / success"
+    # on an imported/manual request as "now downloading".
+    req = db.get_request(int(args.id))
+    if req is not None:
+        payload["request_status"] = req.get("status")
+        payload["executable"] = (
+            req.get("status") == "wanted"
+            and result.outcome == RESULT_SUCCESS
+        )
+    else:
+        payload["request_status"] = None
+        payload["executable"] = False
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:        {payload['request_id']}")
+        print(f"  Outcome:           {result.outcome}")
+        if result.plan_id is not None:
+            print(f"  New plan id:       {result.plan_id}")
+        if result.is_supersede:
+            print("  Replaced previous active plan: yes")
+        if result.failure_class:
+            print(f"  Failure class:     {result.failure_class}")
+        if result.error_message:
+            print(f"  Error message:     {result.error_message}")
+        print(f"  Request status:    {payload['request_status'] or '-'}")
+        print(f"  Executable:        {'yes' if payload['executable'] else 'no'}")
+        if not payload["executable"] and result.outcome == RESULT_SUCCESS:
+            print("  Note: only `wanted` requests run searches; the new "
+                  "plan is recorded but will not be executed for this status.")
+
+    if result.outcome == RESULT_SUCCESS:
+        return 0
+    if result.outcome == RESULT_NOOP_ACTIVE_PLAN_EXISTS:
+        return 0
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        return 2
+    if result.outcome == RESULT_FAILED_DETERMINISTIC:
+        return 3
+    if result.outcome == RESULT_FAILED_TRANSIENT:
+        return 4
+    # Defensive fallback for any future outcome string.
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -1508,6 +1695,32 @@ def main():
     # show
     p_show = sub.add_parser("show", help="Show full details of a request")
     p_show.add_argument("id", type=int, help="Request ID")
+
+    # search-plan
+    p_sp = sub.add_parser(
+        "search-plan",
+        help="Inspect persisted search plans (read-only, U6)")
+    sp_sub = p_sp.add_subparsers(dest="search_plan_command")
+    p_sp_show = sp_sub.add_parser(
+        "show",
+        help="Show active/failed plans, cursor, items, provenance, "
+             "legacy logs for one request")
+    p_sp_show.add_argument("id", type=int, help="Request ID")
+    p_sp_show.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
+    p_sp_show.add_argument("--no-stats", action="store_true",
+                            dest="no_stats",
+                            help="Suppress per-slot/query usefulness stats")
+    p_sp_regen = sp_sub.add_parser(
+        "regenerate",
+        help="Regenerate the search plan for a request (U8)")
+    p_sp_regen.add_argument("id", type=int, help="Request ID")
+    p_sp_regen.add_argument("--prepend-artist", action="store_true",
+                             dest="prepend_artist",
+                             help="Prepend artist name to album title in "
+                             "generated queries")
+    p_sp_regen.add_argument("--json", action="store_true",
+                             help="Print structured JSON instead of text")
 
     # quality
     p_quality = sub.add_parser("quality", help="Show quality state and simulate decisions")
@@ -1625,6 +1838,10 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+    if args.command == "search-plan" and not getattr(
+            args, "search_plan_command", None):
+        p_sp.print_help()
+        sys.exit(1)
 
     db = PipelineDB(args.dsn)
 
@@ -1647,8 +1864,15 @@ def main():
         "wrong-match-preview-backfill": cmd_wrong_match_preview_backfill,
         "repair-spectral": cmd_repair_spectral,
     }
+    search_plan_commands = {
+        "show": cmd_search_plan_show,
+        "regenerate": cmd_search_plan_regenerate,
+    }
     try:
-        rc = commands[args.command](db, args)
+        if args.command == "search-plan":
+            rc = search_plan_commands[args.search_plan_command](db, args)
+        else:
+            rc = commands[args.command](db, args)
     finally:
         db.close()
     if isinstance(rc, int):

@@ -154,7 +154,15 @@ class DatabaseSource:
         return self._db
 
     def get_wanted(self, limit=None):
-        """Get wanted albums as normalized records."""
+        """Get wanted albums as normalized records.
+
+        Forensic / dashboard / inspection callers should use this method
+        -- it returns every wanted row regardless of plan readiness.
+
+        Phase 2 search execution should use ``get_wanted_searchable``
+        (introduced in U4) to filter to rows whose active plan matches
+        the current generator id.
+        """
         db = self._get_db()
         wanted = db.get_wanted(limit=limit)
         records = []
@@ -162,6 +170,25 @@ class DatabaseSource:
             tracks = db.get_tracks(row["id"])
             if not tracks:
                 # Try to populate tracks from MB API
+                tracks = self._populate_tracks(row)
+            record = AlbumRecord.from_db_row(row, tracks)
+            records.append(record)
+        return records
+
+    def get_wanted_searchable(self, generator_id: str, limit: int | None = None):
+        """Get wanted albums whose active plan matches ``generator_id``.
+
+        This is the **execution-eligibility** filter for Phase 2 (U4).
+        Rows without a current-generator active plan are excluded --
+        startup reconciliation owns repairing those before the next
+        cycle. Mirrors the track-population behavior of ``get_wanted``.
+        """
+        db = self._get_db()
+        wanted = db.get_wanted_searchable(generator_id, limit=limit)
+        records = []
+        for row in wanted:
+            tracks = db.get_tracks(row["id"])
+            if not tracks:
                 tracks = self._populate_tracks(row)
             record = AlbumRecord.from_db_row(row, tracks)
             records.append(record)

@@ -1335,6 +1335,213 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
 
 
 @requires_postgres
+class TestSearchPlanReadiness(unittest.TestCase):
+    """U7: ``get_search_plan_readiness`` aggregates wanted rows into
+    plan-readiness buckets that replace exhausted-based reporting.
+
+    The classifier must be exhaustive and exclusive: every wanted row
+    belongs to exactly one bucket, the buckets sum to ``wanted_total``,
+    and ``wanted_no_plan > 0`` is the operator stop-the-deploy signal.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_wanted(self, suffix: str) -> int:
+        return self.db.add_request(
+            mb_release_id=f"plan-readiness-{suffix}",
+            artist_name="Readiness", album_title=suffix,
+            source="request",
+        )
+
+    def _items(self, *queries: str):
+        return [
+            self.SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=q,
+                canonical_query_key=q.lower(),
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def test_empty_db_returns_zeroed_buckets(self):
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness, {
+            "generator_id": "g1",
+            "wanted_total": 0,
+            "wanted_searchable": 0,
+            "wanted_legacy": 0,
+            "wanted_failed_deterministic": 0,
+            "wanted_failed_transient": 0,
+            "wanted_no_plan": 0,
+        })
+
+    def test_buckets_partition_wanted_total(self):
+        # 1 searchable, 1 legacy, 1 deterministic-failed, 1 transient,
+        # 1 no-plan.
+        rid_search = self._add_wanted("searchable")
+        rid_legacy = self._add_wanted("legacy")
+        rid_det = self._add_wanted("det_failed")
+        rid_trans = self._add_wanted("trans_failed")
+        rid_noplan = self._add_wanted("no_plan")
+        # Searchable: active plan with current generator.
+        self.db.create_successful_search_plan(
+            request_id=rid_search, generator_id="g1",
+            items=self._items("query A"))
+        # Legacy: active plan with old generator id.
+        self.db.create_successful_search_plan(
+            request_id=rid_legacy, generator_id="g0_old",
+            items=self._items("query B"))
+        # Deterministic-failed on current generator.
+        self.db.create_failed_search_plan(
+            request_id=rid_det, generator_id="g1",
+            failure_class="no_runnable_query",
+            error_message="empty",
+            transient=False,
+        )
+        # Transient-failed on current generator.
+        self.db.create_failed_search_plan(
+            request_id=rid_trans, generator_id="g1",
+            failure_class="resolver_unavailable",
+            error_message="resolver down",
+            transient=True,
+        )
+        # rid_noplan has no plans at all.
+
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness["wanted_total"], 5)
+        self.assertEqual(readiness["wanted_searchable"], 1)
+        self.assertEqual(readiness["wanted_legacy"], 1)
+        self.assertEqual(readiness["wanted_failed_deterministic"], 1)
+        self.assertEqual(readiness["wanted_failed_transient"], 1)
+        self.assertEqual(readiness["wanted_no_plan"], 1)
+        # Sum invariant.
+        self.assertEqual(
+            readiness["wanted_total"],
+            sum(readiness[k] for k in (
+                "wanted_searchable", "wanted_legacy",
+                "wanted_failed_deterministic", "wanted_failed_transient",
+                "wanted_no_plan")))
+
+    def test_old_generator_failed_plan_falls_to_no_plan(self):
+        """A failed plan on a *different* generator id does not satisfy
+        the readiness check for the current id -- treat it the same as
+        having no plan at all (startup reconciliation will retry)."""
+        rid = self._add_wanted("old_generator_failure")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g0_old",
+            failure_class="no_runnable_query",
+            error_message="historical",
+            transient=False,
+        )
+        readiness = self.db.get_search_plan_readiness("g1")
+        self.assertEqual(readiness["wanted_total"], 1)
+        self.assertEqual(readiness["wanted_no_plan"], 1)
+        self.assertEqual(readiness["wanted_failed_deterministic"], 0)
+
+
+@requires_postgres
+class TestDashboardWrapMetrics(unittest.TestCase):
+    """U7: ``cursor_update_status='wrapped'`` rows replace ``outcome=
+    'exhausted'`` as the cycle-wrap signal in dashboard search windows.
+    Historical exhausted rows still appear in the existing
+    ``outcomes.exhausted`` bucket so legacy reporting does not lie about
+    pre-cutover history.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, SearchPlanItemInput,
+        )
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="wrap-mbid",
+            artist_name="Wrap", album_title="Test",
+            source="request",
+        )
+        items = [
+            SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=f"q{i}",
+                canonical_query_key=f"k{i}",
+            )
+            for i in range(2)
+        ]
+        self.plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=items, set_active=True,
+        )
+        plan_items = self.db._execute(
+            "SELECT id, ordinal FROM search_plan_items "
+            "WHERE plan_id = %s ORDER BY ordinal", (self.plan_id,)
+        ).fetchall()
+        self.plan_items = [dict(r) for r in plan_items]
+
+    def tearDown(self):
+        self.db.close()
+
+    def _consume(self, ordinal: int, outcome: str) -> None:
+        item = self.plan_items[ordinal]
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.db.record_consumed_search_attempt(self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=self.plan_id,
+            plan_item_id=item["id"],
+            plan_ordinal=ordinal,
+            plan_strategy=f"slot_{ordinal}",
+            plan_canonical_query_key=f"k{ordinal}",
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query=f"q{ordinal}",
+            outcome=outcome,
+            plan_item_count=len(self.plan_items),
+            cycle_count_snapshot=int(req["plan_cycle_count"]),
+            elapsed_s=1.0, result_count=0,
+            apply_scheduler_attempt=True,
+            scheduler_success=False,
+        ))
+
+    def test_wrap_count_increments_per_cycle_wrap(self):
+        # Walk through the plan twice -- two wraps expected.
+        for _ in range(2):
+            for ordinal in range(len(self.plan_items)):
+                self._consume(ordinal, "no_results")
+
+        metrics = self.db.get_pipeline_dashboard_metrics(plan_generator_id="g1")
+        windows = metrics["searches"]["windows"]
+        self.assertTrue(windows)
+        window_24h = next(w for w in windows if w["label"] == "24h")
+        self.assertEqual(window_24h["cursor_wraps"], 2)
+        # Sanity: no new exhausted rows after the cutover.
+        self.assertEqual(window_24h["outcomes"]["exhausted"], 0)
+        # Cache attribution stays cycle-only -- ``search_log`` has no
+        # per-search cache columns.
+        self.assertEqual(window_24h["cache_attribution_level"], "cycle_only")
+
+    def test_historical_exhausted_rows_still_counted(self):
+        """Pre-cutover ``outcome='exhausted'`` rows must remain visible in
+        the existing search-window bucket. The dashboard does not strip
+        them out; it only stops emitting new ones."""
+        self.db.log_search(
+            self.req_id, query="historical-exhausted",
+            elapsed_s=0.0, outcome="exhausted",
+        )
+        metrics = self.db.get_pipeline_dashboard_metrics(plan_generator_id="g1")
+        window_24h = next(
+            w for w in metrics["searches"]["windows"] if w["label"] == "24h"
+        )
+        self.assertEqual(window_24h["outcomes"]["exhausted"], 1)
+        # No wraps yet -- historical exhausted is not a wrap.
+        self.assertEqual(window_24h["cursor_wraps"], 0)
+
+
+@requires_postgres
 class TestDenylist(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -3537,6 +3744,1082 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
         self.assertEqual(result["id"], max(first.id, second.id))
+
+
+# ---------------------------------------------------------------------------
+# Persisted search plans (U1)
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+class TestPersistedSearchPlanCRUD(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="plan-crud-mbid",
+            artist_name="Plan",
+            album_title="CRUD",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _items(self, *queries: str) -> list:
+        return [
+            self.SearchPlanItemInput(
+                ordinal=i,
+                strategy=f"slot_{i}",
+                query=q,
+                canonical_query_key=q.lower(),
+                repeat_group="default" if i == 0 else None,
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def test_successful_plan_sets_active_and_resets_cursor(self):
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=self._items("Artist Album", "Artist Track1"),
+            metadata_snapshot={"year": 2024},
+            provenance={"dropped_low_entropy_tokens": ["the"]},
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(active.plan.id, plan_id)
+        self.assertEqual(active.plan.status, "active")
+        self.assertEqual(active.plan.generator_id, "g1")
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(len(active.items), 2)
+        self.assertEqual(active.items[0].ordinal, 0)
+        self.assertEqual(active.items[0].query, "Artist Album")
+        from lib.pipeline_db import (
+            SearchPlanMetadataSnapshot, SearchPlanProvenance)
+        self.assertIsInstance(
+            active.plan.metadata_snapshot, SearchPlanMetadataSnapshot)
+        self.assertIsInstance(active.plan.provenance, SearchPlanProvenance)
+        self.assertEqual(active.plan.metadata_snapshot.year, 2024)
+        self.assertEqual(
+            active.plan.provenance.values["dropped_low_entropy_tokens"],
+            ["the"])
+
+    def test_successful_plan_without_set_active_leaves_request_planless(self):
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=self._items("Q1"),
+            set_active=False,
+        )
+        self.assertIsNone(self.db.get_active_search_plan(self.req_id))
+        # The plan still exists.
+        cur = self.db._execute(
+            "SELECT status FROM search_plans WHERE id = %s", (plan_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "active")
+
+    def test_successful_plan_requires_items(self):
+        with self.assertRaises(ValueError):
+            self.db.create_successful_search_plan(
+                request_id=self.req_id,
+                generator_id="g1",
+                items=[],
+            )
+
+    def test_deterministic_failed_plan_leaves_request_unsearchable(self):
+        plan_id = self.db.create_failed_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            failure_class="no_runnable_query",
+            error_message="no usable artist/title query",
+            transient=False,
+        )
+        # Request stays wanted, but no active plan -> not searchable.
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertIsNone(req["active_plan_id"])
+        self.assertIsNone(self.db.get_active_search_plan(self.req_id))
+        cur = self.db._execute(
+            "SELECT status, failure_class, error_message FROM search_plans "
+            "WHERE id = %s", (plan_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "failed_deterministic")
+        self.assertEqual(row["failure_class"], "no_runnable_query")
+        self.assertEqual(row["error_message"], "no usable artist/title query")
+
+    def test_transient_failed_plan_is_not_sticky(self):
+        plan_id = self.db.create_failed_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            failure_class="resolver_unavailable",
+            transient=True,
+        )
+        cur = self.db._execute(
+            "SELECT status FROM search_plans WHERE id = %s", (plan_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "failed_transient")
+
+    def test_supersede_replaces_active_plan_and_resets_cursor(self):
+        first = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=self._items("Q1", "Q2"),
+        )
+        # Move cursor / cycle to non-zero so we can prove they reset.
+        self.db._execute(
+            "UPDATE album_requests "
+            "SET next_plan_ordinal = 1, plan_cycle_count = 3 WHERE id = %s",
+            (self.req_id,),
+        )
+        new_id = self.db.supersede_search_plan_with_replacement(
+            request_id=self.req_id,
+            generator_id="g2",
+            items=self._items("Q3"),
+        )
+        # Cursor/cycle reset.
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(active.plan.id, new_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        # Old plan flipped to superseded with link to replacement.
+        cur = self.db._execute(
+            "SELECT status, superseded_at, superseded_by_plan_id "
+            "FROM search_plans WHERE id = %s", (first,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "superseded")
+        self.assertIsNotNone(row["superseded_at"])
+        self.assertEqual(row["superseded_by_plan_id"], new_id)
+
+    def test_get_active_search_plan_returns_items_in_ordinal_order(self):
+        """Single-query plan fetch returns items ordered by ordinal with
+        every column hydrated (provenance, canonical_query_key,
+        repeat_group). Guards the JSONB-aggregation rewrite of
+        ``get_active_search_plan`` against drift from the prior two-query
+        shape.
+        """
+        items = [
+            self.SearchPlanItemInput(
+                ordinal=0, strategy="primary", query="Artist Album",
+                canonical_query_key="artist album",
+                repeat_group="default",
+                provenance={"repeat_index": 1},
+            ),
+            self.SearchPlanItemInput(
+                ordinal=1, strategy="track1", query="Artist Track 1",
+                canonical_query_key="artist track 1",
+                provenance={"source_track_index": 0, "track_slot_index": 1},
+            ),
+            self.SearchPlanItemInput(
+                ordinal=2, strategy="track2", query="Artist Track 2",
+                canonical_query_key="artist track 2",
+                provenance=None,
+            ),
+        ]
+        # Insert plan items with ordinals reversed to prove ORDER BY works.
+        self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=list(reversed(items)),
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(len(active.items), 3)
+        ordinals = [it.ordinal for it in active.items]
+        self.assertEqual(ordinals, [0, 1, 2])
+        self.assertEqual(active.items[0].query, "Artist Album")
+        self.assertEqual(active.items[0].canonical_query_key, "artist album")
+        self.assertEqual(active.items[0].repeat_group, "default")
+        from lib.pipeline_db import SearchPlanItemProvenance
+        self.assertIsInstance(
+            active.items[0].provenance, SearchPlanItemProvenance)
+        self.assertEqual(active.items[0].provenance.values["repeat_index"], 1)
+        self.assertEqual(active.items[1].strategy, "track1")
+        self.assertEqual(
+            active.items[1].provenance.values["source_track_index"], 0)
+        self.assertEqual(
+            active.items[1].provenance.values["track_slot_index"], 1)
+        self.assertIsNone(active.items[2].provenance)
+        self.assertIsNone(active.items[2].repeat_group)
+        # IDs must be present + ints (matched the prior two-query contract).
+        for it in active.items:
+            self.assertIsInstance(it.id, int)
+            self.assertGreater(it.id, 0)
+            self.assertEqual(it.plan_id, active.plan.id)
+
+    def test_get_active_search_plan_handles_zero_items(self):
+        """LEFT JOIN + jsonb_agg can mis-handle the zero-item case (NULL
+        or ``[null]``). Confirm an active plan whose items got deleted
+        out-of-band returns ``items=[]`` rather than crashing or
+        constructing a row from NULLs.
+        """
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=self._items("only"),
+        )
+        # Out-of-band deletion (production never does this; the migrator
+        # might, or a future cleanup tool).
+        self.db._execute(
+            "DELETE FROM search_plan_items WHERE plan_id = %s", (plan_id,))
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(active.plan.id, plan_id)
+        self.assertEqual(active.items, [])
+
+
+@requires_postgres
+class TestListSearchPlanClassificationForRequests(unittest.TestCase):
+    """Batch-fetch dry-run classification.
+
+    ``list_search_plan_classification_for_requests`` collapses the
+    per-row 5-query inspection call into a single query. Verify the
+    per-request data returned matches what the previous per-row
+    ``get_search_plan_inspection`` path would have surfaced for the
+    same rows.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add(self, mbid: str) -> int:
+        return self.db.add_request(
+            mb_release_id=mbid, artist_name="Artist",
+            album_title=mbid, source="request",
+        )
+
+    def test_empty_input_returns_empty_dict(self):
+        self.assertEqual(
+            self.db.list_search_plan_classification_for_requests([]), {})
+
+    def test_returns_none_generator_ids_when_no_failed_plans(self):
+        rid = self._add("nofail")
+        result = self.db.list_search_plan_classification_for_requests([rid])
+        self.assertIn(rid, result)
+        self.assertIsNone(
+            result[rid].latest_failed_deterministic_generator_id)
+        self.assertIsNone(
+            result[rid].latest_failed_transient_generator_id)
+
+    def test_returns_latest_failed_generator_ids_per_request(self):
+        rid_a = self._add("rid-a")
+        rid_b = self._add("rid-b")
+        rid_c = self._add("rid-c")
+        # rid_a: deterministic failure on g-old, then deterministic
+        # failure on g-new -- the new one should win.
+        self.db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-old",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-new",
+            failure_class="metadata_incomplete", transient=False,
+        )
+        # rid_b: only transient failure on g-new.
+        self.db.create_failed_search_plan(
+            request_id=rid_b, generator_id="g-new",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        # rid_c: both -- one deterministic g-det, one transient g-trans.
+        self.db.create_failed_search_plan(
+            request_id=rid_c, generator_id="g-det",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid_c, generator_id="g-trans",
+            failure_class="dependency_failure", transient=True,
+        )
+
+        result = self.db.list_search_plan_classification_for_requests(
+            [rid_a, rid_b, rid_c])
+
+        self.assertEqual(
+            result[rid_a].latest_failed_deterministic_generator_id, "g-new")
+        self.assertIsNone(
+            result[rid_a].latest_failed_transient_generator_id)
+
+        self.assertIsNone(
+            result[rid_b].latest_failed_deterministic_generator_id)
+        self.assertEqual(
+            result[rid_b].latest_failed_transient_generator_id, "g-new")
+        self.assertIsNotNone(
+            result[rid_b].latest_failed_transient_created_at)
+
+        self.assertEqual(
+            result[rid_c].latest_failed_deterministic_generator_id, "g-det")
+        self.assertEqual(
+            result[rid_c].latest_failed_transient_generator_id, "g-trans")
+
+    def test_matches_per_row_inspection_for_same_data(self):
+        """Equivalence guard: the batch result for each request must
+        agree with what ``get_search_plan_inspection`` would say about
+        the same rows. This is the contract the dry-run classifier
+        relies on after the rewrite.
+        """
+        rid = self._add("equiv")
+        # Mixed plan history: deterministic failure, then a successful
+        # plan (irrelevant to the classifier), then a transient
+        # failure.
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+            set_active=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g2",
+            failure_class="resolver_unavailable", transient=True,
+        )
+
+        inspection = self.db.get_search_plan_inspection(rid)
+        det = inspection.latest_failed_deterministic
+        trans = inspection.latest_failed_transient
+
+        batch = self.db.list_search_plan_classification_for_requests([rid])
+        entry = batch[rid]
+        self.assertEqual(
+            entry.latest_failed_deterministic_generator_id,
+            det.generator_id if det is not None else None,
+        )
+        self.assertEqual(
+            entry.latest_failed_transient_generator_id,
+            trans.generator_id if trans is not None else None,
+        )
+        self.assertEqual(
+            entry.latest_failed_transient_created_at,
+            trans.created_at if trans is not None else None,
+        )
+
+
+@requires_postgres
+class TestGetWantedSearchable(unittest.TestCase):
+    """``get_wanted_searchable`` filters Phase 2 execution candidates.
+
+    Only rows whose active plan exists, status='active', and
+    generator_id matches the passed-in id are returned. Rows without a
+    current-generator active plan must be excluded so Phase 2 cannot
+    accidentally fall back to recomputing variants from search_attempts.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_wanted(self, mbid: str) -> int:
+        return self.db.add_request(
+            mb_release_id=mbid, artist_name="A",
+            album_title=mbid, source="request",
+        )
+
+    def _make_active(self, request_id: int, generator_id: str) -> int:
+        return self.db.create_successful_search_plan(
+            request_id=request_id,
+            generator_id=generator_id,
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query=f"q-{request_id}")],
+        )
+
+    def test_returns_only_rows_with_current_generator_active_plan(self):
+        rid_match = self._add_wanted("match")
+        self._make_active(rid_match, "g1")
+
+        rid_no_plan = self._add_wanted("no-plan")  # never planned
+        rid_old_gen = self._add_wanted("old-gen")
+        self._make_active(rid_old_gen, "g0")  # different gen
+
+        rid_imported = self._add_wanted("imp")
+        self._make_active(rid_imported, "g1")
+        self.db.update_status(rid_imported, "imported")
+
+        rows = self.db.get_wanted_searchable("g1")
+        rids = {r["id"] for r in rows}
+        self.assertEqual(rids, {rid_match})
+
+    def test_respects_retry_backoff(self):
+        rid = self._add_wanted("backoff")
+        self._make_active(rid, "g1")
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        self.db._execute(
+            "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
+            (future, rid),
+        )
+        self.db.conn.commit()
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_excludes_request_after_supersede_to_new_generator(self):
+        # Old-generator active plan -> supersede to new -> the new id
+        # must be searchable; the old id is not.
+        rid = self._add_wanted("supersede")
+        self._make_active(rid, "g0")
+        self.assertEqual(
+            [r["id"] for r in self.db.get_wanted_searchable("g0")], [rid])
+        self.db.supersede_search_plan_with_replacement(
+            request_id=rid,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q-new")],
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g0"), [])
+        rids = [r["id"] for r in self.db.get_wanted_searchable("g1")]
+        self.assertEqual(rids, [rid])
+
+    def test_failed_deterministic_only_excluded(self):
+        rid = self._add_wanted("det-fail")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_failed_transient_only_excluded(self):
+        rid = self._add_wanted("trans-fail")
+        self.db.create_failed_search_plan(
+            request_id=rid, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        self.assertEqual(self.db.get_wanted_searchable("g1"), [])
+
+    def test_limit_applied(self):
+        ids = []
+        for i in range(5):
+            rid = self._add_wanted(f"lim-{i}")
+            self._make_active(rid, "g1")
+            ids.append(rid)
+        rows = self.db.get_wanted_searchable("g1", limit=3)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(set(r["id"] for r in rows).issubset(set(ids)))
+
+
+@requires_postgres
+class TestPersistedSearchPlanReconciliation(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add(self, mbid: str, status: str = "wanted") -> int:
+        rid = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="A",
+            album_title=mbid,
+            source="request",
+        )
+        if status != "wanted":
+            self.db.update_status(rid, status)
+        return rid
+
+    def test_lists_all_wanted_ignoring_retry_eligibility_and_pagination(self):
+        far_future = datetime.now(timezone.utc) + timedelta(hours=24)
+        rid_due = self._add("recon-due")
+        rid_backoff = self._add("recon-backoff")
+        rid_imported = self._add("recon-imported", status="imported")
+        # Set far-future retry on the second wanted row -- get_wanted would
+        # skip it; reconciliation MUST include it.
+        self.db._execute(
+            "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
+            (far_future, rid_backoff),
+        )
+        # And one wanted row already has an active plan.
+        self.db.create_successful_search_plan(
+            request_id=rid_due,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+
+        rows = self.db.list_wanted_for_plan_reconciliation()
+        rids = {r.request_id for r in rows}
+        self.assertIn(rid_due, rids)
+        self.assertIn(rid_backoff, rids)
+        self.assertNotIn(rid_imported, rids)
+
+        by_id = {r.request_id: r for r in rows}
+        self.assertIsNotNone(by_id[rid_due].active_plan_id)
+        self.assertEqual(by_id[rid_due].active_plan_generator_id, "g1")
+        self.assertIsNone(by_id[rid_backoff].active_plan_id)
+        self.assertIsNone(by_id[rid_backoff].active_plan_generator_id)
+
+    def test_reconciliation_candidate_ignores_non_active_plan_pointer(self):
+        rid = self._add("recon-malformed")
+        failed_id = self.db.create_failed_search_plan(
+            request_id=rid,
+            generator_id="g1",
+            failure_class="no_runnable_query",
+            error_message="failed",
+            transient=False,
+        )
+        self.db._execute(
+            "UPDATE album_requests SET active_plan_id = %s WHERE id = %s",
+            (failed_id, rid),
+        )
+
+        rows = self.db.list_wanted_for_plan_reconciliation()
+        by_id = {r.request_id: r for r in rows}
+        self.assertIn(rid, by_id)
+        self.assertIsNone(by_id[rid].active_plan_id)
+        self.assertIsNone(by_id[rid].active_plan_generator_id)
+
+
+@requires_postgres
+class TestPersistedSearchPlanInspection(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="inspect-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_inspection_returns_active_failed_superseded_and_legacy_counts(self):
+        # Legacy log row (no plan context).
+        self.db.log_search(
+            self.req_id, query="legacy", outcome="error",
+        )
+        # Deterministic + transient failed attempts.
+        self.db.create_failed_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            failure_class="no_runnable_query", transient=False,
+        )
+        self.db.create_failed_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        # First successful, then supersede with second.
+        self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q1")],
+        )
+        new_id = self.db.supersede_search_plan_with_replacement(
+            request_id=self.req_id, generator_id="g2",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q2")],
+        )
+
+        info = self.db.get_search_plan_inspection(self.req_id)
+        assert info.active is not None
+        self.assertEqual(info.active.plan.id, new_id)
+        assert info.latest_failed_deterministic is not None
+        self.assertEqual(
+            info.latest_failed_deterministic.failure_class,
+            "no_runnable_query")
+        assert info.latest_failed_transient is not None
+        self.assertEqual(
+            info.latest_failed_transient.failure_class,
+            "resolver_unavailable")
+        self.assertEqual(info.superseded_count, 1)
+        self.assertEqual(info.legacy_search_log_count, 1)
+
+
+@requires_postgres
+class TestRecordConsumedSearchAttempt(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import (ConsumedAttemptInput,
+                                     SearchPlanItemInput)
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="consumed-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=[
+                self.SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="Q0",
+                    canonical_query_key="q0", repeat_group="rg"),
+                self.SearchPlanItemInput(
+                    ordinal=1, strategy="track_0", query="Q1",
+                    canonical_query_key="q1"),
+            ],
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.active = active
+        self.item_ids = [it.id for it in active.items]
+
+    def tearDown(self):
+        self.db.close()
+
+    def _attempt(self, ordinal: int, **overrides):
+        kwargs = dict(
+            request_id=self.req_id,
+            plan_id=self.plan_id,
+            plan_item_id=self.item_ids[ordinal],
+            plan_ordinal=ordinal,
+            plan_strategy=self.active.items[ordinal].strategy,
+            plan_canonical_query_key=(
+                self.active.items[ordinal].canonical_query_key),
+            plan_repeat_group=self.active.items[ordinal].repeat_group,
+            plan_generator_id="g1",
+            query=self.active.items[ordinal].query,
+            outcome="no_match",
+            plan_item_count=len(self.active.items),
+            apply_scheduler_attempt=True,
+            scheduler_success=False,
+        )
+        kwargs.update(overrides)
+        return self.ConsumedAttemptInput(**kwargs)
+
+    def test_advance_ordinal_writes_log_and_updates_cursor(self):
+        result = self.db.record_consumed_search_attempt(
+            self._attempt(0, outcome="no_match"))
+        self.assertEqual(result.cursor_update_status, "advanced")
+        self.assertEqual(result.new_next_ordinal, 1)
+        self.assertEqual(result.new_cycle_count, 0)
+        self.assertFalse(result.is_stale)
+        # Log row written with plan context + cycle snapshot.
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        log = rows[0]
+        self.assertEqual(log["plan_id"], self.plan_id)
+        self.assertEqual(log["plan_ordinal"], 0)
+        self.assertEqual(log["execution_stage"], "accepted")
+        self.assertTrue(log["attempt_consumed"])
+        self.assertEqual(log["cursor_update_status"], "advanced")
+        self.assertEqual(log["plan_cycle_snapshot"], 0)
+        # Request cursor advanced.
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 1)
+        self.assertEqual(req["plan_cycle_count"], 0)
+        # Scheduler/backoff updated.
+        self.assertEqual(req["search_attempts"], 1)
+        self.assertIsNotNone(req["next_retry_after"])
+
+    def test_final_ordinal_wraps_and_increments_cycle(self):
+        # Move cursor to final ordinal first.
+        self.db._execute(
+            "UPDATE album_requests SET next_plan_ordinal = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(1))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(result.new_next_ordinal, 0)
+        self.assertEqual(result.new_cycle_count, 1)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 1)
+        # Log row reflects pre-write cycle snapshot.
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows[0]["cursor_update_status"], "wrapped")
+        self.assertEqual(rows[0]["plan_cycle_snapshot"], 0)
+
+    def test_stale_completion_logs_but_does_not_advance(self):
+        # Advance the cursor manually so the executor's plan_ordinal=0
+        # no longer matches.
+        self.db._execute(
+            "UPDATE album_requests SET next_plan_ordinal = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(0))
+        self.assertTrue(result.is_stale)
+        self.assertEqual(result.cursor_update_status, "stale")
+        # Cursor NOT advanced.
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 1)
+        # Log row still inserted, flagged stale.
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["execution_stage"], "stale_completion")
+        self.assertFalse(rows[0]["attempt_consumed"])
+        self.assertEqual(rows[0]["cursor_update_status"], "stale")
+        self.assertEqual(rows[0]["stale_reason"], "regenerated")
+        # No scheduler/backoff bump on stale.
+        self.assertEqual(req["search_attempts"], 0)
+
+    def test_stale_when_cycle_count_does_not_match(self):
+        self.db._execute(
+            "UPDATE album_requests SET plan_cycle_count = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(0))
+        self.assertTrue(result.is_stale)
+        self.assertEqual(result.cursor_update_status, "stale")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 1)
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows[0]["execution_stage"], "stale_completion")
+        self.assertFalse(rows[0]["attempt_consumed"])
+        self.assertEqual(rows[0]["plan_cycle_snapshot"], 0)
+
+    def test_stale_when_plan_id_does_not_match(self):
+        # Regenerate -- new plan, cursor reset.
+        new_plan = self.db.supersede_search_plan_with_replacement(
+            request_id=self.req_id,
+            generator_id="g2",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Qnew")],
+        )
+        # Old executor completes against the old plan id.
+        result = self.db.record_consumed_search_attempt(self._attempt(0))
+        self.assertTrue(result.is_stale)
+        # Active plan is still the new one, cursor at 0.
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.assertEqual(active.plan.id, new_plan)
+        self.assertEqual(active.next_ordinal, 0)
+
+    def test_rejects_plan_item_from_another_request(self):
+        other_req_id = self.db.add_request(
+            mb_release_id="consumed-other-mbid",
+            artist_name="C", album_title="D", source="request",
+        )
+        other_plan = self.db.create_successful_search_plan(
+            request_id=other_req_id,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q-other")],
+        )
+        other_active = self.db.get_active_search_plan(other_req_id)
+        assert other_active is not None
+        with self.assertRaises(ValueError):
+            self.db.record_consumed_search_attempt(
+                self._attempt(
+                    0,
+                    plan_id=self.plan_id,
+                    plan_item_id=other_active.items[0].id,
+                )
+            )
+        self.assertIsNotNone(other_plan)
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows, [])
+
+
+@requires_postgres
+class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import (NonConsumingAttemptInput,
+                                     SearchPlanItemInput)
+        self.NonConsumingAttemptInput = NonConsumingAttemptInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="nonconsuming-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_writes_visible_log_and_applies_backoff_without_advancing(self):
+        log_id = self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                error_message="slskd 503",
+                apply_scheduler_attempt=True,
+            )
+        )
+        self.assertGreater(log_id, 0)
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "error")
+        self.assertEqual(rows[0]["execution_stage"], "pre_attempt")
+        self.assertFalse(rows[0]["attempt_consumed"])
+        self.assertEqual(rows[0]["cursor_update_status"], "unchanged")
+        self.assertEqual(rows[0]["plan_cycle_snapshot"], 0)
+        # Cursor + cycle untouched, scheduler/backoff applied.
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 0)
+        self.assertEqual(req["search_attempts"], 1)
+        self.assertIsNotNone(req["next_retry_after"])
+
+    def test_can_skip_scheduler_attempt(self):
+        self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                apply_scheduler_attempt=False,
+            )
+        )
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["search_attempts"], 0)
+        self.assertIsNone(req["next_retry_after"])
+
+
+@requires_postgres
+class TestPersistedSearchPlanLifecycleEdgeCases(unittest.TestCase):
+    def setUp(self):
+        from lib.pipeline_db import (ConsumedAttemptInput,
+                                     SearchPlanItemInput)
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="lifecycle-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_historical_logs_with_null_plan_context_still_returned(self):
+        self.db.log_search(self.req_id, query="legacy", outcome="error")
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0].get("plan_id"))
+        self.assertIsNone(rows[0].get("execution_stage"))
+
+    def test_request_delete_cascades_plans_keeps_inspection_at_zero(self):
+        self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        self.db.delete_request(self.req_id)
+        # After deletion the cascade should clear plans / items / logs (because
+        # search_log already CASCADEs on request from migration 001). The
+        # inspection method just returns zeros for a missing request.
+        info = self.db.get_search_plan_inspection(self.req_id)
+        self.assertIsNone(info.active)
+        self.assertIsNone(info.latest_failed_deterministic)
+        self.assertIsNone(info.latest_failed_transient)
+        self.assertEqual(info.superseded_count, 0)
+        self.assertEqual(info.legacy_search_log_count, 0)
+
+    def test_consumed_attempt_rolls_back_on_failure_no_partial_state(self):
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=[self.SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        # Build an attempt referencing a plan_item_id that doesn't exist; the
+        # FK on search_log.plan_item_id fires inside the transaction and rolls
+        # back the cursor write too.
+        attempt = self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=plan_id,
+            plan_item_id=999999,
+            plan_ordinal=0,
+            plan_strategy="default",
+            plan_canonical_query_key=None,
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query="q",
+            outcome="no_match",
+            plan_item_count=1,
+        )
+        with self.assertRaises(Exception):
+            self.db.record_consumed_search_attempt(attempt)
+        # No log row, cursor untouched.
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(rows, [])
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 0)
+
+
+@requires_postgres
+class TestSearchPlanStats(unittest.TestCase):
+    """U8: ``get_search_plan_stats`` aggregates plan-aware search_log
+    rows into per-slot and per-query-group usefulness stats. Cache
+    attribution is ``cycle_only`` because there are no per-search
+    cache columns on ``search_log`` today.
+    """
+
+    def setUp(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, NonConsumingAttemptInput,
+            SearchPlanItemInput,
+        )
+        self.SearchPlanItemInput = SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.NonConsumingAttemptInput = NonConsumingAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="stats-mbid",
+            artist_name="Stats", album_title="Test",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _make_plan(self, *, ordinals: int = 2, generator_id: str = "g1"):
+        items = [
+            self.SearchPlanItemInput(
+                ordinal=i, strategy="default" if i == 0 else f"strategy_{i}",
+                query=f"q{i}", canonical_query_key=f"k{i}",
+                repeat_group="default-3" if i == 0 else None,
+            )
+            for i in range(ordinals)
+        ]
+        return self.db.create_successful_search_plan(
+            request_id=self.req_id, generator_id=generator_id,
+            items=items, set_active=True,
+        )
+
+    def _consume(self, plan_id, plan_item_id, ordinal, strategy, query,
+                 *, outcome, plan_item_count, **kw):
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        attempt = self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=plan_id, plan_item_id=plan_item_id,
+            plan_ordinal=ordinal, plan_strategy=strategy,
+            plan_canonical_query_key=kw.pop(
+                "canonical_query_key", f"k{ordinal}"),
+            plan_repeat_group=kw.pop("repeat_group", None),
+            plan_generator_id="g1",
+            query=query, outcome=outcome,
+            plan_item_count=plan_item_count,
+            cycle_count_snapshot=kw.pop(
+                "cycle_count_snapshot", int(req["plan_cycle_count"])),
+            elapsed_s=kw.pop("elapsed_s", 1.0),
+            result_count=kw.pop("result_count", 0),
+            browse_time_s=kw.pop("browse_time_s", 0.5),
+            match_time_s=kw.pop("match_time_s", 0.25),
+            peers_browsed=kw.pop("peers_browsed", 4),
+            peers_browsed_lazy=kw.pop("peers_browsed_lazy", 1),
+            fanout_waves=kw.pop("fanout_waves", 1),
+            apply_scheduler_attempt=kw.pop("apply_scheduler_attempt", True),
+            scheduler_success=kw.pop("scheduler_success", False),
+        )
+        return self.db.record_consumed_search_attempt(attempt)
+
+    def _items_for(self, plan_id):
+        cur = self.db._execute(
+            "SELECT id, ordinal, strategy, canonical_query_key, "
+            "repeat_group FROM search_plan_items WHERE plan_id = %s "
+            "ORDER BY ordinal",
+            (plan_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def test_stats_groups_by_slot_and_query_group(self):
+        plan_id = self._make_plan(ordinals=2)
+        items = self._items_for(plan_id)
+        # Run two attempts on slot 0, one on slot 1.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="no_match", plan_item_count=2,
+                      repeat_group="default-3")
+        self._consume(plan_id, items[1]["id"], 1, "strategy_1", "q1",
+                      outcome="found", plan_item_count=2,
+                      result_count=5, elapsed_s=2.0)
+        # After wrap, slot 0 again.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="no_results", plan_item_count=2,
+                      repeat_group="default-3")
+
+        stats = self.db.get_search_plan_stats(self.req_id)
+        slots = stats.current.slots
+        self.assertEqual(len(slots), 2)
+        # Slots are ordered by ordinal.
+        self.assertEqual(slots[0].identity["ordinal"], 0)
+        self.assertEqual(slots[0].attempts, 2)
+        self.assertEqual(slots[0].consumed_attempts, 2)
+        self.assertEqual(
+            slots[0].outcome_counts,
+            {"no_match": 1, "no_results": 1})
+        self.assertEqual(slots[1].identity["ordinal"], 1)
+        self.assertEqual(slots[1].attempts, 1)
+        self.assertEqual(slots[1].outcome_counts, {"found": 1})
+        # Cache attribution is honest about cycle-only counters.
+        self.assertEqual(stats.current.cache_attribution_level, "cycle_only")
+        self.assertFalse(stats.current.cache_per_search_available)
+        # Query groups exist with stable (repeat_group, key) order.
+        # ordinal-1 has no repeat_group (sorts first as ""),
+        # ordinal-0 carries "default-3".
+        order = [
+            (g.identity["repeat_group"] or "",
+             g.identity["canonical_query_key"] or "")
+            for g in stats.current.query_groups
+        ]
+        self.assertEqual(order, sorted(order))
+
+    def test_stats_includes_legacy_bucket_when_current_only_false(self):
+        # One legacy log without plan context.
+        self.db.log_search(
+            request_id=self.req_id, query="legacy",
+            outcome="no_match", variant="v1",
+        )
+        plan_id = self._make_plan(ordinals=1)
+        items = self._items_for(plan_id)
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="found", plan_item_count=1,
+                      repeat_group="default-3")
+
+        # Default current_only=True: no legacy in current cohort,
+        # legacy bucket only appears in superseded_and_legacy when
+        # current_only=False.
+        stats_current = self.db.get_search_plan_stats(self.req_id)
+        self.assertIsNone(stats_current.current.legacy_bucket)
+        self.assertEqual(
+            stats_current.superseded_and_legacy.slots, [])
+        self.assertIsNone(
+            stats_current.superseded_and_legacy.legacy_bucket)
+
+        stats_full = self.db.get_search_plan_stats(
+            self.req_id, current_only=False)
+        self.assertIsNotNone(stats_full.superseded_and_legacy.legacy_bucket)
+        legacy = stats_full.superseded_and_legacy.legacy_bucket
+        assert legacy is not None
+        self.assertEqual(legacy.attempts, 1)
+        self.assertEqual(legacy.identity, {"kind": "legacy"})
+
+    def test_stats_counts_non_consuming_pre_attempt_rows(self):
+        plan_id = self._make_plan(ordinals=1)
+        items = self._items_for(plan_id)
+        # Pre-attempt failure: non-consuming.
+        self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id, outcome="empty_query",
+                plan_id=plan_id, plan_item_id=items[0]["id"],
+                plan_ordinal=0, plan_strategy="default",
+                plan_canonical_query_key="k0", plan_repeat_group=None,
+                plan_generator_id="g1", query="",
+            ))
+        # Consumed attempt that yields a found.
+        self._consume(plan_id, items[0]["id"], 0, "default", "q0",
+                      outcome="found", plan_item_count=1)
+
+        stats = self.db.get_search_plan_stats(self.req_id)
+        # Both rows live on slot 0; non-consuming counted separately.
+        self.assertEqual(len(stats.current.slots), 1)
+        slot0 = stats.current.slots[0]
+        self.assertEqual(slot0.attempts, 2)
+        self.assertEqual(slot0.consumed_attempts, 1)
+        self.assertEqual(slot0.non_consuming_attempts, 1)
+        self.assertEqual(slot0.stale_completion_attempts, 0)
 
 
 if __name__ == "__main__":

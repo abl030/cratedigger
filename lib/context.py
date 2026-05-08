@@ -81,3 +81,11 @@ class CratediggerContext:
     # object with the owner context to make browse_global_max_workers global.
     browse_coordinator: Any = None
     browse_coordinator_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # Worker-local plan-execution snapshot. Set on per-album worker
+    # contexts by ``prepare_find_download_context`` so the find_download
+    # worker can validate the request's active plan is still current
+    # before claiming download ownership. Stale completions (request
+    # was regenerated mid-flight) skip the claim. Owner-thread context
+    # never sets this.
+    active_plan_execution: Any = None

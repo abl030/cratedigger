@@ -40,6 +40,36 @@ from web import cache as cache_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
+def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
+                              tracks, source):
+    """Run shared plan generation after `set_tracks()` on the add path.
+
+    Failures are recorded but never bubble up — the request is repairable
+    via startup reconciliation or explicit regeneration. This keeps the
+    add API contract stable: a 200 response means the request landed,
+    even if plan generation needs another attempt.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import SearchPlanService
+    s = _server()
+    try:
+        svc = SearchPlanService(s._db(), read_runtime_config())
+        svc.generate_for_new_request(
+            req_id,
+            artist_name=artist_name,
+            album_title=album_title,
+            year=year,
+            tracks=tracks or [],
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never fail the HTTP request because plan generation hiccupped.
+        logger.warning(
+            "post_pipeline_add: plan generation failed for request %s: %s",
+            req_id, exc,
+        )
+
+
 def _server():
     """Deferred import to avoid circular deps."""
     from web import server
@@ -438,6 +468,116 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
     h._json(result)
 
 
+def get_pipeline_search_plan(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U6: read-only view of a request's persisted search plan.
+
+    Mirrors ``pipeline-cli search-plan show --json`` so the future
+    dashboard and operators see the same JSON. The U8 stats block is
+    included by default; pass ``stats=0`` to suppress it for a leaner
+    payload (the show endpoint stays a single contract).
+    """
+    from lib.search_plan_inspection import (
+        RequestNotFound,
+        build_inspection_payload,
+    )
+    include_stats = params.get("stats", ["1"])[0] != "0"
+    db = _server()._db()
+    payload = build_inspection_payload(
+        db, int(req_id_str), include_stats=include_stats)
+    if isinstance(payload, RequestNotFound):
+        h._error("Not found", 404)
+        return
+    h._json(payload)
+
+
+def post_pipeline_search_plan_regenerate(
+    h, body: dict, req_id_str: str,
+) -> None:
+    """U8: ``POST /api/pipeline/<id>/search-plan/regenerate``.
+
+    Wraps ``SearchPlanService.generate_for_request(regenerate=True)``.
+    Allowed for any request status; only ``wanted`` requests are
+    executable, surfaced via ``executable`` in the response so
+    operators can't misread "regenerated" as "now downloading".
+
+    Status-code mapping mirrors the CLI's exit codes:
+      * 200 — ``RESULT_SUCCESS`` or ``RESULT_NOOP_ACTIVE_PLAN_EXISTS``
+      * 404 — ``RESULT_REQUEST_NOT_FOUND``
+      * 422 — ``RESULT_FAILED_DETERMINISTIC`` (sticky, body explains)
+      * 503 — ``RESULT_FAILED_TRANSIENT`` (retryable)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_FAILED_DETERMINISTIC,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_NOOP_ACTIVE_PLAN_EXISTS,
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SUCCESS,
+        SearchPlanService,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    prepend_artist: bool | None = None
+    if body is not None and "prepend_artist" in body:
+        if not isinstance(body["prepend_artist"], bool):
+            h._json({"error": "prepend_artist must be a boolean"}, status=400)
+            return
+        prepend_artist = body["prepend_artist"]
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.generate_for_request(
+        request_id, regenerate=True, prepend_artist=prepend_artist,
+    )
+
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "outcome": result.outcome,
+        "plan_id": result.plan_id,
+        "is_supersede": result.is_supersede,
+        "failure_class": result.failure_class,
+        "error_message": result.error_message,
+    }
+
+    req = db.get_request(request_id)
+    if req is not None:
+        payload["request_status"] = req.get("status")
+        payload["executable"] = (
+            req.get("status") == "wanted"
+            and result.outcome == RESULT_SUCCESS
+        )
+    else:
+        payload["request_status"] = None
+        payload["executable"] = False
+
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        # Symmetric body shape with 422 / 503: clients expect to see
+        # request_id / outcome / plan_id (None) / failure_class /
+        # error_message even on the not-found path.
+        payload["error"] = "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_FAILED_DETERMINISTIC:
+        payload["error"] = result.error_message or "Plan generation failed"
+        h._json(payload, status=422)
+        return
+    if result.outcome == RESULT_FAILED_TRANSIENT:
+        payload["error"] = result.error_message or "Plan generation retryable"
+        h._json(payload, status=503)
+        return
+    # RESULT_SUCCESS or RESULT_NOOP_ACTIVE_PLAN_EXISTS.
+    if result.outcome not in (RESULT_SUCCESS, RESULT_NOOP_ACTIVE_PLAN_EXISTS):
+        # Defensive fallback; surface as 500 so we notice unknown shapes.
+        h._error(f"Unknown plan generation outcome: {result.outcome}", 500)
+        return
+    h._json(payload)
+
+
 def _serialize_import_job(job) -> dict[str, object]:
     if hasattr(job, "to_json_dict"):
         return job.to_json_dict()
@@ -539,6 +679,15 @@ def post_pipeline_add(h, body: dict) -> None:
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
 
+        _generate_plan_after_add(
+            req_id,
+            artist_name=release["artist_name"],
+            album_title=release["title"],
+            year=release.get("year"),
+            tracks=release.get("tracks") or [],
+            source=source,
+        )
+
         h._json({
             "status": "added",
             "id": req_id,
@@ -576,6 +725,15 @@ def post_pipeline_add(h, body: dict) -> None:
 
     if release.get("tracks"):
         s._db().set_tracks(req_id, release["tracks"])
+
+    _generate_plan_after_add(
+        req_id,
+        artist_name=release["artist_name"],
+        album_title=release["title"],
+        year=release.get("year"),
+        tracks=release.get("tracks") or [],
+        source=source,
+    )
 
     h._json({
         "status": "added",
@@ -717,6 +875,14 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
+        _generate_plan_after_add(
+            req_id,
+            artist_name=release["artist_name"],
+            album_title=release["title"],
+            year=release.get("year"),
+            tracks=release.get("tracks") or [],
+            source="request",
+        )
         # Newly added request — status is already 'wanted', set quality override
         transitions.finalize_request(
             s._db(),
@@ -1163,6 +1329,8 @@ GET_ROUTES: dict[str, object] = {
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
+     get_pipeline_search_plan),
     (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
 ]
 
@@ -1176,3 +1344,8 @@ POST_ROUTES: dict[str, object] = {
     "/api/pipeline/force-import": post_pipeline_force_import,
     "/api/pipeline/delete": post_pipeline_delete,
 }
+
+POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/regenerate$"),
+     post_pipeline_search_plan_regenerate),
+]

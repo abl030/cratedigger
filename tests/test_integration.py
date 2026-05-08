@@ -1104,7 +1104,14 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
     def tearDown(self):
         cratedigger.cfg = self._orig_cfg
 
-    def test_log_search_result_preserves_unknown_result_count(self):
+    def test_log_search_result_routes_pre_attempt_error_through_non_consuming(self):
+        """Plan §U5: error without final_state and without plan_execution
+        is a pre-attempt failure -- routes through
+        ``record_non_consuming_search_attempt`` (NOT the legacy log_search
+        seam) and must NOT call ``record_attempt`` directly (the
+        non-consuming method owns scheduler/backoff)."""
+        from lib.pipeline_db import NonConsumingAttemptInput
+
         db = MagicMock()
         source = MagicMock()
         source._get_db.return_value = db
@@ -1119,22 +1126,19 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             ctx,
         )
 
-        db.log_search.assert_called_once_with(
-            request_id=42,
-            query="Artist Album",
-            result_count=None,
-            elapsed_s=None,
-            outcome="error",
-            candidates=None,
-            variant=None,
-            final_state=None,
-            browse_time_s=0.0,
-            match_time_s=0.0,
-            peers_browsed=0,
-            peers_browsed_lazy=0,
-            fanout_waves=0,
-        )
-        db.record_attempt.assert_called_once_with(42, "search")
+        db.log_search.assert_not_called()
+        db.record_attempt.assert_not_called()
+        db.record_consumed_search_attempt.assert_not_called()
+        db.record_non_consuming_search_attempt.assert_called_once()
+        attempt = db.record_non_consuming_search_attempt.call_args.args[0]
+        self.assertIsInstance(attempt, NonConsumingAttemptInput)
+        self.assertEqual(attempt.request_id, 42)
+        self.assertEqual(attempt.query, "Artist Album")
+        self.assertEqual(attempt.outcome, "error")
+        self.assertTrue(attempt.apply_scheduler_attempt)
+        # No plan_execution carrier (legacy / no-plan path).
+        self.assertIsNone(attempt.plan_id)
+        self.assertIsNone(attempt.plan_ordinal)
 
     def test_apply_find_download_result_maps_enqueue_failure_to_error(self):
         album = MagicMock()

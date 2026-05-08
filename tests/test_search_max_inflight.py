@@ -29,9 +29,39 @@ from lib.enqueue import (
     FindDownloadResult,
 )
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.pipeline_db import SearchPlanItemInput
 from lib.quality import CandidateScore
-from lib.search import SearchResult, SearchVariant
+from lib.search import (
+    SEARCH_PLAN_GENERATOR_ID, PlanExecutionContext, SearchResult,
+)
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+
+def _seed_plan(db: FakePipelineDB, request_id: int, *, query: str = "Artist Album") -> PlanExecutionContext:
+    """Seed an active default-strategy plan item and return its execution context."""
+    plan_id = db.create_successful_search_plan(
+        request_id=request_id,
+        generator_id=SEARCH_PLAN_GENERATOR_ID,
+        items=[
+            SearchPlanItemInput(
+                ordinal=0, strategy="default", query=query,
+                canonical_query_key=query.lower(),
+            ),
+        ],
+    )
+    active = db.get_active_search_plan(request_id)
+    assert active is not None
+    return PlanExecutionContext(
+        plan_id=plan_id,
+        plan_item_id=active.items[0].id,
+        plan_ordinal=0,
+        plan_strategy="default",
+        plan_canonical_query_key=active.items[0].canonical_query_key,
+        plan_repeat_group=active.items[0].repeat_group,
+        plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+        plan_item_count=1,
+        cycle_count_snapshot=0,
+    )
 
 
 def _empty_cfg(**overrides) -> CratediggerConfig:
@@ -99,15 +129,24 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         first_find_started = threading.Event()
         release_first_find = threading.Event()
 
-        def variant_for(album, _cfg, _db):
+        # U5 plan-driven selection: stub the active-plan picker. Each
+        # album returns a synthetic plan-execution snapshot derived from
+        # its title.
+        def select_plan(album, _db):
+            query = f"Artist {album.title}"
             return (
-                SearchVariant(
-                    kind="default",
-                    query=f"Artist {album.title}",
-                    tag="default",
-                    slice_index=None,
+                query,
+                PlanExecutionContext(
+                    plan_id=100 + album.id,
+                    plan_item_id=200 + album.id,
+                    plan_ordinal=0,
+                    plan_strategy="default",
+                    plan_canonical_query_key=query.lower(),
+                    plan_repeat_group="default",
+                    plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+                    plan_item_count=1,
+                    cycle_count_snapshot=0,
                 ),
-                f"Artist {album.title}",
             )
 
         def collect(_search_id, query, album_id, _cfg, _slskd, variant_tag):
@@ -131,7 +170,8 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
 
         def run_pipeline():
             with patch.object(
-                cratedigger, "_select_variant_for_album", side_effect=variant_for,
+                cratedigger, "_select_active_plan_item_for_album",
+                side_effect=select_plan,
             ), patch.object(
                 cratedigger, "_collect_search_results", side_effect=collect,
             ), patch.object(
@@ -140,6 +180,11 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
                 side_effect=lambda album, ctx, result=None: ctx,
             ), patch.object(
                 cratedigger, "find_download", side_effect=find,
+            ), patch.object(
+                cratedigger, "_log_search_result",
+                # Skip the log-write path; the test asserts pipeline depth, not logs.
+                # Keeps the stubbed mock DB out of the consumed-attempt seam.
+                side_effect=lambda *a, **kw: None,
             ):
                 return cratedigger._search_and_queue_parallel(albums, ctx)
 
@@ -180,6 +225,10 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
             source="request",
             mb_release_id="mbid-miss",
         )
+        # Plan-driven: each request has a single-item active plan.
+        plan_exec_found = _seed_plan(db, rid_found, query="Artist Found")
+        plan_exec_miss = _seed_plan(db, rid_miss, query="Artist Miss")
+        plan_for = {-rid_found: plan_exec_found, -rid_miss: plan_exec_miss}
         source = MagicMock()
         source._get_db.return_value = db
         ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
@@ -237,16 +286,9 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
             db_source="request",
         )
 
-        def variant_for(album, _cfg, _db):
-            return (
-                SearchVariant(
-                    kind="default",
-                    query=f"Artist {album.title}",
-                    tag="default",
-                    slice_index=None,
-                ),
-                f"Artist {album.title}",
-            )
+        def select_plan(album, _db):
+            plan_exec = plan_for[album.id]
+            return (f"Artist {album.title}", plan_exec)
 
         def collect(_search_id, query, album_id, _cfg, _slskd, variant_tag):
             return SearchResult(
@@ -295,7 +337,8 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
                 )
 
         with patch.object(
-            cratedigger, "_select_variant_for_album", side_effect=variant_for,
+            cratedigger, "_select_active_plan_item_for_album",
+            side_effect=select_plan,
         ), patch.object(
             cratedigger, "_collect_search_results", side_effect=collect,
         ), patch.object(
@@ -356,6 +399,8 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
             source="request",
             mb_release_id="mbid-crash",
         )
+        plan_exec_found = _seed_plan(db, rid_found, query="Artist Found")
+        plan_for = {-rid_found: plan_exec_found}
         source = MagicMock()
         source._get_db.return_value = db
         ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
@@ -393,18 +438,10 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
             db_source="request",
         )
 
-        def variant_for(album, _cfg, _db):
+        def select_plan(album, _db):
             if album.id == -rid_crash:
                 raise RuntimeError("owner path failed after worker submit")
-            return (
-                SearchVariant(
-                    kind="default",
-                    query=f"Artist {album.title}",
-                    tag="default",
-                    slice_index=None,
-                ),
-                f"Artist {album.title}",
-            )
+            return (f"Artist {album.title}", plan_for[album.id])
 
         def collect(_search_id, query, album_id, _cfg, _slskd, variant_tag):
             return SearchResult(
@@ -424,7 +461,8 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
             )
 
         with patch.object(
-            cratedigger, "_select_variant_for_album", side_effect=variant_for,
+            cratedigger, "_select_active_plan_item_for_album",
+            side_effect=select_plan,
         ), patch.object(
             cratedigger, "_collect_search_results", side_effect=collect,
         ), patch.object(

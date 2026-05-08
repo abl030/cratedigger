@@ -189,6 +189,8 @@ def _make_server():
     ]
 
     mock_db.get_search_history.return_value = []
+    mock_db.get_search_plan_stats_history.return_value = []
+    mock_db.get_legacy_search_log_summary.return_value = (0, [])
     mock_db.get_pipeline_dashboard_metrics.return_value = {
         "generated_at": "2026-05-05T00:00:00+00:00",
         "searches": {
@@ -211,6 +213,10 @@ def _make_server():
                         "exhausted": 0,
                         "errors": 1,
                     },
+                    "cursor_wraps": 0,
+                    "stale_completions": 0,
+                    "non_consuming": 1,
+                    "cache_attribution_level": "cycle_only",
                 },
                 {
                     "label": "6h",
@@ -230,6 +236,10 @@ def _make_server():
                         "exhausted": 0,
                         "errors": 0,
                     },
+                    "cursor_wraps": 0,
+                    "stale_completions": 0,
+                    "non_consuming": 0,
+                    "cache_attribution_level": "cycle_only",
                 },
             ],
         },
@@ -431,6 +441,15 @@ def _make_server():
                     "new_dirs": 75,
                 },
             ],
+        },
+        "plan_readiness": {
+            "generator_id": "search-plan/2026-05-08-1",
+            "wanted_total": 10,
+            "wanted_searchable": 7,
+            "wanted_legacy": 1,
+            "wanted_failed_deterministic": 1,
+            "wanted_failed_transient": 1,
+            "wanted_no_plan": 0,
         },
     }
     mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
@@ -916,6 +935,8 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/constants",
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
+        r"^/api/pipeline/(\d+)/search-plan$",
+        r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         "/api/pipeline/add",
         "/api/pipeline/update",
         "/api/pipeline/upgrade",
@@ -951,6 +972,9 @@ class TestRouteContractAudit(unittest.TestCase):
         actual = set(srv.Handler._FUNC_GET_ROUTES)
         actual.update(srv.Handler._FUNC_POST_ROUTES)
         actual.update(pattern.pattern for pattern, _fn in srv.Handler._FUNC_GET_PATTERNS)
+        actual.update(
+            pattern.pattern for pattern, _fn
+            in getattr(srv.Handler, "_FUNC_POST_PATTERNS", []))
 
         self.assertFalse(actual - self.CLASSIFIED_ROUTES,
                          f"Unclassified web routes: {sorted(actual - self.CLASSIFIED_ROUTES)}")
@@ -1031,12 +1055,24 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
     DASHBOARD_REQUIRED_FIELDS = {
         "generated_at", "redis", "searches", "cycles", "coverage",
-        "peer_dirs",
+        "peer_dirs", "plan_readiness",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
         "searches_per_hour", "searches_per_24h", "avg_elapsed_s",
         "median_elapsed_s", "p95_elapsed_s", "max_elapsed_s", "outcomes",
+        # Persisted-search-plans rollout (U7): wrap/stale/non-consuming
+        # counts replace the exhausted-based reset signal. Cache
+        # attribution is surfaced honestly (search_log has no per-search
+        # cache columns today) so the dashboard cannot imply per-slot
+        # cache numbers exist.
+        "cursor_wraps", "stale_completions", "non_consuming",
+        "cache_attribution_level",
+    }
+    DASHBOARD_PLAN_READINESS_FIELDS = {
+        "generator_id", "wanted_total", "wanted_searchable",
+        "wanted_legacy", "wanted_failed_deterministic",
+        "wanted_failed_transient", "wanted_no_plan",
     }
     DASHBOARD_CYCLE_WINDOW_FIELDS = {
         "label", "hours", "cycles", "avg_cycle_s", "median_cycle_s",
@@ -1225,6 +1261,32 @@ class TestPipelineRouteContracts(_WebServerCase):
             data["coverage"]["top_loop_suspects"][0],
             {"reset_24h", "problem_24h"},
             "pipeline dashboard loop suspect",
+        )
+        # Persisted-search-plans plan-readiness panel (U7). Replaces
+        # exhausted-based reporting with explicit plan-state buckets.
+        _assert_required_fields(
+            self,
+            data["plan_readiness"],
+            self.DASHBOARD_PLAN_READINESS_FIELDS,
+            "pipeline dashboard plan readiness",
+        )
+        readiness = data["plan_readiness"]
+        # Sum of buckets must equal wanted_total. Off-by-one means the
+        # classifier dropped a row on the floor.
+        self.assertEqual(
+            readiness["wanted_total"],
+            (readiness["wanted_searchable"]
+             + readiness["wanted_legacy"]
+             + readiness["wanted_failed_deterministic"]
+             + readiness["wanted_failed_transient"]
+             + readiness["wanted_no_plan"]),
+            "plan_readiness buckets must sum to wanted_total",
+        )
+        # Cache attribution level on every search window is the honest
+        # surface, not a per-slot number.
+        self.assertEqual(
+            data["searches"]["windows"][0]["cache_attribution_level"],
+            "cycle_only",
         )
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {
@@ -1625,6 +1687,527 @@ class TestPipelineRouteContracts(_WebServerCase):
             "Go! Team-shape transcode must trigger the gate in the simulator")
 
 
+class TestPipelineSearchPlanContract(_WebServerCase):
+    """U6 contract for ``GET /api/pipeline/<id>/search-plan``.
+
+    The frontend doesn't consume this in v1, but the route must be
+    wired so the future dashboard can. The required-fields set is the
+    contract operators / dashboard authors get to depend on.
+    """
+
+    REQUIRED_FIELDS = {
+        "request_id",
+        "request",
+        "current_generator_id",
+        "currentness",
+        "active_plan",
+        "latest_failed_deterministic",
+        "latest_failed_transient",
+        "superseded_count",
+        "legacy_logs",
+        "stats",
+    }
+    STATS_REQUIRED_FIELDS = {
+        "request_id", "current", "superseded_and_legacy",
+    }
+    STATS_BUCKET_REQUIRED_FIELDS = {
+        "slots", "query_groups", "legacy_bucket",
+        "cache_attribution_level", "cache_per_search_available",
+    }
+    STATS_GROUP_REQUIRED_FIELDS = {
+        "identity", "attempts", "consumed_attempts",
+        "non_consuming_attempts", "stale_completion_attempts",
+        "outcome_counts", "elapsed_s_mean", "elapsed_s_p95",
+        "result_count_mean", "browse_time_s_mean", "match_time_s_mean",
+        "peers_browsed_mean", "fanout_waves_mean", "last_seen_at",
+    }
+    REQUEST_REQUIRED_FIELDS = {
+        "id", "status", "artist_name", "album_title",
+        "mb_release_id", "discogs_release_id", "year", "source",
+    }
+    CURRENTNESS_REQUIRED_FIELDS = {
+        "is_wanted",
+        "has_active_plan",
+        "active_plan_generator_id",
+        "current_generator_searchable",
+        "generator_id_mismatch",
+        "has_deterministic_failure",
+        "has_retryable_failure",
+    }
+    ACTIVE_PLAN_REQUIRED_FIELDS = {"plan", "items", "next_ordinal", "cycle_count"}
+    PLAN_ROW_REQUIRED_FIELDS = {
+        "id", "request_id", "generator_id", "status", "failure_class",
+        "metadata_snapshot", "provenance", "error_message",
+        "superseded_at", "superseded_by_plan_id", "created_at",
+    }
+    PLAN_ITEM_REQUIRED_FIELDS = {
+        "id", "plan_id", "ordinal", "strategy", "query",
+        "canonical_query_key", "repeat_group", "provenance",
+    }
+    LEGACY_LOGS_REQUIRED_FIELDS = {"count", "head"}
+    LEGACY_HEAD_REQUIRED_FIELDS = {
+        "id", "created_at", "outcome", "variant", "query",
+        "result_count", "elapsed_s", "final_state",
+    }
+
+    def _wire_inspection(
+        self,
+        *,
+        request_status: str = "wanted",
+        request_id: int = 100,
+        active: object = None,
+        latest_failed_deterministic: object = None,
+        latest_failed_transient: object = None,
+        superseded_count: int = 0,
+        legacy_log_count: int = 0,
+        legacy_head_history: list[dict] | None = None,
+    ) -> None:
+        from lib.pipeline_db import (
+            SearchPlanInspection,
+            SearchPlanStats,
+            SearchPlanStatsBucket,
+            CACHE_ATTRIBUTION_CYCLE_ONLY,
+        )
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=request_id, status=request_status,
+        )
+        self.mock_db.get_search_history.reset_mock()
+        self.mock_db.get_legacy_search_log_summary.reset_mock()
+        self.mock_db.get_search_plan_stats_history.reset_mock()
+        self.mock_db.get_search_plan_inspection.return_value = (
+            SearchPlanInspection(
+                request_id=request_id,
+                active=active,  # type: ignore[arg-type]
+                latest_failed_deterministic=latest_failed_deterministic,  # type: ignore[arg-type]
+                latest_failed_transient=latest_failed_transient,  # type: ignore[arg-type]
+                superseded_count=superseded_count,
+                legacy_search_log_count=legacy_log_count,
+            ))
+        self.mock_db.get_legacy_search_log_summary.return_value = (
+            legacy_log_count, legacy_head_history or [])
+        self.mock_db.get_search_plan_stats_history.return_value = []
+        empty_bucket = SearchPlanStatsBucket(
+            slots=[], query_groups=[], legacy_bucket=None,
+            cache_attribution_level=CACHE_ATTRIBUTION_CYCLE_ONLY,
+            cache_per_search_available=False,
+        )
+        self.mock_db.get_search_plan_stats.return_value = SearchPlanStats(
+            request_id=request_id,
+            current=empty_bucket,
+            superseded_and_legacy=empty_bucket,
+        )
+
+    def _make_active(
+        self, *,
+        generator_id: str = "search-plan/2026-05-08-1",
+        items_count: int = 2,
+        next_ordinal: int = 0,
+        cycle_count: int = 0,
+        plan_provenance: dict | None = None,
+    ):
+        from datetime import datetime, timezone
+        from lib.pipeline_db import (
+            ActiveSearchPlan, SearchPlanItemRow, SearchPlanRow,
+        )
+        plan = SearchPlanRow(
+            id=11, request_id=100, generator_id=generator_id,
+            status="active", failure_class=None,
+            metadata_snapshot={"artist": "X"}, provenance=plan_provenance,
+            error_message=None, superseded_at=None,
+            superseded_by_plan_id=None,
+            created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        )
+        items = [
+            SearchPlanItemRow(
+                id=1000 + i, plan_id=11, ordinal=i,
+                strategy=("default" if i == 0 else f"strategy_{i}"),
+                query=f"q{i}", canonical_query_key=f"k{i}",
+                repeat_group=("default-3" if i == 0 else None),
+                provenance={"src": "gen"} if i == 0 else None,
+            )
+            for i in range(items_count)
+        ]
+        return ActiveSearchPlan(
+            plan=plan, items=items,
+            next_ordinal=next_ordinal, cycle_count=cycle_count,
+        )
+
+    def _make_failed_plan(
+        self, *,
+        plan_id: int,
+        status: str,
+        failure_class: str,
+        error_message: str = "boom",
+        generator_id: str = "search-plan/2026-05-08-1",
+    ):
+        from datetime import datetime, timezone
+        from lib.pipeline_db import SearchPlanRow
+        return SearchPlanRow(
+            id=plan_id, request_id=100, generator_id=generator_id,
+            status=status, failure_class=failure_class,
+            metadata_snapshot=None,
+            provenance={"reason": failure_class},
+            error_message=error_message, superseded_at=None,
+            superseded_by_plan_id=None,
+            created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+    def tearDown(self) -> None:
+        # Reset mocks so other suites in this class don't see leakage.
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="imported", min_bitrate=320,
+            imported_path="/mnt/virtio/Music/Beets/Test",
+        )
+        self.mock_db.get_legacy_search_log_summary.return_value = (0, [])
+        self.mock_db.get_search_plan_stats_history.return_value = []
+        self.mock_db.get_search_plan_inspection.reset_mock(
+            return_value=True, side_effect=True)
+        self.mock_db.get_search_plan_stats.reset_mock(
+            return_value=True, side_effect=True)
+
+    # -- happy path: active + failures + legacy logs --
+
+    def test_search_plan_route_returns_full_inspection_payload(self):
+        active = self._make_active(plan_provenance={
+            "omitted_candidates": [{"q": "x", "why": "low_entropy"}],
+            "dropped_low_entropy_tokens": ["the", "and"],
+        })
+        det = self._make_failed_plan(
+            plan_id=22, status="failed_deterministic",
+            failure_class="no_runnable_query",
+            error_message="all queries dropped")
+        trans = self._make_failed_plan(
+            plan_id=23, status="failed_transient",
+            failure_class="resolver_unavailable",
+            error_message="resolver 503")
+        self._wire_inspection(
+            active=active,
+            latest_failed_deterministic=det,
+            latest_failed_transient=trans,
+            superseded_count=2,
+            legacy_log_count=5,
+            legacy_head_history=[
+                {"id": 1, "request_id": 100, "outcome": "no_match",
+                 "variant": "v1", "query": "q1", "result_count": 0,
+                 "elapsed_s": 1.0, "final_state": "Completed",
+                 "created_at": "2026-04-01T00:00:00+00:00",
+                 "plan_id": None},
+                {"id": 2, "request_id": 100, "outcome": "found",
+                 "variant": "v1", "query": "q2", "result_count": 5,
+                 "elapsed_s": 2.0, "final_state": "Completed",
+                 "created_at": "2026-04-02T00:00:00+00:00",
+                 "plan_id": None},
+            ],
+        )
+
+        status, data = self._get("/api/pipeline/100/search-plan")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "search-plan response")
+        _assert_required_fields(self, data["request"],
+                                self.REQUEST_REQUIRED_FIELDS,
+                                "search-plan request")
+        _assert_required_fields(self, data["currentness"],
+                                self.CURRENTNESS_REQUIRED_FIELDS,
+                                "search-plan currentness")
+        self.assertTrue(data["currentness"]["current_generator_searchable"])
+        self.assertFalse(data["currentness"]["generator_id_mismatch"])
+        self.assertTrue(data["currentness"]["has_deterministic_failure"])
+        self.assertTrue(data["currentness"]["has_retryable_failure"])
+        self.assertIsNotNone(data["active_plan"])
+        _assert_required_fields(self, data["active_plan"],
+                                self.ACTIVE_PLAN_REQUIRED_FIELDS,
+                                "search-plan active_plan")
+        _assert_required_fields(self, data["active_plan"]["plan"],
+                                self.PLAN_ROW_REQUIRED_FIELDS,
+                                "search-plan active_plan.plan")
+        for item in data["active_plan"]["items"]:
+            _assert_required_fields(
+                self, item, self.PLAN_ITEM_REQUIRED_FIELDS,
+                "search-plan active_plan.items[]")
+        # Items must be ordinal-ordered.
+        ordinals = [it["ordinal"] for it in data["active_plan"]["items"]]
+        self.assertEqual(ordinals, sorted(ordinals))
+        # Failures are present and required-field-shaped.
+        _assert_required_fields(
+            self, data["latest_failed_deterministic"],
+            self.PLAN_ROW_REQUIRED_FIELDS,
+            "search-plan latest_failed_deterministic")
+        _assert_required_fields(
+            self, data["latest_failed_transient"],
+            self.PLAN_ROW_REQUIRED_FIELDS,
+            "search-plan latest_failed_transient")
+        self.assertEqual(data["superseded_count"], 2)
+        _assert_required_fields(
+            self, data["legacy_logs"], self.LEGACY_LOGS_REQUIRED_FIELDS,
+            "search-plan legacy_logs")
+        self.assertEqual(data["legacy_logs"]["count"], 5)
+        self.mock_db.get_legacy_search_log_summary.assert_called_once_with(
+            100, limit=5)
+        self.mock_db.get_search_plan_stats_history.assert_called_once_with(100)
+        self.mock_db.get_search_history.assert_not_called()
+        for row in data["legacy_logs"]["head"]:
+            _assert_required_fields(
+                self, row, self.LEGACY_HEAD_REQUIRED_FIELDS,
+                "search-plan legacy_logs.head[]")
+        # Stats payload structural contract.
+        _assert_required_fields(
+            self, data["stats"], self.STATS_REQUIRED_FIELDS,
+            "search-plan stats")
+        _assert_required_fields(
+            self, data["stats"]["current"],
+            self.STATS_BUCKET_REQUIRED_FIELDS,
+            "search-plan stats.current")
+        _assert_required_fields(
+            self, data["stats"]["superseded_and_legacy"],
+            self.STATS_BUCKET_REQUIRED_FIELDS,
+            "search-plan stats.superseded_and_legacy")
+        # Cache attribution must be honest about cycle-only counters.
+        self.assertEqual(
+            data["stats"]["current"]["cache_attribution_level"],
+            "cycle_only")
+        self.assertFalse(
+            data["stats"]["current"]["cache_per_search_available"])
+
+    # -- 404 missing request --
+
+    def test_search_plan_missing_request_returns_404_with_error_body(self):
+        self.mock_db.get_request.return_value = None
+        status, data = self._get("/api/pipeline/9999/search-plan")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    # -- request with no plan at all (transient failure) --
+
+    def test_search_plan_no_active_plan_with_only_transient_failure(self):
+        trans = self._make_failed_plan(
+            plan_id=23, status="failed_transient",
+            failure_class="resolver_unavailable")
+        self._wire_inspection(
+            active=None, latest_failed_transient=trans,
+        )
+        status, data = self._get("/api/pipeline/100/search-plan")
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["active_plan"])
+        self.assertFalse(data["currentness"]["has_active_plan"])
+        self.assertFalse(data["currentness"]["current_generator_searchable"])
+        self.assertTrue(data["currentness"]["has_retryable_failure"])
+
+    # -- legacy logs section is non-empty when only legacy rows exist --
+
+    def test_search_plan_surfaces_legacy_logs_when_no_plan_context(self):
+        self._wire_inspection(
+            active=None,
+            legacy_log_count=2,
+            legacy_head_history=[
+                {"id": 1, "request_id": 100, "outcome": "no_match",
+                 "variant": "v1", "query": "q1", "result_count": 0,
+                 "elapsed_s": 0.5, "final_state": "Completed",
+                 "created_at": "2026-04-01T00:00:00+00:00",
+                 "plan_id": None},
+                {"id": 2, "request_id": 100, "outcome": "no_results",
+                 "variant": "v2", "query": "q2", "result_count": 0,
+                 "elapsed_s": 0.6, "final_state": "Completed",
+                 "created_at": "2026-04-02T00:00:00+00:00",
+                 "plan_id": None},
+            ],
+        )
+        status, data = self._get("/api/pipeline/100/search-plan")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["legacy_logs"]["count"], 2)
+        self.assertEqual(len(data["legacy_logs"]["head"]), 2)
+
+    # -- generator id drift: active plan but stale generator id --
+
+    def test_search_plan_flags_generator_id_mismatch_when_stale(self):
+        active = self._make_active(generator_id="search-plan/2026-01-01-old")
+        self._wire_inspection(active=active)
+        status, data = self._get("/api/pipeline/100/search-plan")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["currentness"]["has_active_plan"])
+        self.assertTrue(data["currentness"]["generator_id_mismatch"])
+        self.assertFalse(data["currentness"]["current_generator_searchable"])
+        self.assertEqual(
+            data["currentness"]["active_plan_generator_id"],
+            "search-plan/2026-01-01-old")
+
+
+class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
+    """U8 contract for ``POST /api/pipeline/<id>/search-plan/regenerate``.
+
+    The endpoint must wrap ``SearchPlanService.generate_for_request``
+    with status-code mapping that mirrors the CLI exit codes:
+      * 200 — success / noop
+      * 404 — request not found
+      * 422 — deterministic failure (sticky)
+      * 503 — transient failure (retryable)
+    """
+
+    REGEN_REQUIRED_FIELDS = {
+        "request_id", "outcome", "plan_id", "is_supersede",
+        "failure_class", "error_message",
+        "request_status", "executable",
+    }
+
+    def _patch_service(self, *, outcome, plan_id=None, is_supersede=False,
+                       failure_class=None, error_message=None):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import ServiceResult
+
+        result = ServiceResult(
+            outcome=outcome, plan_id=plan_id, is_supersede=is_supersede,
+            failure_class=failure_class, error_message=error_message,
+        )
+        return _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+            return_value=result,
+        )
+
+    def setUp(self) -> None:
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted",
+        )
+        # The route reads the runtime config — patch it to a default.
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+
+    def test_regenerate_success_returns_200_with_required_fields(self):
+        with self._patch_service(outcome="success", plan_id=99,
+                                 is_supersede=True):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REGEN_REQUIRED_FIELDS,
+                                "search-plan regenerate response")
+        self.assertEqual(data["outcome"], "success")
+        self.assertEqual(data["plan_id"], 99)
+        self.assertTrue(data["is_supersede"])
+        # Wanted request -> executable=True after success.
+        self.assertTrue(data["executable"])
+        self.assertEqual(data["request_status"], "wanted")
+
+    def test_regenerate_success_for_imported_request_marks_not_executable(self):
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="imported",
+        )
+        with self._patch_service(outcome="success", plan_id=99):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "success")
+        self.assertFalse(data["executable"])
+        self.assertEqual(data["request_status"], "imported")
+
+    def test_regenerate_request_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        with self._patch_service(outcome="request_not_found"):
+            status, data = self._post(
+                "/api/pipeline/9999/search-plan/regenerate", {})
+        self.assertEqual(status, 404)
+        # 404 body must carry the same structured shape as 422/503 so
+        # clients can introspect outcome / plan_id without status-code
+        # branching (#8). plan_id is None on the not-found path.
+        self.assertIn("error", data)
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertIn("plan_id", data)
+        self.assertIsNone(data["plan_id"])
+        self.assertEqual(data["request_id"], 9999)
+
+    def test_regenerate_noop_returns_200_with_noop_outcome(self):
+        """#7: NOOP outcome from the service surfaces as 200 with the
+        outcome string and the existing plan_id, not as a generic 200."""
+        with self._patch_service(
+                outcome="noop_active_plan_exists",
+                plan_id=77, is_supersede=False):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REGEN_REQUIRED_FIELDS,
+                                "search-plan regenerate noop response")
+        self.assertEqual(data["outcome"], "noop_active_plan_exists")
+        self.assertEqual(data["plan_id"], 77)
+        self.assertFalse(data["is_supersede"])
+
+    def test_regenerate_deterministic_failure_returns_422(self):
+        with self._patch_service(
+                outcome="failed_deterministic",
+                failure_class="no_runnable_query",
+                error_message="all queries dropped"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 422)
+        self.assertEqual(data["outcome"], "failed_deterministic")
+        self.assertEqual(data["failure_class"], "no_runnable_query")
+        self.assertEqual(data["error"], "all queries dropped")
+
+    def test_regenerate_transient_failure_returns_503(self):
+        with self._patch_service(
+                outcome="failed_transient",
+                failure_class="resolver_unavailable",
+                error_message="resolver 503"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 503)
+        self.assertEqual(data["outcome"], "failed_transient")
+        self.assertEqual(data["failure_class"], "resolver_unavailable")
+        self.assertEqual(data["error"], "resolver 503")
+
+    def test_regenerate_passes_prepend_artist_flag_to_service(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import ServiceResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+            return_value=ServiceResult(outcome="success", plan_id=1),
+        ) as mock_gen:
+            status, _ = self._post(
+                "/api/pipeline/100/search-plan/regenerate",
+                {"prepend_artist": True})
+        self.assertEqual(status, 200)
+        mock_gen.assert_called_once()
+        kwargs = mock_gen.call_args.kwargs
+        self.assertTrue(kwargs.get("prepend_artist"))
+        self.assertTrue(kwargs.get("regenerate"))
+
+    def test_regenerate_passes_missing_prepend_artist_as_default(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import ServiceResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+            return_value=ServiceResult(outcome="success", plan_id=1),
+        ) as mock_gen:
+            status, _ = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 200)
+        self.assertIsNone(mock_gen.call_args.kwargs.get("prepend_artist"))
+
+    def test_regenerate_rejects_string_prepend_artist(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+        ) as mock_gen:
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate",
+                {"prepend_artist": "false"})
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"], "prepend_artist must be a boolean")
+        mock_gen.assert_not_called()
+
+
 def _kwargs_to_query(kwargs: dict) -> str:
     """Serialize scenario kwargs to a query string the way the form would.
 
@@ -1857,6 +2440,43 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response")
 
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_runs_plan_generation_after_set_tracks(self, mock_get_release):
+        """Web add path generates a search plan after `set_tracks()`,
+        consistent with the CLI add path. Failures must not break the
+        HTTP response."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        mock_get_release.return_value = {
+            "release_group_id": "rg-1",
+            "artist_id": "artist-1",
+            "artist_name": "Tycho",
+            "title": "Awake",
+            "year": 2014,
+            "country": "US",
+            "tracks": [
+                {"title": "Awake", "track_number": 1, "disc_number": 1},
+                {"title": "Montana", "track_number": 2, "disc_number": 1},
+                {"title": "L", "track_number": 3, "disc_number": 1},
+                {"title": "Apogee", "track_number": 4, "disc_number": 1},
+            ],
+        }
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "abc-plan-1"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add response (plan)")
+        new_id = data["id"]
+        active = fake_db.get_active_search_plan(new_id)
+        self.assertIsNotNone(active)
+        assert active is not None
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(active.next_ordinal, 0)
+
     def test_pipeline_add_exists_contract(self):
         self.mock_db.get_request_by_mb_release_id.return_value = {
             "id": 502,
@@ -1868,6 +2488,26 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    def test_pipeline_add_duplicate_does_not_regenerate(self):
+        """Duplicate add returns the existing request without generating
+        a second plan."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        # Pre-seed an existing request matching the release id.
+        fake_db.add_request(
+            mb_release_id="abc-dupe",
+            artist_name="Dupe", album_title="Existing", source="request",
+        )
+        before = len(fake_db.search_plans)
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "abc-dupe"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(len(fake_db.search_plans), before)
 
     @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_contract(self, mock_get_release):

@@ -130,20 +130,155 @@ FROM download_log, jsonb_array_elements(validation_result->'candidates'->0->'map
 WHERE id = <id>;
 ```
 
-## `search_log`
+## Persisted search plans (migration 014)
 
-Every search attempt is logged to `search_log` with: `request_id`, `query` (normalized search term), `result_count`, `elapsed_s`, `outcome`, `variant`, `final_state`, `candidates` (JSONB), browse/match cost fields (`browse_time_s`, `match_time_s`, `peers_browsed`, `peers_browsed_lazy`, `fanout_waves`), and `created_at`. Failed searches also increment `search_attempts` on `album_requests` and trigger exponential backoff.
+Search execution is plan-driven. Each wanted request owns a materialised
+`search_plans` row with an ordered list of `search_plan_items` (the runnable
+queries) and a cursor on `album_requests` (`active_plan_id`, `next_plan_ordinal`,
+`plan_cycle_count`). `search_attempts` no longer selects queries; it remains
+only as scheduler/backoff history. The pure generator that produces plan
+items lives in `lib/search.py` and is keyed by `SEARCH_PLAN_GENERATOR_ID`
+(`search-plan/<date>-<seq>`), which is bumped manually whenever generation-
+affecting code or config changes — see "Generator id discipline" below.
 
-Outcomes: `found` (matched + enqueued), `no_match` (results but no suitable download), `no_results` (0 results from slskd), `timeout`, `error`, `empty_query` (can't build query), `exhausted` (variant ladder ran out — see below).
+### `search_plans`
 
-### Variant ladder
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL PRIMARY KEY` | |
+| `request_id` | `INTEGER NOT NULL` | FK → `album_requests(id) ON DELETE CASCADE` |
+| `generator_id` | `TEXT NOT NULL` | Mirrors `SEARCH_PLAN_GENERATOR_ID` at write time |
+| `status` | `TEXT NOT NULL` | One of `active`, `superseded`, `failed_deterministic`, `failed_transient` |
+| `failure_class` | `TEXT NULL` | `no_runnable_query`, `metadata_incomplete`, `resolver_unavailable`, `dependency_failure`, `unknown` |
+| `metadata_snapshot` | `JSONB NULL` | Snapshot of the release metadata used to generate this plan |
+| `provenance` | `JSONB NULL` | Bounded provenance: dropped tokens, deduped variants, omitted candidates |
+| `error_message` | `TEXT NULL` | Sanitized human-readable error (no credentials / host paths) |
+| `superseded_at` | `TIMESTAMPTZ NULL` | Set when an active plan flips to `superseded` |
+| `superseded_by_plan_id` | `INTEGER NULL` | FK → `search_plans(id) ON DELETE SET NULL` |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT NOW()` | |
 
-`search_log.variant` records which query variant produced this attempt. The pure-function ladder in `lib/search.py:select_variant` selects per cycle based on `search_attempts` (gated by `search_escalation_threshold`, default `5`):
+Indexes:
 
-- `default` — base query (`<artist> <album>`), used for `search_attempts < threshold`.
-- `v1_year` — base query plus the 4-digit year token (skipped when year is unknown — `None`, `"0000"`, non-numeric, or shorter than 4 chars).
-- `v4_tracks_<idx>` — rotating 3-token slices of distinctive track titles, sorted length-descending. No artist, no wildcard. **Suppressed entirely for single-track albums** (`len(track_titles) <= 1`) — a one-token V4 query passes the 0.15 distance gate too easily on slskd, so single-track albums fall straight to `exhausted` after V1.
-- `exhausted` — the V4 token pool ran out (or V4 was suppressed for a single-track album). **No slskd call is made.** `search_attempts` is reset to `0` so the ladder wraps back to `default` on the next cycle; the request stays `wanted`. The `search_log` row records the exhaustion event for forensic purposes.
+- `idx_search_plans_request_status (request_id, status)` — active-plan lookup
+- `idx_search_plans_generator (generator_id)` — current vs old-generator scans
+- `idx_search_plans_request_created_at (request_id, created_at DESC)` — supersession trail
+- `uniq_search_plans_one_active_per_request (request_id) WHERE status = 'active'` — partial unique; one active plan per request
+- Composite-unique `(id, request_id)` — supports the active-plan FK below
+
+Plan statuses:
+
+- **`active`** — current successful plan for this request. The cursor
+  on `album_requests` points here. Only one per request (partial unique).
+- **`superseded`** — was active, replaced by a newer successful plan.
+  Stays readable for forensic audit; `superseded_by_plan_id` walks
+  forward to the replacement.
+- **`failed_deterministic`** — sticky for the current generator id
+  (e.g. no runnable query for any tier). Reconciliation will not retry.
+- **`failed_transient`** — retryable (resolver outage, dependency hiccup).
+  Reconciliation retries on the next startup.
+
+### `search_plan_items`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL PRIMARY KEY` | |
+| `plan_id` | `INTEGER NOT NULL` | FK → `search_plans(id) ON DELETE CASCADE` |
+| `ordinal` | `INTEGER NOT NULL CHECK (ordinal >= 0)` | Cursor position, 0-indexed |
+| `strategy` | `TEXT NOT NULL` | Free-form: `default`, `unwild`, `unwild_year`, `track_<idx>`, ... |
+| `query` | `TEXT NOT NULL CHECK (length(btrim(query, ' \t\n\r\f\v')) > 0)` | Runnable query — never blank |
+| `canonical_query_key` | `TEXT NULL` | Normalised key for dedupe and per-query usefulness aggregation |
+| `repeat_group` | `TEXT NULL` | Shared by intentionally-repeated default slots |
+| `provenance` | `JSONB NULL` | Per-item provenance |
+| | | UNIQUE `(plan_id, ordinal)` |
+
+Indexes:
+
+- `idx_search_plan_items_plan_ordinal (plan_id, ordinal)` — cursor reads
+- `idx_search_plan_items_canonical_key (canonical_query_key)` — per-query rollups
+
+### `album_requests` cursor fields
+
+| Column | Type | Notes |
+|---|---|---|
+| `active_plan_id` | `INTEGER NULL` | Composite FK → `search_plans(id, request_id)`, `ON DELETE SET NULL (active_plan_id)` |
+| `next_plan_ordinal` | `INTEGER NOT NULL DEFAULT 0` | Index into the active plan's items |
+| `plan_cycle_count` | `INTEGER NOT NULL DEFAULT 0` | Increments only when the cursor wraps past the final ordinal |
+
+Constraints:
+
+- `album_requests_active_plan_owner_fkey (active_plan_id, id) → search_plans(id, request_id)` — guarantees the active plan belongs to this request, not another. Plan deletion only nulls `active_plan_id`; the request id stays intact.
+- `next_plan_ordinal >= 0`, `plan_cycle_count >= 0`.
+
+Index: `idx_album_requests_wanted_active_plan (status, active_plan_id) WHERE status = 'wanted'` supports the all-wanted reconciliation scan.
+
+### `search_log` plan-context fields
+
+Migration 014 adds nullable plan-context columns. Historical rows stay
+valid with `NULL` plan context and any `outcome` value — including
+`exhausted` — so legacy reporting remains queryable. The `outcome`
+CHECK constraint is intentionally untouched.
+
+| Column | Type | Notes |
+|---|---|---|
+| `plan_id` | `INTEGER NULL` | FK → `search_plans(id) ON DELETE SET NULL` |
+| `plan_item_id` | `INTEGER NULL` | FK → `search_plan_items(id) ON DELETE SET NULL` |
+| `plan_ordinal` | `INTEGER NULL` | Mirrors the executed item ordinal |
+| `plan_strategy` | `TEXT NULL` | Mirrors the executed slot strategy |
+| `plan_canonical_query_key` | `TEXT NULL` | For per-query stats grouping |
+| `plan_repeat_group` | `TEXT NULL` | For per-repeat-group stats grouping |
+| `plan_generator_id` | `TEXT NULL` | Stamped at log time so post-cutover stats can filter by current generator |
+| `execution_stage` | `TEXT NULL` | `pre_attempt`, `accepted`, `stale_completion`, `reconciliation` |
+| `attempt_consumed` | `BOOLEAN NULL` | True iff this row consumed a slot (advanced cursor) |
+| `cursor_update_status` | `TEXT NULL` | `advanced`, `wrapped`, `unchanged`, `stale` |
+| `stale_reason` | `TEXT NULL` | Short tag explaining why a row is stale (e.g. `regenerated_mid_flight`, `plan_or_ordinal_drift`) |
+| `plan_cycle_snapshot` | `INTEGER NULL` | Snapshot of `plan_cycle_count` at log time, for cycle bucketing without rejoining the request row |
+
+Indexes:
+
+- `idx_search_log_plan_item (plan_item_id)`
+- `idx_search_log_canonical_query_key (plan_canonical_query_key)`
+- `idx_search_log_plan_id_created_at (plan_id, created_at DESC)`
+
+### `search_log` outcomes — no-new-`exhausted` policy
+
+Outcomes still recognised by the schema: `found` (matched + enqueued),
+`no_match` (results but no suitable download), `no_results` (0 results
+from slskd), `timeout`, `error`, `empty_query` (can't build query),
+`exhausted` (legacy reset signal).
+
+After the persisted-search-plans cutover, **new code never writes
+`outcome='exhausted'`**. Plan wrap is the replacement: the executor
+records a normal accepted-search outcome (`no_match`, `no_results`,
+`error`, etc.) and the consumed-attempt DB method sets
+`cursor_update_status = 'wrapped'` plus increments
+`plan_cycle_count`. Historical `outcome='exhausted'` rows from before
+the cutover stay valid and continue to render in the existing dashboard
+position labelled as historical. See
+`docs/persisted-search-plans-rollout.md` for the SQL spot-check that
+confirms zero new exhausted rows after the deploy timestamp.
+
+### Execution stage, attempt-consumed, cursor-update status
+
+These four audit markers (`execution_stage`, `attempt_consumed`,
+`cursor_update_status`, `stale_reason`) make pre-attempt failures,
+accepted attempts, and stale post-regeneration completions
+distinguishable in `search_log`:
+
+- `execution_stage='pre_attempt'`, `attempt_consumed=false`,
+  `cursor_update_status='unchanged'` — submission/setup failed before
+  slskd accepted the search. Non-consuming. Backoff still applies.
+- `execution_stage='accepted'`, `attempt_consumed=true`,
+  `cursor_update_status='advanced'` — happy path; ordinal moved forward.
+- `execution_stage='accepted'`, `attempt_consumed=true`,
+  `cursor_update_status='wrapped'` — final ordinal; cursor wrapped to
+  0 and `plan_cycle_count` incremented. **This replaces
+  `outcome='exhausted'`** as the cycle-wrap signal.
+- `execution_stage='stale_completion'`, `attempt_consumed=false`,
+  `cursor_update_status='stale'`, `stale_reason=<tag>` — a regeneration
+  superseded the active plan after the search was submitted. Log-only;
+  active cursor / status / scheduling are not mutated.
+- `execution_stage='reconciliation'` — emitted by startup
+  reconciliation (rare). Not a normal slot execution.
 
 ### `candidates` JSONB
 
@@ -159,11 +294,35 @@ Empty array `[]` for `no_results` / `no_match` outcomes; `NULL` for `error`, `ti
 
 ### `final_state`
 
-The slskd terminal state for the search (`Completed`, `ResponseLimitReached`, `TimedOut`, `Errored`, etc.). `NULL` on the `exhausted` outcome (no slskd round-trip).
+The slskd terminal state for the search (`Completed`, `ResponseLimitReached`, `TimedOut`, `Errored`, etc.). `NULL` on historical `exhausted` outcomes (no slskd round-trip) and on `pre_attempt` rows where slskd was never reached.
+
+### Generator id discipline
+
+`SEARCH_PLAN_GENERATOR_ID` in `lib/search.py` is the **single runtime
+source** of "which generator output is current". CLI add, web add,
+startup reconciliation, regeneration, and the executor all read this
+constant. Bump it (date-stamped string,
+e.g. `search-plan/2026-05-08-2`) **whenever** any of the following
+change:
+
+- generator output rules (which slots are emitted, in what order)
+- query tokenisation
+- the low-entropy token set (currently `the`, `you`, `from`, `and`)
+- slot ordering / ranking
+- dedupe behaviour
+- repeat-group identity
+- provenance shape
+
+Plans whose `generator_id` differs from the current id are "old-
+generator" plans. Startup reconciliation supersedes them with new
+plans on the next cycle. Tests pin both the literal id and a
+representative ladder snapshot, so any output drift forces
+`tests/test_search.py::test_generator_id_constant_is_pinned` to fail
+until the id is intentionally bumped.
 
 ## `album_requests.manual_reason`
 
-A free-form `TEXT` column populated by system flips that move a request to `status='manual'`. Currently unused — the variant ladder's `exhausted` case resets `search_attempts` instead of flipping to manual. The column stays for future operator-hold workflows that need a structured reason without overloading the human-authored `reasoning` field. Cleared (`NULL`) on every `reset_to_wanted` so re-queue starts with a clean slate.
+A free-form `TEXT` column populated by system flips that move a request to `status='manual'`. Currently unused — the persisted-search-plans cutover replaced the legacy variant ladder's `exhausted` flow with cursor wrap (no manual flip). The column stays for future operator-hold workflows that need a structured reason without overloading the human-authored `reasoning` field. Cleared (`NULL`) on every `reset_to_wanted` so re-queue starts with a clean slate.
 
 ## Wrong Matches and Force-Import
 

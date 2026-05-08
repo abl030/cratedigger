@@ -239,5 +239,432 @@ class TestApplyMigrations(unittest.TestCase):
         self.assertEqual(applied, [])
 
 
+# ---------------------------------------------------------------------------
+# Migration 014 — persisted search plans (U1)
+# ---------------------------------------------------------------------------
+
+@requires_postgres
+class TestPersistedSearchPlansSchema(unittest.TestCase):
+    """Migration 014 lands the search_plans schema and adds nullable plan
+    context to album_requests / search_log without breaking historical rows.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_search_plans_table_exists_with_expected_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'search_plans'
+        """)
+        cols = {r[0] for r in rows}
+        self.assertIn("id", cols)
+        self.assertIn("request_id", cols)
+        self.assertIn("generator_id", cols)
+        self.assertIn("status", cols)
+        self.assertIn("failure_class", cols)
+        self.assertIn("metadata_snapshot", cols)
+        self.assertIn("provenance", cols)
+        self.assertIn("error_message", cols)
+        self.assertIn("superseded_at", cols)
+        self.assertIn("superseded_by_plan_id", cols)
+        self.assertIn("created_at", cols)
+
+    def test_search_plan_items_table_exists_with_expected_columns(self):
+        rows = self._query("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'search_plan_items'
+        """)
+        cols = {r[0] for r in rows}
+        for col in (
+            "id", "plan_id", "ordinal", "strategy",
+            "query", "canonical_query_key", "repeat_group", "provenance",
+        ):
+            self.assertIn(col, cols)
+
+    def test_album_requests_has_cursor_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'album_requests'
+              AND column_name IN (
+                'active_plan_id', 'next_plan_ordinal', 'plan_cycle_count')
+        """)
+        by_col = {r[0]: (r[1], r[2]) for r in rows}
+        self.assertIn("active_plan_id", by_col)
+        # active_plan_id MUST be nullable -- requests can exist without a plan.
+        self.assertEqual(by_col["active_plan_id"][0], "YES")
+        self.assertIn("next_plan_ordinal", by_col)
+        self.assertEqual(by_col["next_plan_ordinal"][0], "NO")
+        self.assertIn("plan_cycle_count", by_col)
+        self.assertEqual(by_col["plan_cycle_count"][0], "NO")
+
+    def test_search_log_has_nullable_plan_context_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'search_log'
+              AND column_name IN (
+                'plan_id', 'plan_item_id', 'plan_ordinal', 'plan_strategy',
+                'plan_canonical_query_key', 'plan_repeat_group',
+                'plan_generator_id', 'execution_stage', 'attempt_consumed',
+                'cursor_update_status', 'stale_reason', 'plan_cycle_snapshot')
+        """)
+        # All 12 columns present and every one nullable.
+        self.assertEqual(len(rows), 12)
+        for col, is_null in rows:
+            with self.subTest(col=col):
+                self.assertEqual(is_null, "YES")
+
+    def test_search_log_plan_item_must_belong_to_logged_plan(self):
+        rid_a = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('owner-a', 'A', 'A', 'request')
+            RETURNING id
+        """)[0][0]
+        rid_b = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('owner-b', 'B', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            plan_a = self._query("""
+                INSERT INTO search_plans (request_id, generator_id, status)
+                VALUES (%s, 'g1', 'active')
+                RETURNING id
+            """, (rid_a,))[0][0]
+            plan_b = self._query("""
+                INSERT INTO search_plans (request_id, generator_id, status)
+                VALUES (%s, 'g1', 'active')
+                RETURNING id
+            """, (rid_b,))[0][0]
+            item_b = self._query("""
+                INSERT INTO search_plan_items
+                    (plan_id, ordinal, strategy, query)
+                VALUES (%s, 0, 'default', 'q')
+                RETURNING id
+            """, (plan_b,))[0][0]
+
+            with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                self._exec("""
+                    INSERT INTO search_log
+                        (request_id, query, outcome, plan_id, plan_item_id)
+                    VALUES (%s, 'q', 'no_match', %s, %s)
+                """, (rid_a, plan_a, item_b))
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id IN (%s, %s)",
+                (rid_a, rid_b),
+            )
+
+    def test_search_log_outcome_check_still_allows_exhausted(self):
+        """Migration 014 must NOT tighten the outcome domain.
+
+        Historical search_log rows with outcome='exhausted' must remain valid
+        even though new code stops emitting it.
+        """
+        # Add a request to satisfy the FK.
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('exhausted-legacy-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid_rows = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("exhausted-legacy-mbid",),
+        )
+        rid = rid_rows[0][0]
+        try:
+            # If the outcome CHECK rejected 'exhausted', this would raise.
+            self._exec(
+                "INSERT INTO search_log (request_id, outcome) VALUES (%s, %s)",
+                (rid, "exhausted"),
+            )
+            rows = self._query(
+                "SELECT outcome FROM search_log WHERE request_id = %s", (rid,)
+            )
+            self.assertIn(("exhausted",), rows)
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_one_active_plan_per_request_partial_unique_index(self):
+        """Inserting a second status='active' plan for the same request fails;
+        failed/superseded plans coexist freely."""
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('active-uniq-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("active-uniq-mbid",),
+        )[0][0]
+        try:
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "active"),
+            )
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec(
+                    "INSERT INTO search_plans (request_id, generator_id, status) "
+                    "VALUES (%s, %s, %s)",
+                    (rid, "g1", "active"),
+                )
+            # Failed and superseded rows are NOT blocked.
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "failed_deterministic"),
+            )
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "superseded"),
+            )
+            count = self._query(
+                "SELECT COUNT(*) FROM search_plans WHERE request_id = %s", (rid,)
+            )[0][0]
+            self.assertEqual(count, 3)
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_active_plan_must_belong_to_request(self):
+        """album_requests.active_plan_id is enforced to point at a plan
+        whose request_id matches this row's id."""
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('owner-a-mbid', 'A', 'B', 'request'),
+                   ('owner-b-mbid', 'C', 'D', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid_a = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("owner-a-mbid",),
+        )[0][0]
+        rid_b = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("owner-b-mbid",),
+        )[0][0]
+        try:
+            # Plan owned by request A.
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid_a, "g1", "active"),
+            )
+            plan_id = self._query(
+                "SELECT id FROM search_plans WHERE request_id = %s", (rid_a,)
+            )[0][0]
+
+            # Setting request B's active_plan_id to a plan owned by A must fail.
+            with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                self._exec(
+                    "UPDATE album_requests SET active_plan_id = %s WHERE id = %s",
+                    (plan_id, rid_b),
+                )
+
+            # Setting request A's active_plan_id to its own plan succeeds.
+            self._exec(
+                "UPDATE album_requests SET active_plan_id = %s WHERE id = %s",
+                (plan_id, rid_a),
+            )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id IN (%s, %s)", (rid_a, rid_b))
+
+    def test_plan_delete_nulls_active_plan_id_only(self):
+        """Deleting an active plan nulls album_requests.active_plan_id but the
+        request row's PK and other fields are unaffected (PG15+ SET NULL on
+        a single column)."""
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('plan-null-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("plan-null-mbid",),
+        )[0][0]
+        try:
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "active"),
+            )
+            plan_id = self._query(
+                "SELECT id FROM search_plans WHERE request_id = %s", (rid,)
+            )[0][0]
+            self._exec(
+                "UPDATE album_requests SET active_plan_id = %s WHERE id = %s",
+                (plan_id, rid),
+            )
+            self._exec("DELETE FROM search_plans WHERE id = %s", (plan_id,))
+            row = self._query(
+                "SELECT id, active_plan_id FROM album_requests WHERE id = %s",
+                (rid,),
+            )
+            self.assertEqual(row[0][0], rid)  # request still here
+            self.assertIsNone(row[0][1])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_request_delete_cascades_plans_and_items_but_logs_remain(self):
+        """Deleting a request cascades to plans and plan items, but search_log
+        rows survive (their plan FKs are nullified) so historical inspection
+        keeps working."""
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('cascade-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("cascade-mbid",),
+        )[0][0]
+        # NOTE: search_log has FK to album_requests with ON DELETE CASCADE
+        # (from migration 001), so its rows DON'T survive request deletion.
+        # Plans/items must cascade with the request via CASCADE FKs.
+        self._exec(
+            "INSERT INTO search_plans (request_id, generator_id, status) "
+            "VALUES (%s, %s, %s)",
+            (rid, "g1", "active"),
+        )
+        plan_id = self._query(
+            "SELECT id FROM search_plans WHERE request_id = %s", (rid,)
+        )[0][0]
+        self._exec(
+            "INSERT INTO search_plan_items (plan_id, ordinal, strategy, query) "
+            "VALUES (%s, %s, %s, %s)",
+            (plan_id, 0, "default", "artist title"),
+        )
+
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+        # Plans + items cascade away with the request.
+        self.assertEqual(
+            self._query(
+                "SELECT COUNT(*) FROM search_plans WHERE id = %s", (plan_id,)
+            )[0][0],
+            0,
+        )
+        self.assertEqual(
+            self._query(
+                "SELECT COUNT(*) FROM search_plan_items WHERE plan_id = %s",
+                (plan_id,),
+            )[0][0],
+            0,
+        )
+
+    def test_plan_item_query_must_be_non_empty(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('empty-q-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("empty-q-mbid",),
+        )[0][0]
+        try:
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "active"),
+            )
+            plan_id = self._query(
+                "SELECT id FROM search_plans WHERE request_id = %s", (rid,)
+            )[0][0]
+            for bad_query in ("", "   ", "\t\n"):
+                with self.subTest(q=repr(bad_query)):
+                    with self.assertRaises(psycopg2.errors.CheckViolation):
+                        self._exec(
+                            "INSERT INTO search_plan_items "
+                            "(plan_id, ordinal, strategy, query) "
+                            "VALUES (%s, %s, %s, %s)",
+                            (plan_id, 0, "default", bad_query),
+                        )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_plan_item_unique_plan_ordinal(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('uniq-ord-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("uniq-ord-mbid",),
+        )[0][0]
+        try:
+            self._exec(
+                "INSERT INTO search_plans (request_id, generator_id, status) "
+                "VALUES (%s, %s, %s)",
+                (rid, "g1", "active"),
+            )
+            plan_id = self._query(
+                "SELECT id FROM search_plans WHERE request_id = %s", (rid,)
+            )[0][0]
+            self._exec(
+                "INSERT INTO search_plan_items "
+                "(plan_id, ordinal, strategy, query) "
+                "VALUES (%s, %s, %s, %s)",
+                (plan_id, 0, "default", "artist title"),
+            )
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec(
+                    "INSERT INTO search_plan_items "
+                    "(plan_id, ordinal, strategy, query) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (plan_id, 0, "default", "different"),
+                )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_status_and_failure_class_check_constraints(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('check-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("check-mbid",),
+        )[0][0]
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    "INSERT INTO search_plans (request_id, generator_id, status) "
+                    "VALUES (%s, %s, %s)",
+                    (rid, "g1", "totally-bogus"),
+                )
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    "INSERT INTO search_plans "
+                    "(request_id, generator_id, status, failure_class) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (rid, "g1", "failed_deterministic", "totally-bogus"),
+                )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
 if __name__ == "__main__":
     unittest.main()

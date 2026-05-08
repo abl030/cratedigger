@@ -57,6 +57,7 @@ namespace, second is the per-lock key.
 | Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Force/manual-import double-click protection |
 | Per-release pipeline | `ADVISORY_LOCK_NAMESPACE_RELEASE` | `0x52454C45` | "RELE" | `release_id_to_lock_key(mb_release_id)` | Cross-process same-MBID serialisation |
 | Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
+| Per-request plan | `ADVISORY_LOCK_NAMESPACE_PLAN` | `0x504C414E` | "PLAN" | `request_id` | Search-plan generation / supersession serialisation |
 
 The ASCII-visible hex lets `pg_locks` rows be interpreted at a glance
 during debugging:
@@ -111,6 +112,25 @@ Covers both MB UUIDs and Discogs numeric IDs since both share the
 `mb_release_id` column. See the docstring on `release_id_to_lock_key`
 in `lib/pipeline_db.py` for the collision analysis (probability
 ~N²/2^31; false collision delays an unrelated release by one cycle).
+
+### PLAN — per-request plan-generation lock
+
+**Why**: `feat: persisted search plans` (U3). The plan-generation service is
+called from CLI add, web add, startup reconciliation, and explicit
+regeneration. Two concurrent calls for the same `request_id` could both
+read no-active-plan, both insert a new active plan, and trip the partial
+unique index on `search_plans(request_id) WHERE status='active'` —
+turning a benign race into a hard failure. The lock serialises generation
+attempts so only one runs end-to-end per request at a time.
+
+**Scope**: Held by `SearchPlanService` for the duration of a single
+generate-and-persist attempt (snapshot construction → generator →
+`create_successful_search_plan` / `supersede_search_plan_with_replacement` /
+`create_failed_search_plan`). Released before the service returns.
+
+**Key**: The raw `request_id`. Independent from IMPORT (different
+namespace) so a force-import and an explicit regeneration can run
+concurrently for the same request without deadlocking.
 
 ### IMPORTER — worker singleton lock
 
@@ -299,6 +319,11 @@ session and returns False — revisit the ordering rules.
 | Force/manual outer | `lib/import_dispatch.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe | `lib/pipeline_db.py` | `enqueue_import_job` | unique index | `dedupe_key` |
+| Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
+
+Plan generation acquires the PLAN lock before reading the request,
+building the snapshot, invoking the generator, and persisting the
+replacement plan/cursor state.
 
 Every acquire site carries a comment linking back here. Line numbers
 are intentionally omitted — grep for `advisory_lock(` to find them.

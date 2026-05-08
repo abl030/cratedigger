@@ -157,6 +157,11 @@ def prepare_find_download_context(
 
     peer_cache = ctx.peer_cache.fork() if getattr(ctx.peer_cache, "fork", None) else ctx.peer_cache
 
+    plan_execution = (
+        getattr(search_result, "plan_execution", None)
+        if search_result is not None else None
+    )
+
     return CratediggerContext(
         cfg=ctx.cfg,
         slskd=ctx.slskd,
@@ -173,6 +178,7 @@ def prepare_find_download_context(
         download_ownership=ctx.download_ownership,
         browse_coordinator=coordinator,
         browse_coordinator_lock=ctx.browse_coordinator_lock,
+        active_plan_execution=plan_execution,
     )
 
 
@@ -412,14 +418,17 @@ def _claim_initial_download_ownership(
         )
 
     state = build_active_download_state(entry)
+    plan_execution = getattr(ctx, "active_plan_execution", None)
     claimed = bool(writer.claim_downloading(
         request_id,
         state.to_json(),
+        plan_execution=plan_execution,
     ))
     if not claimed:
         logger.info(
             "Skipped slskd enqueue for request %s because ownership claim "
-            "was blocked; request is no longer wanted",
+            "was blocked; request is no longer wanted "
+            "(or active plan was regenerated mid-flight)",
             request_id,
         )
     return DownloadOwnershipClaim(

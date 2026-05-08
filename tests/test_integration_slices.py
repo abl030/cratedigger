@@ -2666,6 +2666,12 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         and ``get_tracks(album)`` to the same fake's per-request tracks list
         re-shaped into the ``TrackRecord`` dicts that ``find_download``
         expects (``albumId`` = -request_id, mirroring the real DatabaseSource).
+
+        Also seeds an active plan for the request when one is missing. The
+        post-U5 executor is plan-driven; legacy forensic tests that assume
+        the variant ladder are translated by mapping the variant they
+        expect onto plan-item strategies (default / unwild / unwild_year /
+        track_<idx>).
         """
         from lib.context import CratediggerContext
         cratedigger = self._cratedigger
@@ -2698,6 +2704,45 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         # search_for_album / find_download read the album from the cache.
         ctx.current_album_cache[album.id] = album
         return ctx
+
+    def _seed_plan(
+        self,
+        db,
+        request_id: int,
+        *,
+        items: list[tuple[str, str]] | None = None,
+        cursor_ordinal: int = 0,
+        cycle_count: int = 0,
+        generator_id: str | None = None,
+    ) -> int:
+        """Seed an active search plan for ``request_id``.
+
+        ``items`` is a list of ``(strategy, query)`` pairs. Defaults to a
+        single ``default`` slot with a generic query so search_for_album
+        can run end-to-end without legacy ``select_variant`` plumbing.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        if items is None:
+            items = [("default", "*iggles Album")]
+        plan_id = db.create_successful_search_plan(
+            request_id=request_id,
+            generator_id=generator_id or SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=i, strategy=s, query=q,
+                    canonical_query_key=q.lower(),
+                )
+                for i, (s, q) in enumerate(items)
+            ],
+        )
+        if cursor_ordinal or cycle_count:
+            db.update_request_fields(
+                request_id,
+                next_plan_ordinal=cursor_ordinal,
+                plan_cycle_count=cycle_count,
+            )
+        return plan_id
 
     def test_default_variant_passes_response_limit_and_persists_candidates(self):
         """Happy path: default variant, slskd returns peers, candidates persist."""
@@ -2742,6 +2787,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             {"track_number": 2, "title": "Track Two"},
         ])
         album = self._make_album(request_id=rid)
+        # Plan-driven (U5): seed a default plan-item so search_for_album
+        # has a runnable query.
+        self._seed_plan(db, rid, items=[("default", "*iggles Album")])
         ctx = self._wire(cfg, slskd, db, album)
 
         # Stub slskd_do_enqueue so we do not exercise the real download path.
@@ -2781,7 +2829,13 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0].total_tracks, 2)
 
     def test_unwild_variant_at_threshold(self):
-        """Cycle == threshold → variant=unwild, query is un-wildcarded base."""
+        """Plan-item with strategy='unwild' produces an unwild query (post-U5).
+
+        Post-cutover the executor reads plan items, not a runtime variant
+        ladder. The plan generator (U2) materialises the unwild slot at
+        the threshold position; here we seed it directly to assert the
+        executor hits it.
+        """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(
@@ -2796,10 +2850,12 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-y", year=1991,
         )
-        # cycle == threshold → unwild tier (un-wildcarded base query).
-        db.update_request_fields(rid, search_attempts=5)
         db.set_tracks(rid, [{"track_number": 1, "title": "Hot Potato"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-y")
+        # Seed a plan whose first item is the unwild slot at the cursor.
+        self._seed_plan(db, rid, items=[
+            ("unwild", "Wiggles Album"),
+        ])
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -2813,7 +2869,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(db.search_logs[0].variant, "unwild")
 
     def test_unwild_year_variant_at_threshold_plus_one(self):
-        """cycle == threshold+1 with year known → variant=unwild_year."""
+        """Plan-item strategy='unwild_year' produces an unwild+year query."""
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(
@@ -2828,9 +2884,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-y", year=1991,
         )
-        db.update_request_fields(rid, search_attempts=6)
         db.set_tracks(rid, [{"track_number": 1, "title": "Hot Potato"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-y")
+        self._seed_plan(db, rid, items=[
+            ("unwild_year", "Wiggles Album 1991"),
+        ])
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -2843,25 +2901,28 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertIn("1991", call.search_text)
         self.assertEqual(db.search_logs[0].variant, "unwild_year")
 
-    def test_exhausted_variant_short_circuits_without_slskd_call(self):
-        """search_attempts past pool size → exhausted; no slskd round-trip."""
+    def test_final_ordinal_wraps_cycle_with_no_new_exhausted_row(self):
+        """Plan §AE8: executing the final ordinal wraps cursor to 0 and
+        increments plan_cycle_count. No new ``outcome='exhausted'`` row.
+
+        Replaces the legacy variant-ladder exhaustion test. Plan wrap is
+        the new exhaustion semantic; the search_log row carries the
+        normal slskd outcome (no_results here) plus
+        ``cursor_update_status='wrapped'``.
+        """
         from album_source import AlbumRecord, MediaRecord, ReleaseRecord
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(search_escalation_threshold=5)
         slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(search_id=42, state="Completed", responses=[])
 
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="Wiggles", album_title="Album",
             source="request", mb_release_id="mbid-x", year=None,
         )
-        # No tracks, no year. Ladder: cycle 5 → unwild, cycle 6 → exhausted
-        # (year unknown skips unwild_year, no tracks → no track tier).
-        db.update_request_fields(rid, search_attempts=6)
-        # Build the AlbumRecord with an unknown-year release_date so the
-        # variant generator sees year as None and falls straight to V4 →
-        # exhausted (empty track pool).
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=0)]
         release = ReleaseRecord(
             id=-rid, foreign_release_id="mbid-x", title="Album",
@@ -2876,22 +2937,31 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             db_mb_release_id="mbid-x",
             db_search_filetype_override=None, db_target_format=None,
         )
+        # Two-item plan, cursor parked at the FINAL ordinal so this run
+        # wraps. Pre-run snapshot: plan_cycle_count=3, next_ordinal=1.
+        self._seed_plan(db, rid, items=[
+            ("default", "*iggles Album"),
+            ("unwild", "Wiggles Album"),
+        ], cursor_ordinal=1, cycle_count=3)
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
         self._cratedigger._log_search_result(album, result, ctx)
 
-        # No slskd search was submitted.
-        self.assertEqual(slskd.searches.search_text_calls, [])
-        # Outcome propagates and search_log persists exhausted.
-        self.assertEqual(result.outcome, "exhausted")
-        self.assertEqual(result.variant_tag, "exhausted")
-        row = db.search_logs[0]
-        self.assertEqual(row.outcome, "exhausted")
-        self.assertEqual(row.variant, "exhausted")
-        self.assertIsNone(row.candidates)
-        # Exhaustion doesn't bump search_attempts (U6 will flip to manual).
-        self.assertEqual(db.recorded_attempts, [])
+        # slskd was hit; outcome=no_results (consumed slot).
+        self.assertEqual(result.outcome, "no_results")
+        # No new exhausted row.
+        outcomes = [r.outcome for r in db.search_logs]
+        self.assertNotIn("exhausted", outcomes)
+        # Cursor wrapped + cycle incremented.
+        row = db.request(rid)
+        self.assertEqual(row["next_plan_ordinal"], 0)
+        self.assertEqual(row["plan_cycle_count"], 4)
+        # search_log row carries plan context with cursor_update_status='wrapped'.
+        log = db.search_logs[-1]
+        self.assertEqual(log.cursor_update_status, "wrapped")
+        self.assertEqual(log.plan_ordinal, 1)
+        self.assertEqual(log.plan_cycle_snapshot, 3)
 
     def test_no_results_writes_empty_candidates_and_final_state(self):
         """no_results writes candidates=[] (empty JSONB array, not NULL).
@@ -2918,6 +2988,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         )
         db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-n")
+        self._seed_plan(db, rid)
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -2938,11 +3009,13 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         from lib.search import SearchResult
         from tests.fakes import FakePipelineDB
 
+        from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
         cfg = self._make_cfg()
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="A", album_title="B", source="request",
         )
+        plan_id = self._seed_plan(db, rid)
         ctx = self._wire(cfg, MagicMock(), db, self._make_album(request_id=rid))
 
         # Build 30 synthetic candidates, descending matched_tracks.
@@ -2954,10 +3027,25 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             )
             for i in range(30)
         )
+        # Plan-driven (U5): construct a plan_execution snapshot matching the
+        # seeded plan so _log_search_result routes through the consumed seam.
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item = active.items[0]
+        plan_exec = PlanExecutionContext(
+            plan_id=plan_id, plan_item_id=item.id, plan_ordinal=item.ordinal,
+            plan_strategy=item.strategy,
+            plan_canonical_query_key=item.canonical_query_key,
+            plan_repeat_group=item.repeat_group,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            plan_item_count=len(active.items),
+            cycle_count_snapshot=active.cycle_count,
+        )
         result = SearchResult(
             album_id=-rid, success=False, query="q", outcome="no_match",
             variant_tag="default", final_state="Completed",
             candidates=many,
+            plan_execution=plan_exec,
         )
         album = self._make_album(request_id=rid)
         self._cratedigger._log_search_result(album, result, ctx)
@@ -3003,6 +3091,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             request_id=rid, source="request",
             mb_release_id="",  # MB unknown; release id sits in discogs col.
         )
+        self._seed_plan(db, rid, items=[("default", "*isco Disco")])
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -3064,10 +3153,10 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
                          cfg.search_response_limit)
 
     def test_track_variant_used_after_unwild_year(self):
-        """Cycle threshold+2 with year + tracks → variant=track_0.
+        """Plan-item strategy='track_0' produces a track-tier query (post-U5).
 
-        First per-track query is the cleaned first track title only. One-token
-        track titles append the longest artist token for extra entropy.
+        The plan generator (U2) materialises track tier slots; here we
+        seed a track_0 slot directly to assert the executor uses it.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -3081,8 +3170,6 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             artist_name="The Mountain Goats", album_title="Album",
             source="request", mb_release_id="mbid-v4", year=1991,
         )
-        # threshold(5) + unwild(1) + unwild_year(1) → cycle 7 = track_0.
-        db.update_request_fields(rid, search_attempts=7)
         db.set_tracks(rid, [
             {"track_number": 1, "title": "Tallahassee"},
             {"track_number": 2, "title": "Wide Open Road"},
@@ -3094,6 +3181,9 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             mb_release_id="mbid-v4",
             artist_name="The Mountain Goats",
         )
+        self._seed_plan(db, rid, items=[
+            ("track_0", "Tallahassee Mountain"),
+        ])
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -3102,22 +3192,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(result.variant_tag, "track_0")
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         call = slskd.searches.search_text_calls[0]
-        # Track tier keeps the one-word first title but appends a literal
-        # artist token. No wildcards are used.
         self.assertEqual(call.search_text, "Tallahassee Mountain")
         self.assertNotIn("*", call.search_text)
-        self.assertNotIn("Goats", call.search_text)
         # search_log persisted the variant.
         self.assertEqual(db.search_logs[0].variant, "track_0")
 
-    def test_slskd_error_writes_default_variant_and_null_candidates(self):
-        """slskd raises during search → outcome=error, candidates=NULL.
-
-        Per FIX-3 of the search-escalation-and-forensics review queue,
-        outcomes that lack a candidate concept (error, timeout, exhausted,
-        empty_query) keep candidates=NULL — distinct from no_results /
-        no_match which write []. Drive the serial search loop with a
-        pre-seeded slskd error and assert the persisted forensic state.
+    def test_slskd_error_at_submit_is_non_consuming_pre_attempt_failure(self):
+        """Plan §AE7: submit/setup failure before accepted search id is
+        non-consuming. Cursor stays at 0; backoff IS applied; the row is
+        a pre_attempt stage row with attempt_consumed=False.
         """
         from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -3134,6 +3217,10 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         )
         db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
         album = self._make_album(request_id=rid, mb_release_id="mbid-err")
+        self._seed_plan(db, rid, items=[
+            ("default", "*iggles Album"),
+            ("unwild", "Wiggles Album"),
+        ])
         ctx = self._wire(cfg, slskd, db, album)
 
         result = self._cratedigger.search_for_album(album, ctx)
@@ -3142,12 +3229,55 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(result.outcome, "error")
         row = db.search_logs[0]
         self.assertEqual(row.outcome, "error")
-        # Default variant — escalation never had a chance to advance.
-        self.assertEqual(row.variant, "default")
-        # No candidate concept — JSONB stays NULL (FakePipelineDB writes
-        # None as the JSON serialisation, distinct from "[]" used by
-        # no_results / no_match).
-        self.assertIsNone(row.candidates)
+        # Plan context preserved (plan_strategy carries the strategy tag
+        # for non-consuming rows; search_log.variant is only populated
+        # on the consumed-attempt seam).
+        self.assertEqual(row.plan_strategy, "default")
+        # Pre-attempt failure: attempt_consumed=False, stage=pre_attempt,
+        # cursor unchanged.
+        self.assertEqual(row.execution_stage, "pre_attempt")
+        self.assertFalse(row.attempt_consumed)
+        self.assertEqual(row.cursor_update_status, "unchanged")
+        # Cursor is still parked at the first ordinal; backoff applied.
+        request = db.request(rid)
+        self.assertEqual(request["next_plan_ordinal"], 0)
+        self.assertEqual(request["plan_cycle_count"], 0)
+        self.assertEqual(request["search_attempts"], 1)
+
+    def test_serial_collection_error_after_accept_is_consumed(self):
+        """Once slskd returns a search id, polling/collection failures still
+        consume the plan slot through the atomic consumed-attempt seam."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(search_id=42, state="Completed", responses=[])
+        slskd.searches.search_responses = MagicMock(
+            side_effect=RuntimeError("response collection failed"))
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-collect", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(
+            request_id=rid, mb_release_id="mbid-collect")
+        self._seed_plan(db, rid, items=[("default", "*iggles Album")])
+        ctx = self._wire(cfg, slskd, db, album)
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.outcome, "error")
+        self.assertEqual(result.final_state, "collection_crash")
+        row = db.search_logs[0]
+        self.assertEqual(row.execution_stage, "accepted")
+        self.assertTrue(row.attempt_consumed)
+        self.assertEqual(row.cursor_update_status, "wrapped")
+        self.assertEqual(row.final_state, "collection_crash")
+        self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
 
 
 class TestVariantSelectFallbackObservability(unittest.TestCase):
@@ -3269,14 +3399,12 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
             elapsed_s=0.0, outcome="exhausted", variant_tag="exhausted",
         )
 
-    def test_exhausted_resets_search_attempts_and_stays_wanted(self):
-        """Happy path: search_log row recorded; counter reset; stays wanted.
-
-        After exhaustion the variant ladder wraps — ``search_attempts``
-        goes back to 0, status stays ``wanted``, ``manual_reason`` is
-        never set, and the request remains in ``get_wanted()`` for the
-        next cycle.
-        """
+    def test_legacy_exhausted_result_logs_non_consuming_no_cursor_change(self):
+        """Post-U5, legacy exhausted SearchResult emissions (without
+        plan_execution) flow through the non-consuming seam, leaving the
+        cursor and cycle untouched. New code never emits exhausted rows;
+        this protects historical / accidentally-emitted ones from
+        advancing the active cursor."""
         from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
@@ -3284,29 +3412,31 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
             artist_name="A", album_title="B", source="request",
             mb_release_id="mb-exh", status="wanted",
         )
-        # Bump search_attempts to a value past the threshold so the
-        # request is at the end of the variant ladder.
-        db.update_request_fields(rid, search_attempts=7)
-
         album = self._make_album(rid)
         ctx = self._ctx_with_db(db)
         result = self._make_exhausted_result(album_id=-rid)
 
         self._cratedigger._log_search_result(album, result, ctx)
 
-        # search_log row persists with outcome='exhausted' — the audit trail.
+        # Recorded as a non-consuming pre-attempt row -- the executor
+        # never emits ``exhausted`` post-U5 anyway, but if some legacy
+        # path does it must not advance the active cursor.
         self.assertEqual(len(db.search_logs), 1)
-        self.assertEqual(db.search_logs[0].outcome, "exhausted")
-
-        # search_attempts wraps back to 0; status stays 'wanted'.
+        log = db.search_logs[0]
+        self.assertEqual(log.outcome, "exhausted")
+        self.assertEqual(log.execution_stage, "pre_attempt")
+        self.assertFalse(log.attempt_consumed)
+        self.assertEqual(log.cursor_update_status, "unchanged")
+        # Cursor / cycle / status unchanged.
         row = db.request(rid)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_attempts"], 0)
+        self.assertEqual(row["next_plan_ordinal"], 0)
+        self.assertEqual(row["plan_cycle_count"], 0)
         self.assertIsNone(row["manual_reason"])
-
-        # Request is still in the wanted pool for the next cycle.
-        wanted_ids = [r["id"] for r in db.get_wanted()]
-        self.assertIn(rid, wanted_ids)
+        # Backoff applies (non-consuming method increments scheduler
+        # counters), so the request is currently parked behind a
+        # ``next_retry_after``. Asserting status alone is the right
+        # invariant here.
 
     def test_requeue_via_apply_transition_clears_state(self):
         """Operator re-queue via the single-seam transition resets state."""
@@ -3757,6 +3887,943 @@ class TestSearchWatchdogSlice(unittest.TestCase):
         self.assertNotEqual(result.outcome, "timeout")
         # delete_searches=True still fires after the watchdog branch
         self.assertEqual(slskd.searches.delete_calls, ["abc-123"])
+
+
+class TestStartupReconciliationSlice(unittest.TestCase):
+    """End-to-end startup reconciliation against ``FakePipelineDB`` +
+    real ``SearchPlanService`` + real pure plan generator (U4).
+
+    These slices exercise the whole orchestration: the all-wanted scan,
+    per-row generation, supersede semantics, isolated failure handling,
+    and the readiness summary contract.
+    """
+
+    def _cfg(self):
+        ini = configparser.ConfigParser()
+        return CratediggerConfig.from_ini(ini)
+
+    def _service(self, db, generator_id="g-test"):
+        from lib.search_plan_service import SearchPlanService
+        svc = SearchPlanService(db, self._cfg())
+        # Tests pin a stable test generator id so they don't drift when
+        # the production constant rolls. Real callers never override.
+        svc.generator_id = generator_id
+        return svc
+
+    def _seed_wanted(self, db, mbid, *, tracks: list[dict] | None = None):
+        rid = db.add_request(
+            artist_name="Artist", album_title="Album",
+            mb_release_id=mbid, source="request",
+        )
+        if tracks is None:
+            tracks = [
+                {"disc_number": 1, "track_number": 1, "title": "Song One"},
+                {"disc_number": 1, "track_number": 2, "title": "Song Two"},
+            ]
+        db.set_tracks(rid, tracks)
+        return rid
+
+    def test_scans_all_wanted_ignoring_pagination_and_backoff(self):
+        """Reconciliation must visit every wanted row, not just the
+        page-limited / due ones ``get_wanted`` would surface.
+        """
+        from datetime import datetime, timedelta, timezone
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        # 600 wanted rows, 550 backed off, 50 fresh -- larger than any
+        # page_size cratedigger uses.
+        rids = []
+        for i in range(600):
+            rid = self._seed_wanted(db, f"mbid-{i:04d}")
+            rids.append(rid)
+        far_future = datetime.now(timezone.utc) + timedelta(hours=24)
+        for rid in rids[50:]:
+            db.update_request_fields(rid, next_retry_after=far_future)
+
+        # Sanity: ``get_wanted`` only sees the 50 due rows.
+        self.assertEqual(len(db.get_wanted()), 50)
+
+        summary = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+            progress_batch_size=200,
+        )
+        self.assertEqual(summary.wanted_total, 600)
+        # Every row is generated on first pass.
+        self.assertEqual(summary.generated, 600)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertTrue(summary.is_ready)
+
+    def test_missing_plan_rows_receive_active_plan_with_cursor_at_zero(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "missing-plan")
+        summary = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, "g-test")
+        self.assertEqual(active.plan.status, "active")
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(summary.generated, 1)
+
+    def test_active_current_plan_with_partial_track_snapshot_is_replanned(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(
+            db,
+            "partial-current",
+            tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "Song One"},
+                {"disc_number": 1, "track_number": 2, "title": "Song Two"},
+            ],
+        )
+        old_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="old q")],
+            metadata_snapshot={"track_count": 1},
+        )
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-current"),
+        )
+
+        self.assertEqual(summary.generated, 1)
+        self.assertEqual(summary.active_current, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertNotEqual(active.plan.id, old_id)
+        self.assertEqual(db.search_plans[old_id].status, "superseded")
+        self.assertEqual(active.plan.metadata_snapshot.track_count, 2)
+
+    def test_old_generator_rows_supersede_to_current_with_cursor_reset(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "old-gen")
+        old_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="old q")],
+        )
+        # Cursor moved away so we can prove reset.
+        db.update_request_fields(rid, next_plan_ordinal=1, plan_cycle_count=4)
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-new"),
+        )
+        self.assertEqual(summary.old_generator_replaced, 1)
+        self.assertEqual(summary.generated, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, "g-new")
+        self.assertNotEqual(active.plan.id, old_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(db.search_plans[old_id].status, "superseded")
+
+    def test_deterministic_failed_rows_reported_and_not_retried(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        # Empty artist + album makes the generator return failure_reason.
+        rid = db.add_request(
+            artist_name="", album_title="",
+            mb_release_id="det-fail", source="request",
+        )
+        # First pass: deterministic failure recorded.
+        summary1 = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        self.assertEqual(summary1.deterministic_failed, 1)
+        self.assertIsNone(db.get_active_search_plan(rid))
+        # Plan failure persists with classification.
+        plans_for_req = [
+            p for p in db.search_plans.values() if p.request_id == rid]
+        self.assertEqual(len(plans_for_req), 1)
+        self.assertEqual(plans_for_req[0].status, "failed_deterministic")
+
+        # Second pass: the row is still classified correctly and service
+        # stickiness prevents appending another identical failed row.
+        summary2 = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        # Must classify into a known bucket -- never unclassified.
+        self.assertEqual(summary2.unclassified_no_plan, 0)
+        self.assertEqual(summary2.wanted_total, 1)
+        self.assertEqual(summary2.deterministic_failed, 1)
+        plans_for_req_2 = [
+            p for p in db.search_plans.values() if p.request_id == rid]
+        self.assertEqual(len(plans_for_req_2), 1)
+
+    def test_live_reconciliation_uses_batch_classification_for_sticky_failures(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_det = self._seed_wanted(db, "sticky-det")
+        db.create_failed_search_plan(
+            request_id=rid_det, generator_id="g-test",
+            failure_class="no_runnable_query", transient=False)
+        rid_trans = self._seed_wanted(db, "sticky-trans")
+        db.create_failed_search_plan(
+            request_id=rid_trans, generator_id="g-test",
+            failure_class="resolver_unavailable", transient=True)
+
+        service = self._service(db)
+        service.generate_for_request = MagicMock(  # type: ignore[method-assign]
+            side_effect=AssertionError("sticky failures should not inspect"))
+
+        summary = reconcile_search_plans(
+            db, service, generator_id="g-test")
+
+        self.assertEqual(summary.deterministic_failed, 1)
+        self.assertEqual(summary.retryable_failed, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        service.generate_for_request.assert_not_called()
+
+    def test_per_row_exception_does_not_stop_other_rows(self):
+        """One row's generation exception must not block reconciliation."""
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_good = self._seed_wanted(db, "good")
+        rid_bomb = self._seed_wanted(db, "bomb")
+        rid_other = self._seed_wanted(db, "other")
+
+        service = self._service(db)
+        original = service.generate_for_request
+
+        def _wrapped(request_id, **kwargs):
+            if request_id == rid_bomb:
+                raise RuntimeError("boom")
+            return original(request_id, **kwargs)
+        service.generate_for_request = _wrapped  # type: ignore[method-assign]
+
+        summary = reconcile_search_plans(db, service, generator_id="g-test")
+        self.assertEqual(summary.wanted_total, 3)
+        self.assertEqual(summary.generated, 2)
+        # The bomb row shows up as unclassified -- the operator-visible
+        # stop signal for follow-up.
+        self.assertEqual(summary.unclassified_no_plan, 1)
+        # But the other two rows are repaired regardless.
+        self.assertIsNotNone(db.get_active_search_plan(rid_good))
+        self.assertIsNotNone(db.get_active_search_plan(rid_other))
+
+    def test_summary_counts_reconcile_to_wanted_total(self):
+        """Sum of all classified buckets == wanted_total. No silent drops."""
+        from datetime import datetime, timedelta, timezone
+        from lib.startup_reconciliation import reconcile_search_plans
+        from lib.pipeline_db import SearchPlanItemInput
+        db = FakePipelineDB()
+        # 1 active-current, 1 generated, 1 old-gen-replaced, 1 det-failed,
+        # 1 malformed active_plan_id that points at a non-active plan.
+        rid_a = self._seed_wanted(db, "a")
+        db.create_successful_search_plan(
+            request_id=rid_a, generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        db.create_failed_search_plan(
+            request_id=rid_a, generator_id="g-current",
+            failure_class="historical", transient=False)
+        self._seed_wanted(db, "b")  # generated
+        rid_c = self._seed_wanted(db, "c")
+        db.create_successful_search_plan(
+            request_id=rid_c, generator_id="g-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        # det-failed: blank artist+title -> generator failure.
+        db.add_request(
+            artist_name="", album_title="",
+            mb_release_id="d", source="request",
+        )
+        rid_e = self._seed_wanted(db, "e")
+        malformed_id = db.create_failed_search_plan(
+            request_id=rid_e, generator_id="g-current",
+            failure_class="old failure", transient=False)
+        db.update_request_fields(rid_e, active_plan_id=malformed_id)
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-current"),
+        )
+        self.assertEqual(summary.wanted_total, 5)
+        self.assertEqual(summary.active_current, 1)
+        self.assertEqual(summary.generated, 1)
+        self.assertEqual(summary.old_generator_replaced, 1)
+        self.assertEqual(summary.deterministic_failed, 2)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertEqual(summary.total_classified, summary.wanted_total)
+        self.assertTrue(summary.is_ready)
+
+    def test_dry_run_does_not_persist_plans(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "would-generate")
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertTrue(summary.dry_run)
+        self.assertEqual(summary.generated, 1)
+        # Crucially: nothing was actually written.
+        self.assertEqual(len(db.search_plans), 0)
+        self.assertIsNone(db.get_active_search_plan(rid))
+
+    def test_dry_run_classifies_existing_failure_records(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "trans-fail")
+        db.create_failed_search_plan(
+            request_id=rid, generator_id="g-test",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertEqual(summary.retryable_failed, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+
+    def test_dry_run_buckets_match_pre_batch_behavior_at_scale(self):
+        """End-to-end dry-run over a mixed wanted population must produce
+        the same per-bucket counts after the batch-classification
+        rewrite as the pre-batch path would. Guards against the batch
+        method silently dropping rows or mis-classifying transient vs
+        deterministic.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+
+        # 100 with active current plan -> active_current.
+        for i in range(100):
+            rid = self._seed_wanted(db, f"act-{i}")
+            db.create_successful_search_plan(
+                request_id=rid, generator_id="g-test",
+                items=[SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="q")],
+            )
+        # 50 with active old-generator plan -> old_generator_replaced.
+        for i in range(50):
+            rid = self._seed_wanted(db, f"old-{i}")
+            db.create_successful_search_plan(
+                request_id=rid, generator_id="g-old",
+                items=[SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="q")],
+            )
+        # 30 with deterministic failure on g-test -> deterministic_failed.
+        for i in range(30):
+            rid = self._seed_wanted(db, f"det-{i}")
+            db.create_failed_search_plan(
+                request_id=rid, generator_id="g-test",
+                failure_class="no_runnable_query", transient=False,
+            )
+        # 25 with transient failure on g-test -> retryable_failed.
+        for i in range(25):
+            rid = self._seed_wanted(db, f"trans-{i}")
+            db.create_failed_search_plan(
+                request_id=rid, generator_id="g-test",
+                failure_class="resolver_unavailable", transient=True,
+            )
+        # 40 with no plan at all -> generated.
+        for i in range(40):
+            self._seed_wanted(db, f"new-{i}")
+
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertEqual(summary.wanted_total, 245)
+        self.assertEqual(summary.active_current, 100)
+        self.assertEqual(summary.old_generator_replaced, 50)
+        self.assertEqual(summary.deterministic_failed, 30)
+        self.assertEqual(summary.retryable_failed, 25)
+        self.assertEqual(summary.generated, 40)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertTrue(summary.is_ready)
+
+    def test_resumable_after_interrupted_pass(self):
+        """A second reconciliation pass after a partial first pass must
+        not duplicate active plans or lose failure state.
+        """
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_first = self._seed_wanted(db, "first")
+        rid_second = self._seed_wanted(db, "second")
+
+        # Simulate interrupted first pass: only generate for rid_first.
+        service = self._service(db)
+        service.generate_for_request(rid_first)
+
+        # Second pass: rid_first is active-current (no-op), rid_second
+        # is generated. No duplicates of either.
+        summary = reconcile_search_plans(
+            db, self._service(db),
+            generator_id=service.generator_id,
+        )
+        self.assertEqual(summary.wanted_total, 2)
+        self.assertEqual(summary.active_current, 1)
+        self.assertEqual(summary.generated, 1)
+        # Each request has exactly one active plan.
+        for rid in (rid_first, rid_second):
+            actives = [
+                p for p in db.search_plans.values()
+                if p.request_id == rid and p.status == "active"
+            ]
+            self.assertEqual(len(actives), 1)
+
+
+class TestPhaseTwoEligibilitySlice(unittest.TestCase):
+    """Phase 2 wanted selection respects active-plan eligibility (U4).
+
+    Verifies the second-half claim of U4: ``get_wanted_searchable``
+    excludes rows without a current-generator active plan, including
+    rows that Phase 1 requeued mid-cycle.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(ordinal=i, strategy="default", query=q)
+            for i, q in enumerate(queries)
+        ]
+
+    def test_phase2_excludes_rows_without_current_plan(self):
+        db = FakePipelineDB()
+        rid_ready = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="ready")
+        db.create_successful_search_plan(
+            request_id=rid_ready, generator_id="g-current",
+            items=self._items("Q"),
+        )
+        rid_no_plan = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="no-plan")
+        rid_old = db.add_request(
+            artist_name="A", album_title="D", source="request",
+            mb_release_id="old")
+        db.create_successful_search_plan(
+            request_id=rid_old, generator_id="g-old",
+            items=self._items("Q"),
+        )
+
+        rids = {r["id"] for r in db.get_wanted_searchable("g-current")}
+        self.assertEqual(rids, {rid_ready})
+        # Confirm both excluded rows ARE wanted -- they're just not
+        # searchable until reconciliation.
+        all_wanted = {r["id"] for r in db.get_wanted()}
+        self.assertIn(rid_no_plan, all_wanted)
+        self.assertIn(rid_old, all_wanted)
+
+    def test_row_requeued_to_wanted_midcycle_excluded_until_next_recon(self):
+        """A row that Phase 1 transitions back to ``wanted`` mid-cycle
+        is searchable only via its existing active plan; if that plan
+        is somehow on the old generator, it stays excluded.
+        """
+        db = FakePipelineDB()
+        # Row starts downloading (no active plan, simulating a Phase 1
+        # requeue scenario where reconciliation hasn't run for this row).
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="requeued")
+        db.update_status(rid, "downloading")
+        # Phase 1 fails the download and requeues it without a current
+        # plan attached.
+        db.update_status(rid, "wanted")
+        # Phase 2 must NOT see this row.
+        self.assertEqual(db.get_wanted_searchable("g-current"), [])
+        # But ``get_wanted`` (forensic) sees it.
+        self.assertEqual([r["id"] for r in db.get_wanted()], [rid])
+
+
+class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
+    """U5 integration slices for plan-driven search execution.
+
+    Covers Plan §AE6, §AE7, §AE8, §AE14 plus stale-completion guards
+    on enqueue / download ownership / status transitions.
+    """
+
+    def setUp(self):
+        import cratedigger
+        self._cratedigger = cratedigger
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+        self._orig_pdb = cratedigger.pipeline_db_source
+        self._orig_module_ctx = cratedigger._module_ctx
+
+    def tearDown(self):
+        self._cratedigger.cfg = self._orig_cfg
+        self._cratedigger.slskd = self._orig_slskd
+        self._cratedigger.pipeline_db_source = self._orig_pdb
+        self._cratedigger._module_ctx = self._orig_module_ctx
+
+    def _make_cfg(self, **overrides):
+        import configparser
+        from dataclasses import replace as _replace
+        from lib.config import CratediggerConfig
+        ini = configparser.ConfigParser()
+        ini["Slskd"] = {"delete_searches": "False"}
+        ini["Search Settings"] = {
+            "allowed_filetypes": "flac",
+            "search_response_limit": "1000",
+            "search_escalation_threshold": "5",
+            "search_timeout": "30000",
+            "album_prepend_artist": "False",
+            "minimum_filename_match_ratio": "0.5",
+        }
+        cfg = CratediggerConfig.from_ini(ini)
+        if overrides:
+            cfg = _replace(cfg, **overrides)
+        return cfg
+
+    def _make_album(self, *, request_id):
+        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-request_id, foreign_release_id="mbid",
+            title="A", track_count=1, medium_count=1,
+            format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        return AlbumRecord(
+            id=-request_id, title="A", release_date="1991-01-01",
+            artist_id=0, artist_name="X", foreign_artist_id="",
+            releases=[release],
+            db_request_id=request_id, db_source="request",
+            db_mb_release_id="mbid",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+
+    def _wire(self, cfg, slskd, db):
+        from lib.context import CratediggerContext
+        cratedigger = self._cratedigger
+        cratedigger.cfg = cfg
+        cratedigger.slskd = slskd
+        source = MagicMock()
+        source._get_db.return_value = db
+        cratedigger.pipeline_db_source = source
+        ctx = CratediggerContext(
+            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+        )
+        cratedigger._module_ctx = ctx
+        return ctx
+
+    def _seed_two_item_plan(self, db, rid):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        return db.create_successful_search_plan(
+            request_id=rid,
+            generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="*rtist Album",
+                    canonical_query_key="*rtist album",
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="unwild", query="Artist Album",
+                    canonical_query_key="artist album",
+                ),
+            ],
+        )
+
+    def test_AE6_active_plan_ordinal_executes_and_advances_cursor(self):
+        """AE6: active plan ordinal executes. On success, log + advance."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(
+            search_id=42, state="Completed", responses=[])
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        self._seed_two_item_plan(db, rid)
+        album = self._make_album(request_id=rid)
+        ctx = self._wire(cfg, slskd, db)
+        ctx.current_album_cache[album.id] = album
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        self.assertEqual(result.outcome, "no_results")
+        log = db.search_logs[-1]
+        self.assertEqual(log.execution_stage, "accepted")
+        self.assertTrue(log.attempt_consumed)
+        self.assertEqual(log.cursor_update_status, "advanced")
+        self.assertEqual(log.plan_ordinal, 0)
+        # Cursor advanced to ordinal 1 within cycle 0.
+        row = db.request(rid)
+        self.assertEqual(row["next_plan_ordinal"], 1)
+        self.assertEqual(row["plan_cycle_count"], 0)
+
+    def test_AE7_pre_attempt_failure_is_non_consuming(self):
+        """AE7: submit failure before accepted search is non-consuming."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error = RuntimeError("offline")
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        self._seed_two_item_plan(db, rid)
+        album = self._make_album(request_id=rid)
+        ctx = self._wire(cfg, slskd, db)
+        ctx.current_album_cache[album.id] = album
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        log = db.search_logs[-1]
+        self.assertEqual(log.execution_stage, "pre_attempt")
+        self.assertFalse(log.attempt_consumed)
+        self.assertEqual(log.cursor_update_status, "unchanged")
+        # Cursor is still at ordinal 0; backoff applied.
+        row = db.request(rid)
+        self.assertEqual(row["next_plan_ordinal"], 0)
+        self.assertEqual(row["plan_cycle_count"], 0)
+        self.assertGreaterEqual(row["search_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
+
+    def test_AE8_final_ordinal_wraps_with_no_new_exhausted_row(self):
+        """AE8: final ordinal wraps cursor + cycle. No new exhausted row."""
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(
+            search_id=42, state="Completed", responses=[])
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        self._seed_two_item_plan(db, rid)
+        # Park cursor at the FINAL ordinal in cycle 5.
+        db.update_request_fields(
+            rid, next_plan_ordinal=1, plan_cycle_count=5)
+        album = self._make_album(request_id=rid)
+        ctx = self._wire(cfg, slskd, db)
+        ctx.current_album_cache[album.id] = album
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # Positive: cycle incremented, cursor wrapped.
+        row = db.request(rid)
+        self.assertEqual(row["next_plan_ordinal"], 0)
+        self.assertEqual(row["plan_cycle_count"], 6)
+        log = db.search_logs[-1]
+        self.assertEqual(log.cursor_update_status, "wrapped")
+        # Negative: NO new exhausted row.
+        self.assertNotIn("exhausted", [r.outcome for r in db.search_logs])
+
+    def test_AE14_stale_completion_after_regeneration_does_not_advance_cursor(self):
+        """AE14: regenerated active plan + completion of an old executing
+        plan logs against the executed old plan but does NOT advance the
+        new cursor.
+        """
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import (
+            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID, SearchResult,
+        )
+
+        cfg = self._make_cfg()
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        # Old plan executed by the in-flight search.
+        old_plan_id = self._seed_two_item_plan(db, rid)
+        old_active = db.get_active_search_plan(rid)
+        assert old_active is not None
+        old_item = old_active.items[0]
+        old_exec = PlanExecutionContext(
+            plan_id=old_plan_id, plan_item_id=old_item.id, plan_ordinal=0,
+            plan_strategy="default",
+            plan_canonical_query_key=old_item.canonical_query_key,
+            plan_repeat_group=old_item.repeat_group,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        # Regenerate the plan mid-flight.
+        new_plan_id = db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="New Query",
+                    canonical_query_key="new query"),
+            ],
+        )
+        # Old search now completes (no_results). Log it.
+        result = SearchResult(
+            album_id=-rid, success=False, query="*rtist Album",
+            outcome="no_results", final_state="Completed",
+            elapsed_s=0.01, variant_tag="default",
+            plan_execution=old_exec,
+        )
+        album = self._make_album(request_id=rid)
+        ctx = self._wire(cfg, MagicMock(), db)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # Stale-log row written against the executed OLD plan.
+        log = db.search_logs[-1]
+        self.assertEqual(log.plan_id, old_plan_id)
+        self.assertEqual(log.execution_stage, "stale_completion")
+        self.assertEqual(log.cursor_update_status, "stale")
+        self.assertEqual(log.stale_reason, "regenerated")
+        # New cursor unchanged: still pointing at new plan ordinal 0,
+        # cycle 0 (regen reset it).
+        row = db.request(rid)
+        self.assertEqual(row["active_plan_id"], new_plan_id)
+        self.assertEqual(row["next_plan_ordinal"], 0)
+        self.assertEqual(row["plan_cycle_count"], 0)
+
+    def test_stale_download_ownership_claim_blocked_after_regeneration(self):
+        """Plan §AE14 stale-completion: an in-flight search that resolves
+        ``found`` after the request was regenerated must NOT claim
+        download ownership (wanted -> downloading).
+        """
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import (
+            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
+        )
+        from lib.download_ownership import DownloadOwnershipWriter
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        old_plan_id = self._seed_two_item_plan(db, rid)
+        old_active = db.get_active_search_plan(rid)
+        assert old_active is not None
+        old_exec = PlanExecutionContext(
+            plan_id=old_plan_id, plan_item_id=old_active.items[0].id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="*rtist album",
+            plan_repeat_group=None,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        # Regen mid-flight.
+        db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="New",
+                canonical_query_key="new")],
+        )
+
+        # Stub ``DownloadOwnershipWriter`` to use the fake DB.
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+        result = writer.claim_downloading(
+            rid, '{"state":"planned"}', plan_execution=old_exec,
+        )
+        self.assertFalse(result, "stale claim must be blocked")
+        # Status NOT mutated.
+        self.assertEqual(db.request(rid)["status"], "wanted")
+
+    def test_current_download_ownership_claim_succeeds(self):
+        """Sanity: a non-stale claim with the current plan execution
+        context still succeeds (regression guard)."""
+        from tests.fakes import FakePipelineDB
+        from lib.search import (
+            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
+        )
+        from lib.download_ownership import DownloadOwnershipWriter
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        plan_id = self._seed_two_item_plan(db, rid)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        exec_ctx = PlanExecutionContext(
+            plan_id=plan_id, plan_item_id=active.items[0].id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="*rtist album",
+            plan_repeat_group=None,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+        ok = writer.claim_downloading(
+            rid, '{"state":"planned"}', plan_execution=exec_ctx,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(db.request(rid)["status"], "downloading")
+
+    def test_stale_request_transition_blocked_via_finalize_request_if_plan_current(self):
+        """``finalize_request_if_plan_current`` rejects stale transitions."""
+        from typing import cast
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import PipelineDB, SearchPlanItemInput
+        from lib.transitions import (
+            RequestTransition, finalize_request_if_plan_current,
+        )
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        old_plan_id = self._seed_two_item_plan(db, rid)
+        # Regenerate.
+        db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id="g", items=[
+                SearchPlanItemInput(ordinal=0, strategy="default", query="N")
+            ],
+        )
+        ok = finalize_request_if_plan_current(
+            cast(PipelineDB, db), rid,
+            RequestTransition.to_downloading(
+                from_status="wanted", state_json='{"x":1}'),
+            plan_id=old_plan_id, plan_ordinal=0, cycle_count_snapshot=0,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(db.request(rid)["status"], "wanted")
+
+    def test_stale_enqueue_does_not_move_request_to_downloading(self):
+        """Owner-thread plumbing: when ``ctx.active_plan_execution`` is
+        stale, ``_claim_initial_download_ownership`` returns a non-claimed
+        result and the request stays wanted.
+        """
+        from tests.fakes import FakePipelineDB
+        from lib.context import CratediggerContext
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.enqueue import _claim_initial_download_ownership
+        from lib.grab_list import DownloadFile
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import (
+            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
+        )
+
+        cfg = self._make_cfg()
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        old_plan_id = self._seed_two_item_plan(db, rid)
+        old_active = db.get_active_search_plan(rid)
+        assert old_active is not None
+        old_exec = PlanExecutionContext(
+            plan_id=old_plan_id, plan_item_id=old_active.items[0].id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="*rtist album",
+            plan_repeat_group=None,
+            plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        db.supersede_search_plan_with_replacement(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="New")],
+        )
+
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+        worker_ctx = CratediggerContext(
+            cfg=cfg, slskd=MagicMock(), pipeline_db_source=MagicMock(),
+            download_ownership=writer,
+            active_plan_execution=old_exec,
+        )
+        album = self._make_album(request_id=rid)
+        files = [DownloadFile(
+            filename="a.flac", id="t1", file_dir="d",
+            username="peer", size=1)]
+        claim = _claim_initial_download_ownership(
+            album, files, "flac", worker_ctx,
+        )
+        self.assertTrue(claim.attempted)
+        self.assertFalse(claim.claimed)
+        self.assertEqual(db.request(rid)["status"], "wanted")
+
+
+class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
+    """Regression: post-U5 the search executor must drive selection
+    through the persisted plan -- ``select_variant`` and ``search_attempts``
+    must NOT determine the next runnable query."""
+
+    def setUp(self):
+        import cratedigger
+        self._cratedigger = cratedigger
+        self._orig_cfg = cratedigger.cfg
+        self._orig_slskd = cratedigger.slskd
+
+    def tearDown(self):
+        self._cratedigger.cfg = self._orig_cfg
+        self._cratedigger.slskd = self._orig_slskd
+
+    def test_executor_uses_plan_strategy_not_search_attempts_ladder(self):
+        """A request with search_attempts=99 (ladder past exhaustion) but
+        whose active plan-item is strategy='unwild' MUST issue an unwild
+        query, not the legacy exhausted/track query the old ladder
+        would have produced.
+        """
+        import configparser
+        from dataclasses import replace as _replace
+        from lib.config import CratediggerConfig
+        from lib.context import CratediggerContext
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+
+        cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+        cfg = _replace(cfg, search_escalation_threshold=5)
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.searches.add_search(
+            search_id=42, state="Completed", responses=[])
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="A", source="request",
+            mb_release_id="mbid")
+        # Legacy ladder at search_attempts=99 would produce 'exhausted'.
+        # The active plan instead points at 'unwild' so the executor
+        # MUST issue 'X A' (unwild query).
+        db.update_request_fields(rid, search_attempts=99)
+        db.create_successful_search_plan(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="unwild", query="X A",
+                    canonical_query_key="x a"),
+            ],
+        )
+        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-rid, foreign_release_id="mbid",
+            title="A", track_count=1, medium_count=1,
+            format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-rid, title="A", release_date="1991-01-01",
+            artist_id=0, artist_name="X", foreign_artist_id="",
+            releases=[release], db_request_id=rid, db_source="request",
+            db_mb_release_id="mbid",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+        self._cratedigger.cfg = cfg
+        self._cratedigger.slskd = slskd
+        source = MagicMock()
+        source._get_db.return_value = db
+        ctx = CratediggerContext(
+            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+        )
+        ctx.current_album_cache[album.id] = album
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        # Plan-driven query was issued.
+        self.assertEqual(len(slskd.searches.search_text_calls), 1)
+        self.assertEqual(
+            slskd.searches.search_text_calls[0].search_text, "X A")
+        # Variant comes from the plan-item, not the legacy ladder.
+        self.assertEqual(result.variant_tag, "unwild")
 
 
 if __name__ == "__main__":
