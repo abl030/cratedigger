@@ -266,6 +266,7 @@ def run_import_one(
         cmd,
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=timeout,
         env=beets_subprocess_env(),
     )

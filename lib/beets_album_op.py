@@ -191,7 +191,7 @@ def _run_beet_op(
         # ``beet move`` doesn't prompt, so the extra byte is harmless there.
         proc = sp.run(
             argv,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, errors="replace", timeout=timeout,
             env=beets_subprocess_env(),
             input="y\n",
         )

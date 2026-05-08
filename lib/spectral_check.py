@@ -236,7 +236,10 @@ def _get_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
     if trim_seconds:
         cmd.extend(["trim", "0", str(trim_seconds)])
     cmd.extend(["sinc", "%d-%d" % (lo_hz, hi_hz), "stat"])
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    # errors="replace": sox echoes filename + tag bytes; non-UTF-8 metadata
+    # would otherwise raise UnicodeDecodeError during capture.
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            errors="replace", timeout=60)
     rms = parse_rms_from_stat(result.stderr)
     if rms is None:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"sox exit {result.returncode}"
@@ -262,7 +265,8 @@ def _ffmpeg_to_wav(src, dst, trim_seconds=30):
     if trim_seconds:
         cmd.extend(["-t", str(trim_seconds)])
     cmd.extend(["-ar", "48000", "-ac", "2", "-f", "wav", "-bitexact", dst])
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            errors="replace", timeout=30)
     if result.returncode != 0:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"ffmpeg exit {result.returncode}"
         raise _DecodeFailedError(f"ffmpeg: {last_line}")

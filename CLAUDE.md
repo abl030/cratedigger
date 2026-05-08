@@ -116,6 +116,7 @@ tests/                  — 1400+ tests; fakes.py + helpers.py shared infra
 nix/                    — slskd-api build, package.nix, shell.nix, module.nix, VM check
 flake.nix               — Outputs: slskd-api, devShell, nixosModules.default, checks.moduleVm
 docs/                   — Subsystem docs referenced from this file
+docs/solutions/         — Compounding lessons from past bugs/decisions, organized by category with YAML frontmatter (module, tags, problem_type). Worth a grep when debugging in a documented area.
 .claude/rules/          — Path-scoped auto-loaded rules (code-quality, nix-shell, deploy, ...)
 ```
 

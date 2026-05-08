@@ -704,6 +704,64 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
             self.assertFalse(os.path.exists(flac_path))
 
 
+class TestConvertLosslessNonUtf8Stderr(unittest.TestCase):
+    """Regression: subprocess.run(text=True) decodes stderr as UTF-8 strict by
+    default, so any non-UTF-8 byte in ffmpeg's stderr (typical when FLAC Vorbis
+    comments are CP1252-tagged) raises UnicodeDecodeError DURING capture and
+    crashes the import. Repro from request 580 (78 Saab — Crossed Lines,
+    trelospatrinos, 2026-05-08): exit_code=99,
+    `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe2 in position 32388`.
+    """
+
+    def _make_shim(self, bin_dir: str, name: str, body: str) -> str:
+        """Drop a #!/bin/sh shim into bin_dir; return its path."""
+        path = os.path.join(bin_dir, name)
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_convert_lossless_tolerates_non_utf8_ffmpeg_stderr(self):
+        """A fake ffmpeg that writes 0xE2 + ASCII to stderr must not crash convert_lossless.
+
+        Without errors='replace' on the subprocess.run capture, this raises
+        UnicodeDecodeError before subprocess.run even returns — exactly the
+        live crash on request 580.
+        """
+        import tempfile
+        from harness.import_one import convert_lossless, V0_SPEC
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = os.path.join(tmpdir, "bin")
+            os.makedirs(bin_dir)
+            # Fake ffmpeg: take the last arg as output, create it, emit
+            # 32KB of stderr containing a bare 0xE2 byte (not a UTF-8 lead),
+            # exit 0.
+            self._make_shim(bin_dir, "ffmpeg", (
+                'OUT="${@: -1}"\n'
+                # Pad to ~32KB so the bad byte sits well into the stderr buffer.
+                'printf "%.s ffmpeg version pad pad pad pad pad pad pad pad\\n" {1..600} >&2\n'
+                # Bare 0xE2 followed by ASCII X (no UTF-8 continuation byte).
+                'printf "metadata: title=caf\\xe2X end\\n" >&2\n'
+                # Write a tiny non-empty output so convert_lossless counts it.
+                'printf "id3" > "$OUT"\n'
+                'exit 0\n'
+            ))
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "track01.flac"), "wb") as f:
+                f.write(b"fLaC")  # placeholder; only the extension matters for _is_lossless_file
+            saved_path = os.environ.get("PATH", "")
+            try:
+                os.environ["PATH"] = bin_dir + os.pathsep + saved_path
+                # Pre-fix this raises UnicodeDecodeError; post-fix it returns cleanly.
+                converted, failed, ext = convert_lossless(album, V0_SPEC)
+            finally:
+                os.environ["PATH"] = saved_path
+            self.assertEqual(converted, 1, "shim wrote a non-empty output file → counted as converted")
+            self.assertEqual(failed, 0)
+            self.assertEqual(ext, "flac")
+
+
 # ============================================================================
 # --preserve-source CLI flag — issue #111
 # ============================================================================

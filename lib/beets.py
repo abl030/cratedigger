@@ -36,7 +36,8 @@ def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0
     logger.info(f"BEETS_VALIDATE: cmd={' '.join(cmd)}")
 
     try:
-        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True,
+        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE,
+                        text=True, errors="replace",
                         env=beets_subprocess_env())
     except Exception as e:
         result.error = f"Failed to start harness: {e}"
