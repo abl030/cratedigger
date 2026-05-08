@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from lib.config import CratediggerConfig
@@ -81,6 +82,15 @@ RESULT_REQUEST_NOT_FOUND = "request_not_found"
 # misbehaving exception cannot bloat the table.
 MAX_ERROR_MESSAGE_BYTES = 4 * 1024
 TRUNCATION_MARKER = "…[truncated]"
+
+# How long a transient generation failure is "sticky" before another
+# attempt is permitted. Without this, every cycle that walks a
+# transient-failed request would re-run the resolver and append yet
+# another failed_transient row, causing unbounded JSONB blob growth.
+# 1h is short enough that a recovered upstream is detected within one
+# cycle of its window expiring, while long enough that a persistent
+# outage produces at most ~24 rows/day per request.
+_TRANSIENT_FAILURE_RETRY_INTERVAL = timedelta(hours=1)
 
 
 # Path-prefix redaction list. We strip absolute paths beneath these roots
@@ -303,22 +313,116 @@ class SearchPlanService:
             existing = self.db.get_active_search_plan(request_id)
             if existing is not None and existing.plan.status == PLAN_STATUS_ACTIVE:
                 if existing.plan.generator_id == self.generator_id:
-                    return ServiceResult(
-                        outcome=RESULT_NOOP_ACTIVE_PLAN_EXISTS,
-                        plan_id=existing.plan.id,
+                    # Active current-generator plan check covers the
+                    # happy path; the partial-track replan check (#3)
+                    # decides whether to force regeneration anyway.
+                    if not self._should_regenerate_for_track_count(
+                        request_id, existing,
+                    ):
+                        return ServiceResult(
+                            outcome=RESULT_NOOP_ACTIVE_PLAN_EXISTS,
+                            plan_id=existing.plan.id,
+                        )
+                    return self._build_and_persist(
+                        request_id, row, regenerate=True,
+                        prepend_artist=prepend_artist,
                     )
                 # Old-generator plan: fall through and replace it under
                 # supersede semantics so callers (startup) don't need a
                 # second branch.
+                #
+                # First: check whether the current generator id has
+                # ALREADY recorded a sticky failure for this request. If
+                # so, short-circuit instead of appending another row each
+                # cycle.
+                sticky = self._sticky_failure_short_circuit(request_id)
+                if sticky is not None:
+                    return sticky
                 return self._build_and_persist(
                     request_id, row, regenerate=True,
                     prepend_artist=prepend_artist,
                 )
 
+            # No active plan: still respect a sticky failure on the
+            # current generator id so we don't pile up failed rows.
+            sticky = self._sticky_failure_short_circuit(request_id)
+            if sticky is not None:
+                return sticky
+
         return self._build_and_persist(
             request_id, row, regenerate=regenerate,
             prepend_artist=prepend_artist,
         )
+
+    def _sticky_failure_short_circuit(
+        self, request_id: int,
+    ) -> ServiceResult | None:
+        """Return a sticky-failure ``ServiceResult`` or ``None``.
+
+        Deterministic failures recorded under the current generator id
+        are sticky forever; transient failures are sticky for
+        ``_TRANSIENT_FAILURE_RETRY_INTERVAL`` after they were recorded.
+        Failures recorded under an older generator id never short-circuit
+        — the new id deserves a fresh attempt.
+        """
+        try:
+            inspection = self.db.get_search_plan_inspection(request_id)
+        except Exception:  # noqa: BLE001
+            # If we can't read inspection state, fail open: let the
+            # generator run rather than silently never trying again.
+            return None
+
+        det = inspection.latest_failed_deterministic
+        if det is not None and det.generator_id == self.generator_id:
+            return ServiceResult(
+                outcome=RESULT_FAILED_DETERMINISTIC,
+                plan_id=det.id,
+                failure_class=det.failure_class,
+                error_message=det.error_message,
+            )
+
+        trans = inspection.latest_failed_transient
+        if (trans is not None
+                and trans.generator_id == self.generator_id
+                and _within_retry_window(trans.created_at)):
+            return ServiceResult(
+                outcome=RESULT_FAILED_TRANSIENT,
+                plan_id=trans.id,
+                failure_class=trans.failure_class,
+                error_message=trans.error_message,
+            )
+        return None
+
+    def _should_regenerate_for_track_count(
+        self,
+        request_id: int,
+        existing: Any,
+    ) -> bool:
+        """#3: force regeneration when the request now has more tracks
+        than the active plan was built against.
+
+        ``existing`` is an ``ActiveSearchPlan``. We compare today's
+        ``len(get_tracks)`` to the plan's ``metadata_snapshot.track_count``.
+        Older plans without a recorded ``track_count`` are treated as
+        equal (skip the check) — they will be replaced on the next
+        generator-id bump.
+        """
+        snap = existing.plan.metadata_snapshot or {}
+        try:
+            recorded = snap.get("track_count")
+        except AttributeError:
+            return False
+        if recorded is None:
+            return False
+        try:
+            recorded_int = int(recorded)
+        except (TypeError, ValueError):
+            return False
+        try:
+            current_tracks = self.db.get_tracks(request_id) or []
+        except Exception:  # noqa: BLE001
+            return False
+        return len(current_tracks) > recorded_int
 
     # ---------- internal ----------
 
@@ -552,6 +656,16 @@ class SearchPlanService:
             failure_class=failure_class,
             error_message=sanitized_msg,
         )
+
+
+def _within_retry_window(created_at: datetime | None) -> bool:
+    """True when ``created_at`` is within the transient-retry window of now."""
+    if created_at is None:
+        return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return (now - created_at) < _TRANSIENT_FAILURE_RETRY_INTERVAL
 
 
 def _metadata_snapshot_from_snapshot(

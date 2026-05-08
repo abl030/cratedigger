@@ -268,6 +268,212 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
 
 
+class TestSearchPlanServiceTrackCountReplan(unittest.TestCase):
+    """#3: a plan generated with N tracks must regenerate when the
+    request later has more tracks than the plan was built against."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed_request_with_tracks(self, request_id: int, tracks: list[dict]):
+        _seed_request(
+            self.db, id=request_id,
+            artist_name="Phoebe Bridgers", album_title="Punisher", year=2020,
+        )
+        self.db.set_tracks(request_id, tracks)
+        result = self.svc.generate_for_new_request(
+            request_id, artist_name="Phoebe Bridgers", album_title="Punisher",
+            year=2020, tracks=tracks, source="request",
+        )
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        return result.plan_id
+
+    def test_more_tracks_than_snapshot_forces_replan(self):
+        """A plan generated with 3 tracks regenerates when the request
+        is later updated to carry 12 tracks."""
+        partial = _ok_tracks()[:3]
+        old_plan_id = self._seed_request_with_tracks(60, partial)
+        # Replace tracks with the full 4-track set (more than recorded 3).
+        full = _ok_tracks()
+        self.assertGreater(len(full), 3)
+        self.db.set_tracks(60, full)
+
+        result = self.svc.generate_for_request(60, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_SUCCESS)
+        self.assertTrue(result.is_supersede)
+        self.assertNotEqual(result.plan_id, old_plan_id)
+        # The new plan's snapshot matches the new track count.
+        active = self.db.get_active_search_plan(60)
+        assert active is not None
+        snap = active.plan.metadata_snapshot or {}
+        self.assertEqual(snap.get("track_count"), len(full))
+
+    def test_same_track_count_no_replan(self):
+        """When today's tracks count matches the snapshot, no regeneration."""
+        full = _ok_tracks()
+        old_plan_id = self._seed_request_with_tracks(61, full)
+        before = len(self.db.search_plans)
+        result = self.svc.generate_for_request(61, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_NOOP_ACTIVE_PLAN_EXISTS)
+        self.assertEqual(result.plan_id, old_plan_id)
+        self.assertEqual(len(self.db.search_plans), before)
+
+    def test_missing_track_count_in_snapshot_skips_check(self):
+        """Older plans without ``track_count`` in metadata_snapshot must
+        not be replanned by the partial-track check (they are repaired
+        on the next generator-id bump)."""
+        old_plan_id = self._seed_request_with_tracks(62, _ok_tracks())
+        assert old_plan_id is not None  # narrowing
+        # Hand-edit the snapshot to drop track_count (older plan).
+        plan = self.db.search_plans[old_plan_id]
+        plan.metadata_snapshot = {
+            k: v for k, v in (plan.metadata_snapshot or {}).items()
+            if k != "track_count"
+        }
+        # Add many more tracks; partial-track check must NOT fire.
+        big = _ok_tracks() + _ok_tracks()
+        self.db.set_tracks(62, big)
+        result = self.svc.generate_for_request(62, regenerate=False)
+        self.assertEqual(result.outcome, RESULT_NOOP_ACTIVE_PLAN_EXISTS)
+
+
+class TestSearchPlanServiceFailureStickiness(unittest.TestCase):
+    """`failed_deterministic` is sticky for the current generator id; a
+    `failed_transient` plan is sticky for a configurable retry window
+    before another attempt is allowed."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed_unrunnable(self, request_id: int = 50) -> None:
+        """Seed a request whose metadata cannot produce any runnable query."""
+        _seed_request(
+            self.db, id=request_id,
+            artist_name="", album_title="", year=None,
+        )
+
+    def test_deterministic_failure_does_not_create_a_second_row(self):
+        """Calling generate_for_request twice on a request whose latest
+        attempt is failed_deterministic must NOT insert a new row."""
+        self._seed_unrunnable(50)
+        first = self.svc.generate_for_request(50, regenerate=False)
+        self.assertEqual(first.outcome, RESULT_FAILED_DETERMINISTIC)
+        before = len(self.db.search_plans)
+        # Second call: previous failure must short-circuit.
+        second = self.svc.generate_for_request(50, regenerate=False)
+        self.assertEqual(second.outcome, RESULT_FAILED_DETERMINISTIC)
+        self.assertEqual(second.plan_id, first.plan_id)
+        self.assertEqual(len(self.db.search_plans), before)
+
+    def test_transient_failure_short_circuits_within_retry_window(self):
+        """A recent transient failure must short-circuit additional
+        generate_for_request calls until the retry window elapses."""
+        from lib.search_plan_service import _TRANSIENT_FAILURE_RETRY_INTERVAL
+        _seed_request(self.db, id=51, artist_name="X", album_title="Y",
+                      mb_release_id="release-uuid")
+
+        class FlakyResolver:
+            calls = 0
+
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                FlakyResolver.calls += 1
+                raise ResolverFailure("MB API timed out")
+
+        svc = SearchPlanService(self.db, self.cfg, resolver=FlakyResolver())
+        first = svc.generate_for_request(51, regenerate=False)
+        self.assertEqual(first.outcome, RESULT_FAILED_TRANSIENT)
+        before = len(self.db.search_plans)
+
+        # Within the retry window: short-circuit (no new row, no resolver call).
+        calls_at_start = FlakyResolver.calls
+        second = svc.generate_for_request(51, regenerate=False)
+        self.assertEqual(second.outcome, RESULT_FAILED_TRANSIENT)
+        self.assertEqual(second.plan_id, first.plan_id)
+        self.assertEqual(len(self.db.search_plans), before)
+        self.assertEqual(FlakyResolver.calls, calls_at_start)
+
+        # Backdate the recorded transient failure to before the window.
+        latest = max(
+            (p for p in self.db.search_plans.values()
+             if p.request_id == 51 and p.status == PLAN_STATUS_FAILED_TRANSIENT),
+            key=lambda p: p.created_at,
+        )
+        from datetime import timezone
+        backdated = (
+            latest.created_at - _TRANSIENT_FAILURE_RETRY_INTERVAL
+            - _TRANSIENT_FAILURE_RETRY_INTERVAL
+        )
+        if backdated.tzinfo is None:
+            backdated = backdated.replace(tzinfo=timezone.utc)
+        latest.created_at = backdated
+
+        # After the window: a new attempt is permitted.
+        third = svc.generate_for_request(51, regenerate=False)
+        # The flaky resolver still raises, so a new failed_transient row
+        # is created (different id from the first).
+        self.assertEqual(third.outcome, RESULT_FAILED_TRANSIENT)
+        self.assertNotEqual(third.plan_id, first.plan_id)
+        self.assertEqual(len(self.db.search_plans), before + 1)
+
+    def test_old_generator_failed_does_not_block_current_generator_attempt(self):
+        """A failed_deterministic row from an old generator id must NOT
+        short-circuit the current generator id."""
+        self._seed_unrunnable(52)
+        # Manually insert a failed_deterministic row for an old gen id.
+        self.db.create_failed_search_plan(
+            request_id=52,
+            generator_id="search-plan/ancient-1",
+            failure_class=FAILURE_CLASS_NO_RUNNABLE_QUERY,
+            error_message="old failure",
+            transient=False,
+        )
+        before = len(self.db.search_plans)
+        result = self.svc.generate_for_request(52, regenerate=False)
+        # Current-generator attempt runs and produces its own
+        # failed_deterministic row.
+        self.assertEqual(result.outcome, RESULT_FAILED_DETERMINISTIC)
+        self.assertEqual(len(self.db.search_plans), before + 1)
+
+    def test_old_generator_active_replace_failure_is_sticky(self):
+        """When auto-replacing an old-generator active plan, a new
+        deterministic failure under the current generator must be sticky:
+        a follow-up call must not create yet another failed row."""
+        # Seed a request and produce a successful active plan.
+        _seed_request(
+            self.db, id=53,
+            artist_name="Phoebe Bridgers", album_title="Punisher", year=2020,
+        )
+        self.db.set_tracks(53, _ok_tracks())
+        first = self.svc.generate_for_new_request(
+            53, artist_name="Phoebe Bridgers", album_title="Punisher",
+            year=2020, tracks=_ok_tracks(), source="request",
+        )
+        self.assertEqual(first.outcome, RESULT_SUCCESS)
+        # Pretend it's an old-generator plan.
+        plan_id = first.plan_id
+        assert plan_id is not None
+        self.db.search_plans[plan_id].generator_id = "search-plan/old-1"
+        # Mutate the request so regeneration deterministically fails.
+        self.db.request(53)["artist_name"] = ""
+        self.db.request(53)["album_title"] = ""
+        self.db._tracks[53] = []
+
+        # First implicit-regenerate fails deterministically.
+        a = self.svc.generate_for_request(53, regenerate=False)
+        self.assertEqual(a.outcome, RESULT_FAILED_DETERMINISTIC)
+        before = len(self.db.search_plans)
+
+        # Second call must NOT add another failed row for the current gen id.
+        b = self.svc.generate_for_request(53, regenerate=False)
+        self.assertEqual(b.outcome, RESULT_FAILED_DETERMINISTIC)
+        self.assertEqual(b.plan_id, a.plan_id)
+        self.assertEqual(len(self.db.search_plans), before)
+
+
 class TestSearchPlanServiceResolver(unittest.TestCase):
     """AE12 + metadata-incomplete edge: resolver outage / no metadata."""
 
@@ -301,6 +507,23 @@ class TestSearchPlanServiceResolver(unittest.TestCase):
         self.assertEqual(first.failure_class,
                          FAILURE_CLASS_RESOLVER_UNAVAILABLE)
         self.assertIsNone(self.db.get_active_search_plan(20))
+
+        # Backdate the recorded transient failure past the retry window
+        # so the next call is permitted to actually run the resolver.
+        from datetime import timezone
+        from lib.search_plan_service import _TRANSIENT_FAILURE_RETRY_INTERVAL
+        latest = max(
+            (p for p in self.db.search_plans.values()
+             if p.request_id == 20 and p.status == PLAN_STATUS_FAILED_TRANSIENT),
+            key=lambda p: p.created_at,
+        )
+        backdated = (
+            latest.created_at - _TRANSIENT_FAILURE_RETRY_INTERVAL
+            - _TRANSIENT_FAILURE_RETRY_INTERVAL
+        )
+        if backdated.tzinfo is None:
+            backdated = backdated.replace(tzinfo=timezone.utc)
+        latest.created_at = backdated
 
         # Later retry succeeds.
         second = svc.generate_for_request(20, regenerate=False)
