@@ -3759,5 +3759,328 @@ class TestSearchWatchdogSlice(unittest.TestCase):
         self.assertEqual(slskd.searches.delete_calls, ["abc-123"])
 
 
+class TestStartupReconciliationSlice(unittest.TestCase):
+    """End-to-end startup reconciliation against ``FakePipelineDB`` +
+    real ``SearchPlanService`` + real pure plan generator (U4).
+
+    These slices exercise the whole orchestration: the all-wanted scan,
+    per-row generation, supersede semantics, isolated failure handling,
+    and the readiness summary contract.
+    """
+
+    def _cfg(self):
+        ini = configparser.ConfigParser()
+        return CratediggerConfig.from_ini(ini)
+
+    def _service(self, db, generator_id="g-test"):
+        from lib.search_plan_service import SearchPlanService
+        svc = SearchPlanService(db, self._cfg())
+        # Tests pin a stable test generator id so they don't drift when
+        # the production constant rolls. Real callers never override.
+        svc.generator_id = generator_id
+        return svc
+
+    def _seed_wanted(self, db, mbid, *, tracks: list[dict] | None = None):
+        rid = db.add_request(
+            artist_name="Artist", album_title="Album",
+            mb_release_id=mbid, source="request",
+        )
+        if tracks is None:
+            tracks = [
+                {"disc_number": 1, "track_number": 1, "title": "Song One"},
+                {"disc_number": 1, "track_number": 2, "title": "Song Two"},
+            ]
+        db.set_tracks(rid, tracks)
+        return rid
+
+    def test_scans_all_wanted_ignoring_pagination_and_backoff(self):
+        """Reconciliation must visit every wanted row, not just the
+        page-limited / due ones ``get_wanted`` would surface.
+        """
+        from datetime import datetime, timedelta, timezone
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        # 600 wanted rows, 550 backed off, 50 fresh -- larger than any
+        # page_size cratedigger uses.
+        rids = []
+        for i in range(600):
+            rid = self._seed_wanted(db, f"mbid-{i:04d}")
+            rids.append(rid)
+        far_future = datetime.now(timezone.utc) + timedelta(hours=24)
+        for rid in rids[50:]:
+            db.update_request_fields(rid, next_retry_after=far_future)
+
+        # Sanity: ``get_wanted`` only sees the 50 due rows.
+        self.assertEqual(len(db.get_wanted()), 50)
+
+        summary = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+            progress_batch_size=200,
+        )
+        self.assertEqual(summary.wanted_total, 600)
+        # Every row is generated on first pass.
+        self.assertEqual(summary.generated, 600)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertTrue(summary.is_ready)
+
+    def test_missing_plan_rows_receive_active_plan_with_cursor_at_zero(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "missing-plan")
+        summary = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, "g-test")
+        self.assertEqual(active.plan.status, "active")
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(summary.generated, 1)
+
+    def test_old_generator_rows_supersede_to_current_with_cursor_reset(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "old-gen")
+        old_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="old q")],
+        )
+        # Cursor moved away so we can prove reset.
+        db.update_request_fields(rid, next_plan_ordinal=1, plan_cycle_count=4)
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-new"),
+        )
+        self.assertEqual(summary.old_generator_replaced, 1)
+        self.assertEqual(summary.generated, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.plan.generator_id, "g-new")
+        self.assertNotEqual(active.plan.id, old_id)
+        self.assertEqual(active.next_ordinal, 0)
+        self.assertEqual(active.cycle_count, 0)
+        self.assertEqual(db.search_plans[old_id].status, "superseded")
+
+    def test_deterministic_failed_rows_reported_and_not_retried(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        # Empty artist + album makes the generator return failure_reason.
+        rid = db.add_request(
+            artist_name="", album_title="",
+            mb_release_id="det-fail", source="request",
+        )
+        # First pass: deterministic failure recorded.
+        summary1 = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        self.assertEqual(summary1.deterministic_failed, 1)
+        self.assertIsNone(db.get_active_search_plan(rid))
+        # Plan failure persists with classification.
+        plans_for_req = [
+            p for p in db.search_plans.values() if p.request_id == rid]
+        self.assertEqual(len(plans_for_req), 1)
+        self.assertEqual(plans_for_req[0].status, "failed_deterministic")
+
+        # Second pass: the row is still classified correctly. The
+        # service no-ops on the existing failure record (or re-records
+        # an identical one) -- either way the row is NOT unclassified.
+        summary2 = reconcile_search_plans(
+            db, self._service(db), generator_id="g-test",
+        )
+        # Must classify into a known bucket -- never unclassified.
+        self.assertEqual(summary2.unclassified_no_plan, 0)
+        self.assertEqual(summary2.wanted_total, 1)
+        self.assertEqual(summary2.deterministic_failed, 1)
+
+    def test_per_row_exception_does_not_stop_other_rows(self):
+        """One row's generation exception must not block reconciliation."""
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_good = self._seed_wanted(db, "good")
+        rid_bomb = self._seed_wanted(db, "bomb")
+        rid_other = self._seed_wanted(db, "other")
+
+        service = self._service(db)
+        original = service.generate_for_request
+
+        def _wrapped(request_id, **kwargs):
+            if request_id == rid_bomb:
+                raise RuntimeError("boom")
+            return original(request_id, **kwargs)
+        service.generate_for_request = _wrapped  # type: ignore[method-assign]
+
+        summary = reconcile_search_plans(db, service, generator_id="g-test")
+        self.assertEqual(summary.wanted_total, 3)
+        self.assertEqual(summary.generated, 2)
+        # The bomb row shows up as unclassified -- the operator-visible
+        # stop signal for follow-up.
+        self.assertEqual(summary.unclassified_no_plan, 1)
+        # But the other two rows are repaired regardless.
+        self.assertIsNotNone(db.get_active_search_plan(rid_good))
+        self.assertIsNotNone(db.get_active_search_plan(rid_other))
+
+    def test_summary_counts_reconcile_to_wanted_total(self):
+        """Sum of all classified buckets == wanted_total. No silent drops."""
+        from datetime import datetime, timedelta, timezone
+        from lib.startup_reconciliation import reconcile_search_plans
+        from lib.pipeline_db import SearchPlanItemInput
+        db = FakePipelineDB()
+        # 1 active-current, 1 generated, 1 old-gen-replaced, 1 det-failed.
+        rid_a = self._seed_wanted(db, "a")
+        db.create_successful_search_plan(
+            request_id=rid_a, generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        self._seed_wanted(db, "b")  # generated
+        rid_c = self._seed_wanted(db, "c")
+        db.create_successful_search_plan(
+            request_id=rid_c, generator_id="g-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        # det-failed: blank artist+title -> generator failure.
+        db.add_request(
+            artist_name="", album_title="",
+            mb_release_id="d", source="request",
+        )
+
+        summary = reconcile_search_plans(
+            db, self._service(db, generator_id="g-current"),
+        )
+        self.assertEqual(summary.wanted_total, 4)
+        self.assertEqual(summary.active_current, 1)
+        self.assertEqual(summary.generated, 1)
+        self.assertEqual(summary.old_generator_replaced, 1)
+        self.assertEqual(summary.deterministic_failed, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+        self.assertEqual(summary.total_classified, summary.wanted_total)
+        self.assertTrue(summary.is_ready)
+
+    def test_dry_run_does_not_persist_plans(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "would-generate")
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertTrue(summary.dry_run)
+        self.assertEqual(summary.generated, 1)
+        # Crucially: nothing was actually written.
+        self.assertEqual(len(db.search_plans), 0)
+        self.assertIsNone(db.get_active_search_plan(rid))
+
+    def test_dry_run_classifies_existing_failure_records(self):
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "trans-fail")
+        db.create_failed_search_plan(
+            request_id=rid, generator_id="g-test",
+            failure_class="resolver_unavailable", transient=True,
+        )
+        summary = reconcile_search_plans(
+            db, None, dry_run=True, generator_id="g-test",
+        )
+        self.assertEqual(summary.retryable_failed, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+
+    def test_resumable_after_interrupted_pass(self):
+        """A second reconciliation pass after a partial first pass must
+        not duplicate active plans or lose failure state.
+        """
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid_first = self._seed_wanted(db, "first")
+        rid_second = self._seed_wanted(db, "second")
+
+        # Simulate interrupted first pass: only generate for rid_first.
+        service = self._service(db)
+        service.generate_for_request(rid_first)
+
+        # Second pass: rid_first is active-current (no-op), rid_second
+        # is generated. No duplicates of either.
+        summary = reconcile_search_plans(
+            db, self._service(db),
+            generator_id=service.generator_id,
+        )
+        self.assertEqual(summary.wanted_total, 2)
+        self.assertEqual(summary.active_current, 1)
+        self.assertEqual(summary.generated, 1)
+        # Each request has exactly one active plan.
+        for rid in (rid_first, rid_second):
+            actives = [
+                p for p in db.search_plans.values()
+                if p.request_id == rid and p.status == "active"
+            ]
+            self.assertEqual(len(actives), 1)
+
+
+class TestPhaseTwoEligibilitySlice(unittest.TestCase):
+    """Phase 2 wanted selection respects active-plan eligibility (U4).
+
+    Verifies the second-half claim of U4: ``get_wanted_searchable``
+    excludes rows without a current-generator active plan, including
+    rows that Phase 1 requeued mid-cycle.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(ordinal=i, strategy="default", query=q)
+            for i, q in enumerate(queries)
+        ]
+
+    def test_phase2_excludes_rows_without_current_plan(self):
+        db = FakePipelineDB()
+        rid_ready = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="ready")
+        db.create_successful_search_plan(
+            request_id=rid_ready, generator_id="g-current",
+            items=self._items("Q"),
+        )
+        rid_no_plan = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="no-plan")
+        rid_old = db.add_request(
+            artist_name="A", album_title="D", source="request",
+            mb_release_id="old")
+        db.create_successful_search_plan(
+            request_id=rid_old, generator_id="g-old",
+            items=self._items("Q"),
+        )
+
+        rids = {r["id"] for r in db.get_wanted_searchable("g-current")}
+        self.assertEqual(rids, {rid_ready})
+        # Confirm both excluded rows ARE wanted -- they're just not
+        # searchable until reconciliation.
+        all_wanted = {r["id"] for r in db.get_wanted()}
+        self.assertIn(rid_no_plan, all_wanted)
+        self.assertIn(rid_old, all_wanted)
+
+    def test_row_requeued_to_wanted_midcycle_excluded_until_next_recon(self):
+        """A row that Phase 1 transitions back to ``wanted`` mid-cycle
+        is searchable only via its existing active plan; if that plan
+        is somehow on the old generator, it stays excluded.
+        """
+        db = FakePipelineDB()
+        # Row starts downloading (no active plan, simulating a Phase 1
+        # requeue scenario where reconciliation hasn't run for this row).
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="requeued")
+        db.update_status(rid, "downloading")
+        # Phase 1 fails the download and requeues it without a current
+        # plan attached.
+        db.update_status(rid, "wanted")
+        # Phase 2 must NOT see this row.
+        self.assertEqual(db.get_wanted_searchable("g-current"), [])
+        # But ``get_wanted`` (forensic) sees it.
+        self.assertEqual([r["id"] for r in db.get_wanted()], [rid])
+
+
 if __name__ == "__main__":
     unittest.main()

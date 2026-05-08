@@ -1288,5 +1288,91 @@ class TestBackfillPropagation(unittest.TestCase):
                          "With propagation, download's genuine grade enables backfill")
 
 
+class TestReconciliationFlowScenarios(unittest.TestCase):
+    """Scenario-style tests that exercise the search-plan reconciliation
+    flow against ``FakePipelineDB`` + the real ``SearchPlanService`` /
+    ``reconcile_search_plans`` boundary (U4).
+
+    Two scenarios that mirror the pipeline simulator's role for pure
+    quality decisions:
+
+      * one where reconciliation **repairs a stuck request** (no active
+        plan -> active current plan + searchable next cycle), and
+      * one where a deterministic-failed plan **stays out of the picker**
+        across reconciliation passes.
+    """
+
+    def _service(self, db, generator_id="g-test"):
+        import configparser
+        from lib.config import CratediggerConfig
+        from lib.search_plan_service import SearchPlanService
+        cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+        svc = SearchPlanService(db, cfg)
+        svc.generator_id = generator_id
+        return svc
+
+    def test_reconciliation_repairs_stuck_request_into_picker(self):
+        """A wanted request with no plan is invisible to Phase 2 until
+        reconciliation gives it a current active plan -- after the pass
+        it appears in ``get_wanted_searchable``.
+        """
+        from tests.fakes import FakePipelineDB
+        from lib.startup_reconciliation import reconcile_search_plans
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Artist", album_title="Album",
+            mb_release_id="stuck", source="request",
+        )
+        db.set_tracks(rid, [
+            {"disc_number": 1, "track_number": 1, "title": "Song"},
+        ])
+
+        # Before reconciliation: stuck row is wanted but not searchable.
+        self.assertEqual([r["id"] for r in db.get_wanted()], [rid])
+        self.assertEqual(db.get_wanted_searchable("g-test"), [])
+
+        # Reconciliation cleans it up.
+        summary = reconcile_search_plans(db, self._service(db))
+        self.assertEqual(summary.generated, 1)
+        self.assertEqual(summary.unclassified_no_plan, 0)
+
+        # After: searchable.
+        rids = [r["id"] for r in db.get_wanted_searchable("g-test")]
+        self.assertEqual(rids, [rid])
+
+    def test_deterministic_failed_plan_stays_out_of_the_picker(self):
+        """A request whose generator fails deterministically (no
+        runnable query) gets a sticky failed_deterministic plan and
+        never enters the searchable picker, even after repeated
+        reconciliation passes.
+        """
+        from tests.fakes import FakePipelineDB
+        from lib.startup_reconciliation import reconcile_search_plans
+
+        db = FakePipelineDB()
+        # Empty artist + title -> generator returns failure_reason.
+        rid = db.add_request(
+            artist_name="", album_title="",
+            mb_release_id="det-fail", source="request",
+        )
+
+        # First pass: deterministic failure recorded.
+        s1 = reconcile_search_plans(db, self._service(db))
+        self.assertEqual(s1.deterministic_failed, 1)
+        self.assertEqual(s1.unclassified_no_plan, 0)
+        self.assertEqual(db.get_wanted_searchable("g-test"), [])
+
+        # Second pass: still not in picker, still classified as failed.
+        s2 = reconcile_search_plans(db, self._service(db))
+        self.assertEqual(s2.unclassified_no_plan, 0)
+        # The latest deterministic-failed plan persists.
+        info = db.get_search_plan_inspection(rid)
+        self.assertIsNotNone(info.latest_failed_deterministic)
+        self.assertIsNone(info.active)
+        # Picker remains empty.
+        self.assertEqual(db.get_wanted_searchable("g-test"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

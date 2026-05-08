@@ -1079,6 +1079,11 @@ def main():
                         help="Redis host for the pipeline peer cache")
     parser.add_argument("--redis-port", type=int, default=None,
                         help="Redis port for the pipeline peer cache")
+    parser.add_argument("--reconcile-dry-run", action="store_true",
+                        help="Run startup search-plan reconciliation in "
+                             "read-only mode and exit -- useful for deploy "
+                             "verification. No plans are generated; only "
+                             "classification counts are emitted.")
     args = parser.parse_args()
 
     lock_file_path = os.path.join(args.var_dir, ".cratedigger.lock")
@@ -1214,13 +1219,64 @@ def main():
             finally:
                 phase1_source.close()
 
+        # --- Startup search-plan reconciliation (U4) ---
+        # Walk every wanted request and ensure each has a current-generator
+        # active plan or a visible failed/retryable record. Any row that ends
+        # up unclassified (no plan + no current-generator failure record) is
+        # surfaced as a stop-the-deploy signal at ERROR. We never block the
+        # cycle on transient failures -- the cycle continues with whatever
+        # rows are searchable.
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from lib.search_plan_service import SearchPlanService
+        from lib.startup_reconciliation import reconcile_search_plans
+        try:
+            recon_db = pipeline_db_source._get_db()
+            recon_service = (
+                None if args.reconcile_dry_run
+                else SearchPlanService(recon_db, cfg)
+            )
+            recon_summary = reconcile_search_plans(
+                recon_db,
+                recon_service,
+                dry_run=args.reconcile_dry_run,
+            )
+            logger.info(recon_summary.to_log_line())
+            if recon_summary.unclassified_no_plan > 0:
+                logger.error(
+                    "search_plan_reconciliation: %d wanted row(s) lack "
+                    "explainable plan state -- stop-the-deploy signal "
+                    "(see prior ERROR lines for the request ids)",
+                    recon_summary.unclassified_no_plan,
+                )
+        except Exception:
+            logger.exception(
+                "Startup search-plan reconciliation failed; continuing "
+                "with whatever rows are already searchable.")
+            recon_summary = None
+
+        if args.reconcile_dry_run:
+            # Dry-run mode is a deploy-verification tool. Skip Phase 2
+            # entirely so operators can preflight without producing
+            # search traffic.
+            logger.info(
+                "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
+                "search execution.")
+            return
+
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
             phase1_future = pool.submit(_run_phase1)
 
             # --- Phase 2: Search and enqueue new downloads (main thread) ---
+            #
+            # Use ``get_wanted_searchable`` so only rows with a
+            # current-generator active plan execute searches. A row
+            # requeued to wanted by Phase 1 mid-cycle is excluded until
+            # the NEXT reconciliation pass repairs it -- the active-plan
+            # FK is the gate.
             logger.info("Getting wanted records from pipeline DB...")
-            wanted_records = pipeline_db_source.get_wanted(limit=cfg.page_size)
+            wanted_records = pipeline_db_source.get_wanted_searchable(
+                SEARCH_PLAN_GENERATOR_ID, limit=cfg.page_size)
             logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
 
             failed = 0
