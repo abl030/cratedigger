@@ -149,6 +149,7 @@ class TestSearchPlanServiceAddTime(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(4)
         assert active is not None
+        assert active.plan.metadata_snapshot is not None
         self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
@@ -252,6 +253,7 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(15)
         assert active is not None
+        assert active.plan.metadata_snapshot is not None
         self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
@@ -785,6 +787,143 @@ class TestSearchPlanServiceSanitizer(unittest.TestCase):
         assert out is not None
         flat = repr(out)
         self.assertIn("[TRUNCATED]", flat)
+
+
+class TestSearchPlanServiceHistoryPage(unittest.TestCase):
+    """U1 service contract: ``SearchPlanService.history_for_request``.
+
+    Thin wrapper around ``PipelineDB.get_search_history_page`` that adds:
+      * 404 mapping when the request_id does not exist
+      * input-validation mapping when ``limit`` ∉ [1, 200] or
+        ``before_id`` < 1.
+      * Forwards rows + ``next_before_id`` straight from the DB result.
+
+    Mirrors ``advance_for_request`` shape: returns a typed
+    ``HistoryPageResult`` with an ``outcome`` string the route + CLI can
+    branch on with no logic.
+    """
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed(self, rid: int, n: int) -> None:
+        _seed_request(self.db, id=rid, artist_name="A", album_title="B",
+                      year=2020)
+        for i in range(n):
+            self.db.log_search(rid, query=f"q{i}", outcome="no_match")
+
+    def test_success_returns_rows_and_next_before_id(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_SUCCESS,
+        )
+        self._seed(rid=1, n=5)
+        result = self.svc.history_for_request(1, limit=3)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
+        self.assertEqual(result.request_id, 1)
+        self.assertEqual(len(result.rows), 3)
+        # Newest first; cursor seeds next page.
+        self.assertEqual(result.rows[0]["query"], "q4")
+        self.assertIsNotNone(result.next_before_id)
+
+    def test_success_exhausted_when_fewer_rows_than_limit(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_SUCCESS,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=10)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
+        self.assertEqual(len(result.rows), 2)
+        self.assertIsNone(result.next_before_id)
+
+    def test_success_resumes_from_cursor(self):
+        self._seed(rid=1, n=5)
+        first = self.svc.history_for_request(1, limit=3)
+        second = self.svc.history_for_request(
+            1, limit=3, before_id=first.next_before_id,
+        )
+        self.assertEqual(len(second.rows), 2)
+        self.assertEqual(second.rows[0]["query"], "q1")
+        self.assertEqual(second.rows[1]["query"], "q0")
+        self.assertIsNone(second.next_before_id)
+
+    def test_request_not_found_returns_request_not_found(self):
+        from lib.search_plan_service import (
+            RESULT_REQUEST_NOT_FOUND,
+        )
+        result = self.svc.history_for_request(9999, limit=10)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+        self.assertEqual(result.rows, [])
+        self.assertIsNone(result.next_before_id)
+        self.assertIsNotNone(result.error_message)
+
+    def test_limit_zero_returns_input_validation(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=0)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+        self.assertEqual(result.rows, [])
+        self.assertIn("[1, 200]", result.error_message or "")
+
+    def test_limit_above_max_returns_input_validation(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=201)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+        self.assertIn("[1, 200]", result.error_message or "")
+
+    def test_limit_negative_returns_input_validation(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=-1)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+
+    def test_before_id_zero_returns_input_validation(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=10, before_id=0)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+        self.assertIn("before_id", result.error_message or "")
+
+    def test_before_id_negative_returns_input_validation(self):
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(1, limit=10, before_id=-1)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+
+    def test_before_id_int4_overflow_returns_input_validation(self):
+        """F4: before_id=2147483648 (one past int4 max) must fail validation,
+        not trip the PostgreSQL int4 cast at the DB layer."""
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(
+            1, limit=10, before_id=2147483648)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+        self.assertIn("before_id", result.error_message or "")
+
+    def test_before_id_max_valid_passes_validation(self):
+        """F4: before_id=2147483647 (int4 max) must pass validation."""
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_SUCCESS,
+        )
+        self._seed(rid=1, n=2)
+        # 2147483647 is well above the seeded IDs, so it returns all rows.
+        result = self.svc.history_for_request(
+            1, limit=10, before_id=2147483647)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
 
 
 class TestSearchPlanConfigFromCratedigger(unittest.TestCase):

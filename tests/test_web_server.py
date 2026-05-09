@@ -7,6 +7,7 @@ verifying response codes, JSON structure, and error handling.
 
 import copy
 from datetime import datetime, timezone
+import email.message
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from lib.import_queue import ImportJob
+from lib.pipeline_db import SearchPlanProvenance
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
@@ -937,6 +939,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
+        r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
         "/api/pipeline/add",
@@ -1806,16 +1809,19 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
-        plan_provenance: dict | None = None,
+        plan_provenance: SearchPlanProvenance | None = None,
     ):
         from datetime import datetime, timezone
         from lib.pipeline_db import (
             ActiveSearchPlan, SearchPlanItemRow, SearchPlanRow,
+            SearchPlanMetadataSnapshot, SearchPlanItemProvenance,
+            SearchPlanProvenance,
         )
         plan = SearchPlanRow(
             id=11, request_id=100, generator_id=generator_id,
             status="active", failure_class=None,
-            metadata_snapshot={"artist": "X"}, provenance=plan_provenance,
+            metadata_snapshot=SearchPlanMetadataSnapshot(artist_name="X"),
+            provenance=plan_provenance,
             error_message=None, superseded_at=None,
             superseded_by_plan_id=None,
             created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
@@ -1826,7 +1832,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
                 strategy=("default" if i == 0 else f"strategy_{i}"),
                 query=f"q{i}", canonical_query_key=f"k{i}",
                 repeat_group=("default-3" if i == 0 else None),
-                provenance={"src": "gen"} if i == 0 else None,
+                provenance=SearchPlanItemProvenance(values={"src": "gen"}) if i == 0 else None,
             )
             for i in range(items_count)
         ]
@@ -1844,12 +1850,12 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         generator_id: str = "search-plan/2026-05-08-1",
     ):
         from datetime import datetime, timezone
-        from lib.pipeline_db import SearchPlanRow
+        from lib.pipeline_db import SearchPlanRow, SearchPlanProvenance
         return SearchPlanRow(
             id=plan_id, request_id=100, generator_id=generator_id,
             status=status, failure_class=failure_class,
             metadata_snapshot=None,
-            provenance={"reason": failure_class},
+            provenance=SearchPlanProvenance(values={"reason": failure_class}),
             error_message=error_message, superseded_at=None,
             superseded_by_plan_id=None,
             created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
@@ -1872,10 +1878,11 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- happy path: active + failures + legacy logs --
 
     def test_search_plan_route_returns_full_inspection_payload(self):
-        active = self._make_active(plan_provenance={
+        from lib.pipeline_db import SearchPlanProvenance
+        active = self._make_active(plan_provenance=SearchPlanProvenance(values={
             "omitted_candidates": [{"q": "x", "why": "low_entropy"}],
             "dropped_low_entropy_tokens": ["the", "and"],
-        })
+        }))
         det = self._make_failed_plan(
             plan_id=22, status="failed_deterministic",
             failure_class="no_runnable_query",
@@ -2209,6 +2216,31 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(data["error"], "prepend_artist must be a boolean")
         mock_gen.assert_not_called()
 
+    def test_regenerate_rejects_non_dict_body_with_400(self):
+        """F2: a non-dict JSON body (e.g. raw string) must return 400,
+        not 500 from AttributeError on body.get()."""
+        from unittest.mock import patch as _patch
+        raw_body = b'"hello"'  # valid JSON but not an object
+        req = Request(
+            f"{self.base}/api/pipeline/100/search-plan/regenerate",
+            data=raw_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+        ) as mock_gen:
+            try:
+                resp = urlopen(req, timeout=5)
+                status = resp.status
+                data = json.loads(resp.read())
+            except HTTPError as e:
+                status = e.code
+                data = json.loads(e.read())
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_gen.assert_not_called()
+
 
 class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
     """Contract for ``POST /api/pipeline/<id>/search-plan/advance``.
@@ -2367,6 +2399,191 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("integer", data["error"])
         mock_adv.assert_not_called()
+
+
+class TestPipelineSearchPlanHistoryContract(_WebServerCase):
+    """Contract for ``GET /api/pipeline/<id>/search-plan/history``.
+
+    The endpoint wraps ``SearchPlanService.history_for_request``. Both
+    the CLI (``pipeline-cli search-plan history``) and the API live or
+    die on the same service contract — see ``CLAUDE.md`` § "CLI ⇄ API
+    surface symmetry"; touching one without the other is a contract
+    drift waiting to happen.
+
+    Status-code mapping:
+      * 200 — RESULT_HISTORY_PAGE_SUCCESS
+      * 400 — input validation (non-int / out-of-bounds limit/before_id)
+      * 404 — RESULT_REQUEST_NOT_FOUND
+    """
+
+    HISTORY_REQUIRED_FIELDS = {"request_id", "rows", "next_before_id"}
+
+    def setUp(self) -> None:
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+
+    def _patch_service(self, **result_kwargs):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        return _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(**result_kwargs),
+        )
+
+    def test_history_success_returns_200_with_required_fields(self):
+        rows = [{
+            "id": 12340, "request_id": 100, "query": "q1",
+            "outcome": "no_match",
+        }]
+        with self._patch_service(
+                outcome="success", request_id=100, rows=rows,
+                next_before_id=12300):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.HISTORY_REQUIRED_FIELDS,
+                                "search-plan history response")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["rows"], rows)
+        self.assertEqual(data["next_before_id"], 12300)
+
+    def test_history_success_with_null_cursor_when_exhausted(self):
+        with self._patch_service(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["rows"], [])
+        self.assertIsNone(data["next_before_id"])
+
+    def test_history_request_not_found_returns_404(self):
+        with self._patch_service(
+                outcome="request_not_found", request_id=9999,
+                rows=[],
+                error_message="request 9999 not found"):
+            status, data = self._get(
+                "/api/pipeline/9999/search-plan/history?limit=50")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    def test_history_default_limit_when_not_supplied(self):
+        """No ``limit`` query param uses the default; service receives
+        an int — never passed-through query string."""
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None),
+        ) as mock_hist:
+            status, _ = self._get(
+                "/api/pipeline/100/search-plan/history")
+        self.assertEqual(status, 200)
+        kwargs = mock_hist.call_args.kwargs
+        self.assertIsInstance(kwargs.get("limit"), int)
+        self.assertGreaterEqual(kwargs["limit"], 1)
+        self.assertLessEqual(kwargs["limit"], 200)
+        self.assertIsNone(kwargs.get("before_id"))
+
+    def test_history_passes_before_id_through_to_service(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None),
+        ) as mock_hist:
+            status, _ = self._get(
+                "/api/pipeline/100/search-plan/history"
+                "?limit=50&before_id=12300")
+        self.assertEqual(status, 200)
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs.get("limit"), 50)
+        self.assertEqual(kwargs.get("before_id"), 12300)
+
+    def test_history_rejects_non_int_limit(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+        ) as mock_hist:
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_hist.assert_not_called()
+
+    def test_history_rejects_non_int_before_id(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+        ) as mock_hist:
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50&before_id=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_hist.assert_not_called()
+
+    def test_history_rejects_out_of_bounds_limit(self):
+        """Service-level bounds enforcement bubbles to 400 at the route."""
+        with self._patch_service(
+                outcome="input_invalid", request_id=100, rows=[],
+                error_message="limit must be in [1, 200]"):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=500")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_history_datetime_rows_are_serialized_to_strings(self):
+        """F1: rows with datetime created_at must not 500 — _serialize_row
+        must be applied before JSON encoding."""
+        from datetime import datetime, timezone
+        rows = [{
+            "id": 12340,
+            "request_id": 100,
+            "query": "q1",
+            "outcome": "no_match",
+            "created_at": datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc),
+        }]
+        with self._patch_service(
+                outcome="success", request_id=100, rows=rows,
+                next_before_id=None):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(data["rows"][0]["created_at"], str,
+                              "created_at must be a string (ISO format) on the wire")
+        # Full round-trip: the response body must be valid JSON.
+        import json as _json
+        _json.dumps(data)  # raises TypeError if any datetime slipped through
+
+    def test_history_404_body_shape_matches_neighbor_routes(self):
+        """F3: 404 body must be {error: ...} only — no rows/next_before_id
+        to match the h._error() shape used by get_pipeline_detail etc."""
+        with self._patch_service(
+                outcome="request_not_found", request_id=9999,
+                rows=[],
+                error_message="request 9999 not found"):
+            status, data = self._get(
+                "/api/pipeline/9999/search-plan/history?limit=50")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+        self.assertNotIn("rows", data,
+                         "404 body must not include rows key")
+        self.assertNotIn("next_before_id", data,
+                         "404 body must not include next_before_id key")
 
 
 def _kwargs_to_query(kwargs: dict) -> str:
@@ -4516,7 +4733,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_mb.get_release_group.return_value = {
                 "id": self.MB_RG_ID,
                 "title": "RG",
@@ -4536,7 +4753,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.routes.browse.discogs_api") as mock_dg:
             from urllib.error import HTTPError
             mock_dg.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_dg.get_master_releases.return_value = {
                 "title": "M", "type": "Album", "first_release_date": "1997",
                 "artist_credit": "Artist", "primary_artist_id": "3840",
@@ -4557,7 +4774,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             status, data = self._get(
                 f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=release")
 
@@ -4569,9 +4786,9 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_mb.get_release_group.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             status, data = self._get(
                 f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=unknown")
 

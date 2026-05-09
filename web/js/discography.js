@@ -7,6 +7,7 @@ import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsBu
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
 import { renderLabelLinks } from './labels.js';
+import { renderSearchPlanButton } from './search_plan.js';
 
 /**
  * Render the artist discography into a target element.
@@ -46,10 +47,20 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
       // Masterless Discogs releases have no child master to expand; the rg row
       // is the leaf, so it carries data-release-id for search-by-ID ringing.
       const leafAttr = rg.is_masterless ? ` data-release-id="${rg.id}"` : '';
+      // Search-plan inspector button — only when this rg has a pipeline
+      // request. RG-level pipeline_id surfaces from the analysis tab's
+      // disambData snapshot via pipelineStore (see release_action_state.js).
+      const spBtn = renderSearchPlanButton({
+        pipelineId: buildReleaseActionState({
+          ...rg,
+          artist: artistName,
+          album: rg.title,
+        }).pipelineId,
+      });
       return `
         <div class="rg"${leafAttr}>
           <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
-            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}
+            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
           </div>
           <div class="releases" id="rel-${rg.id}"></div>
         </div>
@@ -242,13 +253,17 @@ export async function loadReleaseGroup(id, el, opts = {}) {
         album: rel.title,
       });
       const toolbar = renderActionToolbar(actionState, { size: 'small' });
+      // Search-plan inspector button — Browse-tab only renders when the
+      // release has an active pipeline request (see release_action_state.js
+      // for the pipelineStore lookup).
+      const spBtn = renderSearchPlanButton({ pipelineId: actionState.pipelineId });
       return `
         <div class="release" data-release-id="${rel.id}" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
           </div>
-          ${toolbar}
+          ${toolbar}${spBtn}
         </div>
         <div class="release-detail" id="reldet-${rel.id}"></div>
       `;

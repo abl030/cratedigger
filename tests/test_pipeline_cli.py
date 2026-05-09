@@ -1996,5 +1996,125 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
         self.assertEqual(payload["new_query"], "Love Till Tuesday")
 
 
+class TestCmdSearchPlanHistory(unittest.TestCase):
+    """``pipeline-cli search-plan history`` wraps
+    ``SearchPlanService.history_for_request``. Counterpart of the API
+    endpoint ``GET /api/pipeline/<id>/search-plan/history`` — both must
+    stay in sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
+
+    def _seed(self, n: int = 5):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            year=2020, status="wanted",
+        )
+        for i in range(n):
+            db.log_search(rid, query=f"q{i}", outcome="no_match")
+        return db, rid
+
+    def _run(self, db, rid, *, limit=None, before_id=None, json_out=False):
+        args = SimpleNamespace(
+            id=rid,
+            limit=limit,
+            before_id=before_id,
+            json=json_out,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_history(db, args)
+        return rc, stdout.getvalue()
+
+    def test_history_success_default_limit_human_output(self):
+        db, rid = self._seed(n=3)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("q2", out)
+        self.assertIn("q1", out)
+        self.assertIn("q0", out)
+
+    def test_history_success_json_output_carries_payload(self):
+        db, rid = self._seed(n=3)
+        rc, out = self._run(db, rid, limit=2, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertEqual(len(payload["rows"]), 2)
+        # Newest first.
+        self.assertEqual(payload["rows"][0]["query"], "q2")
+        self.assertEqual(payload["rows"][1]["query"], "q1")
+        self.assertIsNotNone(payload["next_before_id"])
+
+    def test_history_returns_2_when_request_not_found(self):
+        from tests.fakes import FakePipelineDB
+        rc, out = self._run(FakePipelineDB(), 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_history_returns_3_on_invalid_limit(self):
+        db, rid = self._seed(n=2)
+        rc, out = self._run(db, rid, limit=500)
+        self.assertEqual(rc, 3)
+        self.assertIn("[1, 200]", out)
+
+    def test_history_returns_3_on_zero_limit(self):
+        db, rid = self._seed(n=2)
+        rc, out = self._run(db, rid, limit=0)
+        self.assertEqual(rc, 3)
+
+    def test_history_returns_3_on_negative_before_id(self):
+        db, rid = self._seed(n=2)
+        rc, out = self._run(db, rid, limit=10, before_id=0)
+        self.assertEqual(rc, 3)
+
+    def test_history_paginates_via_before_id(self):
+        db, rid = self._seed(n=5)
+        rc1, out1 = self._run(db, rid, limit=3, json_out=True)
+        first = json.loads(out1)
+        self.assertEqual(rc1, 0)
+        self.assertIsNotNone(first["next_before_id"])
+        rc2, out2 = self._run(
+            db, rid, limit=3, before_id=first["next_before_id"],
+            json_out=True,
+        )
+        second = json.loads(out2)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(len(second["rows"]), 2)
+        self.assertIsNone(second["next_before_id"])
+        # No row appears in both pages.
+        first_ids = {r["id"] for r in first["rows"]}
+        second_ids = {r["id"] for r in second["rows"]}
+        self.assertFalse(first_ids.intersection(second_ids))
+
+    def test_history_human_output_shows_next_page_hint(self):
+        db, rid = self._seed(n=5)
+        rc, out = self._run(db, rid, limit=3)
+        self.assertEqual(rc, 0)
+        # Hint surfaces the next-page cursor so operators can re-run.
+        self.assertIn("--before-id", out)
+
+    def test_history_json_success_omits_outcome_and_error_message(self):
+        """F7: --json on success must match the API 200 shape — no
+        ``outcome`` or ``error_message`` keys that the API omits."""
+        db, rid = self._seed(n=2)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertNotIn("outcome", payload,
+                         "--json success must not include outcome key")
+        self.assertNotIn("error_message", payload,
+                         "--json success must not include error_message key")
+        # Core API fields must still be present.
+        self.assertIn("request_id", payload)
+        self.assertIn("rows", payload)
+        self.assertIn("next_before_id", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

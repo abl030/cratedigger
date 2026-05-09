@@ -106,6 +106,124 @@
   .p-detail-row { display: flex; gap: 8px; margin-bottom: 4px; font-size: 0.8em; }
   .p-detail-label { color: #666; min-width: 80px; }
   .p-detail-value { color: #bbb; }
+  /* Search-plan inspector — per-row magnifier button, in-place summary
+     panel rendered as a sibling of the row (mirrors `.p-detail` shape but
+     kept visually distinct so a row with both expanded is readable). */
+  .p-row-actions { display: inline-flex; gap: 6px; align-items: center; }
+  .sp-button { background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; padding: 1px 6px; cursor: pointer; font-size: 0.95em; line-height: 1.2; }
+  .sp-button:hover { background: #3a3a4a; color: #ccd; }
+  .sp-summary { background: #1a1c22; padding: 10px 12px; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; border-left: 3px solid #56b; }
+  .sp-summary.open { display: block; }
+  .sp-summary-loading { color: #888; font-size: 0.82em; padding: 4px 0; }
+  .sp-summary-inner { display: flex; flex-direction: column; gap: 8px; font-size: 0.82em; }
+  .sp-summary-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .sp-summary-title { color: #ccd; font-weight: 500; }
+  .sp-ref { color: #666; font-weight: 400; font-size: 0.9em; }
+  .sp-summary-actions { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .sp-action-button { padding: 3px 9px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.78em; line-height: 1.2; }
+  .sp-action-button:hover { background: #3a3a4a; color: #ccd; }
+  .sp-action-button-destructive { border-color: #633; color: #d88; background: #2a1a1a; }
+  .sp-action-button-destructive:hover { background: #3a1a1a; color: #f99; }
+  .sp-action-close { padding: 3px 7px; }
+  .sp-summary-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #99a; font-size: 0.82em; }
+  .sp-summary-meta-item strong { color: #ccd; }
+  .sp-status { padding: 1px 6px; border-radius: 3px; background: #2a3a2a; color: #6a9; font-size: 0.82em; font-weight: 600; text-transform: lowercase; letter-spacing: 0.2px; }
+  .sp-status-active { background: #2a3a2a; color: #6a9; }
+  .sp-status-superseded { background: #2a2a3a; color: #99a; }
+  .sp-status-failed_deterministic, .sp-status-failed_transient { background: #3a2a1a; color: #d96; }
+  .sp-drift { color: #d96; background: #3a2a1a; padding: 1px 7px; border-radius: 3px; font-weight: 600; font-size: 0.82em; }
+  .sp-summary-section { display: flex; flex-direction: column; gap: 4px; }
+  .sp-section-label { color: #666; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sp-attempts { display: flex; flex-direction: column; gap: 2px; }
+  .sp-attempts-empty { color: #666; font-size: 0.82em; font-style: italic; }
+  .sp-attempt { display: grid; grid-template-columns: minmax(140px, auto) 1fr minmax(120px, auto); gap: 10px; font-size: 0.82em; padding: 2px 0; border-bottom: 1px solid #222; }
+  .sp-attempt:last-child { border-bottom: none; }
+  .sp-attempt-outcome { color: #aab; }
+  .sp-attempt-no_match .sp-attempt-outcome { color: #d88; }
+  .sp-attempt-success .sp-attempt-outcome { color: #6d6; }
+  .sp-attempt-query { color: #888; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .sp-attempt-when { color: #666; text-align: right; }
+  .sp-failure { padding: 6px 8px; background: #2a1a1a; border-left: 2px solid #844; border-radius: 3px; }
+  .sp-failure-class { color: #ec9; font-size: 0.85em; }
+  .sp-failure-class strong { color: #f88; }
+  .sp-failure-error { color: #b88; font-size: 0.78em; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  /* Search-plan detail page (U4) — full-page renderer dropped into
+     #pipeline-content when state.pipelineView === 'search-plan-detail'.
+     Mirrors the .p-detail / .sp-summary visual language: dark surface,
+     blue-violet accent. Action / refresh / back buttons reuse
+     .sp-action-button. The history table is dense and horizontal-scroll-
+     ready (overflow-x:auto) so 15+ telemetry columns fit on narrow
+     screens without forcing word-wrap on every cell. */
+  .sp-detail-loading { color: #888; padding: 16px; font-size: 0.9em; }
+  .sp-detail { background: #15161a; padding: 14px 18px; border-radius: 6px; border: 1px solid #2a2a3a; color: #ccd; }
+  .sp-detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #222; }
+  .sp-detail-header-left { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .sp-detail-title { font-size: 1.05em; font-weight: 500; color: #ccd; }
+  .sp-detail-header-actions { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .sp-back-button { padding: 3px 11px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.85em; line-height: 1.2; }
+  .sp-back-button:hover { background: #3a3a4a; color: #ccd; }
+  .sp-detail-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #99a; font-size: 0.85em; margin-bottom: 12px; }
+  .sp-detail-section { margin: 12px 0; }
+  .sp-slot-list { list-style: none; padding: 0; margin: 4px 0 0 0; display: flex; flex-direction: column; gap: 2px; }
+  .sp-slot { display: grid; grid-template-columns: 32px 100px 1fr auto; gap: 10px; padding: 3px 6px; border-radius: 3px; font-size: 0.82em; background: #181818; }
+  .sp-slot-current { background: #1a2235; border-left: 2px solid #56b; color: #cce; font-weight: 500; }
+  .sp-slot-ordinal { color: #777; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .sp-slot-strategy { color: #aac; }
+  .sp-slot-query { color: #888; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .sp-slot-meta { color: #555; font-size: 0.95em; }
+  .sp-slot-list-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
+  .sp-history-table { width: 100%; border-collapse: collapse; font-size: 0.78em; margin-top: 4px; display: block; overflow-x: auto; }
+  .sp-history-table thead { background: #1a1a22; }
+  .sp-history-table th { color: #889; text-align: left; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #333; white-space: nowrap; }
+  .sp-history-table td { color: #aaa; padding: 4px 8px; border-bottom: 1px solid #1f1f1f; vertical-align: top; }
+  .sp-history-row.legacy td { color: #666; }
+  .sp-history-row.legacy .sp-history-strategy { color: #966; font-style: italic; }
+  .sp-history-row-stale td { background: #221a1a; }
+  .sp-history-table code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #888; word-break: break-all; }
+  .sp-history-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
+  .sp-candidate-forensics { margin: 0; }
+  .sp-candidate-forensics summary { cursor: pointer; user-select: none; color: #889; font-size: 0.95em; }
+  .sp-candidate-forensics summary:hover { color: #ccd; }
+  .sp-candidate-forensics pre { background: #0e0e0e; color: #aaa; padding: 6px; border-radius: 3px; max-width: 720px; max-height: 360px; overflow: auto; font-size: 0.95em; }
+  .sp-load-older-wrap { padding: 6px 0; }
+  .sp-load-older-button { padding: 4px 12px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.82em; }
+  .sp-load-older-button:hover { background: #3a3a4a; color: #ccd; }
+  .sp-load-older-error { color: #d88; font-size: 0.8em; padding: 4px 0; }
+  .sp-stats-cache-label { color: #889; font-size: 0.78em; padding-bottom: 4px; font-style: italic; }
+  .sp-stats-table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+  .sp-stats-table th { color: #889; text-align: left; font-weight: 600; padding: 3px 8px; border-bottom: 1px solid #333; }
+  .sp-stats-table td { color: #aaa; padding: 3px 8px; border-bottom: 1px solid #1f1f1f; }
+  .sp-stats-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
+  .sp-health { background: #1a1a1a; padding: 8px 12px; border-radius: 4px; border-left: 2px solid #844; }
+  .sp-health-failures-empty { color: #6a9; font-size: 0.85em; }
+  .sp-health-failure { padding: 6px 0; }
+  .sp-health-failure-label { color: #b88; font-size: 0.85em; font-weight: 500; }
+  .sp-health-failure-class { color: #f88; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding-left: 6px; }
+  .sp-health-failure-when { color: #666; font-size: 0.78em; padding: 2px 0; }
+  .sp-health-failure-error { color: #d99; font-size: 0.78em; background: #1a0e0e; padding: 6px 8px; border-radius: 3px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .sp-health-prov-label { color: #889; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 0 4px; }
+  .sp-health-provenance, .sp-health-provenance-empty { color: #889; font-size: 0.82em; }
+  .sp-health-provenance-empty { font-style: italic; color: #555; }
+  .sp-health-prov-row { padding: 4px 0; }
+  .sp-health-prov-key { color: #aac; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding-right: 6px; }
+  .sp-health-prov-val { color: #888; font-size: 0.95em; background: #0e0e0e; padding: 6px; border-radius: 3px; max-height: 220px; overflow: auto; white-space: pre-wrap; }
+  .sp-history-legacy-section { background: #161618; padding: 8px 12px; border-radius: 4px; }
+  .sp-history-legacy summary { cursor: pointer; user-select: none; color: #889; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sp-history-legacy summary:hover { color: #ccd; }
+  .sp-history-legacy[open] summary { color: #ccd; }
+  .sp-history-table-legacy { margin-top: 6px; }
+  /* Search-plan advance form (U5) — replaces the action toolbar in the
+     summary panel or detail page when the operator clicks Advance.
+     Two inputs (strategy <select>, ordinal <input>) + Confirm/Cancel.
+     parseAdvanceTarget enforces XOR; the inline error block surfaces
+     client-side validation failures before a fetch is dispatched. */
+  .sp-advance-form { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 6px; background: #1a1c22; border: 1px solid #3a3a4a; border-radius: 4px; }
+  .sp-advance-form-row { display: inline-flex; gap: 4px; align-items: center; }
+  .sp-advance-form-label { color: #889; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+  .sp-advance-form-input { background: #0e0e0e; color: #ccd; border: 1px solid #3a3a4a; border-radius: 3px; padding: 2px 6px; font-size: 0.82em; line-height: 1.2; min-width: 90px; }
+  .sp-advance-form-input:focus { outline: none; border-color: #56b; }
+  .sp-advance-form-actions { display: inline-flex; gap: 4px; align-items: center; }
+  .sp-advance-form-error { color: #d88; font-size: 0.78em; flex-basis: 100%; padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .p-tracks { margin-top: 8px; }
   .p-track { font-size: 0.78em; color: #888; padding: 1px 0; }
   .p-history { margin-top: 8px; }

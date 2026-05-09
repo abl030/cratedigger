@@ -2547,6 +2547,40 @@ class FakePipelineDB:
             for row in rows
         ]
 
+    def get_search_history_page(
+        self,
+        request_id: int,
+        *,
+        limit: int,
+        before_id: int | None = None,
+    ) -> "SearchLogHistoryPage":
+        """Mirror of ``PipelineDB.get_search_history_page``.
+
+        Returns at most ``limit`` rows ``id DESC``; sets
+        ``next_before_id`` to the trimmed +1 row's id when a next page
+        exists. Same ``id <= before_id`` resume semantics as the real DB
+        so the cursor never loses a row at page boundaries.
+        """
+        from lib.pipeline_db import SearchLogHistoryPage as _Page
+        # Walk newest-first; respect ``id <= before_id`` so the cursor
+        # round-trip resumes exactly at the trimmed row.
+        rows: list[dict[str, object]] = []
+        for entry in reversed(self.search_logs):
+            if entry.request_id != request_id:
+                continue
+            if before_id is not None and entry.id > before_id:
+                continue
+            rows.append(self._search_log_to_dict(entry))
+            if len(rows) >= int(limit) + 1:
+                break
+        next_before_id: int | None = None
+        if len(rows) > int(limit):
+            extra = rows.pop()
+            extra_id = extra["id"]
+            assert isinstance(extra_id, int)
+            next_before_id = extra_id
+        return _Page(rows=rows, next_before_id=next_before_id)
+
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,
     ) -> tuple[int, list[dict[str, object]]]:

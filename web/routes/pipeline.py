@@ -492,6 +492,108 @@ def get_pipeline_search_plan(
     h._json(payload)
 
 
+def get_pipeline_search_plan_history(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """``GET /api/pipeline/<id>/search-plan/history``.
+
+    Cursor-paginated read of one request's ``search_log`` rows. Wraps
+    ``SearchPlanService.history_for_request``; both this route and
+    ``pipeline-cli search-plan history`` go through the same service
+    method so the input bounds and outcome mapping cannot drift.
+
+    Query string:
+      * ``limit`` — int in ``[1, 200]``; defaults to
+        ``HISTORY_PAGE_DEFAULT_LIMIT`` when omitted.
+      * ``before_id`` — int >= 1; the ``next_before_id`` from the
+        previous page. Omit for the first page.
+
+    Status-code mapping:
+      * 200 — ``RESULT_HISTORY_PAGE_SUCCESS``
+      * 400 — query string non-int / ``RESULT_HISTORY_PAGE_INPUT_INVALID``
+      * 404 — ``RESULT_REQUEST_NOT_FOUND``
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        HISTORY_PAGE_DEFAULT_LIMIT,
+        RESULT_HISTORY_PAGE_INPUT_INVALID,
+        RESULT_HISTORY_PAGE_SUCCESS,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    limit_raw = params.get("limit", [None])[0]
+    if limit_raw is None or limit_raw == "":
+        limit = HISTORY_PAGE_DEFAULT_LIMIT
+    else:
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            h._error("limit must be an integer")
+            return
+    before_id_raw = params.get("before_id", [None])[0]
+    before_id: int | None
+    if before_id_raw is None or before_id_raw == "":
+        before_id = None
+    else:
+        try:
+            before_id = int(before_id_raw)
+        except (TypeError, ValueError):
+            h._error("before_id must be an integer")
+            return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.history_for_request(
+        request_id, limit=limit, before_id=before_id,
+    )
+    s = _server()
+    if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
+        # F1: map rows through _serialize_row so datetime fields
+        # (created_at) become ISO strings before json.dumps is called.
+        # F5: pass candidates through msgspec.convert + msgspec.to_builtins
+        # for symmetric wire-boundary strictness (mirrors _build_last_search_payload).
+        serialized_rows: list[dict[str, object]] = []
+        for r in result.rows:
+            sr = s._serialize_row(r)
+            raw_candidates = sr.get("candidates")
+            if raw_candidates is not None:
+                try:
+                    candidates = msgspec.convert(
+                        raw_candidates, type=list[CandidateScore])
+                    sr["candidates"] = [
+                        msgspec.to_builtins(c) for c in candidates]
+                except msgspec.ValidationError as exc:
+                    logger.warning(
+                        "search_log.candidates JSONB failed msgspec validation "
+                        "(request_id=%s, search_log_id=%s): %s",
+                        r.get("request_id"), r.get("id"), exc,
+                    )
+                    sr["candidates"] = None
+            serialized_rows.append(sr)
+        payload: dict[str, object] = {
+            "request_id": result.request_id,
+            "rows": serialized_rows,
+            "next_before_id": result.next_before_id,
+        }
+        h._json(payload)
+        return
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        # F3: match h._error() shape used by neighbor routes (get_pipeline_detail etc.)
+        h._error(result.error_message or "Request not found", 404)
+        return
+    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID:
+        h._error(result.error_message or "Invalid history page request", 400)
+        return
+    # Defensive fallback for any future outcome string.
+    h._error(f"Unknown history outcome: {result.outcome}", 500)
+
+
 def post_pipeline_search_plan_regenerate(
     h, body: dict, req_id_str: str,
 ) -> None:
@@ -521,6 +623,11 @@ def post_pipeline_search_plan_regenerate(
         request_id = int(req_id_str)
     except (TypeError, ValueError):
         h._error("Invalid request id")
+        return
+    # F2: guard against non-dict bodies (e.g. raw JSON string) before
+    # calling body.get(), mirroring post_pipeline_search_plan_advance.
+    if body is not None and not isinstance(body, dict):
+        h._error("Invalid body — expected JSON object", 400)
         return
     prepend_artist: bool | None = None
     if body is not None and "prepend_artist" in body:
@@ -1429,6 +1536,8 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
      get_pipeline_search_plan),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
+     get_pipeline_search_plan_history),
     (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
 ]
 

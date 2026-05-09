@@ -17,6 +17,7 @@ echo ""
 echo "=== JS unit tests ==="
 node tests/test_js_util.mjs || exit 1
 node tests/test_js_decisions.mjs || exit 1
+node tests/test_js_search_plan.mjs || exit 1
 echo ""
 
 # Python tests

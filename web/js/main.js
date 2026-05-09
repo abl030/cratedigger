@@ -15,13 +15,34 @@ import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, deleteTransparentNonFlacWrongMatches, deleteLosslessOpusWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, setWrongMatchConvergeCleanup } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
+import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
 import { toast } from './state.js';
 
 // --- Tab management ---
 const tabOrder = ['browse', 'recents', 'pipeline', 'decisions', 'manual'];
 
+/**
+ * Internal flag used by `openSearchPlanDetail`-style flows to suppress
+ * the F12 detail-context reset for one `showTab` call. Without this,
+ * the detail-open path would clear its own freshly-set context.
+ *
+ * @type {boolean}
+ */
+let suppressDetailReset = false;
+
 /** @param {string} name */
 function showTab(name) {
+  // F12: Tab-switch reset for the search-plan detail subview. When the
+  // operator is on the detail page and clicks a tab — including
+  // re-clicking the Pipeline tab — clear the detail context so the
+  // dispatcher renders the queue/dashboard rather than re-running the
+  // (now-stale) detail render. The `suppressDetailReset` flag carves
+  // out an exception for `openSearchPlanDetail`'s internally-driven
+  // showTab('pipeline') call (which has just set pipelineView).
+  if (!suppressDetailReset && state.pipelineView === 'search-plan-detail') {
+    state.pipelineView = 'queue';
+    state.searchPlanDetailContext = null;
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   const tabEl = document.querySelector(`.tab:nth-child(${tabOrder.indexOf(name) + 1})`);
@@ -32,6 +53,22 @@ function showTab(name) {
   if (name === 'recents') loadRecents();
   if (name === 'decisions') loadDecisions();
   if (name === 'manual') loadWrongMatches();
+}
+
+/**
+ * Wrapper that runs `showTab(name)` with the F12 detail-context reset
+ * suppressed. Used by flows that intentionally route through showTab
+ * after setting `state.pipelineView` (e.g. `openSearchPlanDetail`).
+ *
+ * @param {string} name
+ */
+function showTabPreservingDetail(name) {
+  suppressDetailReset = true;
+  try {
+    showTab(name);
+  } finally {
+    suppressDetailReset = false;
+  }
 }
 
 // --- Search input (debounced) ---
@@ -62,6 +99,7 @@ if (qInput) {
 // --- Expose functions to window for onclick handlers in HTML templates ---
 Object.assign(window, {
   showTab,
+  showTabPreservingDetail,
   setSearchType,
   setBrowseSource,
   openBrowseArtist,
@@ -121,5 +159,18 @@ Object.assign(window, {
   onLabelYearFilterInput,
   toggleLabelIncludeSublabels,
   goToLabelPage,
+  // Search-plan inspector — handlers land in U3 (toggleSearchPlanSummary),
+  // U4 (open/closeSearchPlanDetail + the detail-page Refresh + Load-older
+  // affordances), and U5 (searchPlanRegenerate / searchPlanAdvance, still
+  // stubs).
+  toggleSearchPlanSummary,
+  openSearchPlanDetail,
+  closeSearchPlanDetail,
+  searchPlanRegenerate,
+  searchPlanAdvance,
+  searchPlanLoadOlder,
+  searchPlanRefreshDetail,
+  searchPlanSubmitAdvance,
+  searchPlanCancelAdvance,
   toast,
 });

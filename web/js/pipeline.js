@@ -3,6 +3,7 @@ import { state, API, toast } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton } from './release_actions.js';
+import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
 
 /**
  * Load pipeline data from API and render.
@@ -11,6 +12,16 @@ import { renderBadRipButton } from './release_actions.js';
 export async function loadPipeline() {
   if (state.pipelineView === 'dashboard') {
     await loadPipelineDashboard();
+    return;
+  }
+  if (state.pipelineView === 'search-plan-detail') {
+    // U4: detail subview owns its own render lifecycle; openSearchPlanDetail
+    // already kicked off the fetch when the subview was entered. Don't
+    // clobber it with a queue-list paint.
+    const ctx = state.searchPlanDetailContext;
+    if (ctx && ctx.requestId) {
+      await renderSearchPlanDetail(ctx.requestId);
+    }
     return;
   }
   const el = document.getElementById('pipeline-content');
@@ -24,16 +35,29 @@ export async function loadPipeline() {
 }
 
 /**
- * Switch between the queue and dashboard Pipeline subtabs.
+ * Switch between the Pipeline subviews — queue, dashboard, or
+ * search-plan-detail. The third value is the per-request inspector,
+ * dispatched into `#pipeline-content` via `renderSearchPlanDetail`.
+ * Unknown values fall back to `'queue'`.
+ *
  * @param {string} view
  * @returns {void}
  */
 export function setPipelineView(view) {
-  state.pipelineView = view === 'dashboard' ? 'dashboard' : 'queue';
-  if (state.pipelineView === 'dashboard') {
+  if (view === 'dashboard') {
+    state.pipelineView = 'dashboard';
     loadPipelineDashboard();
     return;
   }
+  if (view === 'search-plan-detail') {
+    state.pipelineView = 'search-plan-detail';
+    const ctx = state.searchPlanDetailContext;
+    if (ctx && ctx.requestId) {
+      void renderSearchPlanDetail(ctx.requestId);
+    }
+    return;
+  }
+  state.pipelineView = 'queue';
   if (state.pipelineData) {
     renderPipeline();
   } else {
@@ -79,11 +103,27 @@ export function setFilter(f) {
 
 /**
  * Render the pipeline view from cached data.
+ *
+ * Dispatches on `state.pipelineView`:
+ *   * `'queue'` (default)  → list of pipeline rows
+ *   * `'dashboard'`        → metrics dashboard
+ *   * `'search-plan-detail'` → per-request inspector (U4)
  */
 export function renderPipeline() {
   const el = document.getElementById('pipeline-content');
   if (state.pipelineView === 'dashboard') {
     renderPipelineDashboard();
+    return;
+  }
+  if (state.pipelineView === 'search-plan-detail') {
+    const ctx = state.searchPlanDetailContext;
+    if (ctx && ctx.requestId) {
+      void renderSearchPlanDetail(ctx.requestId);
+    } else if (el) {
+      // Defensive: subview entered without a context. Fall back to
+      // queue so the operator is never stranded.
+      state.pipelineView = 'queue';
+    }
     return;
   }
   const data = state.pipelineData;
@@ -654,13 +694,19 @@ export function renderPipelineItem(item) {
   const lastColor = item.last_outcome === 'success' || item.last_outcome === 'force_import'
     ? '#6d6' : item.last_outcome === 'rejected' ? '#d88' : '#aa8';
 
+  // Search-plan inspector button — Pipeline rows always have a request
+  // id by construction, so the conditional in renderSearchPlanButton is
+  // a no-op here, but routing through the same helper keeps the toolbar
+  // wiring consistent across Browse / Pipeline / Recents.
+  const spBtn = renderSearchPlanButton({ pipelineId: item.id });
+
   return `
     <div class="p-item ${srcClass}" onclick="window.toggleDetail(${item.id})">
       <div class="p-top">
         <div>
           <div class="p-title">${esc(item.album_title)}${statusBadge}</div>
         </div>
-        <div style="font-size:0.75em;color:#666;">#${item.id}</div>
+        <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
       </div>
       <div class="p-meta">
         <span>${year}</span>
