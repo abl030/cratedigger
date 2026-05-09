@@ -12,10 +12,13 @@
 
 import {
   HISTORY_PAGE_DEFAULT_LIMIT,
+  CACHE_TTL_MS,
   buildHistoryUrl,
   captureOriginContext,
   restoreOriginContext,
   invalidateSearchPlanCache,
+  getCacheEntry,
+  setCacheEntry,
   searchPlanCache,
   renderSearchPlanButton,
   renderSummaryPanel,
@@ -199,6 +202,81 @@ console.log('invalidateSearchPlanCache()');
   assert(returned === cache, 'returns the same Map even when key absent');
   assertEqual(cache.size, 1, 'no-op: cache size unchanged');
   assert(cache.has(7), 'absent-key invalidation does not touch other entries');
+}
+
+// --- getCacheEntry / setCacheEntry / CACHE_TTL_MS --------------------
+console.log('getCacheEntry() + setCacheEntry()');
+
+{
+  // Stale entry treated as a miss and removed from the cache.
+  /** @type {Map<number, any>} */
+  const cache = new Map();
+  const staleAt = Date.now() - (CACHE_TTL_MS + 1000);
+  cache.set(42, { inspection: { active_plan: null }, historyHead: [], fetchedAt: staleAt });
+
+  const result = getCacheEntry(cache, 42, Date.now());
+  assert(result === undefined, 'stale entry returns undefined');
+  assert(!cache.has(42), 'stale entry is deleted from cache');
+}
+
+{
+  // Fresh entry is returned unchanged.
+  /** @type {Map<number, any>} */
+  const cache = new Map();
+  const freshAt = Date.now();
+  const entry = { inspection: { active_plan: { id: 1 } }, historyHead: [], fetchedAt: freshAt };
+  cache.set(7, entry);
+
+  const result = getCacheEntry(cache, 7, freshAt + 100);
+  assert(result === entry, 'fresh entry is returned');
+  assert(cache.has(7), 'fresh entry is not deleted');
+}
+
+{
+  // Missing key returns undefined without throwing.
+  /** @type {Map<number, any>} */
+  const cache = new Map();
+  const result = getCacheEntry(cache, 99);
+  assert(result === undefined, 'missing key returns undefined');
+}
+
+{
+  // setCacheEntry evicts oldest when at capacity (LRU via Map insertion order).
+  /** @type {Map<number, any>} */
+  const cache = new Map();
+  const now = Date.now();
+  // Fill to 50 entries (CACHE_MAX_ENTRIES).
+  for (let i = 0; i < 50; i++) {
+    cache.set(i, { inspection: {}, historyHead: [], fetchedAt: now });
+  }
+  assertEqual(cache.size, 50, 'cache at capacity before 51st insert');
+
+  // Insert a 51st entry — oldest (key=0) should be evicted.
+  setCacheEntry(cache, 50, { inspection: {}, historyHead: [], fetchedAt: now });
+  assertEqual(cache.size, 50, 'cache still at 50 after LRU eviction');
+  assert(!cache.has(0), 'oldest entry (key=0) was evicted');
+  assert(cache.has(50), 'new entry (key=50) is present');
+  // Second-oldest is still there.
+  assert(cache.has(1), 'second-oldest entry (key=1) retained');
+}
+
+{
+  // setCacheEntry re-insert of existing key moves it to most-recent position.
+  /** @type {Map<number, any>} */
+  const cache = new Map();
+  const now = Date.now();
+  cache.set(1, { inspection: {}, historyHead: [], fetchedAt: now });
+  cache.set(2, { inspection: {}, historyHead: [], fetchedAt: now });
+  // Re-insert key 1 — it should now be at the end (newest).
+  setCacheEntry(cache, 1, { inspection: { refreshed: true }, historyHead: [], fetchedAt: now + 1 });
+  // Fill to capacity; the eviction should remove key=2 (now oldest).
+  for (let i = 3; i <= 50; i++) {
+    setCacheEntry(cache, i, { inspection: {}, historyHead: [], fetchedAt: now });
+  }
+  // Now add entry 51 — should evict key=2.
+  setCacheEntry(cache, 51, { inspection: {}, historyHead: [], fetchedAt: now });
+  assert(!cache.has(2), 'key=2 (oldest after re-insert of key=1) was evicted');
+  assert(cache.has(1), 'key=1 (re-inserted, now fresher) survived');
 }
 
 // Module-level cache export is a Map and starts empty (sanity check —

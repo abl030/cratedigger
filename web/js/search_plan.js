@@ -38,10 +38,41 @@ function normaliseFailed(failed) {
 
 /**
  * Default number of `search_log` rows fetched per history page.
- * Mirrors the default on the API (`HISTORY_PAGE_DEFAULT_LIMIT` /
- * `HISTORY_PAGE_DEFAULT_LIMIT` in `lib/search_plan_service.py`).
+ *
+ * WARNING: This value MUST match `HISTORY_PAGE_DEFAULT_LIMIT` in
+ * `lib/search_plan_service.py` (currently line 93). These two constants
+ * are intentionally duplicated — the Python value is the source of truth.
+ * If you change the Python constant, update this constant to match and
+ * search for all JS call sites that pass `HISTORY_PAGE_DEFAULT_LIMIT` as
+ * a `limit` option to `fetchHistoryPage` / `buildHistoryUrl`.
+ *
+ * A cleaner approach would be to include the server's default in the
+ * inspection payload (`GET /search-plan` → `history_page_default_limit`)
+ * and read it at fetch time, falling back to 50 for older deployments.
+ * That wiring was deferred because it would require touching
+ * `lib/search_plan_inspection.py`, `web/routes/search_plan.py`, and
+ * multiple JS call sites in the same PR.
  */
 export const HISTORY_PAGE_DEFAULT_LIMIT = 50;
+
+/**
+ * Maximum age (ms) for a cached search-plan inspection entry.
+ *
+ * Entries older than this are treated as misses so long-running sessions
+ * don't serve stale plan state indefinitely. 30 s is intentionally short
+ * relative to the 5-minute pipeline cycle: the operator sees fresh data
+ * after half a cycle at most, and the TTL is far enough out to avoid
+ * redundant fetches on rapid back-and-forth navigation.
+ */
+export const CACHE_TTL_MS = 30_000;
+
+/**
+ * Maximum number of request-id entries kept in {@link searchPlanCache}.
+ *
+ * When the cache would exceed this size, the oldest entry (Map insertion
+ * order = LRU since we always re-insert on write) is evicted first.
+ */
+const CACHE_MAX_ENTRIES = 50;
 
 /**
  * @typedef {Object} SearchPlanCacheEntry
@@ -171,6 +202,50 @@ export function restoreOriginContext(context) {
 export function invalidateSearchPlanCache(cache, requestId) {
   cache.delete(requestId);
   return cache;
+}
+
+/**
+ * Read a cache entry, treating it as a miss (and deleting it) when stale.
+ *
+ * Staleness is determined by {@link CACHE_TTL_MS} relative to
+ * `Date.now()`. Accepts an optional `now` parameter so tests can control
+ * the clock without mocking `Date`.
+ *
+ * @param {Map<number, SearchPlanCacheEntry>} cache
+ * @param {number} requestId
+ * @param {number} [now]  Override for `Date.now()`. Defaults to the real clock.
+ * @returns {SearchPlanCacheEntry|undefined}
+ */
+export function getCacheEntry(cache, requestId, now) {
+  const entry = cache.get(requestId);
+  if (!entry) return undefined;
+  const age = (now !== undefined ? now : Date.now()) - entry.fetchedAt;
+  if (age > CACHE_TTL_MS) {
+    cache.delete(requestId);
+    return undefined;
+  }
+  return entry;
+}
+
+/**
+ * Write a cache entry, evicting the oldest entry first when the cache is
+ * at capacity ({@link CACHE_MAX_ENTRIES}).
+ *
+ * Map preserves insertion order so the first key returned by
+ * `cache.keys()` is always the oldest (LRU) entry.
+ *
+ * @param {Map<number, SearchPlanCacheEntry>} cache
+ * @param {number} requestId
+ * @param {SearchPlanCacheEntry} entry
+ */
+export function setCacheEntry(cache, requestId, entry) {
+  // Delete first so a re-insert moves the key to the end (freshest).
+  cache.delete(requestId);
+  if (cache.size >= CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(requestId, entry);
 }
 
 /**
@@ -486,7 +561,7 @@ export async function toggleSearchPlanSummary(requestId, rowEl) {
     const livePanel = /** @type {HTMLElement|null} */ (
       document.getElementById(panelId));
     if (livePanel !== panel) return;
-    searchPlanCache.set(requestId, {
+    setCacheEntry(searchPlanCache, requestId, {
       inspection,
       historyHead: Array.isArray(history.rows) ? history.rows.slice(0, 3) : [],
       fetchedAt: Date.now(),
@@ -676,17 +751,40 @@ export function closeSearchPlanDetail() {
     if (typeof showTab === 'function') {
       showTab(tab);
     }
+    // Scroll-restore heuristic — approach (b).
+    //
+    // The proper fix (approach (a)) would be to stash `scrollY` in a
+    // module-scoped `pendingScrollRestore: number | null` and have each
+    // destination tab's render function (loadPipeline, renderPipeline,
+    // loadRecents, …) consume and clear it at the END of its render, so
+    // the restore lands AFTER the re-render rather than before it.  That
+    // wiring lives in `web/js/pipeline.js`, `web/js/recents.js`, and
+    // `web/js/browse.js` — outside the scope of this file.
+    //
+    // Instead we chain 5 rAF ticks (≈ 83 ms at 60 fps).  This is enough
+    // time for the synchronous follow-up render that `showTab` triggers to
+    // complete, so the final scrollTo lands AFTER the re-render rather
+    // than before it.  It is a heuristic: a slow device or a tab-render
+    // that itself awaits I/O can still win the race.  Prefer approach (a)
+    // if this ever misfires in production.
     const scheduler = (typeof window.requestAnimationFrame === 'function')
       ? window.requestAnimationFrame.bind(window)
       : (
         /** @param {() => void} fn */
         function fallback(fn) { setTimeout(fn, 0); return 0; }
       );
-    scheduler(() => {
+    // Chain 5 rAF ticks before applying the restore.
+    const restoreScroll = () => {
       if (typeof window.scrollTo === 'function') {
         window.scrollTo(0, scrollY);
       }
-    });
+    };
+    let chain = restoreScroll;
+    for (let i = 0; i < 4; i++) {
+      const next = chain;
+      chain = () => scheduler(next);
+    }
+    scheduler(chain);
   }
 }
 
@@ -1184,7 +1282,7 @@ export async function renderSearchPlanDetail(requestId) {
     const nextBeforeId = historyPayload.next_before_id == null
       ? null
       : historyPayload.next_before_id;
-    searchPlanCache.set(requestId, {
+    setCacheEntry(searchPlanCache, requestId, {
       inspection,
       historyHead: rows.slice(0, 3),
       fetchedAt: Date.now(),
@@ -1686,7 +1784,7 @@ async function showAdvanceForm(requestId) {
   // operator clicked Advance directly on a stale surface) fall back to
   // a fresh fetch so we have items[] for the form.
   let activePlan = null;
-  const cached = searchPlanCache.get(requestId);
+  const cached = getCacheEntry(searchPlanCache, requestId);
   if (cached && cached.inspection && cached.inspection.active_plan) {
     activePlan = cached.inspection.active_plan;
   }
@@ -1695,8 +1793,8 @@ async function showAdvanceForm(requestId) {
       const inspection = await fetchInspection(requestId);
       activePlan = inspection.active_plan;
       // Patch the cache so a subsequent re-render sees the same data.
-      const prior = searchPlanCache.get(requestId);
-      searchPlanCache.set(requestId, {
+      const prior = getCacheEntry(searchPlanCache, requestId);
+      setCacheEntry(searchPlanCache, requestId, {
         inspection,
         historyHead: prior ? prior.historyHead : [],
         fetchedAt: Date.now(),
