@@ -584,6 +584,56 @@ class TestTriggerPlexScan(unittest.TestCase):
         from lib.util import trigger_plex_scan
         trigger_plex_scan(self._make_cfg(), "/Beets/Artist/Album")  # best-effort
 
+    @patch("lib.util.urllib.request.urlopen")
+    def test_path_map_anchors_relative_imported_path(self, mock_urlopen):
+        """beets.get_album_info() returns paths relative to the beets library
+        root. The path_map must re-anchor relative paths under the container
+        prefix so Plex can resolve them to a library section location."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        trigger_plex_scan(cfg, "Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("path=%2Fprom_music%2FArtist%2FAlbum", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_path_map_substitutes_absolute_imported_path(self, mock_urlopen):
+        """Regression guard for the original April-2 fix: absolute paths under
+        the local prefix must still be substituted to the container prefix."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        trigger_plex_scan(cfg, "/mnt/virtio/Music/Beets/Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("path=%2Fprom_music%2FArtist%2FAlbum", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_path_map_warns_when_absolute_path_unmappable(self, mock_urlopen):
+        """Defensive log: if path_map is configured but the path is absolute
+        AND outside the local prefix, we can't translate it to a container
+        path. Warn instead of silently sending an unresolvable path."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            trigger_plex_scan(cfg, "/some/other/absolute/Album")
+        self.assertTrue(
+            any("PLEX" in m and "path_map" in m for m in captured.output),
+            f"Expected PLEX path_map warning, got: {captured.output}",
+        )
+
 
 class TestTriggerJellyfinScan(unittest.TestCase):
     """Tests for trigger_jellyfin_scan()."""
