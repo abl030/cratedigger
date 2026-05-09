@@ -4019,6 +4019,77 @@ class PipelineDB:
             cycle_count=int(row["plan_cycle_count"]),
         )
 
+    def advance_search_plan_cursor(
+        self,
+        request_id: int,
+        *,
+        target_ordinal: int,
+        plan_item_count: int,
+    ) -> tuple[int, int, int]:
+        """Operator-driven forward-only advance of ``next_plan_ordinal``.
+
+        Used by ``SearchPlanService.advance_for_request`` (via CLI / web
+        API). Forward-only by design — backward intent should go through
+        ``regenerate``. Returns ``(active_plan_id, previous_ordinal,
+        new_ordinal)`` on success.
+
+        Validates inside the row lock so concurrent
+        ``record_consumed_search_attempt`` (executor cursor advance) can't
+        race past the operator: SELECT ... FOR UPDATE pins ``album_requests``
+        for the duration of the check + UPDATE.
+
+        Raises ``ValueError`` for: missing request, no active plan,
+        ``target_ordinal`` outside ``[0, plan_item_count)``, or
+        ``target_ordinal <= current_ordinal`` (forward-only). Service-layer
+        callers translate these into structured outcomes; the DB layer's
+        job is just to keep the invariant.
+        """
+        if plan_item_count <= 0:
+            raise ValueError(
+                f"plan_item_count must be > 0 (got {plan_item_count})")
+        if target_ordinal < 0 or target_ordinal >= plan_item_count:
+            raise ValueError(
+                f"target_ordinal {target_ordinal} out of range "
+                f"[0, {plan_item_count})")
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    "SELECT active_plan_id, next_plan_ordinal "
+                    "FROM album_requests WHERE id = %s FOR UPDATE",
+                    (request_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError(f"request {request_id} not found")
+                active_plan_id = row["active_plan_id"]
+                if active_plan_id is None:
+                    raise ValueError(
+                        f"request {request_id} has no active plan")
+                previous_ordinal = int(row["next_plan_ordinal"])
+                if target_ordinal <= previous_ordinal:
+                    raise ValueError(
+                        f"target_ordinal {target_ordinal} must be greater "
+                        f"than current next_plan_ordinal {previous_ordinal} "
+                        "(advance is forward-only; use regenerate for "
+                        "backward intent)")
+                cur.execute(
+                    "UPDATE album_requests SET next_plan_ordinal = %s, "
+                    "updated_at = NOW() WHERE id = %s",
+                    (target_ordinal, request_id),
+                )
+            self.conn.commit()
+            return (int(active_plan_id), previous_ordinal, target_ordinal)
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
     def is_request_plan_current(
         self,
         request_id: int,

@@ -87,6 +87,20 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - Never construct `CratediggerConfig` with positional/keyword args for a subset of fields. Always use `CratediggerConfig.from_ini()` with the runtime config file. Partial configs silently diverge when new config fields are added.
 - Before adding a new function that "does roughly what X does but simpler," check if X can be called with an adapter. The adapter may be ugly — that's a signal to improve X's interface, not to duplicate X.
 
+## CLI ⇄ API Surface Symmetry
+- Every operator action must exist on **both** `pipeline-cli` and the web API. Adding only one is a contract drift waiting to happen — operators expect parity and will trip when it isn't there.
+- Both surfaces wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`). The CLI subcommand and the HTTP handler are thin adapters with matched outcome → exit-code / outcome → status-code mappings. Never duplicate logic across the two; route everything through the service.
+- Reference layout (worked example: `search-plan advance` in PR for the cursor-advance feature):
+  - `lib/<thing>_service.py` — service method + typed `Result` dataclass (one outcome string per branch)
+  - `lib/pipeline_db.py` — atomic mutation with `FOR UPDATE` row lock
+  - `scripts/pipeline_cli.py` — CLI subcommand wrapping the service
+  - `web/routes/<thing>.py` — HTTP endpoint wrapping the service
+  - `tests/test_<thing>_service.py` — authoritative coverage of every outcome branch
+  - `tests/test_pipeline_cli.py` — CLI wrapper test (exit-code mapping)
+  - `tests/test_web_server.py` — API contract test (status-code mapping) + entry in `TestRouteContractAudit.CLASSIFIED_ROUTES`
+- Status/exit-code convention to match: `200/0` success, `400/3` input validation (API only — CLI argparse covers this), `404/2` not found, `409/4` wrong state, `422/3` semantic violation, `503/5` transient/retryable.
+- See `CLAUDE.md` § "CLI ⇄ API surface symmetry" for the full pattern table.
+
 ## New Work Checklist (read this first)
 
 Before writing any new code, decide which test types you owe and what infrastructure you'll reuse:
@@ -95,7 +109,8 @@ Before writing any new code, decide which test types you owe and what infrastruc
 |------------------|-----------|-------------------------|
 | A new pure decision function in `lib/quality.py` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
 | A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
-| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` | `_WebServerCase`, `_assert_required_fields`, `tests/test_web_server.py` |
+| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_WebServerCase`, `_assert_required_fields`, `tests/test_web_server.py`, `scripts/pipeline_cli.py` |
+| A new operator action (CLI subcommand or API endpoint) | A service-layer method with a typed `Result`, BOTH a CLI subcommand AND an API endpoint, exit-code and status-code tests for each | `tests/test_<service>.py` for the authoritative coverage; CLI/API tests check the wrapper only |
 | A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
 | A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |

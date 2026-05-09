@@ -2928,6 +2928,43 @@ class FakePipelineDB:
             return False
         return True
 
+    def advance_search_plan_cursor(
+        self,
+        request_id: int,
+        *,
+        target_ordinal: int,
+        plan_item_count: int,
+    ) -> tuple[int, int, int]:
+        """Mirror of ``PipelineDB.advance_search_plan_cursor``.
+
+        Forward-only operator-driven cursor advance. Validates inputs the
+        same way the real method does, raising ``ValueError`` for missing
+        request, no active plan, out-of-range target, or backward intent.
+        """
+        if plan_item_count <= 0:
+            raise ValueError(
+                f"plan_item_count must be > 0 (got {plan_item_count})")
+        if target_ordinal < 0 or target_ordinal >= plan_item_count:
+            raise ValueError(
+                f"target_ordinal {target_ordinal} out of range "
+                f"[0, {plan_item_count})")
+        row = self._requests.get(request_id)
+        if row is None:
+            raise ValueError(f"request {request_id} not found")
+        active_plan_id = row.get("active_plan_id")
+        if active_plan_id is None:
+            raise ValueError(
+                f"request {request_id} has no active plan")
+        previous_ordinal = int(row.get("next_plan_ordinal") or 0)
+        if target_ordinal <= previous_ordinal:
+            raise ValueError(
+                f"target_ordinal {target_ordinal} must be greater than "
+                f"current next_plan_ordinal {previous_ordinal} "
+                "(advance is forward-only; use regenerate for backward "
+                "intent)")
+        row["next_plan_ordinal"] = target_ordinal
+        return (int(active_plan_id), previous_ordinal, target_ordinal)
+
     def list_wanted_for_plan_reconciliation(
         self,
     ) -> list[WantedReconciliationCandidate]:

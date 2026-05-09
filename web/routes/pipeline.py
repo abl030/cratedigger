@@ -578,6 +578,104 @@ def post_pipeline_search_plan_regenerate(
     h._json(payload)
 
 
+def post_pipeline_search_plan_advance(
+    h, body: dict, req_id_str: str,
+) -> None:
+    """``POST /api/pipeline/<id>/search-plan/advance``.
+
+    Forward-only operator advance of the search-plan cursor. Counterpart
+    of ``pipeline-cli search-plan advance``. Both surfaces wrap
+    ``SearchPlanService.advance_for_request`` — keep them in sync (see
+    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Body: exactly one of
+      * ``{"to_ordinal": <int>}`` — absolute target ordinal
+      * ``{"to_strategy": <str>}`` — first slot past cursor whose strategy
+        starts with this prefix
+
+    Status-code mapping mirrors the CLI exit codes:
+      * 200 — ``RESULT_ADVANCED``
+      * 400 — body validation failure (missing/extra keys, wrong type)
+      * 404 — ``RESULT_REQUEST_NOT_FOUND``
+      * 409 — ``RESULT_NO_ACTIVE_PLAN`` (request needs ``regenerate`` first)
+      * 422 — ``RESULT_INVALID_TARGET`` (out of range, backward, no slot
+        matches strategy)
+      * 503 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_ADVANCED,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_INVALID_TARGET,
+        RESULT_NO_ACTIVE_PLAN,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    body = body or {}
+    if not isinstance(body, dict):
+        h._json({"error": "body must be a JSON object"}, status=400)
+        return
+    to_ordinal = body.get("to_ordinal")
+    to_strategy = body.get("to_strategy")
+    if (to_ordinal is None) == (to_strategy is None):
+        h._json({
+            "error": "exactly one of to_ordinal or to_strategy is required",
+        }, status=400)
+        return
+    if to_ordinal is not None and not isinstance(to_ordinal, int):
+        h._json({"error": "to_ordinal must be an integer"}, status=400)
+        return
+    if to_strategy is not None and not isinstance(to_strategy, str):
+        h._json({"error": "to_strategy must be a string"}, status=400)
+        return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.advance_for_request(
+        request_id, to_ordinal=to_ordinal, to_strategy=to_strategy,
+    )
+    payload: dict[str, object] = {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "plan_id": result.plan_id,
+        "previous_ordinal": result.previous_ordinal,
+        "new_ordinal": result.new_ordinal,
+        "new_strategy": result.new_strategy,
+        "new_query": result.new_query,
+        "error_message": result.error_message,
+    }
+    if result.outcome == RESULT_ADVANCED:
+        h._json(payload)
+        return
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_NO_ACTIVE_PLAN:
+        payload["error"] = (
+            result.error_message or "No active plan; regenerate first")
+        h._json(payload, status=409)
+        return
+    if result.outcome == RESULT_INVALID_TARGET:
+        payload["error"] = (
+            result.error_message or "Invalid advance target")
+        h._json(payload, status=422)
+        return
+    if result.outcome == RESULT_FAILED_TRANSIENT:
+        payload["error"] = (
+            result.error_message or "Plan lock contention; retry")
+        h._json(payload, status=503)
+        return
+    # Defensive: any unknown outcome string is a bug.
+    h._error(f"Unknown advance outcome: {result.outcome}", 500)
+
+
 def _serialize_import_job(job) -> dict[str, object]:
     if hasattr(job, "to_json_dict"):
         return job.to_json_dict()
@@ -1348,4 +1446,6 @@ POST_ROUTES: dict[str, object] = {
 POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/regenerate$"),
      post_pipeline_search_plan_regenerate),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
+     post_pipeline_search_plan_advance),
 ]
