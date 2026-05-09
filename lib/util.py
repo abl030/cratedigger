@@ -238,8 +238,20 @@ def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
     scans the parent (artist) directory and removes any sibling dirs that
     have zero audio files.
 
+    ``imported_path`` MUST be absolute. ``BeetsDB.get_album_info()`` returns
+    paths relative to the beets library root, so callers that source the
+    path from beets need to absolutize it (or accept the warn-and-skip below).
     Returns the list of removed directory paths.
     """
+    if not os.path.isabs(imported_path):
+        # Symmetric defense with trigger_plex_scan's path_map warning: silent
+        # no-ops on a path-translation gap is exactly how PR #236 lurked for
+        # 5 weeks. See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md
+        logger.warning(
+            f"cleanup_disambiguation_orphans: imported_path {imported_path!r} "
+            "is relative; cannot resolve siblings without an absolute beets root. "
+            "Skipping (no orphans removed).")
+        return []
     artist_dir = os.path.dirname(imported_path)
     if not os.path.isdir(artist_dir):
         return []
@@ -520,6 +532,7 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
             return
         section = cfg.plex_library_section_id or "1"
         url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={token}"
+        scan_path: str | None = None
         if imported_path:
             from urllib.parse import quote
             scan_path = imported_path
@@ -546,8 +559,8 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
-        if imported_path:
-            logger.info(f"PLEX: triggered partial scan for {imported_path} (HTTP {status})")
+        if scan_path is not None:
+            logger.info(f"PLEX: triggered partial scan for {scan_path} (HTTP {status})")
         else:
             logger.info(f"PLEX: triggered full library scan (HTTP {status})")
     except Exception as e:

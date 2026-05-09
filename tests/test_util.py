@@ -430,6 +430,21 @@ class TestCleanupDisambiguationOrphans(unittest.TestCase):
         self.assertTrue(os.path.exists(other))
         self.assertEqual(removed, [])
 
+    def test_relative_path_warns_and_skips(self):
+        """beets stores paths relative to its library root, so consumers that
+        do filesystem ops on imported_path must reject relative paths instead
+        of silently no-opping. PR #236 fixed the symmetric bug in
+        trigger_plex_scan; this is the same defensive guard here."""
+        from lib.util import cleanup_disambiguation_orphans
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            removed = cleanup_disambiguation_orphans(
+                "Artist/2009 - Blood Bank [2009]")
+        self.assertEqual(removed, [])
+        self.assertTrue(
+            any("relative" in m.lower() for m in captured.output),
+            f"Expected warning about relative path, got: {captured.output}",
+        )
+
     def test_ignores_files_in_artist_dir(self):
         """Files directly in the artist dir should not cause errors."""
         from lib.util import cleanup_disambiguation_orphans
@@ -614,6 +629,60 @@ class TestTriggerPlexScan(unittest.TestCase):
         trigger_plex_scan(cfg, "/mnt/virtio/Music/Beets/Artist/Album")
         req = mock_urlopen.call_args[0][0]
         self.assertIn("path=%2Fprom_music%2FArtist%2FAlbum", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_log_shows_substituted_path_not_raw_input(self, mock_urlopen):
+        """The trigger's success log should reflect what was actually sent to
+        Plex (post path_map substitution), not the raw input. Otherwise a
+        future regression that breaks substitution would still log a
+        success-looking line, repeating the silent failure that motivated PR
+        #236."""
+        import logging
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        from lib.util import trigger_plex_scan
+        with self.assertLogs("cratedigger", level=logging.INFO) as captured:
+            trigger_plex_scan(cfg, "Artist/Album")
+        joined = "\n".join(captured.output)
+        self.assertIn("/prom_music/Artist/Album", joined)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_dot_relative_path_anchored_under_container_prefix(self, mock_urlopen):
+        """./Artist/Album is technically relative (os.path.isabs returns
+        False), so the relative-anchor branch should still apply rather than
+        falling through to the warning."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        trigger_plex_scan(cfg, "./Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        # Plex normalizes /prom_music/./Artist internally; we just need to
+        # confirm we sent something rooted under /prom_music, not the raw
+        # ./ prefix without anchoring.
+        self.assertIn("path=%2Fprom_music%2F", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_empty_imported_path_skips_path_arg(self, mock_urlopen):
+        """An empty string is falsy and should result in a full library scan
+        (no path arg), matching the imported_path=None case."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/mnt/virtio/Music/Beets:/prom_music")
+        trigger_plex_scan(cfg, "")
+        req = mock_urlopen.call_args[0][0]
+        self.assertNotIn("path=", req.full_url)
 
     @patch("lib.util.urllib.request.urlopen")
     def test_path_map_warns_when_absolute_path_unmappable(self, mock_urlopen):
