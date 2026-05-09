@@ -68,9 +68,69 @@ logger = logging.getLogger("cratedigger")
 # SEARCH_CANCEL_WAIT_POLL_S — inner poll cadence during the post-cancel
 #   wait. 200ms keeps end-to-end latency tight in the typical fast-
 #   cleanup case.
+# SEARCH_RESPONSE_SETTLE_DEADLINE_S — after slskd reports a terminal
+#   state (Completed, FileLimitReached / ResponseLimitReached / TimedOut),
+#   wait at most this long for slskd's async response-store commit to
+#   stabilise before reading. Issue #242: the response writer and the
+#   state writer are separate threads on slskd's side, so an immediate
+#   `search_responses` after `"Completed" in state` can return [] while
+#   the writer is still flushing. 2.0s is shorter than the 5.0s post-
+#   cancel deadline because natural completion is the happy path —
+#   responses are usually already settled and the helper exits after one
+#   confirmatory call. The cancel path is the worst case (slskd just got
+#   interrupted) so it earns more headroom.
+# SEARCH_RESPONSE_SETTLE_POLL_S — inner poll cadence during settle.
+#   200ms matches the cancel-wait cadence; one extra HTTP call in the
+#   happy path, a handful in the race case.
 SEARCH_WATCHDOG_DEADLINE_S = 90.0
 SEARCH_CANCEL_WAIT_DEADLINE_S = 5.0
 SEARCH_CANCEL_WAIT_POLL_S = 0.2
+SEARCH_RESPONSE_SETTLE_DEADLINE_S = 2.0
+SEARCH_RESPONSE_SETTLE_POLL_S = 0.2
+
+
+def _fetch_search_responses_settled(
+    slskd_client: Any,
+    search_id: Any,
+    *,
+    deadline_s: float,
+    poll_s: float,
+    clock_fn: Any = time.monotonic,
+) -> list[dict[str, Any]]:
+    """Fetch slskd ``search_responses`` after waiting for the response store
+    to commit. Mitigates the issue #242 race between slskd's terminal-state
+    update and its response-store flush.
+
+    Polls ``search_responses`` until two consecutive calls return the same
+    length, or ``deadline_s`` elapses. Returns the most-recently-fetched
+    list. In the happy path (responses already settled), this costs exactly
+    one extra HTTP call vs. a naive single-shot fetch — a small price for
+    eliminating the empirically-observed 56% zero-rate on
+    ``Completed, FileLimitReached``.
+
+    The two-consecutive-same-length condition is the natural stability
+    signal: slskd's writer flushes responses incrementally, and consecutive
+    same-length reads mean the writer is no longer making progress (either
+    because it's done, or because no further responses are coming). Either
+    way, the list we have is the list slskd intends to deliver.
+
+    On deadline expiry, returns the last list seen rather than raising — the
+    caller already wraps the harvest in try/except for transport errors;
+    a short list is better than a crash.
+
+    ``clock_fn`` is injected for test determinism; production callers omit
+    it (defaults to ``time.monotonic``).
+    """
+    deadline = clock_fn() + deadline_s
+    prev: list[dict[str, Any]] | None = None
+    current = slskd_client.searches.search_responses(search_id)
+    while clock_fn() < deadline:
+        if prev is not None and len(prev) == len(current):
+            return current
+        prev = current
+        time.sleep(poll_s)
+        current = slskd_client.searches.search_responses(search_id)
+    return current
 
 # === API client instances (set in main()) ===
 pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
@@ -435,7 +495,17 @@ def search_for_album(album, ctx):
                 break
             time.sleep(1)
 
-        search_results = slskd.searches.search_responses(search["id"])
+        # Bridge slskd's state→responses race (issue #242). slskd's
+        # state writer and response-store writer are separate threads;
+        # an immediate harvest after seeing `"Completed"` in state
+        # historically dropped 56% of `FileLimitReached` searches. The
+        # helper polls responses until two consecutive calls return the
+        # same length (the natural stability signal).
+        search_results = _fetch_search_responses_settled(
+            slskd, search["id"],
+            deadline_s=SEARCH_RESPONSE_SETTLE_DEADLINE_S,
+            poll_s=SEARCH_RESPONSE_SETTLE_POLL_S,
+        )
         elapsed = time.time() - t0
         logger.info(f"Search returned {len(search_results)} results")
         if cfg.delete_searches:
@@ -618,28 +688,40 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
                     f"proceeding with harvest anyway"
                 )
             watchdog_fired = True
-            # Post-cancel state-transition wait. slskd populates
+            # Post-cancel response-store wait. slskd populates
             # `Search.Responses` in an async Task.Run cleanup AFTER the
             # cancel propagates and state transitions to Completed |
             # Cancelled. Reading responses before that cleanup runs
-            # returns an empty list. Bounded at ~5s to keep us out of a
+            # returns an empty list. The helper below polls responses
+            # directly (same idea, generalised) — bounded at
+            # ``SEARCH_CANCEL_WAIT_DEADLINE_S`` to keep us out of a
             # doubly-broken-slskd hang.
-            cancel_deadline = clock_fn() + SEARCH_CANCEL_WAIT_DEADLINE_S
-            while clock_fn() < cancel_deadline:
-                try:
-                    state_resp = slskd_client.searches.state(search_id, False)
-                    post_state = state_resp["state"]
-                    final_state = post_state
-                    if isinstance(post_state, str) and "Completed" in post_state:
-                        break
-                except Exception:
-                    break
-                time.sleep(SEARCH_CANCEL_WAIT_POLL_S)
             break
 
         time.sleep(1)
 
-    search_results = slskd_client.searches.search_responses(search_id)
+    # Bridge slskd's state→responses race (issue #242). The natural-
+    # completion path has historically read responses immediately after
+    # seeing a terminal state; this dropped 56% of `FileLimitReached`
+    # searches because slskd's response writer hadn't committed yet. The
+    # cancel path needs a longer budget because slskd just got
+    # interrupted; the natural path is the happy case where responses
+    # are usually already settled and the helper exits after one
+    # confirmatory call.
+    settle_deadline = (
+        SEARCH_CANCEL_WAIT_DEADLINE_S
+        if watchdog_fired
+        else SEARCH_RESPONSE_SETTLE_DEADLINE_S
+    )
+    settle_poll = (
+        SEARCH_CANCEL_WAIT_POLL_S
+        if watchdog_fired
+        else SEARCH_RESPONSE_SETTLE_POLL_S
+    )
+    search_results = _fetch_search_responses_settled(
+        slskd_client, search_id,
+        deadline_s=settle_deadline, poll_s=settle_poll, clock_fn=clock_fn,
+    )
     elapsed = time.time() - t0
     logger.info(f"Search returned {len(search_results)} results in {elapsed:.1f}s for: {query}")
     if search_cfg.delete_searches:
