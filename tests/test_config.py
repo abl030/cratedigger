@@ -415,6 +415,29 @@ class TestReadRuntimeConfig(unittest.TestCase):
         self.assertEqual(cfg.plex_url, "http://plex.test")
         self.assertEqual(cfg.plex_token, "test-token")
 
+    def test_beets_directory_defaults_to_empty(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
+            tmp.write("[Slskd]\napi_key = ignored\n")
+            config_path = tmp.name
+        try:
+            cfg = read_runtime_config(config_path)
+        finally:
+            os.unlink(config_path)
+        self.assertEqual(cfg.beets_directory, "")
+
+    def test_beets_directory_read_from_config(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
+            tmp.write(
+                "[Beets]\n"
+                "directory = /srv/music/Beets\n"
+            )
+            config_path = tmp.name
+        try:
+            cfg = read_runtime_config(config_path)
+        finally:
+            os.unlink(config_path)
+        self.assertEqual(cfg.beets_directory, "/srv/music/Beets")
+
 
 class TestReadRuntimeRankConfig(unittest.TestCase):
     def test_missing_config_returns_defaults(self):

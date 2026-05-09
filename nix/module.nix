@@ -168,6 +168,9 @@
     use_extension_whitelist = ${if cfg.downloadSettings.useExtensionWhitelist then "True" else "False"}
     extensions_whitelist = ${concatStringsSep "," cfg.downloadSettings.extensionsWhitelist}
 
+    [Beets]
+    directory = ${cfg.beetsDirectory}
+
     [Beets Validation]
     enabled = ${if cfg.beetsValidation.enable then "True" else "False"}
     harness_path = ${cfg.beetsValidation.harnessPath}
@@ -457,6 +460,24 @@ in {
         default = 100;
         description = "Redis command timeout for the pipeline peer cache, in milliseconds.";
       };
+    };
+
+    beetsDirectory = mkOption {
+      type = types.str;
+      default = "";
+      example = "/mnt/virtio/Music/Beets";
+      description = ''
+        Absolute path to the beets library root (matches `directory:` in
+        ~/.config/beets/config.yaml). Beets stores file paths in its SQLite
+        DB as relative to this root, so consumers that perform host-side
+        filesystem ops (cleanup_disambiguation_orphans) or send absolute
+        paths to external services (trigger_plex_scan on bare-metal Plex)
+        need to absolutize against this root.
+
+        Optional but recommended. Leave empty if you provide an equivalent
+        absolute prefix via notifiers.plex.pathMap (Docker remap form
+        `/host/beets:/container/path`).
+      '';
     };
 
     beetsValidation = {

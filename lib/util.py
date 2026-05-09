@@ -229,7 +229,9 @@ def repair_mp3_headers(folder_path: str) -> None:
 from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
 
 
-def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
+def cleanup_disambiguation_orphans(
+    imported_path: str, beets_directory: str = ""
+) -> list[str]:
     """Remove sibling directories that contain no audio files.
 
     After beets disambiguates an album path (e.g. renames '2009 - Blood Bank'
@@ -238,20 +240,24 @@ def cleanup_disambiguation_orphans(imported_path: str) -> list[str]:
     scans the parent (artist) directory and removes any sibling dirs that
     have zero audio files.
 
-    ``imported_path`` MUST be absolute. ``BeetsDB.get_album_info()`` returns
-    paths relative to the beets library root, so callers that source the
-    path from beets need to absolutize it (or accept the warn-and-skip below).
+    ``imported_path`` is absolutized against ``beets_directory`` if it's
+    relative (``BeetsDB.get_album_info()`` returns paths relative to the
+    beets library root). When ``beets_directory`` is empty and the path
+    is relative, warn-and-skip rather than silently no-op.
     Returns the list of removed directory paths.
     """
     if not os.path.isabs(imported_path):
-        # Symmetric defense with trigger_plex_scan's path_map warning: silent
-        # no-ops on a path-translation gap is exactly how PR #236 lurked for
-        # 5 weeks. See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md
-        logger.warning(
-            f"cleanup_disambiguation_orphans: imported_path {imported_path!r} "
-            "is relative; cannot resolve siblings without an absolute beets root. "
-            "Skipping (no orphans removed).")
-        return []
+        if beets_directory:
+            imported_path = os.path.join(beets_directory, imported_path)
+        else:
+            # Symmetric defense with trigger_plex_scan: silent no-ops on a
+            # path-translation gap is exactly how PR #236 lurked for 5 weeks.
+            # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md
+            logger.warning(
+                f"cleanup_disambiguation_orphans: imported_path {imported_path!r} "
+                "is relative and beets_directory is unset; cannot resolve "
+                "siblings. Skipping (no orphans removed).")
+            return []
     artist_dir = os.path.dirname(imported_path)
     if not os.path.isdir(artist_dir):
         return []
@@ -536,20 +542,33 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
         if imported_path:
             from urllib.parse import quote
             scan_path = imported_path
+            # Step 1: absolutize relative paths via beets_directory if set.
+            # Beets stores paths relative to its library root, so this is the
+            # general-purpose mechanism for any deployment to absolutize.
+            if not os.path.isabs(scan_path) and cfg.beets_directory:
+                scan_path = os.path.join(cfg.beets_directory, scan_path)
+            # Step 2: translate host path → container path via path_map
+            # (only needed when Plex runs in a container with a different mount).
             if cfg.plex_path_map:
                 local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
                 if scan_path.startswith(local_prefix):
                     scan_path = container_prefix + scan_path[len(local_prefix):]
                 elif not os.path.isabs(scan_path):
-                    # beets stores paths relative to its library root.
-                    # Re-anchor under the container prefix so Plex resolves
-                    # them against the library section's location.
+                    # path_map is set but beets_directory wasn't (or didn't
+                    # apply). Fall back to anchoring relative paths under the
+                    # container_prefix — this is the original PR #236 fix.
                     scan_path = container_prefix.rstrip("/") + "/" + scan_path
                 else:
                     logger.warning(
                         f"PLEX: imported_path {scan_path!r} is absolute but "
                         f"outside path_map local_prefix {local_prefix!r}; "
                         "Plex may silently ignore the partial scan")
+            # Step 3: final guard — Plex won't resolve a relative path.
+            if not os.path.isabs(scan_path):
+                logger.warning(
+                    f"PLEX: imported_path {scan_path!r} is relative and no "
+                    "beets_directory or plex_path_map is configured to "
+                    "absolutize it; Plex may silently ignore the partial scan")
             url += f"&path={quote(scan_path, safe='')}"
         # Log the URL without the token for debugging
         safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"

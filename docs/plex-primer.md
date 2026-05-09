@@ -44,17 +44,31 @@ Single function: `lib/util.py::trigger_plex_scan(cfg, imported_path)`.
 - Sends `GET <plex_url>/library/sections/<id>/refresh?path=<...>&X-Plex-Token=<...>`.
 - Best-effort — failures don't block the import.
 
-The `path_map` config translates the cratedigger-side filesystem path
-(`/mnt/virtio/Music/Beets/...`) into the Plex container's path
-(`/prom_music/...`). **Beets stores paths as relative to its
-`directory:` root, so `imported_path` is normally relative.** The
-substitution handles both relative and absolute inputs and warns on
-unmappable absolute paths — see PR #236 and
-`docs/solutions/runtime-errors/plex-partial-scan-silent-200.md`.
+### How paths get to Plex
+
+Beets stores file paths as **relative** to its `directory:` root, so
+`imported_path` is normally something like `Artist/Album` (no leading
+slash). `trigger_plex_scan` runs two transforms in sequence:
+
+1. **Absolutize** if relative and `beets_directory` is set
+   (`Artist/Album` → `/mnt/virtio/Music/Beets/Artist/Album`).
+2. **Translate host → container** if `path_map` is set
+   (`/mnt/virtio/Music/Beets/Artist/Album` → `/prom_music/Artist/Album`).
+
+If both are set (this homelab), the two compose. If only `path_map` is
+set, the path_map substitution itself anchors relative paths under the
+container prefix as a fallback. If only `beets_directory` is set
+(bare-metal Plex on the same host as beets), the absolutize step is
+sufficient by itself. See PR #236 and
+`docs/solutions/runtime-errors/plex-partial-scan-silent-200.md` for the
+five-week silent-failure story behind this.
 
 ### Cratedigger config (`/var/lib/cratedigger/config.ini`)
 
 ```ini
+[Beets]
+directory = /mnt/virtio/Music/Beets
+
 [Plex]
 url = https://plex.ablz.au
 token_file = /run/cratedigger-secrets/PLEX_TOKEN
@@ -65,6 +79,21 @@ path_map = /mnt/virtio/Music/Beets:/prom_music
 `token_file` is sops-managed (`secrets/cratedigger.env` on doc1, decrypted
 into `/run/cratedigger-secrets/` at runtime via the
 `cratedigger-secrets-split` oneshot — see `docs/nixos-module.md`).
+
+### Plex on a different setup (other deployments)
+
+The path-shape concerns are configurable; nothing is hardcoded:
+
+| Deployment | Set in cratedigger config | Result |
+|------------|--------------------------|--------|
+| Plex in Docker, music mounted at a different container path | `[Beets] directory` + `[Plex] path_map = /host/beets:/container/path` | Absolutize then translate |
+| Plex on the same host as beets (bare metal, no remap) | `[Beets] directory` only | Absolutize, send absolute |
+| Plex with the same path on host and container (already absolute somehow) | `[Plex] path_map = /shared/root:/shared/root` | Idempotent translation |
+| Nothing configured | (warning logged) | Plex receives a relative path and silently no-ops |
+
+Via the Nix module, the equivalent options are
+`services.cratedigger.beetsDirectory` and
+`services.cratedigger.notifiers.plex.pathMap`.
 
 ## API Access
 
