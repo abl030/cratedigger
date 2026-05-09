@@ -8,6 +8,7 @@ verifying response codes, JSON structure, and error handling.
 import copy
 from datetime import datetime, timezone
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -7322,6 +7323,198 @@ class TestFuzzyShimRemoved(unittest.TestCase):
             "check_beets_by_artist_album was deleted in issue #123 "
             "— the fuzzy artist+album shim must not return.",
         )
+
+
+class TestClientDisconnectHandling(unittest.TestCase):
+    """Issue #233 wedge regression: client closes mid-response.
+
+    Before this fix, a BrokenPipeError raised inside do_GET/do_POST
+    (typically from _json's wfile.write to a closed socket) reached
+    the bare ``except Exception`` catch-all, which unconditionally
+    called _try_reconnect_db() and tried to write a 500 body back to
+    the dead socket — causing a second BrokenPipeError, a 30-line
+    chained traceback in journald, and a costly DB reconnect.
+    Sustained client-disconnect traffic (cratedigger.py's end-of-cycle
+    POST that closed mid-body, see U1) compounded reconnects until the
+    single-threaded server wedged in poll().
+
+    U2's fix: a typed ``except (BrokenPipeError, ConnectionResetError,
+    ConnectionAbortedError)`` clause sits before the existing catch-all
+    in both do_GET and do_POST. Disconnect errors get a single WARNING
+    log line and a clean return — no DB reconnect, no second body-write.
+
+    These tests inject the exception via ``mock_db.<method>.side_effect``
+    rather than via raw-socket mid-body close. The mechanism is the same
+    code path (typed except clause inside do_POST's try block); the
+    side_effect approach is deterministic where raw-socket timing is
+    flaky on localhost. R3 regression-guard tests confirm the existing
+    catch-all still fires for real handler errors.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.port, cls.mock_db = _make_server()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        # Ensure each test starts with a clean side_effect.
+        self.mock_db.update_request_fields.side_effect = None
+        self.mock_db.update_request_fields.return_value = None
+
+    def _post(self, path, body):
+        url = f"{self.base}{path}"
+        data = json.dumps(body).encode()
+        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            resp = urlopen(req, timeout=2)
+            return resp.status, json.loads(resp.read())
+        except HTTPError as e:
+            return e.code, json.loads(e.read())
+        except Exception:
+            # Connection-level failures (which is exactly what the wedge
+            # produces server-side) surface client-side as URLError or
+            # similar. Tests assert on server-side observable state, not
+            # on the client response.
+            return None, None
+
+    def _assert_no_reconnect_no_traceback(self, mock_reconnect, log_records, kind):
+        """Shared assertions for the disconnect-class tests."""
+        # The narrowed clause caught the disconnect — no reconnect attempted.
+        self.assertEqual(
+            mock_reconnect.call_count, 0,
+            f"{kind} must not trigger _try_reconnect_db",
+        )
+        # A single WARNING-level record about the disconnect.
+        warnings = [r for r in log_records if r.levelname == "WARNING"]
+        self.assertGreaterEqual(
+            len(warnings), 1,
+            f"Expected at least one WARNING log line for {kind}, "
+            f"got records: {[(r.levelname, r.getMessage()) for r in log_records]}",
+        )
+        self.assertTrue(
+            any("Client disconnect" in r.getMessage() for r in warnings),
+            f"Expected 'Client disconnect' in WARNING for {kind}, got: "
+            f"{[r.getMessage() for r in warnings]}",
+        )
+        # No log.exception (ERROR with exc_info) — that's the 30-line
+        # traceback pattern the wedge produced.
+        errors_with_exc = [
+            r for r in log_records
+            if r.levelname == "ERROR" and r.exc_info is not None
+        ]
+        self.assertEqual(
+            len(errors_with_exc), 0,
+            f"Disconnect ({kind}) must not emit a traceback "
+            f"(would be the journald-flood signature). Found: "
+            f"{[r.getMessage() for r in errors_with_exc]}",
+        )
+
+    @patch("web.server._try_reconnect_db")
+    def test_brokenpipe_during_post_does_not_trigger_reconnect(self, mock_reconnect):
+        """Wedge regression: BrokenPipeError reaches the typed except
+        clause first, never the catch-all that reconnects."""
+        self.mock_db.update_request_fields.side_effect = BrokenPipeError(32, "Broken pipe")
+        with self.assertLogs("cratedigger-web", level="WARNING") as cm:
+            self._post("/api/pipeline/set-intent",
+                       {"id": 100, "intent": "default"})
+        self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "BrokenPipeError")
+
+    @patch("web.server._try_reconnect_db")
+    def test_connection_reset_during_post_does_not_trigger_reconnect(self, mock_reconnect):
+        """Sibling disconnect class — same handling expected."""
+        self.mock_db.update_request_fields.side_effect = ConnectionResetError(104, "Connection reset by peer")
+        with self.assertLogs("cratedigger-web", level="WARNING") as cm:
+            self._post("/api/pipeline/set-intent",
+                       {"id": 100, "intent": "default"})
+        self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionResetError")
+
+    @patch("web.server._try_reconnect_db")
+    def test_connection_aborted_during_post_does_not_trigger_reconnect(self, mock_reconnect):
+        """Sibling disconnect class — same handling expected."""
+        self.mock_db.update_request_fields.side_effect = ConnectionAbortedError(103, "Software caused connection abort")
+        with self.assertLogs("cratedigger-web", level="WARNING") as cm:
+            self._post("/api/pipeline/set-intent",
+                       {"id": 100, "intent": "default"})
+        self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionAbortedError")
+
+    @patch("web.server._try_reconnect_db")
+    def test_real_db_error_still_triggers_reconnect(self, mock_reconnect):
+        """R3 regression guard: psycopg2.OperationalError must still hit
+        the catch-all and trigger _try_reconnect_db. The narrowing must
+        not change behaviour for real DB errors."""
+        import psycopg2
+        self.mock_db.update_request_fields.side_effect = psycopg2.OperationalError("simulated PG outage")
+        with self.assertLogs("cratedigger-web", level="ERROR") as cm:
+            status, _ = self._post("/api/pipeline/set-intent",
+                                   {"id": 100, "intent": "default"})
+        # Real DB error → catch-all fires → reconnect attempted.
+        self.assertEqual(
+            mock_reconnect.call_count, 1,
+            "Real psycopg2.OperationalError must still trigger _try_reconnect_db",
+        )
+        # log.exception emits ERROR with exc_info — that's the existing behaviour.
+        errors_with_exc = [
+            r for r in cm.records
+            if r.levelname == "ERROR" and r.exc_info is not None
+        ]
+        self.assertGreaterEqual(
+            len(errors_with_exc), 1,
+            "Real DB error must produce a log.exception traceback for diagnosis",
+        )
+        # Server returns 500.
+        self.assertEqual(status, 500)
+
+    @patch("web.server._try_reconnect_db")
+    def test_other_exception_in_handler_still_triggers_reconnect(self, mock_reconnect):
+        """Unchanged-behaviour regression guard: a real handler bug
+        (e.g. ValueError) still hits the catch-all. Narrowing this
+        further (so non-DB exceptions skip the reconnect) is explicitly
+        out of scope per the plan — see follow-up #234."""
+        self.mock_db.update_request_fields.side_effect = ValueError("simulated handler bug")
+        with self.assertLogs("cratedigger-web", level="ERROR") as cm:
+            status, _ = self._post("/api/pipeline/set-intent",
+                                   {"id": 100, "intent": "default"})
+        self.assertEqual(
+            mock_reconnect.call_count, 1,
+            "Existing broad catch-all behaviour preserved: any non-disconnect "
+            "exception still triggers _try_reconnect_db. Narrowing is deferred to #234.",
+        )
+        errors_with_exc = [
+            r for r in cm.records
+            if r.levelname == "ERROR" and r.exc_info is not None
+        ]
+        self.assertGreaterEqual(len(errors_with_exc), 1)
+        self.assertEqual(status, 500)
+
+    @patch("web.server._try_reconnect_db")
+    def test_normal_post_no_reconnect_no_warning(self, mock_reconnect):
+        """Happy path regression guard: a successful POST does not
+        trigger any reconnect or disconnect-warning side effects."""
+        # mock_db.set_intent_for_request returns True by default per setUp.
+        # Use assertNoLogs (Python 3.10+) to assert no WARNING/ERROR records.
+        # Some logger setups still emit INFO; we only care that no WARNING
+        # for "Client disconnect" appears and no ERROR is emitted.
+        with self.assertLogs("cratedigger-web", level="DEBUG") as cm:
+            # assertLogs requires at least one record; a trivial DEBUG log
+            # ensures the context manager is satisfied even on a quiet path.
+            logging.getLogger("cratedigger-web").debug("test marker: normal POST path")
+            status, _ = self._post("/api/pipeline/set-intent",
+                                   {"id": 100, "intent": "default"})
+        self.assertEqual(mock_reconnect.call_count, 0)
+        disconnect_warnings = [
+            r for r in cm.records
+            if r.levelname == "WARNING" and "Client disconnect" in r.getMessage()
+        ]
+        self.assertEqual(len(disconnect_warnings), 0,
+            "Normal POST must not emit a disconnect WARNING")
+        errors = [r for r in cm.records if r.levelname == "ERROR"]
+        self.assertEqual(len(errors), 0,
+            f"Normal POST must not produce ERROR logs, got: "
+            f"{[r.getMessage() for r in errors]}")
 
 
 if __name__ == "__main__":
