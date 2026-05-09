@@ -27,6 +27,8 @@ import {
   renderAdvanceForm,
   searchPlanRegenerate,
   searchPlanAdvance,
+  searchPlanLoadOlder,
+  toggleSearchPlanSummary,
   REGENERATE_CONFIRM_MESSAGE,
 } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
@@ -34,12 +36,17 @@ import { state } from '../web/js/state.js';
 let passed = 0;
 let failed = 0;
 
+// Capture the real console.error at module-load time so FAIL messages
+// always reach stderr, even when individual tests stub console.error
+// (e.g. inside withFetchAndConfirmShim).
+const ORIGINAL_CONSOLE_ERROR = console.error.bind(console);
+
 function assert(condition, msg) {
   if (condition) {
     passed++;
   } else {
     failed++;
-    console.error(`  FAIL: ${msg}`);
+    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg}`);
   }
 }
 
@@ -48,7 +55,7 @@ function assertEqual(actual, expected, msg) {
     passed++;
   } else {
     failed++;
-    console.error(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
 }
 
@@ -61,10 +68,10 @@ function assertThrows(fn, errorClass, msg) {
   }
   if (caught === null) {
     failed++;
-    console.error(`  FAIL: ${msg} — expected throw, got no throw`);
+    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg} — expected throw, got no throw`);
   } else if (errorClass && !(caught instanceof errorClass)) {
     failed++;
-    console.error(
+    ORIGINAL_CONSOLE_ERROR(
       `  FAIL: ${msg} — expected ${errorClass.name}, got ${caught.constructor.name}: ${caught.message}`,
     );
   } else {
@@ -1332,6 +1339,546 @@ console.log('U5: stub-removal sanity check');
   });
   assert(advError === null,
     'searchPlanAdvance: real implementation does not throw "not implemented"');
+}
+
+// --- F1/F2/F3/F13: Race-condition guards -----------------------------
+//
+// Concurrency tests that simulate operator-driven races: clicking Back
+// during a fetch, double-clicking Advance, and so on. Each test uses a
+// "deferred" Promise that the test resolves manually so we can land
+// events between fetches.
+console.log('Race-condition guards (F1/F2/F3/F13)');
+
+/** @returns {{promise: Promise<any>, resolve: (v: any) => void, reject: (err: any) => void}} */
+function makeDeferred() {
+  /** @type {(v: any) => void} */
+  let resolve = () => {};
+  /** @type {(err: any) => void} */
+  let reject = () => {};
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * Build a fake `Response` object suitable for `fetchInspection` and
+ * `fetchHistoryPage` — they call `.json()` on success and `.text()` on
+ * failure. The body is the inspection / history payload (ok=true).
+ *
+ * @param {Object} body
+ */
+function fakeOkResponse(body) {
+  return {
+    ok: true, status: 200,
+    text() { return Promise.resolve(JSON.stringify(body)); },
+    json() { return Promise.resolve(body); },
+  };
+}
+
+/**
+ * Race-test fixture. Stubs window/document/fetch; gives the test
+ * control over which fetch resolves when. Cleans up on exit.
+ *
+ * @param {(ctx: {
+ *   document: any, window: any,
+ *   fetchCalls: string[],
+ *   fetchQueue: Array<{promise: Promise<any>, resolve: (v: any) => void}>,
+ *   element: any,
+ *   getInnerHtml: () => string,
+ * }) => Promise<void>} impl
+ */
+async function withRaceFixture(impl) {
+  const fetchCalls = /** @type {string[]} */ ([]);
+  /** @type {Array<{promise: Promise<any>, resolve: (v: any) => void}>} */
+  const fetchQueue = [];
+  const prevFetch = globalThis.fetch;
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevState = state.searchPlanDetailContext;
+  const prevPipelineView = state.pipelineView;
+  /** @type {string} */
+  let innerHtml = '';
+  /** @type {any} */
+  const element = {
+    set innerHTML(v) { innerHtml = v; },
+    get innerHTML() { return innerHtml; },
+    classList: {
+      _classes: new Set(),
+      add(/** @type {string} */ c) { this._classes.add(c); },
+      remove(/** @type {string} */ c) { this._classes.delete(c); },
+      contains(/** @type {string} */ c) { return this._classes.has(c); },
+    },
+    parentNode: { insertBefore() {} },
+    closest() { return null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  /** @type {any} */
+  const fakeDocument = {
+    /** @param {string} _id */
+    getElementById(_id) { return element; },
+    querySelector() { return element; },
+    querySelectorAll() { return []; },
+    /** @param {string} _tag */
+    createElement(_tag) {
+      return {
+        className: '',
+        id: '',
+        innerHTML: '',
+        classList: {
+          _classes: new Set(),
+          add(/** @type {string} */ c) { this._classes.add(c); },
+          remove(/** @type {string} */ c) { this._classes.delete(c); },
+          contains(/** @type {string} */ c) { return this._classes.has(c); },
+        },
+      };
+    },
+  };
+  /** @type {any} */
+  const fakeWindow = {
+    scrollY: 0,
+    requestAnimationFrame(/** @type {() => void} */ fn) { fn(); return 1; },
+    scrollTo() {},
+    showTab() {},
+  };
+  globalThis.window = fakeWindow;
+  globalThis.document = fakeDocument;
+  /** @type {any} */
+  globalThis.fetch = (/** @type {string} */ url) => {
+    fetchCalls.push(url);
+    const d = makeDeferred();
+    fetchQueue.push({ promise: d.promise, resolve: d.resolve });
+    return d.promise;
+  };
+  try {
+    await impl({
+      document: fakeDocument,
+      window: fakeWindow,
+      fetchCalls,
+      fetchQueue,
+      element,
+      getInnerHtml: () => innerHtml,
+    });
+  } finally {
+    state.searchPlanDetailContext = prevState;
+    state.pipelineView = prevPipelineView;
+    if (prevFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = prevFetch;
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+  }
+}
+
+// F1 — renderSearchPlanDetail: Back-during-fetch must not clobber the
+// restored view. We start a render for requestId=42, then start a render
+// for requestId=43 (which bumps the generation counter), then resolve
+// 42's fetches. The 42 paint must NOT happen.
+{
+  await withRaceFixture(async (ctx) => {
+    const inspection42 = makeDetailInspection({ request_id: 42 });
+    inspection42.request_id = 42;
+    const inspection43 = makeDetailInspection({ request_id: 43 });
+    inspection43.request_id = 43;
+    // Fire 42's render. It enqueues two fetches (inspection + history).
+    const p42 = renderSearchPlanDetail(42);
+    // Fire 43's render. It enqueues two more.
+    const p43 = renderSearchPlanDetail(43);
+    // We now have 4 deferreds. Resolve 43's first (positions 2 and 3 in
+    // the queue) so the page becomes "the 43 view".
+    ctx.fetchQueue[2].resolve(fakeOkResponse(inspection43));
+    ctx.fetchQueue[3].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    await p43;
+    // Capture the post-43-paint HTML.
+    const after43 = ctx.getInnerHtml();
+    assert(after43.includes('sp-detail') || after43.length > 0,
+      'F1: detail page rendered after 43 resolved');
+    // Now resolve 42's fetches — the stale render must NOT clobber.
+    ctx.fetchQueue[0].resolve(fakeOkResponse(inspection42));
+    ctx.fetchQueue[1].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    await p42;
+    // The HTML must still match the 43 paint, not get overwritten by 42.
+    assertEqual(ctx.getInnerHtml(), after43,
+      'F1: stale 42 render did NOT clobber the live 43 paint');
+  });
+}
+
+// F2 — toggleSearchPlanSummary: two concurrent calls for the same id
+// must trigger exactly ONE fetch (deduplication).
+{
+  await withRaceFixture(async (ctx) => {
+    // Override getElementById so the first call returns null (creates
+    // a panel), and subsequent calls return the panel we created.
+    /** @type {any} */
+    let createdPanel = null;
+    ctx.document.getElementById = (/** @type {string} */ id) => {
+      if (id === `sp-summary-42`) return createdPanel;
+      return ctx.element;
+    };
+    const originalCreate = ctx.document.createElement;
+    ctx.document.createElement = (/** @type {string} */ tag) => {
+      const el = originalCreate(tag);
+      // Simulate the panel being inserted.
+      createdPanel = el;
+      return el;
+    };
+    /** @type {any} */
+    const rowEl = {
+      parentNode: {
+        insertBefore() {},
+      },
+      nextSibling: null,
+    };
+
+    // Two concurrent calls — both should NOT cause four fetches.
+    const p1 = toggleSearchPlanSummary(42, rowEl);
+    const p2 = toggleSearchPlanSummary(42, rowEl);
+    // We expect 2 fetches at most (inspection + history) — not 4.
+    assertEqual(ctx.fetchCalls.length, 2,
+      'F2: concurrent calls dedup — exactly one fetch pair dispatched');
+    // Resolve to settle promises.
+    ctx.fetchQueue[0].resolve(fakeOkResponse(makeInspection()));
+    ctx.fetchQueue[1].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    await Promise.all([p1, p2]);
+  });
+}
+
+// F2 (closing-mid-fetch) — Open the panel; while the fetch is still
+// in-flight, simulate the panel being removed from the DOM (operator
+// dismissed the page / closed the panel). Resolve the fetch. The
+// detached panel must NOT receive the stale innerHTML.
+{
+  await withRaceFixture(async (ctx) => {
+    /** @type {any} */
+    let createdPanel = null;
+    /** @type {boolean} */
+    let panelLive = true;
+    ctx.document.getElementById = (/** @type {string} */ id) => {
+      if (id === `sp-summary-77`) return panelLive ? createdPanel : null;
+      return ctx.element;
+    };
+    const originalCreate = ctx.document.createElement;
+    ctx.document.createElement = (/** @type {string} */ tag) => {
+      const el = originalCreate(tag);
+      createdPanel = el;
+      return el;
+    };
+    /** @type {any} */
+    const rowEl = {
+      parentNode: { insertBefore() {} },
+      nextSibling: null,
+    };
+    // Open call (in-flight).
+    const p1 = toggleSearchPlanSummary(77, rowEl);
+    assertEqual(ctx.fetchCalls.length, 2,
+      'F2 close: open call dispatched the initial fetch pair');
+    // Capture the loading-state HTML that was set synchronously.
+    const beforeResolve = createdPanel.innerHTML;
+    assert(beforeResolve.includes('Loading'),
+      'F2 close: panel shows loading text while fetch is in-flight');
+    // Simulate the panel being detached (operator clicked Close /
+    // navigated away). getElementById will now return null for this id.
+    panelLive = false;
+    // Resolve the fetches.
+    ctx.fetchQueue[0].resolve(fakeOkResponse(makeInspection()));
+    ctx.fetchQueue[1].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    await p1;
+    // F2 closed-mid-fetch guard: the detached panel must NOT have been
+    // overwritten with the resolved summary HTML.
+    assertEqual(createdPanel.innerHTML, beforeResolve,
+      'F2 close: detached-during-fetch panel was NOT overwritten by stale resolve');
+  });
+}
+
+// F3 — searchPlanLoadOlder: rapid double-click should dispatch one fetch.
+{
+  await withRaceFixture(async (ctx) => {
+    /** @type {any} */
+    const button = {
+      disabled: false,
+    };
+    /** @type {any} */
+    const wrap = {
+      innerHTML: '',
+      remove() {},
+      querySelector(/** @type {string} */ sel) {
+        if (sel.includes('button')) return button;
+        return null;
+      },
+    };
+    /** @type {any} */
+    const tbody = {
+      insertAdjacentHTML() {},
+      closest() {
+        return {
+          querySelector(/** @type {string} */ sel) {
+            if (sel.includes('sp-load-older-wrap')) return wrap;
+            return null;
+          },
+        };
+      },
+    };
+    ctx.document.querySelector = (/** @type {string} */ sel) => {
+      if (sel.includes('sp-history-tbody')) return tbody;
+      if (sel.includes('sp-load-older-wrap')) return wrap;
+      return null;
+    };
+    const p1 = searchPlanLoadOlder(42, 12300);
+    // The very first call should immediately dispatch a fetch AND disable
+    // the button before any await yields.
+    assertEqual(ctx.fetchCalls.length, 1,
+      'F3: first load-older click fires one fetch');
+    // Now click again — must NOT dispatch a second fetch.
+    const p2 = searchPlanLoadOlder(42, 12300);
+    assertEqual(ctx.fetchCalls.length, 1,
+      'F3: second click during in-flight load-older does NOT dispatch a second fetch');
+    ctx.fetchQueue[0].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    await Promise.all([p1, p2]);
+  });
+}
+
+// F13 — searchPlanRegenerate: rapid double-confirm should dispatch one
+// regenerate POST. Reuses the regenerate fetch shim because confirm gating
+// is still required.
+{
+  // Re-use withFetchAndConfirmShim but mutate it to track concurrency by
+  // running two calls in parallel without awaiting.
+  const calls = {
+    fetch: /** @type {Array<{url: string, init: any}>} */ ([]),
+  };
+  const prevFetch = globalThis.fetch;
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevState = state.searchPlanDetailContext;
+  const prevPipelineView = state.pipelineView;
+  /** @type {Array<{promise: Promise<any>, resolve: (v: any) => void}>} */
+  const fetchQueue = [];
+  /** @type {any} */
+  globalThis.window = {
+    confirm() { return true; },
+    scrollY: 0,
+    requestAnimationFrame(/** @type {() => void} */ fn) { fn(); return 1; },
+    scrollTo() {},
+    showTab() {},
+  };
+  /** @type {any} */
+  globalThis.document = {
+    getElementById() { return null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  /** @type {any} */
+  globalThis.fetch = (/** @type {string} */ url, /** @type {any} */ init) => {
+    calls.fetch.push({ url, init });
+    const d = makeDeferred();
+    fetchQueue.push({ promise: d.promise, resolve: d.resolve });
+    return d.promise.then((body) => ({
+      ok: true, status: 200,
+      text() { return Promise.resolve(JSON.stringify(body)); },
+      json() { return Promise.resolve(body); },
+    }));
+  };
+  try {
+    const p1 = searchPlanRegenerate(2566);
+    const p2 = searchPlanRegenerate(2566);
+    // Only the first call should have dispatched a fetch. The second
+    // is suppressed by the in-flight guard.
+    assertEqual(calls.fetch.length, 1,
+      'F13: concurrent regenerate clicks dispatch exactly one fetch');
+    fetchQueue[0].resolve({ request_id: 2566, outcome: 'success', plan_id: 999 });
+    await Promise.all([p1, p2]);
+  } finally {
+    state.searchPlanDetailContext = prevState;
+    state.pipelineView = prevPipelineView;
+    if (prevFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = prevFetch;
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+  }
+}
+
+// F8 — searchPlanRegenerate: 404 (request_not_found). Should toast the
+// error message AND preserve the cache (no invalidation).
+await withFetchAndConfirmShim({
+  confirmReturns: true,
+  fetchResp: {
+    ok: false, status: 404,
+    body: {
+      request_id: 9999, outcome: 'request_not_found',
+      error_message: 'Request 9999 does not exist',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(9999, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanRegenerate(9999);
+  assert(searchPlanCache.has(9999),
+    'F8: 404 request_not_found does NOT invalidate the cache');
+  assertEqual(calls.fetch.length, 1,
+    'F8: 404 reports one fetch was dispatched (toast happens after)');
+});
+
+// --- F14: Testing gaps -----------------------------------------------
+console.log('F14: misc test gaps');
+
+// F14.1 — renderSummaryPanel debug-line branch: no active plan and no
+// failure plan → surfaces the booleans.
+{
+  const inspection = makeInspection({
+    active_plan: null,
+    currentness: {
+      is_wanted: true, has_active_plan: false, generator_id_mismatch: false,
+      has_deterministic_failure: false, has_retryable_failure: false,
+    },
+    latest_failed_deterministic: null,
+  });
+  const html = renderSummaryPanel({ inspection, history: { rows: [] } });
+  assert(html.includes('No active plan'),
+    'F14.1: no-plan + no-failure surfaces the "No active plan" debug line');
+  assert(html.includes('has_active_plan='),
+    'F14.1: debug line surfaces has_active_plan=');
+  assert(html.includes('has_deterministic_failure='),
+    'F14.1: debug line surfaces has_deterministic_failure=');
+  assert(html.includes('has_retryable_failure='),
+    'F14.1: debug line surfaces has_retryable_failure=');
+}
+
+// F14.2 — closeSearchPlanDetail with origin browse + non-null subView.
+// Asserts state.browseSubView is restored.
+{
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 42,
+      originTab: 'browse',
+      originScrollY: 100,
+      originSubView: 'albums',
+    };
+    state.browseSubView = 'singles';
+    closeSearchPlanDetail();
+    assertEqual(state.browseSubView, 'albums',
+      'F14.2: browse-origin with subView="albums" restores state.browseSubView');
+    assertEqual(calls.showTab[0], 'browse',
+      'F14.2: showTab("browse") still called');
+  });
+}
+
+// F14.3 — searchPlanAdvance malformed target: target carries
+// `toOrdinal` / `toStrategy` keys but with values of the wrong type.
+// This hits the "malformed target" branch (after the "open the form"
+// check, before the POST). Must NOT dispatch a fetch and must
+// console.error.
+{
+  await withFetchAndConfirmShim({}, async (calls) => {
+    /** @type {any} */
+    const malformed = { toOrdinal: 'not-a-number', toStrategy: 12345 };
+    await searchPlanAdvance(2566, malformed);
+    assertEqual(calls.fetch.length, 0,
+      'F14.3: malformed target does NOT dispatch a fetch');
+    assert(calls.consoleError.length >= 1,
+      'F14.3: malformed target logs console.error');
+  });
+}
+
+// --- F12: Tab-switch clears search-plan-detail context ---------------
+//
+// Imported via the live main.js — but main.js attaches showTab to the
+// window only when imported in a browser. We test the behaviour
+// directly by simulating: state.pipelineView='search-plan-detail' →
+// showTab('browse') → expect state.pipelineView reset.
+//
+// main.js's showTab is a closure over imported state. We reach it by
+// dynamic import after stubbing globals.
+console.log('F12: tab-switch clears detail context');
+
+{
+  // Set up DOM stubs needed by main.js's showTab.
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevState = state.searchPlanDetailContext;
+  const prevPipelineView = state.pipelineView;
+  /** @type {any} */
+  globalThis.window = { setTimeout: () => 0 };
+  /** @type {any} */
+  const fakeTabEl = { classList: { add() {}, remove() {} } };
+  /** @type {any} */
+  const fakeSecEl = { classList: { add() {}, remove() {} } };
+  /** @type {any} */
+  globalThis.document = {
+    querySelectorAll() {
+      return {
+        forEach(/** @type {(t: any) => void} */ fn) {
+          fn({ classList: { remove() {} } });
+        },
+      };
+    },
+    querySelector() { return fakeTabEl; },
+    getElementById(/** @type {string} */ id) {
+      if (id === 'q') return null;
+      return fakeSecEl;
+    },
+  };
+  try {
+    // Dynamically import main.js so it sees our stubbed globals.
+    // main.js wires window.showTab at import; we read it back.
+    await import('../web/js/main.js');
+    /** @type {any} */
+    const showTab = globalThis.window.showTab;
+    /** @type {any} */
+    const showTabPreserving = globalThis.window.showTabPreservingDetail;
+    assert(typeof showTab === 'function',
+      'F12 prereq: main.js wires window.showTab');
+    assert(typeof showTabPreserving === 'function',
+      'F12 prereq: main.js wires window.showTabPreservingDetail');
+    // Set up: pipelineView is search-plan-detail, context populated.
+    state.pipelineView = 'search-plan-detail';
+    state.searchPlanDetailContext = {
+      requestId: 42, originTab: 'browse',
+      originScrollY: 0, originSubView: null,
+    };
+    // Switch to a different tab.
+    showTab('browse');
+    assertEqual(state.pipelineView, 'queue',
+      'F12: switching away from pipeline resets pipelineView from search-plan-detail to queue');
+    assert(state.searchPlanDetailContext === null,
+      'F12: detail context cleared when leaving search-plan-detail');
+    // Now re-set and switch INTO pipeline directly — should also reset.
+    state.pipelineView = 'search-plan-detail';
+    state.searchPlanDetailContext = {
+      requestId: 42, originTab: 'browse',
+      originScrollY: 0, originSubView: null,
+    };
+    showTab('pipeline');
+    assertEqual(state.pipelineView, 'queue',
+      'F12: switching into pipeline tab resets stuck search-plan-detail state to queue');
+    assert(state.searchPlanDetailContext === null,
+      'F12: switching into pipeline tab clears stale detail context');
+    // Verify the openSearchPlanDetail flow does NOT trip the reset:
+    // showTabPreservingDetail wraps showTab and preserves the
+    // freshly-set pipelineView='search-plan-detail'.
+    state.pipelineView = 'search-plan-detail';
+    state.searchPlanDetailContext = {
+      requestId: 99, originTab: 'browse',
+      originScrollY: 0, originSubView: null,
+    };
+    showTabPreserving('pipeline');
+    assertEqual(state.pipelineView, 'search-plan-detail',
+      'F12: showTabPreservingDetail preserves pipelineView for openSearchPlanDetail flow');
+    assert(state.searchPlanDetailContext !== null,
+      'F12: showTabPreservingDetail preserves detail context');
+  } finally {
+    state.searchPlanDetailContext = prevState;
+    state.pipelineView = prevPipelineView;
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+  }
 }
 
 // --- Summary ---------------------------------------------------------

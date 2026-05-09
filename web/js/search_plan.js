@@ -18,8 +18,23 @@
  * `// @ts-check`, ES6 module, JSDoc on exports, pure helpers DOM-free.
  */
 
-import { state, toast, updatePipelineStatus } from './state.js';
+import { state, toast } from './state.js';
 import { esc, awstDateTime } from './util.js';
+
+/**
+ * Normalise the failure-plan payload to the flat plan dict shape.
+ *
+ * The production API returns a flat plan dict (per `_plan_to_dict`) with
+ * `failure_class` / `error_message` at the top level; some tests
+ * construct `{plan: {...}}`. Reading both covers both producers without
+ * forking code paths.
+ *
+ * @param {Object|null|undefined} failed
+ * @returns {Object|null|undefined}
+ */
+function normaliseFailed(failed) {
+  return (failed && failed.plan) ? failed.plan : failed;
+}
 
 /**
  * Default number of `search_log` rows fetched per history page.
@@ -47,6 +62,26 @@ export const HISTORY_PAGE_DEFAULT_LIMIT = 50;
  * @type {Map<number, SearchPlanCacheEntry>}
  */
 export const searchPlanCache = new Map();
+
+/**
+ * Module-scoped set of request ids whose summary fetch is currently in
+ * flight. Used to dedup concurrent {@link toggleSearchPlanSummary} calls
+ * (operator double-click, refresh-during-open, etc.) so we don't dispatch
+ * multiple fetches and don't insert duplicate `<div class="sp-summary">`
+ * sibling elements.
+ *
+ * @type {Set<number>}
+ */
+const summaryInFlight = new Set();
+
+/**
+ * Module-scoped set of request ids whose regenerate/advance POST is
+ * currently in flight. Same pattern as {@link summaryInFlight} — guards
+ * against rapid double-clicks queueing concurrent mutations.
+ *
+ * @type {Set<number>}
+ */
+const mutationInFlight = new Set();
 
 /**
  * @typedef {Object} HistoryUrlOptions
@@ -312,11 +347,7 @@ export function renderSummaryPanel(args) {
   // No active plan — render failure class + sanitised error if present.
   if (!activePlan) {
     const failed = inspection.latest_failed_deterministic;
-    // Support BOTH shapes: the production API returns a flat plan dict
-    // (per `_plan_to_dict`) with `failure_class` / `error_message` at
-    // the top level; some tests construct `{plan: {...}}`. Reading both
-    // covers both producers without forking code paths.
-    const failurePlan = (failed && failed.plan) ? failed.plan : failed;
+    const failurePlan = normaliseFailed(failed);
     const failureClass = (failurePlan && failurePlan.failure_class) || null;
     const failureError = (failurePlan && failurePlan.error_message) || null;
 
@@ -410,14 +441,16 @@ export function renderSummaryPanel(args) {
  * @returns {Promise<void>}
  */
 export async function toggleSearchPlanSummary(requestId, rowEl) {
-  // Touch `state` so future cache-driven reads don't trip "unused import"
-  // checks. The U5 mutation handlers will properly use it.
-  void state;
   if (!Number.isInteger(requestId) || requestId <= 0) {
     throw new TypeError(
       `toggleSearchPlanSummary: requestId must be a positive integer (got ${JSON.stringify(requestId)})`,
     );
   }
+
+  // Concurrent-call guard: a fetch is already in flight for this id.
+  // The first call will write into the panel; the duplicate call from
+  // (e.g.) a rapid second click is a no-op.
+  if (summaryInFlight.has(requestId)) return;
 
   const panelId = `sp-summary-${requestId}`;
   let panel = /** @type {HTMLElement|null} */ (document.getElementById(panelId));
@@ -441,11 +474,18 @@ export async function toggleSearchPlanSummary(requestId, rowEl) {
   panel.innerHTML = '<div class="sp-summary-loading">Loading search-plan…</div>';
   panel.classList.add('open');
 
+  summaryInFlight.add(requestId);
   try {
     const [inspection, history] = await Promise.all([
       fetchInspection(requestId),
       fetchHistoryPage(requestId, { limit: 3 }),
     ]);
+    // Closed-mid-fetch guard: if the panel was removed from the DOM
+    // (operator clicked Close, dismissed a tab, etc.) skip the write so
+    // we don't repaint a stale surface.
+    const livePanel = /** @type {HTMLElement|null} */ (
+      document.getElementById(panelId));
+    if (livePanel !== panel) return;
     searchPlanCache.set(requestId, {
       inspection,
       historyHead: Array.isArray(history.rows) ? history.rows.slice(0, 3) : [],
@@ -453,8 +493,14 @@ export async function toggleSearchPlanSummary(requestId, rowEl) {
     });
     panel.innerHTML = renderSummaryPanel({ inspection, history });
   } catch (err) {
+    // Same closed-mid-fetch guard on the error path.
+    const livePanel = /** @type {HTMLElement|null} */ (
+      document.getElementById(panelId));
+    if (livePanel !== panel) return;
     const msg = err instanceof Error ? err.message : String(err);
     panel.innerHTML = `<div class="sp-summary-loading">Failed to load search-plan: ${esc(msg)}</div>`;
+  } finally {
+    summaryInFlight.delete(requestId);
   }
 }
 
@@ -546,6 +592,16 @@ export function openSearchPlanDetail(requestId, _originEl) {
   state.searchPlanDetailContext = { ...ctx, requestId };
   state.pipelineView = 'search-plan-detail';
   if (typeof window !== 'undefined') {
+    // Prefer the F12-aware showTab wrapper that preserves
+    // `state.pipelineView === 'search-plan-detail'` across the tab
+    // switch. Fall back to plain `showTab` for environments that don't
+    // expose the wrapper, then to a direct render for test harnesses.
+    const showTabPreserving = /** @type {(name: string) => void} */ (
+      /** @type {any} */ (window).showTabPreservingDetail);
+    if (typeof showTabPreserving === 'function') {
+      showTabPreserving('pipeline');
+      return;
+    }
     const showTab = /** @type {(name: string) => void} */ (
       /** @type {any} */ (window).showTab);
     if (typeof showTab === 'function') {
@@ -572,6 +628,10 @@ export function openSearchPlanDetail(requestId, _originEl) {
  * @returns {void}
  */
 export function closeSearchPlanDetail() {
+  // Bump the detail-page generation counter so any in-flight
+  // `renderSearchPlanDetail` call skips its paint when it resolves —
+  // covers the operator-clicks-Back-during-fetch race.
+  bumpDetailGeneration();
   const ctx = state.searchPlanDetailContext;
   if (!ctx) {
     // No stash — fall back to the Pipeline queue without throwing.
@@ -588,11 +648,11 @@ export function closeSearchPlanDetail() {
     }
     return;
   }
-  const { originTab, originSubView, originScrollY } = ctx;
-  if (originTab === 'pipeline') {
-    state.pipelineView = (originSubView === 'dashboard'
-      || originSubView === 'queue')
-      ? originSubView
+  const { tab, scrollY, subView } = restoreOriginContext(ctx);
+  if (tab === 'pipeline') {
+    state.pipelineView = (subView === 'dashboard'
+      || subView === 'queue')
+      ? subView
       : 'queue';
   } else {
     // Leave pipelineView alone on non-pipeline origins; the next time
@@ -601,12 +661,12 @@ export function closeSearchPlanDetail() {
     if (state.pipelineView === 'search-plan-detail') {
       state.pipelineView = 'queue';
     }
-    if (originTab === 'recents'
-      && (originSubView === 'history' || originSubView === 'downloading' || originSubView === 'queue')) {
-      state.recentsSub = originSubView;
+    if (tab === 'recents'
+      && (subView === 'history' || subView === 'downloading' || subView === 'queue')) {
+      state.recentsSub = subView;
     }
-    if (originTab === 'browse' && typeof originSubView === 'string') {
-      state.browseSubView = originSubView;
+    if (tab === 'browse' && typeof subView === 'string') {
+      state.browseSubView = subView;
     }
   }
   state.searchPlanDetailContext = null;
@@ -614,7 +674,7 @@ export function closeSearchPlanDetail() {
     const showTab = /** @type {(name: string) => void} */ (
       /** @type {any} */ (window).showTab);
     if (typeof showTab === 'function') {
-      showTab(originTab);
+      showTab(tab);
     }
     const scheduler = (typeof window.requestAnimationFrame === 'function')
       ? window.requestAnimationFrame.bind(window)
@@ -624,7 +684,7 @@ export function closeSearchPlanDetail() {
       );
     scheduler(() => {
       if (typeof window.scrollTo === 'function') {
-        window.scrollTo(0, originScrollY);
+        window.scrollTo(0, scrollY);
       }
     });
   }
@@ -857,7 +917,7 @@ function renderPlanHealth(inspection) {
 
   const renderFailure = (failure, label) => {
     if (!failure) return '';
-    const plan = failure.plan ? failure.plan : failure;
+    const plan = normaliseFailed(failure);
     const klass = (plan && plan.failure_class) || 'unknown';
     const errMsg = (plan && plan.error_message) || '';
     const ts = plan && plan.created_at ? awstDateTime(plan.created_at) : '';
@@ -1074,6 +1134,17 @@ export function renderDetailPage(args) {
 }
 
 /**
+ * Module-scoped generation counter for detail-page renders. Bumped at
+ * the start of every {@link renderSearchPlanDetail} call so that an
+ * in-flight render whose generation is now stale (e.g. operator clicked
+ * Back, opened a different request, or kicked Refresh mid-fetch) cannot
+ * clobber the visible surface when its fetches finally resolve.
+ *
+ * @type {number}
+ */
+let detailGeneration = 0;
+
+/**
  * Async detail-page renderer — fetches inspection + history page in
  * parallel, builds the full HTML via {@link renderDetailPage}, and
  * paints into `#pipeline-content`.
@@ -1093,6 +1164,10 @@ export async function renderSearchPlanDetail(requestId) {
       `renderSearchPlanDetail: requestId must be a positive integer (got ${JSON.stringify(requestId)})`,
     );
   }
+  // Generation guard — only the most-recent render owns the paint. If
+  // another render/back/refresh bumps `detailGeneration` while we await,
+  // we skip the writes after the await resolves.
+  const gen = ++detailGeneration;
   const el = (typeof document !== 'undefined')
     ? /** @type {HTMLElement|null} */ (document.getElementById('pipeline-content'))
     : null;
@@ -1104,6 +1179,7 @@ export async function renderSearchPlanDetail(requestId) {
       fetchInspection(requestId),
       fetchHistoryPage(requestId, { limit: HISTORY_PAGE_DEFAULT_LIMIT }),
     ]);
+    if (gen !== detailGeneration) return;
     const rows = Array.isArray(historyPayload.rows) ? historyPayload.rows : [];
     const nextBeforeId = historyPayload.next_before_id == null
       ? null
@@ -1116,11 +1192,23 @@ export async function renderSearchPlanDetail(requestId) {
     const html = renderDetailPage({ inspection, history: rows, nextBeforeId });
     if (el) el.innerHTML = html;
   } catch (err) {
+    if (gen !== detailGeneration) return;
     const msg = err instanceof Error ? err.message : String(err);
     if (el) {
       el.innerHTML = `<div class="sp-detail-loading">Failed to load search-plan: ${esc(msg)}</div>`;
     }
   }
+}
+
+/**
+ * Bump the detail-page generation counter without rendering. Operator
+ * Back-button clicks call this so any in-flight detail render skips its
+ * paint when it resolves.
+ *
+ * @returns {void}
+ */
+function bumpDetailGeneration() {
+  detailGeneration++;
 }
 
 /**
@@ -1163,6 +1251,17 @@ export async function searchPlanLoadOlder(requestId, beforeId) {
     document.querySelector(`.sp-history-table[data-request-id="${requestId}"] ~ .sp-load-older-wrap`)
     || tbody.closest('.sp-detail')?.querySelector('.sp-load-older-wrap')
     || null);
+  // Double-click guard: synchronously disable the button so a rapid
+  // second click can't dispatch a duplicate fetch (rows would otherwise
+  // be inserted twice into the tbody). Re-enabled in `finally` only when
+  // the wrap is still around — exhaustion or error replaces the markup
+  // outright, so leaving the disabled flag on a removed node is fine.
+  const button = /** @type {HTMLButtonElement|null} */ (
+    wrap ? wrap.querySelector('button.sp-load-older-button') : null);
+  if (button) {
+    if (button.disabled) return;
+    button.disabled = true;
+  }
   try {
     const page = await fetchHistoryPage(requestId, {
       limit: HISTORY_PAGE_DEFAULT_LIMIT,
@@ -1232,6 +1331,10 @@ export const REGENERATE_CONFIRM_MESSAGE =
  */
 async function refreshInspectorSurface(requestId) {
   invalidateSearchPlanCache(searchPlanCache, requestId);
+  // Clear the summary in-flight marker so a still-running first-open
+  // fetch can't block our re-open. The new toggle below will re-set
+  // the marker for the duration of its own fetch.
+  summaryInFlight.delete(requestId);
   const ctx = state.searchPlanDetailContext;
   if (ctx && ctx.requestId === requestId) {
     await renderSearchPlanDetail(requestId);
@@ -1282,10 +1385,8 @@ async function readJsonOrNull(resp) {
  * minimal for the smallest blast radius.
  *
  * Status-code mapping mirrors `searchPlanAdvance`:
- *   * 200 with `outcome ∈ {success, success_noop, success_supersede,
- *     noop_active_plan_exists}` → invalidate cache + re-render the
- *     visible surface; piggyback `updatePipelineStatus` when the
- *     response carries a fresh `request_status`.
+ *   * 200 with `outcome ∈ {success, noop_active_plan_exists}` →
+ *     invalidate cache + re-render the visible surface.
  *   * 404 (`request_not_found`) → toast "Request not found".
  *   * 422 (`failed_deterministic`) → toast the API's sanitised error.
  *   * 503 (`failed_transient`) → toast retry-soon.
@@ -1310,71 +1411,67 @@ export async function searchPlanRegenerate(requestId) {
   if (typeof confirmFn === 'function' && !confirmFn(REGENERATE_CONFIRM_MESSAGE)) {
     return;
   }
-
-  /** @type {Response} */
-  let resp;
+  // Double-click guard — a regenerate is already in flight for this id.
+  if (mutationInFlight.has(requestId)) return;
+  mutationInFlight.add(requestId);
   try {
-    resp = await fetch(`/api/pipeline/${requestId}/search-plan/regenerate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    toast(`Regenerate failed (network): ${msg}`, true);
-    return;
-  }
-
-  const data = await readJsonOrNull(resp);
-  const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
-  const errMsg = (data && typeof data.error_message === 'string')
-    ? data.error_message
-    : ((data && typeof data.error === 'string') ? data.error : null);
-
-  // Success outcomes: invalidate + re-render.
-  const successOutcomes = new Set([
-    'success', 'success_noop', 'success_supersede', 'noop_active_plan_exists',
-  ]);
-  if (resp.status === 200 && outcome != null && successOutcomes.has(outcome)) {
-    // Cross-module pipeline status — when the regenerate carries a new
-    // request_status (typically `wanted` again), refresh the central
-    // store so any open Browse/Recents row badge reflects the change.
-    const reqStatus = (data && typeof data.request_status === 'string')
-      ? data.request_status
-      : null;
-    const mbid = (data && data.request && typeof data.request.mb_release_id === 'string')
-      ? data.request.mb_release_id
-      : null;
-    if (mbid && reqStatus) {
-      // requestId is the pipeline id we already know about; pass it
-      // through so any pipelineStore consumer sees both fields update.
-      updatePipelineStatus(mbid, reqStatus, requestId);
+    /** @type {Response} */
+    let resp;
+    try {
+      resp = await fetch(`/api/pipeline/${requestId}/search-plan/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast(`Regenerate failed (network): ${msg}`, true);
+      return;
     }
-    await refreshInspectorSurface(requestId);
-    return;
-  }
 
-  // Failure outcomes — surface the API-sanitised error via toast and do
-  // NOT mutate the cache so the operator sees the prior plan state.
-  if (resp.status === 404) {
-    toast(errMsg || 'Request not found', true);
-    return;
+    const data = await readJsonOrNull(resp);
+    const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
+    const errMsg = (data && typeof data.error_message === 'string')
+      ? data.error_message
+      : ((data && typeof data.error === 'string') ? data.error : null);
+
+    // Success outcomes: invalidate + re-render. The regenerate API only
+    // returns these two on the success path — see
+    // `lib/search_plan_service.py::RESULT_SUCCESS` /
+    // `RESULT_NOOP_ACTIVE_PLAN_EXISTS`.
+    const successOutcomes = new Set([
+      'success', 'noop_active_plan_exists',
+    ]);
+    if (resp.status === 200 && outcome != null && successOutcomes.has(outcome)) {
+      // Cross-tab badge refresh deliberately omitted — regenerate response shape doesn't carry mb_release_id
+      await refreshInspectorSurface(requestId);
+      return;
+    }
+
+    // Failure outcomes — surface the API-sanitised error via toast and do
+    // NOT mutate the cache so the operator sees the prior plan state.
+    if (resp.status === 404) {
+      toast(errMsg || 'Request not found', true);
+      return;
+    }
+    if (resp.status === 422) {
+      toast(errMsg || 'Plan generation failed (deterministic)', true);
+      return;
+    }
+    if (resp.status === 503) {
+      toast(`${errMsg || 'Plan generation retryable'} — try again`, true);
+      return;
+    }
+    // Defensive: surface unknown errors but don't refresh.
+    if (typeof console !== 'undefined' && console.error) {
+      console.error(
+        `searchPlanRegenerate: unexpected response`,
+        { status: resp.status, data });
+    }
+    toast(`Regenerate failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
+  } finally {
+    mutationInFlight.delete(requestId);
   }
-  if (resp.status === 422) {
-    toast(errMsg || 'Plan generation failed (deterministic)', true);
-    return;
-  }
-  if (resp.status === 503) {
-    toast(`${errMsg || 'Plan generation retryable'} — try again`, true);
-    return;
-  }
-  // Defensive: surface unknown errors but don't refresh.
-  if (typeof console !== 'undefined' && console.error) {
-    console.error(
-      `searchPlanRegenerate: unexpected response`,
-      { status: resp.status, data });
-  }
-  toast(`Regenerate failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
 }
 
 /**
@@ -1671,7 +1768,9 @@ export async function searchPlanAdvance(requestId, target) {
       `searchPlanAdvance: requestId must be a positive integer (got ${JSON.stringify(requestId)})`,
     );
   }
-  // No target — open the inline form (call mode 1).
+  // No target — open the inline form (call mode 1). Form-open is a
+  // UI-only flip; no in-flight guard needed (the guard is keyed to the
+  // POST below).
   if (target === undefined || target === null
     || (typeof target === 'object'
       && !('toOrdinal' in target) && !('toStrategy' in target))) {
@@ -1695,59 +1794,68 @@ export async function searchPlanAdvance(requestId, target) {
     return;
   }
 
-  /** @type {Response} */
-  let resp;
+  // Double-click guard — same as `searchPlanRegenerate`. Keyed on
+  // requestId so concurrent advance POSTs for the same plan are
+  // suppressed; concurrent advances for different plans still work.
+  if (mutationInFlight.has(requestId)) return;
+  mutationInFlight.add(requestId);
   try {
-    resp = await fetch(`/api/pipeline/${requestId}/search-plan/advance`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    toast(`Advance failed (network): ${msg}`, true);
-    return;
-  }
-
-  const data = await readJsonOrNull(resp);
-  const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
-  const errMsg = (data && typeof data.error_message === 'string')
-    ? data.error_message
-    : ((data && typeof data.error === 'string') ? data.error : null);
-
-  if (resp.status === 200 && outcome === 'advanced') {
-    await refreshInspectorSurface(requestId);
-    return;
-  }
-  if (resp.status === 400) {
-    // The form should always validate client-side, so 400 is internal.
-    if (typeof console !== 'undefined' && console.error) {
-      console.error('searchPlanAdvance: 400 from server (internal bug)',
-        { status: resp.status, data, body });
+    /** @type {Response} */
+    let resp;
+    try {
+      resp = await fetch(`/api/pipeline/${requestId}/search-plan/advance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast(`Advance failed (network): ${msg}`, true);
+      return;
     }
-    toast(errMsg || 'Internal error (advance request malformed)', true);
-    return;
+
+    const data = await readJsonOrNull(resp);
+    const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
+    const errMsg = (data && typeof data.error_message === 'string')
+      ? data.error_message
+      : ((data && typeof data.error === 'string') ? data.error : null);
+
+    if (resp.status === 200 && outcome === 'advanced') {
+      await refreshInspectorSurface(requestId);
+      return;
+    }
+    if (resp.status === 400) {
+      // The form should always validate client-side, so 400 is internal.
+      if (typeof console !== 'undefined' && console.error) {
+        console.error('searchPlanAdvance: 400 from server (internal bug)',
+          { status: resp.status, data, body });
+      }
+      toast(errMsg || 'Internal error (advance request malformed)', true);
+      return;
+    }
+    if (resp.status === 404) {
+      toast(errMsg || 'Request not found', true);
+      return;
+    }
+    if (resp.status === 409) {
+      toast(errMsg || 'Regenerate first — no active plan to advance', true);
+      return;
+    }
+    if (resp.status === 422) {
+      toast(errMsg || 'Invalid advance target', true);
+      return;
+    }
+    if (resp.status === 503) {
+      toast(`${errMsg || 'Plan lock contention'} — try again`, true);
+      return;
+    }
+    if (typeof console !== 'undefined' && console.error) {
+      console.error(
+        'searchPlanAdvance: unexpected response',
+        { status: resp.status, data });
+    }
+    toast(`Advance failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
+  } finally {
+    mutationInFlight.delete(requestId);
   }
-  if (resp.status === 404) {
-    toast(errMsg || 'Request not found', true);
-    return;
-  }
-  if (resp.status === 409) {
-    toast(errMsg || 'Regenerate first — no active plan to advance', true);
-    return;
-  }
-  if (resp.status === 422) {
-    toast(errMsg || 'Invalid advance target', true);
-    return;
-  }
-  if (resp.status === 503) {
-    toast(`${errMsg || 'Plan lock contention'} — try again`, true);
-    return;
-  }
-  if (typeof console !== 'undefined' && console.error) {
-    console.error(
-      'searchPlanAdvance: unexpected response',
-      { status: resp.status, data });
-  }
-  toast(`Advance failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
 }
