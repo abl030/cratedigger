@@ -323,6 +323,14 @@ class Handler(BaseHTTPRequestHandler):
                     fn(self, params, *m.groups())  # type: ignore[operator]
                     return
             self._error("Not found", 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            # Issue #233: client closed mid-response. The original wedge cause
+            # was the broad `except Exception` below firing _try_reconnect_db
+            # on every disconnect, which compounded into a reconnect storm
+            # under sustained client-disconnect traffic. Catch the disconnect
+            # classes here first — single warning line, no DB churn, no second
+            # body-write attempt to a dead socket.
+            log.warning("Client disconnect on GET %s: %s", path, type(e).__name__)
         except Exception as e:
             log.exception("GET %s failed", path)
             _try_reconnect_db()
@@ -336,7 +344,10 @@ class Handler(BaseHTTPRequestHandler):
             # Cache invalidation endpoint — kept for backwards compat with
             # cratedigger's main-loop POST at end of every cycle. Post-#101
             # there's nothing to invalidate at the `web:` namespace, so
-            # this is a best-effort no-op.
+            # this is a best-effort no-op. NOTE: The cratedigger-side caller
+            # was deleted in this PR; this handler stays in place to absorb
+            # the deploy-window asymmetry (in-flight cycles may POST during
+            # the swap). Tracked for cleanup in #234.
             if path == "/api/cache/invalidate":
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
@@ -359,6 +370,12 @@ class Handler(BaseHTTPRequestHandler):
                     fn(self, body, *m.groups())  # type: ignore[operator]
                     return
             self._error("Not found", 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            # Issue #233: see do_GET above. The function-level except covers
+            # both the cache-invalidate short-circuit and the dispatch path —
+            # they share this outer try block, so any disconnect on either is
+            # handled here.
+            log.warning("Client disconnect on POST %s: %s", path, type(e).__name__)
         except Exception as e:
             log.exception("POST %s failed", path)
             _try_reconnect_db()
