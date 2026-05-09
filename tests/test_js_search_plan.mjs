@@ -19,7 +19,12 @@ import {
   searchPlanCache,
   renderSearchPlanButton,
   renderSummaryPanel,
+  renderDetailPage,
+  renderSearchPlanDetail,
+  closeSearchPlanDetail,
+  searchPlanRefreshDetail,
 } from '../web/js/search_plan.js';
+import { state } from '../web/js/state.js';
 
 let passed = 0;
 let failed = 0;
@@ -396,6 +401,455 @@ function makeInspection(overrides = {}) {
     'raw <script> substring not present');
   assert(html.includes('&lt;script&gt;'),
     'angle brackets entity-escaped in rendered HTML');
+}
+
+// --- renderDetailPage / closeSearchPlanDetail / pagination -----------
+//
+// U4 scenarios. All DOM-free string-match assertions on the HTML
+// returned by `renderDetailPage`, plus pure assertions on the back-
+// button restore logic via tiny window/document shims (no jsdom).
+console.log('renderDetailPage()');
+
+/**
+ * Build a slot-stats bucket for the inspection.stats.current.slots block.
+ */
+function makeSlotStats() {
+  return {
+    request_id: 2566,
+    current: {
+      slots: [
+        {
+          identity: { plan_ordinal: 0, plan_strategy: 'track_0' },
+          attempts: 4, consumed_attempts: 3, non_consuming_attempts: 1,
+          stale_completion_attempts: 0,
+          outcome_counts: { found: 1, no_match: 2, error: 0, no_results: 1 },
+          elapsed_s_mean: 4.21, elapsed_s_p95: 9.30,
+          result_count_mean: 5.5, browse_time_s_mean: 1.1,
+          match_time_s_mean: 3.0, peers_browsed_mean: 6.0,
+          fanout_waves_mean: 2.0, last_seen_at: '2026-05-09T01:00:00Z',
+        },
+        {
+          identity: { plan_ordinal: 1, plan_strategy: 'track_1' },
+          attempts: 2, consumed_attempts: 2, non_consuming_attempts: 0,
+          stale_completion_attempts: 0,
+          outcome_counts: { found: 0, no_match: 1, error: 1, no_results: 0 },
+          elapsed_s_mean: 5.5, elapsed_s_p95: 7.0,
+          result_count_mean: 0, browse_time_s_mean: 0.5,
+          match_time_s_mean: 5.0, peers_browsed_mean: 2.0,
+          fanout_waves_mean: 1.0, last_seen_at: '2026-05-09T02:00:00Z',
+        },
+      ],
+      query_groups: [],
+      legacy_bucket: null,
+      cache_attribution_level: 'cycle-level',
+      cache_per_search_available: false,
+    },
+    superseded_and_legacy: {
+      slots: [], query_groups: [], legacy_bucket: null,
+      cache_attribution_level: 'cycle-level', cache_per_search_available: false,
+    },
+  };
+}
+
+/**
+ * Build a complete inspection payload appropriate for the detail page.
+ */
+function makeDetailInspection(overrides = {}) {
+  const base = makeInspection(overrides);
+  base.stats = overrides.stats ?? makeSlotStats();
+  if (overrides.legacy_logs !== undefined) {
+    base.legacy_logs = overrides.legacy_logs;
+  }
+  if (overrides.latest_failed_deterministic !== undefined) {
+    base.latest_failed_deterministic = overrides.latest_failed_deterministic;
+  }
+  if (overrides.latest_failed_transient !== undefined) {
+    base.latest_failed_transient = overrides.latest_failed_transient;
+  }
+  // Add provenance so health-block tests have something to render.
+  if (base.active_plan && base.active_plan.plan && overrides.provenance !== undefined) {
+    base.active_plan.plan.provenance = overrides.provenance;
+  }
+  return base;
+}
+
+function makeHistoryRows() {
+  return [
+    {
+      id: 12345, created_at: '2026-05-09T03:00:00Z', request_id: 2566,
+      plan_id: 583, plan_item_id: 5821, plan_ordinal: 2,
+      plan_strategy: 'track_2', plan_canonical_query_key: 'foo',
+      plan_repeat_group: 'track_2', plan_generator_id: '13',
+      execution_stage: 'accepted', attempt_consumed: true,
+      cursor_update_status: 'advanced', stale_reason: null,
+      plan_cycle_snapshot: 1,
+      outcome: 'no_match', variant: 'track_2', query: 'q-current',
+      result_count: 12, elapsed_s: 4.23, final_state: 'Completed',
+      candidates: [{ user: 'peer-A', score: 0.9 }, { user: 'peer-B', score: 0.7 }],
+      browse_time_s: 1.2, match_time_s: 3.0,
+      peers_browsed: 5, peers_browsed_lazy: 2, fanout_waves: 2,
+    },
+    {
+      id: 12340, created_at: '2026-05-09T02:00:00Z', request_id: 2566,
+      plan_id: 583, plan_item_id: 5820, plan_ordinal: 1,
+      plan_strategy: 'track_1', plan_canonical_query_key: 'bar',
+      plan_repeat_group: 'track_1', plan_generator_id: '13',
+      execution_stage: 'stale_completion', attempt_consumed: false,
+      cursor_update_status: 'stale', stale_reason: 'plan_superseded',
+      plan_cycle_snapshot: 0,
+      outcome: 'partial', variant: 'track_1', query: 'q-stale',
+      result_count: 3, elapsed_s: 1.10, final_state: 'Cancelled',
+      candidates: null,
+      browse_time_s: 0.5, match_time_s: 0.6,
+      peers_browsed: 1, peers_browsed_lazy: 0, fanout_waves: 1,
+    },
+  ];
+}
+
+{
+  // AE5: detail page surfaces every required telemetry column + plan
+  // structure + per-slot stats + plan-health + collapsed pre-rollout.
+  const inspection = makeDetailInspection({
+    legacy_logs: { count: 12, head: [
+      { id: 1, created_at: '2026-04-01T00:00:00Z', outcome: 'no_match',
+        variant: 'fallback', query: 'old_q', result_count: 0,
+        elapsed_s: 1.0, final_state: 'Completed' },
+    ]},
+    latest_failed_deterministic: {
+      plan: { id: 580, generator_id: '13', failure_class: 'no_runnable_query',
+        error_message: 'metadata incomplete', created_at: '2026-05-08T00:00:00Z' },
+    },
+    provenance: {
+      omitted_candidates: ['weird thing'],
+      deduped_losers: ['lose-1'],
+      dropped_low_entropy_tokens: ['the'],
+    },
+  });
+  const html = renderDetailPage({
+    inspection,
+    history: makeHistoryRows(),
+    nextBeforeId: 12300,
+  });
+  // Plan slot list rendered, with the cursor (next_ordinal=2) highlighted.
+  assert(html.includes('sp-slot-list'),
+    'AE5: slot list rendered');
+  assert(html.includes('sp-slot-current'),
+    'AE5: cursor slot has sp-slot-current marker');
+  // Plan-aware history table with telemetry columns visible.
+  assert(html.includes('sp-history-table'),
+    'AE5: plan-aware history table present');
+  assert(html.includes('Outcome') && html.includes('Strategy')
+    && html.includes('Elapsed') && html.includes('Final state')
+    && html.includes('Cursor') && html.includes('Stale')
+    && html.includes('Consumed') && html.includes('Cycle')
+    && html.includes('Peers') && html.includes('Fanout')
+    && html.includes('Forensics'),
+    'AE5: history columns include outcome/strategy/elapsed/final_state/cursor/stale/consumed/cycle/peers/fanout/forensics');
+  // Specific row data: ordinal 2, strategy track_2, attempt_consumed=yes.
+  assert(html.includes('q-current'),
+    'AE5: current attempt query rendered');
+  assert(html.includes('q-stale'),
+    'AE5: stale attempt query rendered');
+  assert(html.includes('plan_superseded'),
+    'AE5: stale_reason rendered for the second row');
+  assert(html.includes('sp-history-row-stale'),
+    'AE5: stale row carries the .sp-history-row-stale CSS class');
+  assert(html.includes('sp-candidate-forensics'),
+    'AE5: candidate forensics rendered as <details>');
+  assert(html.includes('peer-A'),
+    'AE5: candidate JSONB serialised inside the forensics block');
+  // Per-slot stats.
+  assert(html.includes('sp-stats-table'),
+    'AE5: per-slot stats table rendered');
+  assert(html.includes('track_0') && html.includes('track_1'),
+    'AE5: per-slot stats include both strategies');
+  // Plan-health block.
+  assert(html.includes('sp-health'),
+    'AE5: plan-health block rendered');
+  assert(html.includes('no_runnable_query'),
+    'AE5: failure class surfaced in plan-health');
+  assert(html.includes('metadata incomplete'),
+    'AE5: failure error_message surfaced');
+  assert(html.includes('omitted_candidates'),
+    'AE5: provenance: omitted_candidates rendered');
+  assert(html.includes('deduped_losers'),
+    'AE5: provenance: deduped_losers rendered');
+  assert(html.includes('dropped_low_entropy_tokens'),
+    'AE5: provenance: dropped_low_entropy_tokens rendered');
+  // Pre-rollout legacy section, collapsed.
+  assert(html.includes('sp-history-legacy-section'),
+    'AE5: pre-rollout legacy section rendered');
+  assert(html.includes('Pre-rollout history'),
+    'AE5: pre-rollout summary text present');
+  assert(html.includes('<details class="sp-history-legacy">'),
+    'AE5: pre-rollout block is collapsed via <details>');
+  assert(html.includes('class="sp-history-row legacy"'),
+    'AE5: legacy rows tagged distinctly');
+  assert(html.includes('old_q'),
+    'AE5: legacy row content rendered inside the collapsed block');
+}
+
+{
+  // AE6: cache stat label includes the literal substring "cycle-level".
+  const inspection = makeDetailInspection();
+  const html = renderDetailPage({
+    inspection,
+    history: makeHistoryRows(),
+    nextBeforeId: null,
+  });
+  assert(html.includes('cycle-level'),
+    'AE6: cache attribution label literally reads "cycle-level"');
+  assert(html.includes('Cache attribution'),
+    'AE6: cache attribution label introduces the level');
+}
+
+{
+  // AE7: plan-aware and legacy rows render in clearly-distinguished
+  // sections (different CSS classes, different parent sections).
+  const inspection = makeDetailInspection({
+    legacy_logs: { count: 5, head: [
+      { id: 9, created_at: '2026-04-09T00:00:00Z', outcome: 'no_match',
+        variant: 'fallback', query: 'legacy-q1', result_count: 1,
+        elapsed_s: 1.5, final_state: 'Completed' },
+      { id: 8, created_at: '2026-04-08T00:00:00Z', outcome: 'no_match',
+        variant: 'fallback', query: 'legacy-q2', result_count: 0,
+        elapsed_s: 0.9, final_state: 'Completed' },
+    ]},
+  });
+  const html = renderDetailPage({
+    inspection,
+    history: makeHistoryRows(),
+    nextBeforeId: null,
+  });
+  // Plan-aware rows live inside .sp-history-table without .legacy.
+  assert(/<tr class="sp-history-row[ "]/.test(html),
+    'AE7: plan-aware rows use .sp-history-row without .legacy');
+  // Legacy rows live in .sp-history-legacy-section as .sp-history-row.legacy.
+  assert(html.includes('class="sp-history-row legacy"'),
+    'AE7: legacy rows distinguished via .legacy CSS suffix');
+  assert(html.includes('sp-history-legacy-section'),
+    'AE7: legacy rows live in their own section');
+  // The two rendered queries must both appear, in the expected sections.
+  assert(html.includes('q-current') && html.includes('legacy-q1'),
+    'AE7: both plan-aware and legacy queries rendered');
+}
+
+{
+  // AE10: a Refresh button is rendered and bound to the window handler.
+  // The function-spec assertion (export exists, button HTML present) is
+  // sufficient — fetch wiring is exercised by impure tests (not unit-runable here).
+  assert(typeof renderSearchPlanDetail === 'function',
+    'AE10: renderSearchPlanDetail is exported as a function');
+  assert(typeof searchPlanRefreshDetail === 'function',
+    'AE10: searchPlanRefreshDetail is exported (Refresh handler)');
+  const html = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: makeHistoryRows(),
+    nextBeforeId: null,
+  });
+  assert(html.includes('window.searchPlanRefreshDetail'),
+    'AE10: Refresh button wires to window.searchPlanRefreshDetail');
+  assert(/>\s*Refresh\s*</.test(html),
+    'AE10: Refresh button label rendered');
+}
+
+{
+  // Pagination — first render with a cursor renders a Load older button.
+  const html = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: makeHistoryRows(),
+    nextBeforeId: 12300,
+  });
+  assert(html.includes('sp-load-older-button'),
+    'pagination: Load older button rendered when nextBeforeId is non-null');
+  assert(html.includes('window.searchPlanLoadOlder(2566, 12300)'),
+    'pagination: button onclick wires the cursor seed');
+}
+
+{
+  // Pagination — exhausted: no Load older button.
+  const html = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: makeHistoryRows(),
+    nextBeforeId: null,
+  });
+  assert(!html.includes('sp-load-older-button'),
+    'pagination: no Load older button when nextBeforeId is null');
+}
+
+{
+  // Edge — no plan-aware history, but legacy rows exist. The page shows
+  // an empty-state for plan-aware and a populated legacy section.
+  const inspection = makeDetailInspection({
+    legacy_logs: { count: 1, head: [
+      { id: 1, created_at: '2026-04-01T00:00:00Z', outcome: 'no_match',
+        variant: 'fallback', query: 'legacy-only', result_count: 1,
+        elapsed_s: 1.0, final_state: 'Completed' },
+    ]},
+  });
+  const html = renderDetailPage({
+    inspection,
+    history: [],
+    nextBeforeId: null,
+  });
+  assert(html.includes('No plan-aware attempts yet'),
+    'edge: empty plan-aware history shows an empty-state message');
+  assert(html.includes('legacy-only'),
+    'edge: legacy section still renders the legacy row');
+}
+
+{
+  // Edge — both empty: empty-state for both, no errors.
+  const inspection = makeDetailInspection({
+    legacy_logs: { count: 0, head: [] },
+  });
+  const html = renderDetailPage({
+    inspection,
+    history: [],
+    nextBeforeId: null,
+  });
+  assert(html.includes('No plan-aware attempts yet'),
+    'both-empty: plan-aware empty-state shown');
+  assert(html.includes('No legacy attempts'),
+    'both-empty: legacy empty-state shown');
+}
+
+// --- closeSearchPlanDetail back-button restore -----------------------
+console.log('closeSearchPlanDetail() / openSearchPlanDetail()');
+
+/**
+ * Tiny shim — capture window-side effects without a real DOM.
+ */
+function withFakeWindow(impl) {
+  const calls = { showTab: [], scrollTo: [], rafCount: 0, scheduledScrolls: [] };
+  const prevState = state.searchPlanDetailContext;
+  const prevPipelineView = state.pipelineView;
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  /** @type {any} */
+  const fakeWindow = {
+    scrollY: 0,
+    /** @param {number} _x @param {number} y */
+    scrollTo(_x, y) { calls.scrollTo.push(y); },
+    /** @param {() => void} fn */
+    requestAnimationFrame(fn) {
+      calls.rafCount += 1;
+      // Run the callback inline — the test then inspects calls.scrollTo.
+      fn();
+      return calls.rafCount;
+    },
+    /** @param {string} name */
+    showTab(name) { calls.showTab.push(name); },
+  };
+  globalThis.window = fakeWindow;
+  // The module reads `document.querySelector` inside `snapshotActiveTab`,
+  // which we don't invoke here for the close-side path. Stub minimally.
+  globalThis.document = /** @type {any} */ ({
+    querySelector() { return null; },
+  });
+  try {
+    impl(fakeWindow, calls);
+  } finally {
+    state.searchPlanDetailContext = prevState;
+    state.pipelineView = prevPipelineView;
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+  }
+}
+
+{
+  // AE3: originTab='browse', originScrollY=420 → showTab('browse'),
+  // scrollTo scheduled to 420.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 2566,
+      originTab: 'browse',
+      originScrollY: 420,
+      originSubView: null,
+    };
+    closeSearchPlanDetail();
+    assert(calls.showTab.length === 1 && calls.showTab[0] === 'browse',
+      'AE3: showTab("browse") called once');
+    assert(calls.scrollTo.length === 1 && calls.scrollTo[0] === 420,
+      'AE3: window.scrollTo(0, 420) scheduled via requestAnimationFrame');
+    assert(state.searchPlanDetailContext === null,
+      'AE3: stash cleared after close');
+  });
+}
+
+{
+  // Origin tab is pipeline+queue: pipelineView restored to queue.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 100,
+      originTab: 'pipeline',
+      originScrollY: 64,
+      originSubView: 'queue',
+    };
+    state.pipelineView = 'search-plan-detail';
+    closeSearchPlanDetail();
+    assertEqual(state.pipelineView, 'queue',
+      'pipeline-origin: pipelineView restored to queue');
+    assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
+      'pipeline-origin: showTab("pipeline") called');
+    assert(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
+      'pipeline-origin: scrollTo scheduled to origin scrollY');
+  });
+}
+
+{
+  // Origin tab is pipeline+dashboard: pipelineView restored to dashboard.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 100,
+      originTab: 'pipeline',
+      originScrollY: 0,
+      originSubView: 'dashboard',
+    };
+    state.pipelineView = 'search-plan-detail';
+    closeSearchPlanDetail();
+    assertEqual(state.pipelineView, 'dashboard',
+      'pipeline-origin dashboard subView restored');
+  });
+}
+
+{
+  // Origin tab is recents+downloading: restore recentsSub.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 99,
+      originTab: 'recents',
+      originScrollY: 100,
+      originSubView: 'downloading',
+    };
+    state.recentsSub = 'history';
+    closeSearchPlanDetail();
+    assertEqual(state.recentsSub, 'downloading',
+      'recents-origin: recentsSub restored to downloading');
+    assert(calls.showTab[0] === 'recents',
+      'recents-origin: showTab("recents") called');
+  });
+}
+
+{
+  // No origin context: fallback to pipeline/queue, no throw.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = null;
+    state.pipelineView = 'search-plan-detail';
+    let threw = false;
+    try {
+      closeSearchPlanDetail();
+    } catch (err) {
+      threw = true;
+    }
+    assert(!threw, 'no-origin: close does not throw');
+    assertEqual(state.pipelineView, 'queue',
+      'no-origin: fallback to pipelineView=queue');
+    assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
+      'no-origin: fallback shows the pipeline tab');
+  });
 }
 
 // --- Summary ---------------------------------------------------------
