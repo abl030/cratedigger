@@ -1603,19 +1603,6 @@ def main():
             logger.warning(f"Failed to persist peer-dir observations: {e}")
 
     finally:
-        # Bust web UI cache so freshly imported albums appear immediately
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                "http://localhost:8085/api/cache/invalidate",
-                data=b'{"groups": ["pipeline", "library"]}',
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=2)
-        except Exception:
-            pass  # web UI may be down — that's fine
-
         # Clean up pipeline DB connection
         if pipeline_db_source is not None:
             try:
