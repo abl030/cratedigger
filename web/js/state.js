@@ -7,7 +7,20 @@
 
 import { normalizeReleaseId } from './util.js';
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null }} */
+/**
+ * Stash for the search-plan detail page's back button. Captured when
+ * the operator clicks "Open detail →" inside an inspector summary panel
+ * and consumed by `closeSearchPlanDetail` to restore the originating
+ * tab + sub-view + scroll position. `null` when no detail page is open.
+ *
+ * @typedef {Object} SearchPlanDetailContext
+ * @property {number} requestId        The pipeline request being inspected.
+ * @property {string} originTab        Tab to restore — `'browse'`, `'pipeline'`, `'recents'`, etc.
+ * @property {number} originScrollY    `window.scrollY` at click time.
+ * @property {string|null} originSubView  Sub-view to restore (e.g. `'queue'`/`'dashboard'` on Pipeline). `null` for tabs with no sub-view.
+ */
+
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -45,6 +58,9 @@ export const state = {
   searchTargetId: null,
   searchTargetExpandId: null,
   searchTargetSource: null,
+  // Search-plan detail subview back-button stash. Hydrated by
+  // `openSearchPlanDetail` (U4); cleared by `closeSearchPlanDetail`.
+  searchPlanDetailContext: null,
 };
 
 export const API = '';
