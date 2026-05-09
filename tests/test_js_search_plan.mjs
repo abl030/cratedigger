@@ -23,6 +23,11 @@ import {
   renderSearchPlanDetail,
   closeSearchPlanDetail,
   searchPlanRefreshDetail,
+  parseAdvanceTarget,
+  renderAdvanceForm,
+  searchPlanRegenerate,
+  searchPlanAdvance,
+  REGENERATE_CONFIRM_MESSAGE,
 } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 
@@ -850,6 +855,483 @@ function withFakeWindow(impl) {
     assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'no-origin: fallback shows the pipeline tab');
   });
+}
+
+// --- U5: parseAdvanceTarget ------------------------------------------
+//
+// Pure validator covering the eight branches required by AE9. Each
+// scenario passes a synthetic `{strategy?, ordinal?}` object (mirroring
+// what the form's Confirm handler reads) and asserts the typed return
+// or that a typed error fires.
+console.log('parseAdvanceTarget()');
+
+assertEqual(
+  JSON.stringify(parseAdvanceTarget({ strategy: 'track' })),
+  JSON.stringify({ toStrategy: 'track' }),
+  'AE9: strategy-only input → {toStrategy}',
+);
+
+assertEqual(
+  JSON.stringify(parseAdvanceTarget({ ordinal: '7' })),
+  JSON.stringify({ toOrdinal: 7 }),
+  'AE9: ordinal-only string input → {toOrdinal}',
+);
+
+assertEqual(
+  JSON.stringify(parseAdvanceTarget({ ordinal: 7 })),
+  JSON.stringify({ toOrdinal: 7 }),
+  'AE9: ordinal-only numeric input → {toOrdinal}',
+);
+
+assertThrows(
+  () => parseAdvanceTarget({ strategy: 'track', ordinal: '7' }),
+  TypeError,
+  'AE9: both fields populated throws TypeError',
+);
+
+assertThrows(
+  () => parseAdvanceTarget({}),
+  TypeError,
+  'AE9: neither field populated throws TypeError',
+);
+
+assertThrows(
+  () => parseAdvanceTarget({ ordinal: 'abc' }),
+  TypeError,
+  'AE9: non-numeric ordinal throws TypeError',
+);
+
+assertThrows(
+  () => parseAdvanceTarget({ ordinal: '-1' }),
+  TypeError,
+  'AE9: negative ordinal throws TypeError',
+);
+
+assertThrows(
+  () => parseAdvanceTarget({ strategy: '' }),
+  TypeError,
+  'AE9: empty-string strategy throws TypeError',
+);
+
+// Defensive — ordinal is non-integer (1.5).
+assertThrows(
+  () => parseAdvanceTarget({ ordinal: '1.5' }),
+  TypeError,
+  'AE9: non-integer ordinal (1.5) throws TypeError',
+);
+
+// Numeric -1 covers the {ordinal: -1} numeric branch alongside the
+// string branch above.
+assertThrows(
+  () => parseAdvanceTarget({ ordinal: -1 }),
+  TypeError,
+  'AE9: numeric -1 ordinal throws TypeError',
+);
+
+// --- U5: renderAdvanceForm -------------------------------------------
+console.log('renderAdvanceForm()');
+
+{
+  // Pure helper test — given an active plan with 10 slots and 5 unique
+  // strategies, the form HTML includes a strategy <select> with 5
+  // strategy options + leading "no choice", a number input with
+  // max=9, and Confirm + Cancel buttons.
+  const items = [];
+  for (let i = 0; i < 10; i++) {
+    items.push({
+      id: i + 1, plan_id: 1, ordinal: i,
+      strategy: `track_${i % 5}`, query: `q${i}`,
+      canonical_query_key: `cqk${i}`, repeat_group: `rg${i}`,
+      provenance: {},
+    });
+  }
+  const html = renderAdvanceForm({
+    activePlan: { plan: { id: 1 }, items, next_ordinal: 0, cycle_count: 0 },
+    requestId: 42,
+  });
+  // Strategy select with leading "no choice" option + 5 unique strategies.
+  assert(html.includes('<select'),
+    'renderAdvanceForm: emits a <select>');
+  assert(html.includes('— (use ordinal)'),
+    'renderAdvanceForm: leading "— (use ordinal)" option present');
+  for (let i = 0; i < 5; i++) {
+    assert(html.includes(`>track_${i}</option>`),
+      `renderAdvanceForm: strategy option for track_${i}`);
+  }
+  // Strategy options are de-duped (5 unique strategies, not 10).
+  const optionMatches = html.match(/<option /g) || [];
+  assertEqual(optionMatches.length, 6,
+    'renderAdvanceForm: 6 options total (5 unique strategies + leading "—")');
+  // Ordinal input bounded to items.length - 1.
+  assert(/<input[^>]*type="number"[^>]*min="0"/.test(html),
+    'renderAdvanceForm: ordinal input is type="number" min="0"');
+  assert(html.includes('max="9"'),
+    'renderAdvanceForm: ordinal max=N-1 (items.length - 1)');
+  // Confirm + Cancel buttons.
+  assert(/>Confirm</.test(html),
+    'renderAdvanceForm: Confirm button present');
+  assert(/>Cancel</.test(html),
+    'renderAdvanceForm: Cancel button present');
+  // Confirm wires to the submit handler with the request id.
+  assert(html.includes('window.searchPlanSubmitAdvance(42'),
+    'renderAdvanceForm: Confirm button wires window.searchPlanSubmitAdvance');
+  // Cancel wires to cancel handler.
+  assert(html.includes('window.searchPlanCancelAdvance(42'),
+    'renderAdvanceForm: Cancel button wires window.searchPlanCancelAdvance');
+  // form id captured for the submit handler to read inputs back.
+  assert(html.includes('class="sp-advance-form"'),
+    'renderAdvanceForm: form has the sp-advance-form class');
+  assert(html.includes('data-field="strategy"'),
+    'renderAdvanceForm: strategy input data-field marker');
+  assert(html.includes('data-field="ordinal"'),
+    'renderAdvanceForm: ordinal input data-field marker');
+}
+
+// --- U5: REGENERATE_CONFIRM_MESSAGE includes "cursor" + "cycle" ------
+//
+// Origin R15 / AE8 mandate both substrings so the operator sees
+// consequences before clicking through. The literal message is
+// exported so this assertion does not depend on string matching the
+// source code.
+console.log('REGENERATE_CONFIRM_MESSAGE');
+
+{
+  const lower = REGENERATE_CONFIRM_MESSAGE.toLowerCase();
+  assert(lower.includes('cursor'),
+    'AE8: regenerate confirm message includes "cursor"');
+  assert(lower.includes('cycle'),
+    'AE8: regenerate confirm message includes "cycle"');
+  assert(REGENERATE_CONFIRM_MESSAGE.length > 10,
+    'AE8: regenerate confirm message is non-trivially long');
+}
+
+// --- U5: searchPlanRegenerate confirm gating ------------------------
+//
+// The action handler MUST call window.confirm with the published
+// message before dispatching a fetch. We swap window.confirm + fetch
+// for shims and observe both side effects.
+console.log('searchPlanRegenerate()');
+
+/**
+ * Shim helper — swap globals (window.confirm, fetch, document) before
+ * invoking impl, restore afterwards.
+ *
+ * @param {Object} opts
+ * @param {boolean} [opts.confirmReturns]
+ * @param {Object} [opts.fetchResp]   Response shape to return from the shim.
+ * @param {(arg: any) => Promise<void>} impl
+ */
+async function withFetchAndConfirmShim(opts, impl) {
+  const calls = {
+    confirm: /** @type {string[]} */ ([]),
+    fetch: /** @type {Array<{url: string, init: any}>} */ ([]),
+    toast: /** @type {Array<{msg: string, isError: boolean|undefined}>} */ ([]),
+    consoleError: /** @type {any[][]} */ ([]),
+  };
+  const prevWindow = globalThis.window;
+  const prevFetch = globalThis.fetch;
+  const prevDocument = globalThis.document;
+  const prevState = state.searchPlanDetailContext;
+  const prevPipelineView = state.pipelineView;
+  const confirmReturns = opts.confirmReturns ?? true;
+  const fetchResp = opts.fetchResp || { ok: true, status: 200, body: {} };
+  /** @type {any} */
+  const fakeWindow = {
+    /** @param {string} msg */
+    confirm(msg) { calls.confirm.push(msg); return confirmReturns; },
+    scrollY: 0,
+    /** @param {() => void} fn */
+    requestAnimationFrame(fn) { fn(); return 1; },
+    scrollTo() {},
+    showTab() {},
+  };
+  /** @type {any} */
+  const fakeDocument = {
+    getElementById() { return null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  // Patch state.toast — toast is imported from state.js, so we patch
+  // the underlying function via a wrapper that the import sees. The
+  // search_plan.js module captures `toast` at module-evaluation time;
+  // we can't replace it after the fact. Instead, we replace
+  // `globalThis.document.getElementById` so the toast() call short-
+  // circuits to a no-op (the toast helper bails when the #toast
+  // element is missing — see web/js/state.js).
+  const prevConsoleError = console.error;
+  console.error = (/** @type {any[]} */ ...args) => {
+    calls.consoleError.push(args);
+  };
+  globalThis.window = fakeWindow;
+  globalThis.document = fakeDocument;
+  /** @type {any} */
+  globalThis.fetch = (/** @type {string} */ url, /** @type {any} */ init) => {
+    calls.fetch.push({ url, init });
+    return Promise.resolve({
+      ok: fetchResp.ok ?? true,
+      status: fetchResp.status ?? 200,
+      text() {
+        const body = fetchResp.body == null ? '' : JSON.stringify(fetchResp.body);
+        return Promise.resolve(body);
+      },
+      json() { return Promise.resolve(fetchResp.body); },
+    });
+  };
+  try {
+    await impl(calls);
+  } finally {
+    state.searchPlanDetailContext = prevState;
+    state.pipelineView = prevPipelineView;
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = prevFetch;
+    console.error = prevConsoleError;
+  }
+}
+
+// AE8: confirm returns false → no fetch.
+await withFetchAndConfirmShim({ confirmReturns: false }, async (calls) => {
+  await searchPlanRegenerate(2566);
+  assertEqual(calls.fetch.length, 0,
+    'AE8: confirm=false suppresses the regenerate fetch');
+  assertEqual(calls.confirm.length, 1,
+    'AE8: confirm dialog was shown once');
+  assertEqual(calls.confirm[0], REGENERATE_CONFIRM_MESSAGE,
+    'AE8: confirm dialog received the published message');
+});
+
+// AE8: confirm returns true + 200 success → fetch dispatched, cache cleared.
+await withFetchAndConfirmShim({
+  confirmReturns: true,
+  fetchResp: {
+    ok: true, status: 200,
+    body: { request_id: 2566, outcome: 'success', plan_id: 999 },
+  },
+}, async (calls) => {
+  // Pre-populate cache so refresh-after-success can be observed.
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanRegenerate(2566);
+  assertEqual(calls.fetch.length, 1,
+    'AE8: confirm=true dispatches one fetch');
+  assert(calls.fetch[0].url.endsWith('/search-plan/regenerate'),
+    'AE8: regenerate hits the regenerate endpoint');
+  assertEqual(calls.fetch[0].init.method, 'POST',
+    'AE8: regenerate uses POST');
+  assertEqual(calls.fetch[0].init.body, '{}',
+    'AE8: regenerate sends an empty JSON body');
+  // Cache invalidated on success — refresh-after-success contract.
+  assert(!searchPlanCache.has(2566),
+    'AE8: cache for the request is cleared on regenerate success');
+});
+
+// Refresh-after-success: cache cleared on success_noop too.
+await withFetchAndConfirmShim({
+  confirmReturns: true,
+  fetchResp: {
+    ok: true, status: 200,
+    body: { request_id: 2566, outcome: 'noop_active_plan_exists', plan_id: 999 },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanRegenerate(2566);
+  assert(!searchPlanCache.has(2566),
+    'noop_active_plan_exists also invalidates the cache');
+});
+
+// Failure path — 422 (failed_deterministic). NO cache mutation.
+await withFetchAndConfirmShim({
+  confirmReturns: true,
+  fetchResp: {
+    ok: false, status: 422,
+    body: {
+      request_id: 2566, outcome: 'failed_deterministic',
+      error_message: 'metadata incomplete',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanRegenerate(2566);
+  assert(searchPlanCache.has(2566),
+    '422 failure path does NOT invalidate the cache');
+});
+
+// Failure path — 503 (failed_transient). NO cache mutation.
+await withFetchAndConfirmShim({
+  confirmReturns: true,
+  fetchResp: {
+    ok: false, status: 503,
+    body: {
+      request_id: 2566, outcome: 'failed_transient',
+      error_message: 'lock contention',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanRegenerate(2566);
+  assert(searchPlanCache.has(2566),
+    '503 failure path does NOT invalidate the cache');
+});
+
+// --- U5: searchPlanAdvance error-mapping ----------------------------
+console.log('searchPlanAdvance()');
+
+// Happy path — 200 with outcome=advanced invalidates cache.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: true, status: 200,
+    body: {
+      request_id: 2566, outcome: 'advanced', plan_id: 999,
+      previous_ordinal: 0, new_ordinal: 5, new_strategy: 'track_5',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(2566, { toOrdinal: 5 });
+  assertEqual(calls.fetch.length, 1,
+    'advance: dispatches one fetch with a typed target');
+  assert(calls.fetch[0].url.endsWith('/search-plan/advance'),
+    'advance: hits the advance endpoint');
+  assertEqual(calls.fetch[0].init.method, 'POST',
+    'advance: uses POST');
+  assertEqual(JSON.parse(calls.fetch[0].init.body).to_ordinal, 5,
+    'advance: serialises toOrdinal as to_ordinal in the request body');
+  assert(!searchPlanCache.has(2566),
+    'advance: cache invalidated on outcome=advanced');
+});
+
+// AE9 — 422 with invalid_target surfaces the API message via toast and
+// does NOT invalidate the cache.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: false, status: 422,
+    body: {
+      request_id: 2566, outcome: 'invalid_target',
+      error_message: 'Forward-only: ordinal 1 is before cursor 5',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(2566, { toOrdinal: 1 });
+  assert(searchPlanCache.has(2566),
+    'AE9: invalid_target does NOT invalidate the cache');
+  // The fetch was still dispatched (toast happens after the response).
+  assertEqual(calls.fetch.length, 1,
+    'AE9: invalid_target reports the fetch was dispatched');
+  // body sent the correct shape.
+  assertEqual(JSON.parse(calls.fetch[0].init.body).to_ordinal, 1,
+    'AE9: body shape preserved on the failure path');
+});
+
+// 409 (no_active_plan) — toast + no cache invalidation.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: false, status: 409,
+    body: {
+      request_id: 2566, outcome: 'no_active_plan',
+      error_message: 'No active plan; regenerate first',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(2566, { toStrategy: 'track' });
+  assert(searchPlanCache.has(2566),
+    '409 no_active_plan: cache preserved');
+  assertEqual(JSON.parse(calls.fetch[0].init.body).to_strategy, 'track',
+    'advance with toStrategy → to_strategy in body');
+});
+
+// 404 — toast + no cache invalidation.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: false, status: 404,
+    body: { request_id: 9999, outcome: 'request_not_found' },
+  },
+}, async (calls) => {
+  searchPlanCache.set(9999, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(9999, { toOrdinal: 0 });
+  assert(searchPlanCache.has(9999),
+    '404 request_not_found: cache preserved');
+});
+
+// 503 — toast retry + no cache invalidation.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: false, status: 503,
+    body: {
+      request_id: 2566, outcome: 'failed_transient',
+      error_message: 'lock contention',
+    },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(2566, { toOrdinal: 5 });
+  assert(searchPlanCache.has(2566),
+    '503 failed_transient: cache preserved');
+});
+
+// 400 — internal bug (form-side validation should have caught this).
+// We expect a console.error in addition to the toast.
+await withFetchAndConfirmShim({
+  fetchResp: {
+    ok: false, status: 400,
+    body: { error: 'exactly one of to_ordinal or to_strategy is required' },
+  },
+}, async (calls) => {
+  searchPlanCache.set(2566, {
+    inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
+  });
+  await searchPlanAdvance(2566, { toOrdinal: 5 });
+  assert(searchPlanCache.has(2566),
+    '400 internal: cache preserved');
+  assert(calls.consoleError.length >= 1,
+    '400 internal bug: console.error logged');
+});
+
+// --- U5: stubs are gone ---------------------------------------------
+console.log('U5: stub-removal sanity check');
+
+{
+  // Both handlers are real — they DO NOT throw "not implemented".
+  // Confirm-cancelled regenerate returns silently; advance with no
+  // target now opens the form (no fetch — the form stays in the DOM
+  // and waits for the operator). Both call paths must NOT match the
+  // U2 stub message.
+  let regenError = null;
+  await withFetchAndConfirmShim({ confirmReturns: false }, async () => {
+    try { await searchPlanRegenerate(2566); }
+    catch (err) { regenError = err; }
+  });
+  assert(regenError === null,
+    'searchPlanRegenerate: confirm-cancel returns without throwing (no stub)');
+
+  let advError = null;
+  await withFetchAndConfirmShim({}, async () => {
+    try { await searchPlanAdvance(2566, { toOrdinal: 0 }); }
+    catch (err) { advError = err; }
+  });
+  assert(advError === null,
+    'searchPlanAdvance: real implementation does not throw "not implemented"');
 }
 
 // --- Summary ---------------------------------------------------------

@@ -18,7 +18,7 @@
  * `// @ts-check`, ES6 module, JSDoc on exports, pure helpers DOM-free.
  */
 
-import { state } from './state.js';
+import { state, toast, updatePipelineStatus } from './state.js';
 import { esc, awstDateTime } from './util.js';
 
 /**
@@ -1189,26 +1189,565 @@ export async function searchPlanLoadOlder(requestId, beforeId) {
   }
 }
 
-// --- U5 stubs ---------------------------------------------------------
+// --- U5: regenerate / advance action handlers -----------------------
 //
-// Real implementations land in U5. Window bindings exist now so the
-// summary + detail surfaces don't have to re-wire `main.js`.
+// Both handlers wrap the same service-layer methods the CLI uses
+// (`SearchPlanService.generate_for_request`, `.advance_for_request`).
+// Surfaces:
+//   * regenerate: native `confirm()` (mirrors `confirm()` usage in
+//     `analysis.js::disambRemove`, `pipeline.js`, `wrong-matches.js`).
+//     Confirmation message includes both "cursor" and "cycle" per
+//     origin R15 / AE8.
+//   * advance: inline form rendered into the open summary panel or
+//     detail page replacing the action toolbar (since advance needs
+//     two-mode entry — strategy prefix XOR ordinal — `prompt()` is too
+//     crude per Key Technical Decisions in the U5 plan).
+//
+// Refresh after a successful mutation: invalidate the cache and re-
+// render the visible surface (detail page if active, else the open
+// summary panel). `pipelineStore` is also touched on regenerate
+// success when the response carries a fresh `request_status` so
+// cross-module callers see the new status without a Pipeline reload.
 
 /**
- * @param {number} _requestId
- * @returns {void}
+ * Regenerate confirmation message — exposed so tests can assert it
+ * literally contains "cursor" and "cycle". Origin R15 / AE8 require
+ * both substrings so the operator sees the consequence before clicking
+ * through.
  */
-// eslint-disable-next-line no-unused-vars
-export function searchPlanRegenerate(_requestId) {
-  throw new Error('searchPlanRegenerate: not implemented (U5 will land regenerate action)');
+export const REGENERATE_CONFIRM_MESSAGE =
+  "Regenerate this request's search plan? This will reset the cursor and cycle count.";
+
+/**
+ * Re-render the inspector surface that is currently visible for one
+ * request. Detail page wins when `state.searchPlanDetailContext`
+ * matches; otherwise the open summary panel (if any) is rebuilt by
+ * round-tripping through {@link toggleSearchPlanSummary}.
+ *
+ * Pulled out of the action handlers so both `searchPlanRegenerate` and
+ * `searchPlanAdvance` have identical refresh semantics.
+ *
+ * @param {number} requestId
+ * @returns {Promise<void>}
+ */
+async function refreshInspectorSurface(requestId) {
+  invalidateSearchPlanCache(searchPlanCache, requestId);
+  const ctx = state.searchPlanDetailContext;
+  if (ctx && ctx.requestId === requestId) {
+    await renderSearchPlanDetail(requestId);
+    return;
+  }
+  // Summary surface — locate the open `.sp-summary` panel for this
+  // request, close it (so the next toggle re-fetches and re-renders),
+  // and re-open via `toggleSearchPlanSummary(requestId, null)`. The
+  // null row arg is fine: the existing panel id is found via getElementById.
+  if (typeof document === 'undefined') return;
+  const panel = /** @type {HTMLElement|null} */ (
+    document.getElementById(`sp-summary-${requestId}`));
+  if (panel) {
+    // The toggle helper opens an existing closed panel — clear `.open`
+    // first so the second click reopens via the fetch path.
+    panel.classList.remove('open');
+    await toggleSearchPlanSummary(requestId, null);
+  }
 }
 
 /**
- * @param {number} _requestId
- * @param {{toOrdinal?: number, toStrategy?: string}} _target
- * @returns {void}
+ * Read a JSON-or-empty body from a `Response` without crashing on
+ * empty/invalid payloads. Returns `null` when the body is not parseable.
+ *
+ * @param {Response} resp
+ * @returns {Promise<any>}
  */
-// eslint-disable-next-line no-unused-vars
-export function searchPlanAdvance(_requestId, _target) {
-  throw new Error('searchPlanAdvance: not implemented (U5 will land advance action)');
+async function readJsonOrNull(resp) {
+  try {
+    const text = await resp.text();
+    if (!text) return null;
+    return JSON.parse(text);
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Operator-driven plan regeneration.
+ *
+ * Native `confirm()` first — bail when the operator dismisses the
+ * dialog. The confirmation text MUST include both "cursor" and "cycle"
+ * (origin R15 / AE8) so consequences are visible before the click.
+ *
+ * Body shape: `{}` — `prepend_artist: false` is the API default per
+ * `web/routes/pipeline.py::post_pipeline_search_plan_regenerate`. A
+ * future PR may surface the toggle on the form; v1 keeps the body
+ * minimal for the smallest blast radius.
+ *
+ * Status-code mapping mirrors `searchPlanAdvance`:
+ *   * 200 with `outcome ∈ {success, success_noop, success_supersede,
+ *     noop_active_plan_exists}` → invalidate cache + re-render the
+ *     visible surface; piggyback `updatePipelineStatus` when the
+ *     response carries a fresh `request_status`.
+ *   * 404 (`request_not_found`) → toast "Request not found".
+ *   * 422 (`failed_deterministic`) → toast the API's sanitised error.
+ *   * 503 (`failed_transient`) → toast retry-soon.
+ *   * Other → console.error + toast.
+ *
+ * Exposed on `window.searchPlanRegenerate` via `main.js`.
+ *
+ * @param {number} requestId
+ * @returns {Promise<void>}
+ */
+export async function searchPlanRegenerate(requestId) {
+  if (!Number.isInteger(requestId) || requestId <= 0) {
+    throw new TypeError(
+      `searchPlanRegenerate: requestId must be a positive integer (got ${JSON.stringify(requestId)})`,
+    );
+  }
+  const confirmFn = (typeof window !== 'undefined' && typeof window.confirm === 'function')
+    ? window.confirm.bind(window)
+    : ((typeof globalThis !== 'undefined' && typeof globalThis.confirm === 'function')
+      ? globalThis.confirm.bind(globalThis)
+      : null);
+  if (typeof confirmFn === 'function' && !confirmFn(REGENERATE_CONFIRM_MESSAGE)) {
+    return;
+  }
+
+  /** @type {Response} */
+  let resp;
+  try {
+    resp = await fetch(`/api/pipeline/${requestId}/search-plan/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    toast(`Regenerate failed (network): ${msg}`, true);
+    return;
+  }
+
+  const data = await readJsonOrNull(resp);
+  const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
+  const errMsg = (data && typeof data.error_message === 'string')
+    ? data.error_message
+    : ((data && typeof data.error === 'string') ? data.error : null);
+
+  // Success outcomes: invalidate + re-render.
+  const successOutcomes = new Set([
+    'success', 'success_noop', 'success_supersede', 'noop_active_plan_exists',
+  ]);
+  if (resp.status === 200 && outcome != null && successOutcomes.has(outcome)) {
+    // Cross-module pipeline status — when the regenerate carries a new
+    // request_status (typically `wanted` again), refresh the central
+    // store so any open Browse/Recents row badge reflects the change.
+    const reqStatus = (data && typeof data.request_status === 'string')
+      ? data.request_status
+      : null;
+    const mbid = (data && data.request && typeof data.request.mb_release_id === 'string')
+      ? data.request.mb_release_id
+      : null;
+    if (mbid && reqStatus) {
+      // requestId is the pipeline id we already know about; pass it
+      // through so any pipelineStore consumer sees both fields update.
+      updatePipelineStatus(mbid, reqStatus, requestId);
+    }
+    await refreshInspectorSurface(requestId);
+    return;
+  }
+
+  // Failure outcomes — surface the API-sanitised error via toast and do
+  // NOT mutate the cache so the operator sees the prior plan state.
+  if (resp.status === 404) {
+    toast(errMsg || 'Request not found', true);
+    return;
+  }
+  if (resp.status === 422) {
+    toast(errMsg || 'Plan generation failed (deterministic)', true);
+    return;
+  }
+  if (resp.status === 503) {
+    toast(`${errMsg || 'Plan generation retryable'} — try again`, true);
+    return;
+  }
+  // Defensive: surface unknown errors but don't refresh.
+  if (typeof console !== 'undefined' && console.error) {
+    console.error(
+      `searchPlanRegenerate: unexpected response`,
+      { status: resp.status, data });
+  }
+  toast(`Regenerate failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
+}
+
+/**
+ * @typedef {Object} AdvanceTargetInput
+ * @property {string} [strategy]
+ * @property {string|number} [ordinal]
+ */
+
+/**
+ * @typedef {{toStrategy: string} | {toOrdinal: number}} AdvanceTarget
+ */
+
+/**
+ * Pure validator — turn raw form values into a typed advance target.
+ *
+ * The caller (the form's Confirm button handler) reads two inputs
+ * from the inline form: `strategy` (a `<select>` with a leading
+ * "no choice" option) and `ordinal` (an `<input type="number">`).
+ * Either is set; both raise. Empty strings count as "absent" so the
+ * "no choice" option in the select doesn't accidentally win.
+ *
+ * @param {AdvanceTargetInput} formData
+ * @returns {AdvanceTarget}
+ * @throws {TypeError} On any invalid combination.
+ */
+export function parseAdvanceTarget(formData) {
+  const fd = formData ?? {};
+  const rawStrategy = fd.strategy;
+  const rawOrdinal = fd.ordinal;
+  const hasStrategy = (typeof rawStrategy === 'string' && rawStrategy !== '');
+  const ordinalIsNonEmptyString = (typeof rawOrdinal === 'string' && rawOrdinal !== '');
+  const ordinalIsNumber = (typeof rawOrdinal === 'number');
+  const hasOrdinal = ordinalIsNonEmptyString || ordinalIsNumber;
+
+  // Reject empty strategy when explicitly passed (covers `{strategy: ''}`).
+  if (typeof rawStrategy === 'string' && rawStrategy === '') {
+    if (!hasOrdinal) {
+      throw new TypeError(
+        'parseAdvanceTarget: strategy is empty and no ordinal was provided',
+      );
+    }
+  }
+
+  if (hasStrategy && hasOrdinal) {
+    throw new TypeError(
+      'parseAdvanceTarget: provide exactly one of strategy or ordinal, not both',
+    );
+  }
+  if (!hasStrategy && !hasOrdinal) {
+    throw new TypeError(
+      'parseAdvanceTarget: one of strategy or ordinal is required',
+    );
+  }
+  if (hasStrategy) {
+    return { toStrategy: /** @type {string} */ (rawStrategy) };
+  }
+  // hasOrdinal — coerce to int and validate.
+  let ord;
+  if (ordinalIsNumber) {
+    ord = /** @type {number} */ (rawOrdinal);
+  } else {
+    const parsed = Number(/** @type {string} */ (rawOrdinal));
+    ord = parsed;
+  }
+  if (!Number.isFinite(ord) || !Number.isInteger(ord) || ord < 0) {
+    throw new TypeError(
+      `parseAdvanceTarget: ordinal must be a non-negative integer (got ${JSON.stringify(rawOrdinal)})`,
+    );
+  }
+  return { toOrdinal: ord };
+}
+
+/**
+ * Pure HTML producer for the advance form. Renders into the open
+ * summary panel or detail page replacing the action toolbar; submission
+ * picks whichever input the operator filled in.
+ *
+ * Inputs:
+ *   * `activePlan` — `inspection.active_plan` (or null when no plan).
+ *     The form uses `activePlan.items[]` to populate a unique-strategy
+ *     `<select>` and to derive the ordinal max bound.
+ *   * `requestId` — needed to wire the Confirm onclick.
+ *
+ * Layout:
+ *   * `<select name="strategy">` with a leading `—` option = "no
+ *     strategy choice — using ordinal instead".
+ *   * `<input type="number" name="ordinal" min="0" max="N-1">` —
+ *     `max` is `items.length - 1` so the operator can't tab past the
+ *     last slot.
+ *   * Confirm button (calls `window.searchPlanSubmitAdvance` which
+ *     reads both inputs, parses via {@link parseAdvanceTarget}, and
+ *     dispatches the API call).
+ *   * Cancel button (calls `window.searchPlanCancelAdvance` which
+ *     restores the toolbar by re-rendering the surface).
+ *
+ * @param {{activePlan: Object|null, requestId: number}} args
+ * @returns {string}
+ */
+export function renderAdvanceForm(args) {
+  const activePlan = args.activePlan;
+  const requestId = args.requestId;
+  /** @type {Array<Object>} */
+  const items = (activePlan && Array.isArray(activePlan.items))
+    ? activePlan.items : [];
+  /** @type {Set<string>} */
+  const strategies = new Set();
+  for (const item of items) {
+    const s = (item && typeof item.strategy === 'string') ? item.strategy : null;
+    if (s) strategies.add(s);
+  }
+  const sortedStrategies = Array.from(strategies).sort();
+  const maxOrdinal = items.length > 0 ? items.length - 1 : 0;
+
+  const strategyOptions = ['<option value="">— (use ordinal)</option>']
+    .concat(sortedStrategies.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`))
+    .join('');
+
+  const reqIdAttr = (Number.isInteger(requestId) && requestId > 0) ? requestId : 0;
+
+  return `<div class="sp-advance-form" data-request-id="${reqIdAttr}">
+    <div class="sp-advance-form-row">
+      <label class="sp-advance-form-label">Strategy</label>
+      <select class="sp-advance-form-input" data-field="strategy">${strategyOptions}</select>
+    </div>
+    <div class="sp-advance-form-row">
+      <label class="sp-advance-form-label">Ordinal</label>
+      <input class="sp-advance-form-input" data-field="ordinal" type="number" min="0" max="${esc(String(maxOrdinal))}" placeholder="0..${esc(String(maxOrdinal))}" />
+    </div>
+    <div class="sp-advance-form-error" data-field="error" style="display:none;"></div>
+    <div class="sp-advance-form-actions">
+      <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanSubmitAdvance(${reqIdAttr}, this.closest('.sp-advance-form'))">Confirm</button>
+      <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanCancelAdvance(${reqIdAttr})">Cancel</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * Read the inline form's two fields and dispatch the advance API call.
+ * Bound to `window.searchPlanSubmitAdvance`. Does not throw — surfaces
+ * errors via the form's inline error block + toast.
+ *
+ * @param {number} requestId
+ * @param {Element|null} formEl
+ * @returns {Promise<void>}
+ */
+export async function searchPlanSubmitAdvance(requestId, formEl) {
+  if (!Number.isInteger(requestId) || requestId <= 0) return;
+  const errEl = (formEl && formEl.querySelector)
+    ? /** @type {HTMLElement|null} */ (formEl.querySelector('[data-field="error"]'))
+    : null;
+  if (errEl) {
+    errEl.style.display = 'none';
+    errEl.textContent = '';
+  }
+  const stratEl = (formEl && formEl.querySelector)
+    ? /** @type {HTMLSelectElement|null} */ (formEl.querySelector('[data-field="strategy"]'))
+    : null;
+  const ordEl = (formEl && formEl.querySelector)
+    ? /** @type {HTMLInputElement|null} */ (formEl.querySelector('[data-field="ordinal"]'))
+    : null;
+  /** @type {AdvanceTargetInput} */
+  const formData = {};
+  if (stratEl && typeof stratEl.value === 'string' && stratEl.value !== '') {
+    formData.strategy = stratEl.value;
+  }
+  if (ordEl && typeof ordEl.value === 'string' && ordEl.value !== '') {
+    formData.ordinal = ordEl.value;
+  }
+  /** @type {AdvanceTarget} */
+  let target;
+  try {
+    target = parseAdvanceTarget(formData);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.style.display = '';
+    } else {
+      toast(msg, true);
+    }
+    return;
+  }
+  await searchPlanAdvance(requestId, target);
+}
+
+/**
+ * Cancel the open advance form and restore the action toolbar by re-
+ * rendering the visible inspector surface. Bound to
+ * `window.searchPlanCancelAdvance`.
+ *
+ * @param {number} requestId
+ * @returns {Promise<void>}
+ */
+export async function searchPlanCancelAdvance(requestId) {
+  if (!Number.isInteger(requestId) || requestId <= 0) return;
+  await refreshInspectorSurface(requestId);
+}
+
+/**
+ * Open the inline advance form for one request. Replaces the action
+ * toolbar inside the open summary panel or detail page with the form.
+ * No fetch — the form reads from the cached inspection payload (so the
+ * strategy `<select>` and ordinal `max` come from `activePlan.items`).
+ * On Confirm the form calls `searchPlanAdvance(requestId, target)`.
+ *
+ * @param {number} requestId
+ * @returns {Promise<void>}
+ */
+async function showAdvanceForm(requestId) {
+  if (typeof document === 'undefined') return;
+  // Pull the active plan from the cache. If the cache is empty (e.g.
+  // operator clicked Advance directly on a stale surface) fall back to
+  // a fresh fetch so we have items[] for the form.
+  let activePlan = null;
+  const cached = searchPlanCache.get(requestId);
+  if (cached && cached.inspection && cached.inspection.active_plan) {
+    activePlan = cached.inspection.active_plan;
+  }
+  if (!activePlan) {
+    try {
+      const inspection = await fetchInspection(requestId);
+      activePlan = inspection.active_plan;
+      // Patch the cache so a subsequent re-render sees the same data.
+      const prior = searchPlanCache.get(requestId);
+      searchPlanCache.set(requestId, {
+        inspection,
+        historyHead: prior ? prior.historyHead : [],
+        fetchedAt: Date.now(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast(`Could not load plan for advance form: ${msg}`, true);
+      return;
+    }
+  }
+  if (!activePlan) {
+    toast('Regenerate first — no active plan to advance', true);
+    return;
+  }
+
+  const formHtml = renderAdvanceForm({ activePlan, requestId });
+
+  // Two surfaces to consider: the open summary panel AND the detail
+  // page. Replace the actions block in whichever is visible.
+  // 1) Detail page actions container.
+  const ctx = state.searchPlanDetailContext;
+  if (ctx && ctx.requestId === requestId) {
+    const detailActions = /** @type {HTMLElement|null} */ (
+      document.querySelector(`.sp-detail[data-request-id="${requestId}"] .sp-detail-header-actions`));
+    if (detailActions) {
+      detailActions.innerHTML = formHtml;
+      return;
+    }
+  }
+  // 2) Open summary panel actions block.
+  const summaryActions = /** @type {HTMLElement|null} */ (
+    document.querySelector(`#sp-summary-${requestId} .sp-summary-actions`));
+  if (summaryActions) {
+    summaryActions.innerHTML = formHtml;
+    return;
+  }
+  // Neither surface is visible — nothing to attach to. Surface a hint.
+  toast('Open the inspector first, then click Advance', true);
+}
+
+/**
+ * Operator-driven plan-cursor advance.
+ *
+ * Two call modes:
+ *   1. No `target` (default summary/detail "Advance" button click) →
+ *      open the inline advance form; submission re-enters with a
+ *      typed target.
+ *   2. With `target` (programmatic call from the form's Confirm
+ *      handler) → POST `/search-plan/advance` with the appropriate
+ *      body and process the response.
+ *
+ * Status-code mapping (origin R16 / AE9):
+ *   * 200 (`advanced`) → cache invalidate + re-render visible surface.
+ *   * 400 (input-validation, internal bug) → console.error + toast.
+ *   * 404 (`request_not_found`) → toast "Request not found".
+ *   * 409 (`no_active_plan`) → toast "Regenerate first — no active
+ *     plan to advance".
+ *   * 422 (`invalid_target`) → toast the API's forward-only / out-of-
+ *     range message.
+ *   * 503 (`failed_transient`) → toast retry-soon.
+ *
+ * @param {number} requestId
+ * @param {AdvanceTarget} [target]
+ * @returns {Promise<void>}
+ */
+export async function searchPlanAdvance(requestId, target) {
+  if (!Number.isInteger(requestId) || requestId <= 0) {
+    throw new TypeError(
+      `searchPlanAdvance: requestId must be a positive integer (got ${JSON.stringify(requestId)})`,
+    );
+  }
+  // No target — open the inline form (call mode 1).
+  if (target === undefined || target === null
+    || (typeof target === 'object'
+      && !('toOrdinal' in target) && !('toStrategy' in target))) {
+    await showAdvanceForm(requestId);
+    return;
+  }
+
+  // Construct the API body. parseAdvanceTarget returns a typed XOR;
+  // honour whichever key is present.
+  /** @type {Record<string, any>} */
+  const body = {};
+  if ('toOrdinal' in target && typeof target.toOrdinal === 'number') {
+    body.to_ordinal = target.toOrdinal;
+  } else if ('toStrategy' in target && typeof target.toStrategy === 'string') {
+    body.to_strategy = target.toStrategy;
+  } else {
+    if (typeof console !== 'undefined' && console.error) {
+      console.error('searchPlanAdvance: malformed target', target);
+    }
+    toast('Internal error (advance request malformed)', true);
+    return;
+  }
+
+  /** @type {Response} */
+  let resp;
+  try {
+    resp = await fetch(`/api/pipeline/${requestId}/search-plan/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    toast(`Advance failed (network): ${msg}`, true);
+    return;
+  }
+
+  const data = await readJsonOrNull(resp);
+  const outcome = (data && typeof data.outcome === 'string') ? data.outcome : null;
+  const errMsg = (data && typeof data.error_message === 'string')
+    ? data.error_message
+    : ((data && typeof data.error === 'string') ? data.error : null);
+
+  if (resp.status === 200 && outcome === 'advanced') {
+    await refreshInspectorSurface(requestId);
+    return;
+  }
+  if (resp.status === 400) {
+    // The form should always validate client-side, so 400 is internal.
+    if (typeof console !== 'undefined' && console.error) {
+      console.error('searchPlanAdvance: 400 from server (internal bug)',
+        { status: resp.status, data, body });
+    }
+    toast(errMsg || 'Internal error (advance request malformed)', true);
+    return;
+  }
+  if (resp.status === 404) {
+    toast(errMsg || 'Request not found', true);
+    return;
+  }
+  if (resp.status === 409) {
+    toast(errMsg || 'Regenerate first — no active plan to advance', true);
+    return;
+  }
+  if (resp.status === 422) {
+    toast(errMsg || 'Invalid advance target', true);
+    return;
+  }
+  if (resp.status === 503) {
+    toast(`${errMsg || 'Plan lock contention'} — try again`, true);
+    return;
+  }
+  if (typeof console !== 'undefined' && console.error) {
+    console.error(
+      'searchPlanAdvance: unexpected response',
+      { status: resp.status, data });
+  }
+  toast(`Advance failed (HTTP ${resp.status}): ${errMsg || 'unknown error'}`, true);
 }
