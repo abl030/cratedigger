@@ -2,6 +2,7 @@
 import { state, API } from './state.js';
 import { awstDate, awstTime, esc } from './util.js';
 import { toggleDetail } from './pipeline.js';
+import { renderSearchPlanButton } from './search_plan.js';
 
 /**
  * Set the recents filter and reload.
@@ -76,6 +77,11 @@ export function renderRecentsItems(items, matchRates = null) {
         ? `<span class="badge badge-warn" title="${esc(triageDetail)}">triage: ${esc(triageSummary)}</span>`
         : '';
 
+      // Search-plan inspector button — Recents rows always render the
+      // button. Use the request_id (the album_requests.id) since the
+      // download_log row's id (item.id) is the wrong cursor space.
+      const spBtn = renderSearchPlanButton({ pipelineId: item.request_id });
+
       return `
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
@@ -83,7 +89,7 @@ export function renderRecentsItems(items, matchRates = null) {
               <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}${triageChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
-            <div style="font-size:0.75em;color:#666;">${time}</div>
+            <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
           </div>
           <div class="p-meta">
             <span>${esc(summary)}</span>
@@ -153,6 +159,11 @@ export function renderImportQueueItems(jobs) {
       job.preview_status ? `preview: ${job.preview_status}` : '',
       job.status ? `import: ${job.status}` : '',
     ].filter(Boolean).join(' · ');
+    // Search-plan inspector button — Recents queue rows render the
+    // button when the import job is bound to a pipeline request. Orphan
+    // imports (job.request_id null) get nothing — the conditional in
+    // renderSearchPlanButton handles the absent case.
+    const spBtn = renderSearchPlanButton({ pipelineId: job.request_id });
     return `
       <div class="r-item" style="border-left-color:${queueBorderColor(job)}">
         <div class="p-top">
@@ -160,7 +171,7 @@ export function renderImportQueueItems(jobs) {
             <div class="p-title">${esc(title)} <span class="badge ${badgeClass}">${esc(badge)}</span></div>
             <div class="p-artist">${esc(artist)}</div>
           </div>
-          <div style="font-size:0.75em;color:#666;">#${job.id}</div>
+          <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${job.id}</span></div>
         </div>
         <div class="p-meta"><span>${esc(meta)}</span></div>
         ${message ? `<div class="p-meta"><span>${esc(message)}</span></div>` : ''}
@@ -213,6 +224,9 @@ export function renderDownloadingItems(items) {
   if (items.length === 0) return '<div class="loading">No active downloads</div>';
   return items.map(item => {
     const date = item.updated_at ? awstDate(item.updated_at) : awstDate(item.created_at || '');
+    // Downloading rows are pipeline_request rows — `item.id` is the
+    // album_requests.id directly. Always render the inspector button.
+    const spBtn = renderSearchPlanButton({ pipelineId: item.id });
     return `
       <div class="r-item" style="border-left-color:#1a3a5a" onclick="window.toggleDetail('downloading-${item.id}', ${item.id})">
         <div class="p-top">
@@ -220,7 +234,7 @@ export function renderDownloadingItems(items) {
             <div class="p-title">${esc(item.album_title)} <span class="badge badge-downloading">downloading</span></div>
             <div class="p-artist">${esc(item.artist_name)}</div>
           </div>
-          <div style="font-size:0.75em;color:#666;">#${item.id}</div>
+          <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
         </div>
         <div class="p-meta"><span>${esc(downloadingSummary(item))}</span></div>
         <div class="p-meta"><span>${date}</span>${item.last_outcome ? `<span>last: ${esc(item.last_outcome)}</span>` : ''}</div>

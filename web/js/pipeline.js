@@ -3,6 +3,7 @@ import { state, API, toast } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton } from './release_actions.js';
+import { renderSearchPlanButton } from './search_plan.js';
 
 /**
  * Load pipeline data from API and render.
@@ -654,13 +655,19 @@ export function renderPipelineItem(item) {
   const lastColor = item.last_outcome === 'success' || item.last_outcome === 'force_import'
     ? '#6d6' : item.last_outcome === 'rejected' ? '#d88' : '#aa8';
 
+  // Search-plan inspector button — Pipeline rows always have a request
+  // id by construction, so the conditional in renderSearchPlanButton is
+  // a no-op here, but routing through the same helper keeps the toolbar
+  // wiring consistent across Browse / Pipeline / Recents.
+  const spBtn = renderSearchPlanButton({ pipelineId: item.id });
+
   return `
     <div class="p-item ${srcClass}" onclick="window.toggleDetail(${item.id})">
       <div class="p-top">
         <div>
           <div class="p-title">${esc(item.album_title)}${statusBadge}</div>
         </div>
-        <div style="font-size:0.75em;color:#666;">#${item.id}</div>
+        <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
       </div>
       <div class="p-meta">
         <span>${year}</span>
