@@ -1894,5 +1894,107 @@ class TestStaleCompletionRacingRegeneration(unittest.TestCase):
         self.assertEqual(stale_rows[0]["plan_id"], plan_a_id)
 
 
+class TestCmdSearchPlanAdvance(unittest.TestCase):
+    """``pipeline-cli search-plan advance`` wraps
+    ``SearchPlanService.advance_for_request``. Counterpart of the API
+    endpoint ``POST /api/pipeline/<id>/search-plan/advance`` — both must
+    stay in sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
+
+    def _seed_plan(self):
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="David Bowie", album_title="David Bowie",
+            source="request", year=1967, status="wanted",
+        )
+        items = [
+            SearchPlanItemInput(
+                ordinal=i, strategy="default",
+                query="*avid *owie", canonical_query_key="*avid *owie")
+            for i in range(5)
+        ]
+        items.append(SearchPlanItemInput(
+            ordinal=5, strategy="track_0", query="Love Till Tuesday",
+            canonical_query_key="love till tuesday"))
+        db.create_successful_search_plan(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=items, set_active=True,
+        )
+        return db, rid
+
+    def _run(self, db, rid, *, to_ordinal=None, to_strategy=None,
+             json_out=False):
+        args = SimpleNamespace(
+            id=rid, to_ordinal=to_ordinal, to_strategy=to_strategy,
+            json=json_out,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_advance(db, args)
+        return rc, stdout.getvalue()
+
+    def test_advance_to_ordinal_succeeds_and_moves_cursor(self):
+        db, rid = self._seed_plan()
+        rc, out = self._run(db, rid, to_ordinal=5)
+        self.assertEqual(rc, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 5)
+        self.assertIn("track_0", out)
+
+    def test_advance_to_strategy_jumps_past_collapsed_default_slots(self):
+        """The motivating use case: self-titled releases collapse into 5
+        identical default-strategy slots; --to-strategy track skips them."""
+        db, rid = self._seed_plan()
+        rc, out = self._run(db, rid, to_strategy="track")
+        self.assertEqual(rc, 0)
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 5)
+        self.assertIn("Cursor:", out)
+        self.assertIn("0 → 5", out)
+
+    def test_advance_returns_2_when_request_not_found(self):
+        from tests.fakes import FakePipelineDB
+        rc, out = self._run(FakePipelineDB(), 9999, to_ordinal=1)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_advance_returns_3_on_invalid_target(self):
+        db, rid = self._seed_plan()
+        rc, out = self._run(db, rid, to_ordinal=99)
+        self.assertEqual(rc, 3)
+        self.assertIn("invalid_target", out)
+
+    def test_advance_returns_4_when_no_active_plan(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="X", album_title="Y",
+            source="request", year=2020, status="wanted",
+        )
+        rc, out = self._run(db, rid, to_ordinal=1)
+        self.assertEqual(rc, 4)
+        self.assertIn("no_active_plan", out)
+
+    def test_advance_json_output_carries_full_payload(self):
+        db, rid = self._seed_plan()
+        rc, out = self._run(db, rid, to_ordinal=5, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "advanced")
+        self.assertEqual(payload["new_ordinal"], 5)
+        self.assertEqual(payload["new_strategy"], "track_0")
+        self.assertEqual(payload["new_query"], "Love Till Tuesday")
+
+
 if __name__ == "__main__":
     unittest.main()

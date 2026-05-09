@@ -1656,6 +1656,81 @@ def cmd_search_plan_regenerate(db, args):
     return 1
 
 
+def cmd_search_plan_advance(db, args):
+    """Forward-only operator advance of the search-plan cursor.
+
+    Counterpart of ``POST /api/pipeline/<id>/search-plan/advance``. Both
+    surfaces wrap ``SearchPlanService.advance_for_request`` — keep them
+    in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Exit codes:
+      * 0 — ``RESULT_ADVANCED``
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``
+      * 3 — ``RESULT_INVALID_TARGET`` (out of range, would go backward,
+        no slot matches strategy, or both/neither flag given)
+      * 4 — ``RESULT_NO_ACTIVE_PLAN``
+      * 5 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_ADVANCED,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_INVALID_TARGET,
+        RESULT_NO_ACTIVE_PLAN,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.advance_for_request(
+        int(args.id),
+        to_ordinal=args.to_ordinal,
+        to_strategy=args.to_strategy,
+    )
+    payload = {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "plan_id": result.plan_id,
+        "previous_ordinal": result.previous_ordinal,
+        "new_ordinal": result.new_ordinal,
+        "new_strategy": result.new_strategy,
+        "new_query": result.new_query,
+        "error_message": result.error_message,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:        {payload['request_id']}")
+        print(f"  Outcome:           {result.outcome}")
+        if result.plan_id is not None:
+            print(f"  Plan id:           {result.plan_id}")
+        if (result.previous_ordinal is not None
+                and result.new_ordinal is not None):
+            print(
+                f"  Cursor:            {result.previous_ordinal} → "
+                f"{result.new_ordinal}")
+        if result.new_strategy is not None:
+            print(f"  New slot strategy: {result.new_strategy}")
+        if result.new_query is not None:
+            print(f"  New slot query:    {result.new_query}")
+        if result.error_message:
+            print(f"  Error message:     {result.error_message}")
+
+    if result.outcome == RESULT_ADVANCED:
+        return 0
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        return 2
+    if result.outcome == RESULT_INVALID_TARGET:
+        return 3
+    if result.outcome == RESULT_NO_ACTIVE_PLAN:
+        return 4
+    if result.outcome == RESULT_FAILED_TRANSIENT:
+        return 5
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -1721,6 +1796,22 @@ def main():
                              "generated queries")
     p_sp_regen.add_argument("--json", action="store_true",
                              help="Print structured JSON instead of text")
+    p_sp_advance = sp_sub.add_parser(
+        "advance",
+        help="Forward-only operator advance of the cursor (e.g. skip "
+             "collapsed default-strategy slots on a self-titled release)")
+    p_sp_advance.add_argument("id", type=int, help="Request ID")
+    sp_target = p_sp_advance.add_mutually_exclusive_group(required=True)
+    sp_target.add_argument(
+        "--to-ordinal", type=int, dest="to_ordinal",
+        help="Absolute target ordinal in [0, plan_item_count)")
+    sp_target.add_argument(
+        "--to-strategy", dest="to_strategy",
+        help="Strategy prefix; advance to the first plan item past the "
+             "current cursor whose strategy starts with this string "
+             "(e.g. `track`, `unwild_year`)")
+    p_sp_advance.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
 
     # quality
     p_quality = sub.add_parser("quality", help="Show quality state and simulate decisions")
@@ -1867,6 +1958,7 @@ def main():
     search_plan_commands = {
         "show": cmd_search_plan_show,
         "regenerate": cmd_search_plan_regenerate,
+        "advance": cmd_search_plan_advance,
     }
     try:
         if args.command == "search-plan":

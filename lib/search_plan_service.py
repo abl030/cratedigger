@@ -76,6 +76,10 @@ RESULT_NOOP_ACTIVE_PLAN_EXISTS = "noop_active_plan_exists"
 RESULT_FAILED_DETERMINISTIC = "failed_deterministic"
 RESULT_FAILED_TRANSIENT = "failed_transient"
 RESULT_REQUEST_NOT_FOUND = "request_not_found"
+# advance_for_request outcomes (forward-only cursor mutation, no plan write).
+RESULT_ADVANCED = "advanced"
+RESULT_NO_ACTIVE_PLAN = "no_active_plan"
+RESULT_INVALID_TARGET = "invalid_target"
 
 # Sanitisation cap for persisted error/provenance strings. 4 KB is well
 # above any expected exception string but bounds JSONB blob growth so a
@@ -230,6 +234,28 @@ class ServiceResult:
     is_supersede: bool = False
 
 
+@dataclass(frozen=True)
+class AdvanceResult:
+    """Outcome of a single ``advance_for_request`` call.
+
+    Distinct from ``ServiceResult`` because cursor advance does not
+    persist a plan and reports its own set of outcomes
+    (``RESULT_ADVANCED``, ``RESULT_NO_ACTIVE_PLAN``, ``RESULT_INVALID_TARGET``,
+    ``RESULT_REQUEST_NOT_FOUND``). ``previous_ordinal`` and ``new_ordinal``
+    are populated on the success path so CLI / API can render a clear
+    "cursor: 1 → 7" line.
+    """
+
+    outcome: str
+    request_id: int
+    plan_id: int | None = None
+    previous_ordinal: int | None = None
+    new_ordinal: int | None = None
+    new_strategy: str | None = None
+    new_query: str | None = None
+    error_message: str | None = None
+
+
 class SearchPlanService:
     """Shared plan generation/persistence service.
 
@@ -318,6 +344,143 @@ class SearchPlanService:
                 request_id, regenerate=regenerate,
                 prepend_artist=prepend,
             )
+
+    def advance_for_request(
+        self,
+        request_id: int,
+        *,
+        to_ordinal: int | None = None,
+        to_strategy: str | None = None,
+    ) -> "AdvanceResult":
+        """Forward-only cursor advance for an operator's active plan.
+
+        Resolves the target ordinal from either ``to_ordinal`` (explicit)
+        or ``to_strategy`` (prefix match against ``strategy`` of plan items
+        at or after the current cursor). Exactly one must be set.
+
+        Designed for cases like self-titled releases where the dedup
+        collapses 5 default-strategy slots into the same query, leaving
+        track searches stranded behind retries. ``advance --to-strategy
+        track`` jumps the cursor to the first track-strategy slot so the
+        next cycle exercises a useful query.
+
+        Forward-only: backward intent should go through ``regenerate``.
+        Held under the PLAN advisory lock so concurrent regeneration
+        cannot replace the plan we're advancing within. Forward-stale
+        completions from in-flight executors are still detected by
+        ``record_consumed_search_attempt``'s row-level cursor check.
+
+        Outcomes:
+          * ``RESULT_ADVANCED`` — cursor moved; ``previous_ordinal`` /
+            ``new_ordinal`` / ``new_strategy`` / ``new_query`` populated.
+          * ``RESULT_REQUEST_NOT_FOUND`` — no such request id.
+          * ``RESULT_NO_ACTIVE_PLAN`` — request exists but has no active
+            plan (request never got past add-time, or last attempt failed
+            deterministically).
+          * ``RESULT_INVALID_TARGET`` — ordinal out of range, would go
+            backward, or no plan item matches the strategy prefix.
+        """
+        if (to_ordinal is None) == (to_strategy is None):
+            return AdvanceResult(
+                outcome=RESULT_INVALID_TARGET,
+                request_id=request_id,
+                error_message=(
+                    "exactly one of to_ordinal or to_strategy must be "
+                    "provided"),
+            )
+        with self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_PLAN, request_id,
+        ) as acquired:
+            if not acquired:
+                return AdvanceResult(
+                    outcome=RESULT_FAILED_TRANSIENT,
+                    request_id=request_id,
+                    error_message="another writer holds the plan lock",
+                )
+            row = self.db.get_request(request_id)
+            if row is None:
+                return AdvanceResult(
+                    outcome=RESULT_REQUEST_NOT_FOUND,
+                    request_id=request_id,
+                    error_message=f"request {request_id} not found",
+                )
+            active = self.db.get_active_search_plan(request_id)
+            if active is None:
+                return AdvanceResult(
+                    outcome=RESULT_NO_ACTIVE_PLAN,
+                    request_id=request_id,
+                    error_message=(
+                        f"request {request_id} has no active plan; "
+                        "regenerate first"),
+                )
+            current = active.next_ordinal
+            target = self._resolve_advance_target(
+                items=active.items, current_ordinal=current,
+                to_ordinal=to_ordinal, to_strategy=to_strategy,
+            )
+            if isinstance(target, str):
+                # Resolution returned an error message.
+                return AdvanceResult(
+                    outcome=RESULT_INVALID_TARGET,
+                    request_id=request_id,
+                    plan_id=active.plan.id,
+                    previous_ordinal=current,
+                    error_message=target,
+                )
+            try:
+                _, prev, new = self.db.advance_search_plan_cursor(
+                    request_id, target_ordinal=target,
+                    plan_item_count=len(active.items),
+                )
+            except ValueError as e:
+                return AdvanceResult(
+                    outcome=RESULT_INVALID_TARGET,
+                    request_id=request_id,
+                    plan_id=active.plan.id,
+                    previous_ordinal=current,
+                    error_message=str(e),
+                )
+            new_item = active.items[new]
+            return AdvanceResult(
+                outcome=RESULT_ADVANCED,
+                request_id=request_id,
+                plan_id=active.plan.id,
+                previous_ordinal=prev,
+                new_ordinal=new,
+                new_strategy=new_item.strategy,
+                new_query=new_item.query,
+            )
+
+    @staticmethod
+    def _resolve_advance_target(
+        *,
+        items: list[Any],
+        current_ordinal: int,
+        to_ordinal: int | None,
+        to_strategy: str | None,
+    ) -> int | str:
+        """Return the absolute target ordinal, or an error string."""
+        if to_ordinal is not None:
+            if to_ordinal < 0 or to_ordinal >= len(items):
+                return (
+                    f"to_ordinal {to_ordinal} out of range "
+                    f"[0, {len(items)})")
+            if to_ordinal <= current_ordinal:
+                return (
+                    f"to_ordinal {to_ordinal} must be greater than "
+                    f"current cursor {current_ordinal} "
+                    "(advance is forward-only)")
+            return to_ordinal
+        # to_strategy: first item past current cursor whose strategy
+        # starts with the given prefix.
+        assert to_strategy is not None
+        for item in items:
+            if (item.ordinal > current_ordinal
+                    and item.strategy.startswith(to_strategy)):
+                return int(item.ordinal)
+        return (
+            f"no plan item past cursor {current_ordinal} has strategy "
+            f"prefix {to_strategy!r}")
 
     def _generate_for_request_locked(
         self,

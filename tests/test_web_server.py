@@ -938,6 +938,7 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
+        r"^/api/pipeline/(\d+)/search-plan/advance$",
         "/api/pipeline/add",
         "/api/pipeline/update",
         "/api/pipeline/upgrade",
@@ -2207,6 +2208,165 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertEqual(data["error"], "prepend_artist must be a boolean")
         mock_gen.assert_not_called()
+
+
+class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
+    """Contract for ``POST /api/pipeline/<id>/search-plan/advance``.
+
+    The endpoint wraps ``SearchPlanService.advance_for_request``. Both
+    the CLI (``pipeline-cli search-plan advance``) and the API live or
+    die on the same service contract — see ``CLAUDE.md`` § "CLI ⇄ API
+    surface symmetry"; touching one without the other is a contract
+    drift waiting to happen.
+
+    Status-code mapping mirrors the CLI exit codes:
+      * 200 — RESULT_ADVANCED
+      * 400 — body validation failure
+      * 404 — RESULT_REQUEST_NOT_FOUND
+      * 409 — RESULT_NO_ACTIVE_PLAN
+      * 422 — RESULT_INVALID_TARGET
+      * 503 — RESULT_FAILED_TRANSIENT
+    """
+
+    ADVANCE_REQUIRED_FIELDS = {
+        "request_id", "outcome", "plan_id", "previous_ordinal",
+        "new_ordinal", "new_strategy", "new_query", "error_message",
+    }
+
+    def setUp(self) -> None:
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+
+    def _patch_service(self, **result_kwargs):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import AdvanceResult
+        return _patch(
+            "lib.search_plan_service.SearchPlanService.advance_for_request",
+            return_value=AdvanceResult(**result_kwargs),
+        )
+
+    def test_advance_success_returns_200_with_required_fields(self):
+        with self._patch_service(
+                outcome="advanced", request_id=100, plan_id=42,
+                previous_ordinal=1, new_ordinal=7,
+                new_strategy="track_0", new_query="Love Till Tuesday"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 7})
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADVANCE_REQUIRED_FIELDS,
+                                "search-plan advance response")
+        self.assertEqual(data["outcome"], "advanced")
+        self.assertEqual(data["new_ordinal"], 7)
+        self.assertEqual(data["new_strategy"], "track_0")
+
+    def test_advance_request_not_found_returns_404(self):
+        with self._patch_service(
+                outcome="request_not_found", request_id=9999,
+                error_message="request 9999 not found"):
+            status, data = self._post(
+                "/api/pipeline/9999/search-plan/advance",
+                {"to_ordinal": 7})
+        self.assertEqual(status, 404)
+        _assert_required_fields(self, data, self.ADVANCE_REQUIRED_FIELDS,
+                                "404 advance response")
+        self.assertIn("error", data)
+
+    def test_advance_no_active_plan_returns_409(self):
+        with self._patch_service(
+                outcome="no_active_plan", request_id=100,
+                error_message="request 100 has no active plan"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 1})
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "no_active_plan")
+        self.assertIn("error", data)
+
+    def test_advance_invalid_target_returns_422(self):
+        with self._patch_service(
+                outcome="invalid_target", request_id=100, plan_id=42,
+                previous_ordinal=5, error_message="target 3 must be > 5"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 3})
+        self.assertEqual(status, 422)
+        self.assertEqual(data["outcome"], "invalid_target")
+        self.assertIn("error", data)
+
+    def test_advance_lock_contention_returns_503(self):
+        with self._patch_service(
+                outcome="failed_transient", request_id=100,
+                error_message="another writer holds the plan lock"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 1})
+        self.assertEqual(status, 503)
+        self.assertEqual(data["outcome"], "failed_transient")
+        self.assertIn("error", data)
+
+    def test_advance_passes_to_strategy_to_service(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import AdvanceResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.advance_for_request",
+            return_value=AdvanceResult(
+                outcome="advanced", request_id=100, plan_id=1,
+                previous_ordinal=0, new_ordinal=7,
+                new_strategy="track_0", new_query="X"),
+        ) as mock_adv:
+            status, _ = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_strategy": "track"})
+        self.assertEqual(status, 200)
+        mock_adv.assert_called_once()
+        kwargs = mock_adv.call_args.kwargs
+        self.assertEqual(kwargs.get("to_strategy"), "track")
+        self.assertIsNone(kwargs.get("to_ordinal"))
+
+    def test_advance_rejects_missing_target(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.advance_for_request",
+        ) as mock_adv:
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance", {})
+        self.assertEqual(status, 400)
+        self.assertIn("to_ordinal", data["error"])
+        mock_adv.assert_not_called()
+
+    def test_advance_rejects_both_targets(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.advance_for_request",
+        ) as mock_adv:
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 1, "to_strategy": "track"})
+        self.assertEqual(status, 400)
+        mock_adv.assert_not_called()
+
+    def test_advance_rejects_non_int_ordinal(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.advance_for_request",
+        ) as mock_adv:
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": "seven"})
+        self.assertEqual(status, 400)
+        self.assertIn("integer", data["error"])
+        mock_adv.assert_not_called()
 
 
 def _kwargs_to_query(kwargs: dict) -> str:

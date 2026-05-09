@@ -843,5 +843,142 @@ class TestAdvisoryLockBoundary(unittest.TestCase):
         self.assertEqual(db.search_plans, {})
 
 
+class TestSearchPlanServiceAdvance(unittest.TestCase):
+    """Operator-driven cursor advance — counterpart of regenerate, used to
+    skip past collapsed default-strategy slots on self-titled releases.
+
+    The CLI (``pipeline-cli search-plan advance``) and web API (``POST
+    /api/pipeline/<id>/search-plan/advance``) are thin wrappers over
+    ``SearchPlanService.advance_for_request``; coverage here protects both
+    surfaces. See ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed_plan_with_items(self) -> int:
+        """Seed a Bowie-style plan: 5 default + 1 unwild + 1 unwild_year +
+        2 track_X items. Returns the request id (10)."""
+        _seed_request(self.db, id=10,
+                       artist_name="David Bowie",
+                       album_title="David Bowie", year=1967)
+        from lib.pipeline_db import SearchPlanItemInput
+        items = [
+            SearchPlanItemInput(ordinal=i, strategy="default",
+                                query="*avid *owie",
+                                canonical_query_key="*avid *owie")
+            for i in range(5)
+        ]
+        items.append(SearchPlanItemInput(
+            ordinal=5, strategy="unwild", query="David Bowie",
+            canonical_query_key="david bowie"))
+        items.append(SearchPlanItemInput(
+            ordinal=6, strategy="unwild_year", query="David Bowie 1967",
+            canonical_query_key="david bowie 1967"))
+        items.append(SearchPlanItemInput(
+            ordinal=7, strategy="track_0", query="Love Till Tuesday",
+            canonical_query_key="love till tuesday"))
+        items.append(SearchPlanItemInput(
+            ordinal=8, strategy="track_1", query="Maids Bond Street",
+            canonical_query_key="maids bond street"))
+        plan = self.db.create_successful_search_plan(
+            request_id=10, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=items)
+        return plan
+
+    def test_advance_to_ordinal_moves_cursor_forward(self):
+        """Happy path: explicit ordinal advance updates cursor and reports
+        the new slot."""
+        from lib.search_plan_service import RESULT_ADVANCED
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10, to_ordinal=7)
+        self.assertEqual(result.outcome, RESULT_ADVANCED)
+        self.assertEqual(result.previous_ordinal, 0)
+        self.assertEqual(result.new_ordinal, 7)
+        self.assertEqual(result.new_strategy, "track_0")
+        self.assertEqual(result.new_query, "Love Till Tuesday")
+        active = self.db.get_active_search_plan(10)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 7)
+
+    def test_advance_to_strategy_finds_first_matching_slot(self):
+        """``--to-strategy track`` jumps to the first ``track_*`` slot past
+        the cursor — the motivating use case for self-titled releases."""
+        from lib.search_plan_service import RESULT_ADVANCED
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10, to_strategy="track")
+        self.assertEqual(result.outcome, RESULT_ADVANCED)
+        self.assertEqual(result.new_ordinal, 7)
+        self.assertEqual(result.new_strategy, "track_0")
+
+    def test_advance_to_strategy_unwild_year_exact(self):
+        """Strategy prefix matches exact strategy names too."""
+        from lib.search_plan_service import RESULT_ADVANCED
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10, to_strategy="unwild_year")
+        self.assertEqual(result.outcome, RESULT_ADVANCED)
+        self.assertEqual(result.new_ordinal, 6)
+        self.assertEqual(result.new_strategy, "unwild_year")
+
+    def test_advance_backward_is_rejected(self):
+        """Forward-only: target <= current cursor returns INVALID_TARGET."""
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()
+        # First advance to 5 so cursor isn't at 0
+        self.svc.advance_for_request(10, to_ordinal=5)
+        result = self.svc.advance_for_request(10, to_ordinal=3)
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+        self.assertIsNotNone(result.error_message)
+        # Cursor unchanged.
+        active = self.db.get_active_search_plan(10)
+        assert active is not None
+        self.assertEqual(active.next_ordinal, 5)
+
+    def test_advance_to_same_ordinal_is_rejected(self):
+        """target == current is also forward-only-violating."""
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10, to_ordinal=0)
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+
+    def test_advance_to_out_of_range_ordinal(self):
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()  # 9 items, indices 0..8
+        result = self.svc.advance_for_request(10, to_ordinal=99)
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+
+    def test_advance_to_strategy_no_match(self):
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10, to_strategy="nonexistent")
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+
+    def test_advance_no_active_plan(self):
+        """Request exists but has no active plan → NO_ACTIVE_PLAN."""
+        from lib.search_plan_service import RESULT_NO_ACTIVE_PLAN
+        _seed_request(self.db, id=20, artist_name="X", album_title="Y")
+        result = self.svc.advance_for_request(20, to_ordinal=1)
+        self.assertEqual(result.outcome, RESULT_NO_ACTIVE_PLAN)
+
+    def test_advance_request_not_found(self):
+        from lib.search_plan_service import RESULT_REQUEST_NOT_FOUND
+        result = self.svc.advance_for_request(9999, to_ordinal=1)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+
+    def test_advance_neither_target_provided(self):
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(10)
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+
+    def test_advance_both_targets_provided(self):
+        from lib.search_plan_service import RESULT_INVALID_TARGET
+        self._seed_plan_with_items()
+        result = self.svc.advance_for_request(
+            10, to_ordinal=7, to_strategy="track")
+        self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
+
+
 if __name__ == "__main__":
     unittest.main()

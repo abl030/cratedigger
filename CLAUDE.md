@@ -180,6 +180,33 @@ Web UI (music.ablz.au)               CLI
 
 Schema fields, JSONB audit blobs, search_log outcomes, and the force-import flow live in `docs/pipeline-db-schema.md`.
 
+## CLI ⇄ API surface symmetry
+
+Operator capabilities should appear on **both** `pipeline-cli` and the web API. When you add an operator action to one, add it to the other in the same PR. Both surfaces wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`); the CLI command and the HTTP endpoint are thin adapters with matching exit-code/status-code mappings.
+
+Why: operators frequently start in the web UI, escalate to CLI when they want a script, or vice versa. A capability that exists in only one surface is a trap — the team learns to expect parity, then trips when it isn't there. A drifted contract (CLI returns one shape, API returns another) is worse than no parity, because tests usually catch only one side.
+
+Concrete pattern (see `search-plan advance` for a worked example):
+
+| Layer | File | Responsibility |
+|-------|------|----------------|
+| Service | `lib/<thing>_service.py` | Holds logic; returns a typed `Result` dataclass |
+| DB | `lib/pipeline_db.py` | Atomic mutations + `FOR UPDATE` row locks |
+| CLI | `scripts/pipeline_cli.py` | Wraps service; maps `Result.outcome` to exit code |
+| API | `web/routes/<thing>.py` | Wraps service; maps `Result.outcome` to HTTP status |
+| Tests | `tests/test_<thing>_service.py` + `tests/test_pipeline_cli.py` + `tests/test_web_server.py` | Service tests are authoritative; CLI + API tests check the wrapper mapping |
+| Audit | `tests/test_web_server.py::TestRouteContractAudit::CLASSIFIED_ROUTES` | Every new route must be added — guard test fails otherwise |
+
+Status/exit code mapping should follow the existing convention:
+- 200 / exit 0 — success
+- 400 / exit 3 — input validation error (API only — CLI argparse catches this)
+- 404 / exit 2 — not found
+- 409 / exit 4 — wrong state (e.g. no active plan when one is required)
+- 422 / exit 3 — semantic validation error (e.g. forward-only violated)
+- 503 / exit 5 — transient (lock contention, retry)
+
+If you only need the capability from one surface in this PR, expose it on both anyway. The cost of adding the second surface is small; the cost of explaining "why is X CLI-only?" to a future operator is larger.
+
 ## Decision architecture
 
 Quality policy should stay pure where possible: facts in, decision out, no I/O,
