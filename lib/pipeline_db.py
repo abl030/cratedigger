@@ -2526,17 +2526,16 @@ class PipelineDB:
 
         Returns at most ``limit`` rows for ``request_id`` ordered by
         ``id DESC`` (newest first). ``before_id`` excludes rows whose id
-        is greater-than-or-equal — pass the previous page's
+        is greater-than ``before_id`` — pass the previous page's
         ``next_before_id`` to read the next page.
 
         ``next_before_id`` is the id of the *next-older row past the
         page boundary* — the +1 row trimmed by the SQL ``LIMIT %s + 1``
         — when more rows remain, or ``None`` when the page exhausted
-        the history. The comparison in the WHERE clause is strict
-        ``<``, but ``next_before_id`` deliberately points one row past
-        the page so the next call resumes at the row we trimmed (it is
-        the smallest id we still want to return). No row is skipped at
-        page boundaries.
+        the history. The WHERE clause uses ``id <= %s`` (inclusive) so
+        ``next_before_id`` round-trips as the smallest id we still want
+        to return on the next page. No row is skipped at page
+        boundaries.
 
         ``limit`` is unconditionally cast to ``int`` and not range-checked
         here; callers (the route handler / CLI subcommand) own the

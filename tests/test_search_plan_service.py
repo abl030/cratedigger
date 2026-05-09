@@ -149,6 +149,7 @@ class TestSearchPlanServiceAddTime(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(4)
         assert active is not None
+        assert active.plan.metadata_snapshot is not None
         self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
@@ -252,6 +253,7 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         active = db.get_active_search_plan(15)
         assert active is not None
+        assert active.plan.metadata_snapshot is not None
         self.assertEqual(active.plan.metadata_snapshot.prepend_artist, True)
         self.assertEqual(active.items[0].query, "*ycho Awake")
 
@@ -899,6 +901,29 @@ class TestSearchPlanServiceHistoryPage(unittest.TestCase):
         self._seed(rid=1, n=2)
         result = self.svc.history_for_request(1, limit=10, before_id=-1)
         self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+
+    def test_before_id_int4_overflow_returns_input_validation(self):
+        """F4: before_id=2147483648 (one past int4 max) must fail validation,
+        not trip the PostgreSQL int4 cast at the DB layer."""
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_INPUT_INVALID,
+        )
+        self._seed(rid=1, n=2)
+        result = self.svc.history_for_request(
+            1, limit=10, before_id=2147483648)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_INPUT_INVALID)
+        self.assertIn("before_id", result.error_message or "")
+
+    def test_before_id_max_valid_passes_validation(self):
+        """F4: before_id=2147483647 (int4 max) must pass validation."""
+        from lib.search_plan_service import (
+            RESULT_HISTORY_PAGE_SUCCESS,
+        )
+        self._seed(rid=1, n=2)
+        # 2147483647 is well above the seeded IDs, so it returns all rows.
+        result = self.svc.history_for_request(
+            1, limit=10, before_id=2147483647)
+        self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
 
 
 class TestSearchPlanConfigFromCratedigger(unittest.TestCase):

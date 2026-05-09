@@ -2099,6 +2099,22 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
         # Hint surfaces the next-page cursor so operators can re-run.
         self.assertIn("--before-id", out)
 
+    def test_history_json_success_omits_outcome_and_error_message(self):
+        """F7: --json on success must match the API 200 shape — no
+        ``outcome`` or ``error_message`` keys that the API omits."""
+        db, rid = self._seed(n=2)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertNotIn("outcome", payload,
+                         "--json success must not include outcome key")
+        self.assertNotIn("error_message", payload,
+                         "--json success must not include error_message key")
+        # Core API fields must still be present.
+        self.assertIn("request_id", payload)
+        self.assertIn("rows", payload)
+        self.assertIn("next_before_id", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

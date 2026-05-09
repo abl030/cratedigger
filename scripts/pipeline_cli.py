@@ -1773,7 +1773,17 @@ def cmd_search_plan_history(db, args):
         "error_message": result.error_message,
     }
     if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2, sort_keys=True,
+        if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
+            # F7: strip internal routing keys so --json output matches the
+            # API 200 shape (CLI ⇄ API surface symmetry, CLAUDE.md).
+            api_payload = {
+                "request_id": result.request_id,
+                "rows": result.rows,
+                "next_before_id": result.next_before_id,
+            }
+        else:
+            api_payload = payload
+        print(json.dumps(api_payload, indent=2, sort_keys=True,
                          default=_json_default))
     elif result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
         print(f"  Request ID:        {result.request_id}")

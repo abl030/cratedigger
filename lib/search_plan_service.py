@@ -522,12 +522,14 @@ class SearchPlanService:
                     f"{HISTORY_PAGE_MAX_LIMIT}]"
                 ),
             )
-        if before_id is not None and before_id < 1:
+        if before_id is not None and (before_id < 1 or before_id > 2147483647):
             return SearchLogHistoryPageResult(
                 outcome=RESULT_HISTORY_PAGE_INPUT_INVALID,
                 request_id=request_id,
                 rows=[],
-                error_message="before_id must be >= 1 when provided",
+                error_message=(
+                    "before_id must be in [1, 2147483647] when provided"
+                ),
             )
         row = self.db.get_request(request_id)
         if row is None:

@@ -2210,6 +2210,31 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(data["error"], "prepend_artist must be a boolean")
         mock_gen.assert_not_called()
 
+    def test_regenerate_rejects_non_dict_body_with_400(self):
+        """F2: a non-dict JSON body (e.g. raw string) must return 400,
+        not 500 from AttributeError on body.get()."""
+        from unittest.mock import patch as _patch
+        raw_body = b'"hello"'  # valid JSON but not an object
+        req = Request(
+            f"{self.base}/api/pipeline/100/search-plan/regenerate",
+            data=raw_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.generate_for_request",
+        ) as mock_gen:
+            try:
+                resp = urlopen(req, timeout=5)
+                status = resp.status
+                data = json.loads(resp.read())
+            except HTTPError as e:
+                status = e.code
+                data = json.loads(e.read())
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_gen.assert_not_called()
+
 
 class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
     """Contract for ``POST /api/pipeline/<id>/search-plan/advance``.
@@ -2514,6 +2539,45 @@ class TestPipelineSearchPlanHistoryContract(_WebServerCase):
                 "/api/pipeline/100/search-plan/history?limit=500")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+    def test_history_datetime_rows_are_serialized_to_strings(self):
+        """F1: rows with datetime created_at must not 500 — _serialize_row
+        must be applied before JSON encoding."""
+        from datetime import datetime, timezone
+        rows = [{
+            "id": 12340,
+            "request_id": 100,
+            "query": "q1",
+            "outcome": "no_match",
+            "created_at": datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc),
+        }]
+        with self._patch_service(
+                outcome="success", request_id=100, rows=rows,
+                next_before_id=None):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(data["rows"][0]["created_at"], str,
+                              "created_at must be a string (ISO format) on the wire")
+        # Full round-trip: the response body must be valid JSON.
+        import json as _json
+        _json.dumps(data)  # raises TypeError if any datetime slipped through
+
+    def test_history_404_body_shape_matches_neighbor_routes(self):
+        """F3: 404 body must be {error: ...} only — no rows/next_before_id
+        to match the h._error() shape used by get_pipeline_detail etc."""
+        with self._patch_service(
+                outcome="request_not_found", request_id=9999,
+                rows=[],
+                error_message="request 9999 not found"):
+            status, data = self._get(
+                "/api/pipeline/9999/search-plan/history?limit=50")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+        self.assertNotIn("rows", data,
+                         "404 body must not include rows key")
+        self.assertNotIn("next_before_id", data,
+                         "404 body must not include next_before_id key")
 
 
 def _kwargs_to_query(kwargs: dict) -> str:
