@@ -1263,7 +1263,10 @@ def dispatch_import_core(
                     # disposable by design.
                     _cleanup_staged_dir(path)
                 if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                    removed = cleanup_disambiguation_orphans(ir.postflight.imported_path)
+                    removed = cleanup_disambiguation_orphans(
+                        ir.postflight.imported_path,
+                        beets_directory=cfg.beets_directory if cfg is not None else "",
+                    )
                     if removed and cfg is not None:
                         trigger_meelo_clean(cfg)
         except sp.TimeoutExpired:

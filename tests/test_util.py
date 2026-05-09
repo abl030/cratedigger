@@ -445,6 +445,36 @@ class TestCleanupDisambiguationOrphans(unittest.TestCase):
             f"Expected warning about relative path, got: {captured.output}",
         )
 
+    def test_relative_path_absolutizes_with_beets_directory(self):
+        """When beets_directory is provided, relative imported_path should be
+        absolutized against it and the function should perform real cleanup
+        (not just warn-and-skip)."""
+        from lib.util import cleanup_disambiguation_orphans
+        # Use the existing tmpdir as the synthetic beets root.
+        # self.artist_dir = <tmpdir>/Bon Iver, set by setUp.
+        imported_rel = os.path.relpath(self._make_dir(
+            "2009 - Blood Bank [2009]",
+            ["01 Blood Bank.mp3"]), self.tmpdir)
+        orphan = self._make_dir("2009 - Blood Bank", ["cover.jpg"])
+        removed = cleanup_disambiguation_orphans(
+            imported_rel, beets_directory=self.tmpdir)
+        self.assertFalse(os.path.exists(orphan))
+        self.assertEqual(removed, [orphan])
+
+    def test_relative_path_with_empty_beets_directory_still_warns(self):
+        """Empty beets_directory falls back to warn-and-skip — explicit
+        regression guard for the case where the config option is wired up
+        but left empty."""
+        from lib.util import cleanup_disambiguation_orphans
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            removed = cleanup_disambiguation_orphans(
+                "Artist/Album", beets_directory="")
+        self.assertEqual(removed, [])
+        self.assertTrue(
+            any("relative" in m.lower() for m in captured.output),
+            f"Expected warning, got: {captured.output}",
+        )
+
     def test_ignores_files_in_artist_dir(self):
         """Files directly in the artist dir should not cause errors."""
         from lib.util import cleanup_disambiguation_orphans
@@ -550,12 +580,14 @@ class TestTriggerPlexScan(unittest.TestCase):
 
     def _make_cfg(self, url: str | None = "http://plex:32400",
                   token: str | None = "tok123", section: str | None = "3",
-                  path_map: str | None = None):
+                  path_map: str | None = None,
+                  beets_directory: str = ""):
         cfg = MagicMock()
         cfg.plex_url = url
         cfg.plex_token = token
         cfg.plex_library_section_id = section
         cfg.plex_path_map = path_map
+        cfg.beets_directory = beets_directory
         cfg.resolved_plex_token.return_value = token
         return cfg
 
@@ -668,6 +700,58 @@ class TestTriggerPlexScan(unittest.TestCase):
         # confirm we sent something rooted under /prom_music, not the raw
         # ./ prefix without anchoring.
         self.assertIn("path=%2Fprom_music%2F", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_beets_directory_absolutizes_relative_path_for_bare_metal_plex(self, mock_urlopen):
+        """Bare-metal Plex (no Docker, no path_map) must still get an absolute
+        path. With cfg.beets_directory set and no path_map, the relative path
+        from beets gets joined with beets_directory before being sent."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map=None,
+                             beets_directory="/srv/music")
+        trigger_plex_scan(cfg, "Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("path=%2Fsrv%2Fmusic%2FArtist%2FAlbum", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_beets_directory_composes_with_path_map(self, mock_urlopen):
+        """When BOTH beets_directory and path_map are set (typical Docker
+        deployment): absolutize against beets_directory FIRST, then path_map
+        translates host→container. Output should be the container path."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map="/srv/music:/container/music",
+                             beets_directory="/srv/music")
+        trigger_plex_scan(cfg, "Artist/Album")
+        req = mock_urlopen.call_args[0][0]
+        self.assertIn("path=%2Fcontainer%2Fmusic%2FArtist%2FAlbum", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_warns_when_relative_and_no_absolutize_config(self, mock_urlopen):
+        """Final defensive guard: relative path with NO path_map AND NO
+        beets_directory should log a warning, since Plex can't resolve it."""
+        from lib.util import trigger_plex_scan
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b""
+        mock_urlopen.return_value = mock_resp
+        cfg = self._make_cfg(path_map=None, beets_directory="")
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            trigger_plex_scan(cfg, "Artist/Album")
+        self.assertTrue(
+            any("relative" in m.lower() for m in captured.output),
+            f"Expected warning about relative path, got: {captured.output}",
+        )
 
     @patch("lib.util.urllib.request.urlopen")
     def test_empty_imported_path_skips_path_arg(self, mock_urlopen):

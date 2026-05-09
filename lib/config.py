@@ -125,6 +125,16 @@ class CratediggerConfig:
     audio_check_mode: str = "normal"
     beets_tracking_file: str = ""
     verified_lossless_target: str = ""  # Target format after verified lossless (e.g. "opus 128", "mp3 v2")
+    # Absolute path to the beets library root (matches `directory:` in
+    # ~/.config/beets/config.yaml). Beets stores file paths in its SQLite
+    # DB as relative to this root, so `BeetsDB.get_album_info().album_path`
+    # is also relative. Consumers that perform host-side filesystem ops
+    # (cleanup_disambiguation_orphans) or send absolute paths to external
+    # services (trigger_plex_scan on bare-metal Plex) need to absolutize
+    # against this root. Optional — leave empty if the equivalent
+    # absolutization is provided via `plex_path_map` instead.
+    # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md.
+    beets_directory: str = ""
 
     # --- Quality Ranks (codec-aware comparison model, issue #60) ---
     quality_ranks: QualityRankConfig = field(default_factory=QualityRankConfig.defaults)
@@ -303,6 +313,9 @@ class CratediggerConfig:
             audio_check_mode=get("Beets Validation", "audio_check", "normal"),
             beets_tracking_file=get("Beets Validation", "tracking_file", ""),
             verified_lossless_target=get("Beets Validation", "verified_lossless_target", ""),
+            # Top-level `[Beets]` section (separate from `[Beets Validation]`
+            # which exists for legacy reasons). Empty string → unset.
+            beets_directory=get("Beets", "directory", ""),
             # Quality Ranks — codec-aware comparison policy. Missing section
             # yields the default QualityRankConfig (see lib/quality.py).
             quality_ranks=QualityRankConfig.from_ini(config),
