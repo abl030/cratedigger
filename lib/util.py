@@ -527,6 +527,16 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
                 local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
                 if scan_path.startswith(local_prefix):
                     scan_path = container_prefix + scan_path[len(local_prefix):]
+                elif not os.path.isabs(scan_path):
+                    # beets stores paths relative to its library root.
+                    # Re-anchor under the container prefix so Plex resolves
+                    # them against the library section's location.
+                    scan_path = container_prefix.rstrip("/") + "/" + scan_path
+                else:
+                    logger.warning(
+                        f"PLEX: imported_path {scan_path!r} is absolute but "
+                        f"outside path_map local_prefix {local_prefix!r}; "
+                        "Plex may silently ignore the partial scan")
             url += f"&path={quote(scan_path, safe='')}"
         # Log the URL without the token for debugging
         safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"
