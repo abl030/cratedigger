@@ -473,6 +473,22 @@ class FakeSlskdSearches:
         })
         return {"id": search_id}
 
+    def _maybe_apply_post_stop_flip(self, cfg: dict[str, Any]) -> None:
+        """Apply the post-stop state/response flip on the first observation
+        after ``stop()``. Called from both ``state()`` and
+        ``search_responses()`` because slskd's real async cleanup commits
+        the response store regardless of which endpoint we poll. Pre-#242
+        the flip was state()-gated; that no longer matches the production
+        helper which polls responses directly.
+        """
+        if cfg.get("_stopped") and cfg.get("post_stop_state") is not None:
+            cfg["state"] = cfg["post_stop_state"]
+            cfg["post_stop_state"] = None  # only flip once
+            if cfg.get("post_stop_responses") is not None:
+                cfg["responses"] = cfg["post_stop_responses"]
+                cfg["response_count"] = len(cfg["responses"])
+                cfg["post_stop_responses"] = None
+
     def state(self, search_id: Any, _include_responses: bool = False) -> dict[str, Any]:
         self.state_calls.append((search_id, _include_responses))
         cfg = self._searches.get(search_id)
@@ -483,16 +499,7 @@ class FakeSlskdSearches:
                 "isComplete": True,
                 "responseCount": 0,
             }
-        # If stop() ran and a post-stop state was configured, flip on
-        # the FIRST state() poll after stop(). This models slskd's async
-        # cleanup landing within one poll tick.
-        if cfg.get("_stopped") and cfg.get("post_stop_state") is not None:
-            cfg["state"] = cfg["post_stop_state"]
-            cfg["post_stop_state"] = None  # only flip once
-            if cfg.get("post_stop_responses") is not None:
-                cfg["responses"] = cfg["post_stop_responses"]
-                cfg["response_count"] = len(cfg["responses"])
-                cfg["post_stop_responses"] = None
+        self._maybe_apply_post_stop_flip(cfg)
         return {
             "id": search_id,
             "state": cfg["state"],
@@ -503,7 +510,10 @@ class FakeSlskdSearches:
     def search_responses(self, search_id: Any) -> list[dict[str, Any]]:
         self.responses_calls.append(search_id)
         cfg = self._searches.get(search_id)
-        return copy.deepcopy(cfg["responses"]) if cfg else []
+        if cfg is None:
+            return []
+        self._maybe_apply_post_stop_flip(cfg)
+        return copy.deepcopy(cfg["responses"])
 
     def stop(self, search_id: Any) -> bool:
         self.stop_calls.append(search_id)
