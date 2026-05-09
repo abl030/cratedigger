@@ -7,6 +7,7 @@ verifying response codes, JSON structure, and error handling.
 
 import copy
 from datetime import datetime, timezone
+import email.message
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
 from lib.import_queue import ImportJob
+from lib.pipeline_db import SearchPlanProvenance
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
@@ -1807,16 +1809,19 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
-        plan_provenance: dict | None = None,
+        plan_provenance: SearchPlanProvenance | None = None,
     ):
         from datetime import datetime, timezone
         from lib.pipeline_db import (
             ActiveSearchPlan, SearchPlanItemRow, SearchPlanRow,
+            SearchPlanMetadataSnapshot, SearchPlanItemProvenance,
+            SearchPlanProvenance,
         )
         plan = SearchPlanRow(
             id=11, request_id=100, generator_id=generator_id,
             status="active", failure_class=None,
-            metadata_snapshot={"artist": "X"}, provenance=plan_provenance,
+            metadata_snapshot=SearchPlanMetadataSnapshot(artist_name="X"),
+            provenance=plan_provenance,
             error_message=None, superseded_at=None,
             superseded_by_plan_id=None,
             created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
@@ -1827,7 +1832,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
                 strategy=("default" if i == 0 else f"strategy_{i}"),
                 query=f"q{i}", canonical_query_key=f"k{i}",
                 repeat_group=("default-3" if i == 0 else None),
-                provenance={"src": "gen"} if i == 0 else None,
+                provenance=SearchPlanItemProvenance(values={"src": "gen"}) if i == 0 else None,
             )
             for i in range(items_count)
         ]
@@ -1845,12 +1850,12 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         generator_id: str = "search-plan/2026-05-08-1",
     ):
         from datetime import datetime, timezone
-        from lib.pipeline_db import SearchPlanRow
+        from lib.pipeline_db import SearchPlanRow, SearchPlanProvenance
         return SearchPlanRow(
             id=plan_id, request_id=100, generator_id=generator_id,
             status=status, failure_class=failure_class,
             metadata_snapshot=None,
-            provenance={"reason": failure_class},
+            provenance=SearchPlanProvenance(values={"reason": failure_class}),
             error_message=error_message, superseded_at=None,
             superseded_by_plan_id=None,
             created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
@@ -1873,10 +1878,11 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- happy path: active + failures + legacy logs --
 
     def test_search_plan_route_returns_full_inspection_payload(self):
-        active = self._make_active(plan_provenance={
+        from lib.pipeline_db import SearchPlanProvenance
+        active = self._make_active(plan_provenance=SearchPlanProvenance(values={
             "omitted_candidates": [{"q": "x", "why": "low_entropy"}],
             "dropped_low_entropy_tokens": ["the", "and"],
-        })
+        }))
         det = self._make_failed_plan(
             plan_id=22, status="failed_deterministic",
             failure_class="no_runnable_query",
@@ -4727,7 +4733,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_mb.get_release_group.return_value = {
                 "id": self.MB_RG_ID,
                 "title": "RG",
@@ -4747,7 +4753,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.routes.browse.discogs_api") as mock_dg:
             from urllib.error import HTTPError
             mock_dg.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_dg.get_master_releases.return_value = {
                 "title": "M", "type": "Album", "first_release_date": "1997",
                 "artist_credit": "Artist", "primary_artist_id": "3840",
@@ -4768,7 +4774,7 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             status, data = self._get(
                 f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=release")
 
@@ -4780,9 +4786,9 @@ class TestSearchByIdResolveContract(_WebServerCase):
         with patch("web.server.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             mock_mb.get_release_group.side_effect = HTTPError(
-                url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+                url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
             status, data = self._get(
                 f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=unknown")
 
