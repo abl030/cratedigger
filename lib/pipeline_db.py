@@ -579,6 +579,23 @@ class ConsumedAttemptResult:
 
 
 @dataclass(frozen=True)
+class SearchLogHistoryPage:
+    """One paginated slice of ``search_log`` rows for a single request.
+
+    Returned by ``PipelineDB.get_search_history_page``. ``rows`` is an
+    ordered list (newest first) of full ``search_log`` row dicts —
+    JSONB columns (``candidates``) are already deserialized by
+    psycopg2's ``DictRow`` pipeline. ``next_before_id`` seeds the next
+    page's ``before_id`` cursor; ``None`` means this page exhausted the
+    history. Internal-only typed result; the route/CLI hand back a dict
+    tree on the wire.
+    """
+
+    rows: list[dict[str, object]]
+    next_before_id: int | None
+
+
+@dataclass(frozen=True)
 class RequestV0ProbeStateUpdate:
     """Typed update for current comparable lossless-source V0 probe state."""
 
@@ -2497,6 +2514,56 @@ class PipelineDB:
             LIMIT %s
         """, (request_id, int(limit)))
         return count, [dict(r) for r in head_cur.fetchall()]
+
+    def get_search_history_page(
+        self,
+        request_id: int,
+        *,
+        limit: int,
+        before_id: int | None = None,
+    ) -> "SearchLogHistoryPage":
+        """Cursor-paginated ``search_log`` rows for one request.
+
+        Returns at most ``limit`` rows for ``request_id`` ordered by
+        ``id DESC`` (newest first). ``before_id`` excludes rows whose id
+        is greater-than-or-equal — pass the previous page's
+        ``next_before_id`` to read the next page.
+
+        ``next_before_id`` is the id of the *next-older row past the
+        page boundary* — the +1 row trimmed by the SQL ``LIMIT %s + 1``
+        — when more rows remain, or ``None`` when the page exhausted
+        the history. The comparison in the WHERE clause is strict
+        ``<``, but ``next_before_id`` deliberately points one row past
+        the page so the next call resumes at the row we trimmed (it is
+        the smallest id we still want to return). No row is skipped at
+        page boundaries.
+
+        ``limit`` is unconditionally cast to ``int`` and not range-checked
+        here; callers (the route handler / CLI subcommand) own the
+        ``[1, 200]`` clamp so the DB layer stays a thin SQL adapter.
+        """
+        # +1 row to detect "more remains" without a second COUNT(*) round-trip.
+        sql_limit = int(limit) + 1
+        # ``<=`` so the trimmed row's id round-trips through the cursor
+        # without being dropped on the next page. The strict-less option
+        # would skip one row per boundary.
+        cur = self._execute("""
+            SELECT * FROM search_log
+            WHERE request_id = %s
+              AND (%s::int IS NULL OR id <= %s)
+            ORDER BY id DESC
+            LIMIT %s
+        """, (request_id, before_id, before_id, sql_limit))
+        rows = [dict(r) for r in cur.fetchall()]
+        next_before_id: int | None = None
+        if len(rows) > int(limit):
+            extra = rows.pop()
+            extra_id = extra["id"]
+            assert isinstance(extra_id, int)
+            next_before_id = extra_id
+        return SearchLogHistoryPage(
+            rows=rows, next_before_id=next_before_id,
+        )
 
     def get_search_history_batch(self, request_ids: list[int]) -> dict[int, list[dict[str, object]]]:
         """Batch fetch search history for multiple request IDs.

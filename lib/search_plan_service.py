@@ -80,6 +80,17 @@ RESULT_REQUEST_NOT_FOUND = "request_not_found"
 RESULT_ADVANCED = "advanced"
 RESULT_NO_ACTIVE_PLAN = "no_active_plan"
 RESULT_INVALID_TARGET = "invalid_target"
+# history_for_request outcomes (read-only paginated search_log slice).
+RESULT_HISTORY_PAGE_SUCCESS = "success"
+RESULT_HISTORY_PAGE_INPUT_INVALID = "input_invalid"
+
+# Bounds for the paginated history endpoint. The route handler and CLI
+# both consult these so the cap stays consistent across surfaces.
+HISTORY_PAGE_MIN_LIMIT = 1
+HISTORY_PAGE_MAX_LIMIT = 200
+# Default page size when the query string / CLI flag is omitted. 50 is
+# the v1 sensible default per the plan; tunable as the inspector evolves.
+HISTORY_PAGE_DEFAULT_LIMIT = 50
 
 # Sanitisation cap for persisted error/provenance strings. 4 KB is well
 # above any expected exception string but bounds JSONB blob growth so a
@@ -232,6 +243,29 @@ class ServiceResult:
     failure_class: str | None = None
     error_message: str | None = None
     is_supersede: bool = False
+
+
+@dataclass(frozen=True)
+class SearchLogHistoryPageResult:
+    """Outcome of one ``history_for_request`` call.
+
+    ``outcome`` is one of:
+      * ``RESULT_HISTORY_PAGE_SUCCESS`` — page produced; ``rows`` /
+        ``next_before_id`` populated.
+      * ``RESULT_REQUEST_NOT_FOUND`` — no such request id.
+      * ``RESULT_HISTORY_PAGE_INPUT_INVALID`` — ``limit`` or
+        ``before_id`` violated the bounds; ``error_message`` describes.
+
+    Internal-only typed result (the route + CLI hand back a dict tree on
+    the wire; no msgspec.Struct boundary needed since the rows are read
+    straight from the DB and never re-encoded as a Struct).
+    """
+
+    outcome: str
+    request_id: int
+    rows: list[dict[str, Any]]
+    next_before_id: int | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -450,6 +484,68 @@ class SearchPlanService:
                 new_strategy=new_item.strategy,
                 new_query=new_item.query,
             )
+
+    def history_for_request(
+        self,
+        request_id: int,
+        *,
+        limit: int,
+        before_id: int | None = None,
+    ) -> "SearchLogHistoryPageResult":
+        """Paginated read of one request's ``search_log`` rows.
+
+        Counterpart of ``GET /api/pipeline/<id>/search-plan/history`` and
+        ``pipeline-cli search-plan history``. Both surfaces wrap this
+        single service method so they cannot drift on the input bounds
+        or status mapping.
+
+        ``limit`` must be in ``[HISTORY_PAGE_MIN_LIMIT, HISTORY_PAGE_MAX_LIMIT]``;
+        violators return ``RESULT_HISTORY_PAGE_INPUT_INVALID``. ``before_id``
+        when present must be ``>= 1``. The DB layer is a thin SQL adapter
+        and does not re-validate.
+
+        Outcomes:
+          * ``RESULT_HISTORY_PAGE_SUCCESS`` — page produced; ``rows`` are
+            newest-first, capped at ``limit``; ``next_before_id`` seeds
+            the next page or is ``None`` when exhausted.
+          * ``RESULT_REQUEST_NOT_FOUND`` — request_id does not exist.
+          * ``RESULT_HISTORY_PAGE_INPUT_INVALID`` — bounds violation.
+        """
+        if (limit < HISTORY_PAGE_MIN_LIMIT
+                or limit > HISTORY_PAGE_MAX_LIMIT):
+            return SearchLogHistoryPageResult(
+                outcome=RESULT_HISTORY_PAGE_INPUT_INVALID,
+                request_id=request_id,
+                rows=[],
+                error_message=(
+                    f"limit must be in [{HISTORY_PAGE_MIN_LIMIT}, "
+                    f"{HISTORY_PAGE_MAX_LIMIT}]"
+                ),
+            )
+        if before_id is not None and before_id < 1:
+            return SearchLogHistoryPageResult(
+                outcome=RESULT_HISTORY_PAGE_INPUT_INVALID,
+                request_id=request_id,
+                rows=[],
+                error_message="before_id must be >= 1 when provided",
+            )
+        row = self.db.get_request(request_id)
+        if row is None:
+            return SearchLogHistoryPageResult(
+                outcome=RESULT_REQUEST_NOT_FOUND,
+                request_id=request_id,
+                rows=[],
+                error_message=f"request {request_id} not found",
+            )
+        page = self.db.get_search_history_page(
+            request_id, limit=limit, before_id=before_id,
+        )
+        return SearchLogHistoryPageResult(
+            outcome=RESULT_HISTORY_PAGE_SUCCESS,
+            request_id=request_id,
+            rows=page.rows,
+            next_before_id=page.next_before_id,
+        )
 
     @staticmethod
     def _resolve_advance_target(

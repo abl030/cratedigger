@@ -956,6 +956,7 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
         "get_search_plan_stats",
         "get_search_plan_stats_history",
         "get_legacy_search_log_summary",
+        "get_search_history_page",
         "record_consumed_search_attempt",
         "record_non_consuming_search_attempt",
         "is_request_plan_current",
@@ -1823,6 +1824,57 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(
             {k: [r["outcome"] for r in v] for k, v in batch.items()},
             {1: ["no_match", "found"], 2: ["error"]})
+
+    def test_get_search_history_page_clamps_to_limit_and_seeds_cursor(self):
+        """U1: cursor-paginated history mirrors PipelineDB semantics."""
+        db = FakePipelineDB()
+        for i in range(5):
+            db.log_search(1, query=f"q{i}", outcome="no_match")
+        page = db.get_search_history_page(1, limit=3)
+        self.assertEqual(len(page.rows), 3)
+        # Newest first.
+        self.assertEqual(page.rows[0]["query"], "q4")
+        self.assertEqual(page.rows[1]["query"], "q3")
+        self.assertEqual(page.rows[2]["query"], "q2")
+        # next_before_id seeds the next page.
+        self.assertIsNotNone(page.next_before_id)
+
+    def test_get_search_history_page_resumes_from_cursor_without_skip(self):
+        db = FakePipelineDB()
+        for i in range(5):
+            db.log_search(1, query=f"q{i}", outcome="no_match")
+        first = db.get_search_history_page(1, limit=3)
+        second = db.get_search_history_page(
+            1, limit=3, before_id=first.next_before_id,
+        )
+        self.assertEqual(len(second.rows), 2)
+        self.assertEqual(second.rows[0]["query"], "q1")
+        self.assertEqual(second.rows[1]["query"], "q0")
+        self.assertIsNone(second.next_before_id)
+        first_ids = {r["id"] for r in first.rows}
+        second_ids = {r["id"] for r in second.rows}
+        self.assertFalse(first_ids.intersection(second_ids))
+
+    def test_get_search_history_page_exhausted(self):
+        db = FakePipelineDB()
+        db.log_search(1, query="only", outcome="no_match")
+        page = db.get_search_history_page(1, limit=10)
+        self.assertEqual(len(page.rows), 1)
+        self.assertIsNone(page.next_before_id)
+
+    def test_get_search_history_page_empty(self):
+        db = FakePipelineDB()
+        page = db.get_search_history_page(1, limit=10)
+        self.assertEqual(page.rows, [])
+        self.assertIsNone(page.next_before_id)
+
+    def test_get_search_history_page_excludes_other_requests(self):
+        db = FakePipelineDB()
+        db.log_search(1, query="mine", outcome="no_match")
+        db.log_search(2, query="theirs", outcome="no_match")
+        page = db.get_search_history_page(1, limit=10)
+        self.assertEqual(len(page.rows), 1)
+        self.assertEqual(page.rows[0]["query"], "mine")
 
     def test_user_cooldowns_upsert_and_filter(self):
         db = FakePipelineDB()

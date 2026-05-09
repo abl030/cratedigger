@@ -937,6 +937,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
+        r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
         "/api/pipeline/add",
@@ -2367,6 +2368,152 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("integer", data["error"])
         mock_adv.assert_not_called()
+
+
+class TestPipelineSearchPlanHistoryContract(_WebServerCase):
+    """Contract for ``GET /api/pipeline/<id>/search-plan/history``.
+
+    The endpoint wraps ``SearchPlanService.history_for_request``. Both
+    the CLI (``pipeline-cli search-plan history``) and the API live or
+    die on the same service contract — see ``CLAUDE.md`` § "CLI ⇄ API
+    surface symmetry"; touching one without the other is a contract
+    drift waiting to happen.
+
+    Status-code mapping:
+      * 200 — RESULT_HISTORY_PAGE_SUCCESS
+      * 400 — input validation (non-int / out-of-bounds limit/before_id)
+      * 404 — RESULT_REQUEST_NOT_FOUND
+    """
+
+    HISTORY_REQUIRED_FIELDS = {"request_id", "rows", "next_before_id"}
+
+    def setUp(self) -> None:
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+
+    def _patch_service(self, **result_kwargs):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        return _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(**result_kwargs),
+        )
+
+    def test_history_success_returns_200_with_required_fields(self):
+        rows = [{
+            "id": 12340, "request_id": 100, "query": "q1",
+            "outcome": "no_match",
+        }]
+        with self._patch_service(
+                outcome="success", request_id=100, rows=rows,
+                next_before_id=12300):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.HISTORY_REQUIRED_FIELDS,
+                                "search-plan history response")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["rows"], rows)
+        self.assertEqual(data["next_before_id"], 12300)
+
+    def test_history_success_with_null_cursor_when_exhausted(self):
+        with self._patch_service(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["rows"], [])
+        self.assertIsNone(data["next_before_id"])
+
+    def test_history_request_not_found_returns_404(self):
+        with self._patch_service(
+                outcome="request_not_found", request_id=9999,
+                rows=[],
+                error_message="request 9999 not found"):
+            status, data = self._get(
+                "/api/pipeline/9999/search-plan/history?limit=50")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    def test_history_default_limit_when_not_supplied(self):
+        """No ``limit`` query param uses the default; service receives
+        an int — never passed-through query string."""
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None),
+        ) as mock_hist:
+            status, _ = self._get(
+                "/api/pipeline/100/search-plan/history")
+        self.assertEqual(status, 200)
+        kwargs = mock_hist.call_args.kwargs
+        self.assertIsInstance(kwargs.get("limit"), int)
+        self.assertGreaterEqual(kwargs["limit"], 1)
+        self.assertLessEqual(kwargs["limit"], 200)
+        self.assertIsNone(kwargs.get("before_id"))
+
+    def test_history_passes_before_id_through_to_service(self):
+        from unittest.mock import patch as _patch
+        from lib.search_plan_service import SearchLogHistoryPageResult
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+            return_value=SearchLogHistoryPageResult(
+                outcome="success", request_id=100, rows=[],
+                next_before_id=None),
+        ) as mock_hist:
+            status, _ = self._get(
+                "/api/pipeline/100/search-plan/history"
+                "?limit=50&before_id=12300")
+        self.assertEqual(status, 200)
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs.get("limit"), 50)
+        self.assertEqual(kwargs.get("before_id"), 12300)
+
+    def test_history_rejects_non_int_limit(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+        ) as mock_hist:
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_hist.assert_not_called()
+
+    def test_history_rejects_non_int_before_id(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.search_plan_service.SearchPlanService.history_for_request",
+        ) as mock_hist:
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=50&before_id=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_hist.assert_not_called()
+
+    def test_history_rejects_out_of_bounds_limit(self):
+        """Service-level bounds enforcement bubbles to 400 at the route."""
+        with self._patch_service(
+                outcome="input_invalid", request_id=100, rows=[],
+                error_message="limit must be in [1, 200]"):
+            status, data = self._get(
+                "/api/pipeline/100/search-plan/history?limit=500")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
 
 
 def _kwargs_to_query(kwargs: dict) -> str:

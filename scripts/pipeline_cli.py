@@ -1731,6 +1731,88 @@ def cmd_search_plan_advance(db, args):
     return 1
 
 
+def cmd_search_plan_history(db, args):
+    """Cursor-paginated read of one request's ``search_log`` rows.
+
+    Counterpart of ``GET /api/pipeline/<id>/search-plan/history``. Both
+    surfaces wrap ``SearchPlanService.history_for_request`` — keep them
+    in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Default limit is ``HISTORY_PAGE_DEFAULT_LIMIT`` (50). Pass
+    ``--before-id <id>`` to read the next page. JSON mode returns the
+    same payload as the API (``request_id`` / ``rows`` / ``next_before_id``).
+
+    Exit codes:
+      * 0 — ``RESULT_HISTORY_PAGE_SUCCESS``
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``
+      * 3 — ``RESULT_HISTORY_PAGE_INPUT_INVALID`` (limit out of bounds,
+        before_id < 1)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        HISTORY_PAGE_DEFAULT_LIMIT,
+        RESULT_HISTORY_PAGE_INPUT_INVALID,
+        RESULT_HISTORY_PAGE_SUCCESS,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    limit = args.limit if args.limit is not None else HISTORY_PAGE_DEFAULT_LIMIT
+    result = svc.history_for_request(
+        int(args.id),
+        limit=int(limit),
+        before_id=args.before_id,
+    )
+    payload = {
+        "request_id": result.request_id,
+        "rows": result.rows,
+        "next_before_id": result.next_before_id,
+        "outcome": result.outcome,
+        "error_message": result.error_message,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    elif result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
+        print(f"  Request ID:        {result.request_id}")
+        print(f"  Rows on page:      {len(result.rows)}")
+        print(f"  Next before-id:    "
+              f"{result.next_before_id if result.next_before_id is not None else '-'}")
+        for row in result.rows:
+            created = row.get("created_at") or "-"
+            outcome = row.get("outcome") or "-"
+            strategy = row.get("plan_strategy") or "(legacy)"
+            ordinal = row.get("plan_ordinal")
+            ord_str = f"ord={ordinal}" if ordinal is not None else "ord=-"
+            query = row.get("query") or ""
+            row_id = row.get("id")
+            print(
+                f"  [{created}] id={row_id} {outcome} {strategy} "
+                f"{ord_str} query={query!r}"
+            )
+        if result.next_before_id is not None:
+            print(
+                "  Next page: "
+                f"pipeline-cli search-plan history {result.request_id} "
+                f"--before-id {result.next_before_id}"
+            )
+    else:
+        print(f"  Request ID:        {result.request_id}")
+        print(f"  Outcome:           {result.outcome}")
+        if result.error_message:
+            print(f"  Error message:     {result.error_message}")
+
+    if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
+        return 0
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        return 2
+    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID:
+        return 3
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -1811,6 +1893,19 @@ def main():
              "current cursor whose strategy starts with this string "
              "(e.g. `track`, `unwild_year`)")
     p_sp_advance.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
+    p_sp_history = sp_sub.add_parser(
+        "history",
+        help="Cursor-paginated read of one request's search_log rows "
+             "(per-attempt forensics)")
+    p_sp_history.add_argument("id", type=int, help="Request ID")
+    p_sp_history.add_argument(
+        "--limit", type=int, default=None,
+        help="Rows per page; defaults to 50; valid range [1, 200]")
+    p_sp_history.add_argument(
+        "--before-id", type=int, default=None, dest="before_id",
+        help="Resume cursor: pass the previous page's next_before_id")
+    p_sp_history.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
 
     # quality
@@ -1959,6 +2054,7 @@ def main():
         "show": cmd_search_plan_show,
         "regenerate": cmd_search_plan_regenerate,
         "advance": cmd_search_plan_advance,
+        "history": cmd_search_plan_history,
     }
     try:
         if args.command == "search-plan":

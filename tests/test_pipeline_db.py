@@ -1153,6 +1153,132 @@ class TestSearchLog(unittest.TestCase):
 
 
 @requires_postgres
+class TestGetSearchHistoryPage(unittest.TestCase):
+    """U1: cursor-style pagination for ``GET /search-plan/history``.
+
+    The DB method ``get_search_history_page`` returns at most ``limit``
+    rows for one request_id ordered ``id DESC`` with an opaque
+    ``next_before_id`` seed when more rows remain. Mirrors
+    ``get_search_history`` shape but bounded.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="search-hist-page-uuid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed(self, n: int) -> list[int]:
+        for i in range(n):
+            self.db.log_search(
+                self.req_id, query=f"q{i}", outcome="no_match",
+            )
+        full = self.db.get_search_history(self.req_id)
+        return [int(r["id"]) for r in full]  # newest-first
+
+    def test_first_page_clamps_to_limit_and_seeds_next_before_id(self):
+        ids_desc = self._seed(75)
+        page = self.db.get_search_history_page(
+            self.req_id, limit=50, before_id=None,
+        )
+        self.assertEqual(len(page.rows), 50)
+        # Newest 50 rows in DESC order.
+        self.assertEqual(
+            [int(r["id"]) for r in page.rows], ids_desc[:50],
+        )
+        # next_before_id seeds the next page from the 51st row's id.
+        self.assertEqual(page.next_before_id, ids_desc[50])
+
+    def test_second_page_via_before_id_returns_strictly_older_rows(self):
+        ids_desc = self._seed(75)
+        first = self.db.get_search_history_page(
+            self.req_id, limit=50, before_id=None,
+        )
+        second = self.db.get_search_history_page(
+            self.req_id, limit=50, before_id=first.next_before_id,
+        )
+        # First page returns 50 rows; ``next_before_id`` points one row
+        # past the boundary (the 51st row), and the second page resumes
+        # *at* that row — no row is skipped.
+        self.assertEqual(len(second.rows), 25)
+        # Second page rows are older-or-equal to the cursor and
+        # id-monotonic descending.
+        page_ids = [int(r["id"]) for r in second.rows]
+        self.assertEqual(page_ids, ids_desc[50:75])
+        # No id appears in both pages (no boundary overlap).
+        first_ids = {int(r["id"]) for r in first.rows}
+        self.assertFalse(first_ids.intersection(page_ids))
+        self.assertIsNone(second.next_before_id)
+
+    def test_exhausted_when_fewer_rows_than_limit(self):
+        self._seed(30)
+        page = self.db.get_search_history_page(
+            self.req_id, limit=50, before_id=None,
+        )
+        self.assertEqual(len(page.rows), 30)
+        self.assertIsNone(page.next_before_id)
+
+    def test_empty_when_no_rows_for_request(self):
+        page = self.db.get_search_history_page(
+            self.req_id, limit=50, before_id=None,
+        )
+        self.assertEqual(page.rows, [])
+        self.assertIsNone(page.next_before_id)
+
+    def test_legacy_only_rows_returned_with_null_plan_columns(self):
+        # log_search writes legacy-shaped rows (plan_id IS NULL).
+        self.db.log_search(self.req_id, query="legacy", outcome="no_match")
+        page = self.db.get_search_history_page(
+            self.req_id, limit=10, before_id=None,
+        )
+        self.assertEqual(len(page.rows), 1)
+        row = page.rows[0]
+        self.assertEqual(row["query"], "legacy")
+        self.assertIsNone(row["plan_id"])
+        self.assertIsNone(row["plan_ordinal"])
+
+    def test_other_request_ids_excluded(self):
+        other_req = self.db.add_request(
+            mb_release_id="search-hist-page-other-uuid",
+            artist_name="C", album_title="D", source="request",
+        )
+        self.db.log_search(other_req, query="other", outcome="no_match")
+        self.db.log_search(self.req_id, query="mine", outcome="no_match")
+        page = self.db.get_search_history_page(
+            self.req_id, limit=10, before_id=None,
+        )
+        self.assertEqual(len(page.rows), 1)
+        self.assertEqual(page.rows[0]["query"], "mine")
+
+    def test_page_returns_dict_rows_with_full_search_log_columns(self):
+        self.db.log_search(
+            self.req_id, query="q", result_count=5, elapsed_s=1.2,
+            outcome="no_match", variant="v0", final_state="Completed",
+        )
+        page = self.db.get_search_history_page(
+            self.req_id, limit=1, before_id=None,
+        )
+        row = page.rows[0]
+        # Spot-check a wider column set than legacy_logs.head provides —
+        # this endpoint surfaces full telemetry per row.
+        for col in ("id", "request_id", "query", "result_count",
+                    "elapsed_s", "outcome", "candidates", "variant",
+                    "final_state", "browse_time_s", "match_time_s",
+                    "peers_browsed", "peers_browsed_lazy", "fanout_waves",
+                    "plan_id", "plan_item_id", "plan_ordinal",
+                    "plan_strategy", "plan_canonical_query_key",
+                    "plan_repeat_group", "plan_generator_id",
+                    "execution_stage", "attempt_consumed",
+                    "cursor_update_status", "stale_reason",
+                    "plan_cycle_snapshot", "created_at"):
+            self.assertIn(col, row, f"missing column {col!r}")
+
+
+@requires_postgres
 class TestPipelineDashboardMetrics(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
