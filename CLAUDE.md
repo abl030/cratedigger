@@ -280,7 +280,7 @@ Install with: `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`. Runs pyri
 - `/deploy` — full push → flake update → rebuild → verify sequence
 - `/debug-download <id>` — query both JSONB audit blobs for a download_log entry
 - `/check` — pyright + full test suite pre-commit quality gate
-- `/refactor`, `/fix-bug` — guided pipelines
+- `/refactor` — guided structural refactor pipeline
 
 ### Claude Code rules (auto-loaded when editing matching files)
 

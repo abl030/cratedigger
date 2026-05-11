@@ -35,7 +35,7 @@ history more closely.
 
 ### Shared review-fix format
 
-- When following the shared `refactor` or `fix-bug` workflows, keep the
+- When following the shared `refactor` workflow, keep the
   cross-engine review-fix subject pattern from the shared skill instead of
   inventing a Codex-only variant.
 - Prefer subjects such as
