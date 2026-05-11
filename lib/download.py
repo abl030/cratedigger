@@ -1803,6 +1803,10 @@ def reconstruct_grab_list_entry(
     """
     files = []
     for f in state.files:
+        restored_status = _restored_terminal_status(
+            f.last_state,
+            f.bytes_transferred,
+        )
         files.append(DownloadFile(
             filename=f.filename,
             id="",                  # Must be re-derived from slskd API
@@ -1814,6 +1818,7 @@ def reconstruct_grab_list_entry(
             retry=f.retry_count,
             bytes_transferred=f.bytes_transferred,
             last_state=f.last_state,
+            status=restored_status,
         ))
     year = request.get("year")
     return GrabListEntry(
@@ -1830,6 +1835,24 @@ def reconstruct_grab_list_entry(
         db_target_format=request.get("target_format"),
         import_folder=state.current_path,
     )
+
+
+def _restored_terminal_status(
+    last_state: str | None,
+    bytes_transferred: int,
+) -> dict[str, object] | None:
+    """Rehydrate terminal slskd observations persisted in JSONB state.
+
+    slskd's ``includeRemoved`` snapshot can stop exposing terminal transfer
+    rows between poll cycles. Once we have seen a terminal state, keep that
+    evidence actionable instead of downgrading it to an invisible transfer.
+    """
+    if not last_state or not last_state.startswith("Completed,"):
+        return None
+    return {
+        "state": last_state,
+        "bytesTransferred": bytes_transferred,
+    }
 
 
 # === Async download polling ===
@@ -2322,8 +2345,11 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
         now = datetime.now(timezone.utc)
         elapsed_seconds = (now - enqueued_at).total_seconds()
 
-        # Check if all transfers have vanished (slskd restart, user offline)
-        all_vanished = all(f.id == "" for f in entry.files)
+        # Check if all transfers have vanished (slskd restart, user offline).
+        # A restored terminal status from a previous poll is still visible
+        # evidence; do not erase it just because slskd no longer lists the
+        # removed transfer row.
+        all_vanished = all(f.id == "" and f.status is None for f in entry.files)
         if all_vanished:
             if elapsed_seconds < 60:
                 logger.info(
@@ -2335,9 +2361,11 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
             continue
 
-        # Mark files with vanished transfers as errored
+        # Mark files with vanished transfers as errored. Preserve restored
+        # terminal statuses (Completed, Rejected/Errored/etc.) from previous
+        # poll cycles so the reducer can report the real terminal failure.
         for f in entry.files:
-            if f.id == "":
+            if f.id == "" and f.status is None:
                 f.status = {"state": "Completed, Errored"}
 
         # Track total album age separately from stall/progress timing.

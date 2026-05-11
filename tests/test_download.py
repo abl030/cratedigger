@@ -2600,6 +2600,68 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
 
+    def test_poll_active_uses_persisted_terminal_failures_when_snapshot_drops_rows(self):
+        """Terminal slskd failures remain actionable after removed rows disappear.
+
+        Live elgoognplus M4A failures reached ``Completed, Rejected`` /
+        ``Completed, Errored`` with zero bytes. A later poll snapshot no
+        longer exposed those terminal rows, and the old code collapsed that
+        persisted evidence into the misleading ``all transfers vanished``
+        timeout.
+        """
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row(state_dict={
+            "filetype": "m4a",
+            "enqueued_at": (
+                datetime.now(timezone.utc) - timedelta(minutes=2)
+            ).isoformat(),
+            "files": [
+                {
+                    "username": "elgoognplus",
+                    "filename": (
+                        "Music\\78 Saab\\Crossed Lines\\01 No Illusions.m4a"
+                    ),
+                    "file_dir": "Music\\78 Saab\\Crossed Lines",
+                    "size": 26799968,
+                    "last_state": "Completed, Rejected",
+                    "bytes_transferred": 0,
+                },
+                {
+                    "username": "elgoognplus",
+                    "filename": (
+                        "Music\\78 Saab\\Crossed Lines\\02 Cops.m4a"
+                    ),
+                    "file_dir": "Music\\78 Saab\\Crossed Lines",
+                    "size": 29382804,
+                    "last_state": "Completed, Errored",
+                    "bytes_transferred": 0,
+                },
+            ],
+        })
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "elgoognplus",
+                "directories": [{
+                    "directory": "Music\\78 Saab\\Crossed Lines",
+                    "files": [],
+                }],
+            }],
+        )
+
+        with patch("lib.download.cancel_and_delete"):
+            poll_active_downloads(ctx)
+
+        fake_db.assert_log(self, 0, outcome="timeout")
+        log = fake_db.download_logs[0]
+        self.assertEqual(log.error_message, "all 2 files errored")
+        self.assertNotEqual(log.error_message, "all transfers vanished from slskd")
+        self.assertEqual(log.filetype, "m4a")
+        self.assertEqual(log.soulseek_username, "elgoognplus")
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
+        self.assertEqual(fake_db.cooldowns_applied, ["elgoognplus"])
+        self.assertEqual(fake_db.denylist, [])
+
     def test_poll_active_fresh_preclaim_with_empty_snapshot_stays_downloading(self):
         """A same-cycle preclaim should not be reset before slskd registers transfers."""
         from lib.download import poll_active_downloads
@@ -2651,6 +2713,49 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs()), 1)
+
+    def test_poll_active_restored_completed_success_queues_importer(self):
+        """Persisted success remains complete after slskd drops removed rows."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row(state_dict={
+            "filetype": "m4a",
+            "enqueued_at": (
+                datetime.now(timezone.utc) - timedelta(minutes=2)
+            ).isoformat(),
+            "files": [
+                {
+                    "username": "elgoognplus",
+                    "filename": (
+                        "Music\\78 Saab\\Crossed Lines\\01 No Illusions.m4a"
+                    ),
+                    "file_dir": "Music\\78 Saab\\Crossed Lines",
+                    "size": 26799968,
+                    "last_state": "Completed, Succeeded",
+                    "bytes_transferred": 26799968,
+                },
+            ],
+        })
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "elgoognplus",
+                "directories": [{
+                    "directory": "Music\\78 Saab\\Crossed Lines",
+                    "files": [],
+                }],
+            }],
+        )
+
+        with patch("lib.download.slskd_download_status") as mock_status:
+            poll_active_downloads(ctx)
+
+        mock_status.assert_not_called()
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.cooldowns_applied, [])
+        self.assertEqual(fake_db.denylist, [])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_ignores_stale_terminal_transfer_before_claim(self):
         """A new claim must not bind to an older includeRemoved terminal transfer."""
@@ -3968,6 +4073,38 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         entry = reconstruct_grab_list_entry(request, state)
         self.assertEqual(entry.files[0].bytes_transferred, 4096)
         self.assertEqual(entry.files[0].last_state, "InProgress")
+        self.assertIsNone(entry.files[0].status)
+
+    def test_reconstruct_restores_terminal_status_from_persisted_state(self):
+        """Once slskd reports a terminal state, later snapshot gaps must not
+        erase that evidence."""
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        state = ActiveDownloadState(
+            filetype="m4a",
+            enqueued_at="now",
+            files=[
+                ActiveDownloadFileState(
+                    username="elgoognplus",
+                    filename="Music\\78 Saab\\Crossed Lines\\01 No Illusions.m4a",
+                    file_dir="Music\\78 Saab\\Crossed Lines",
+                    size=26799968,
+                    bytes_transferred=0,
+                    last_state="Completed, Rejected",
+                ),
+            ],
+        )
+        request = {"id": 10, "album_title": "Crossed Lines",
+                   "artist_name": "78 Saab", "year": 2004,
+                   "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+
+        entry = reconstruct_grab_list_entry(request, state)
+
+        self.assertEqual(
+            entry.files[0].status,
+            {"state": "Completed, Rejected", "bytesTransferred": 0},
+        )
 
     def test_reconstruct_missing_year(self):
         from lib.download import reconstruct_grab_list_entry
