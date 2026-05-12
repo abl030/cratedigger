@@ -211,6 +211,57 @@ def recover_abandoned_preview_jobs(
     )
 
 
+def run_threaded_workers(
+    *,
+    dsn: str,
+    worker_id: str,
+    worker_count: int,
+    poll_interval: float,
+) -> int:
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    error_lock = threading.Lock()
+
+    def worker_loop(index: int) -> None:
+        thread_db = PipelineDB(dsn)
+        thread_worker_id = f"{worker_id}:preview-{index}"
+        try:
+            while not stop.is_set():
+                job = run_once(thread_db, worker_id=thread_worker_id)
+                if job is None:
+                    stop.wait(poll_interval)
+        except BaseException as exc:
+            with error_lock:
+                errors.append(exc)
+            stop.set()
+            logger.exception("Import preview worker thread %s crashed", index)
+        finally:
+            thread_db.close()
+
+    threads = [
+        threading.Thread(target=worker_loop, args=(i,), daemon=False)
+        for i in range(worker_count)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        stop.set()
+        for thread in threads:
+            thread.join()
+        return 0
+
+    if errors:
+        logger.error(
+            "Import preview worker exiting after %s worker thread crash(es)",
+            len(errors),
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run async previews for Cratedigger import jobs",
@@ -239,33 +290,12 @@ def main() -> int:
             )
 
         if args.workers > 1 and not args.once:
-            stop = threading.Event()
-
-            def worker_loop(index: int) -> None:
-                thread_db = PipelineDB(args.dsn)
-                thread_worker_id = f"{worker_id}:preview-{index}"
-                try:
-                    while not stop.is_set():
-                        job = run_once(thread_db, worker_id=thread_worker_id)
-                        if job is None:
-                            time.sleep(args.poll_interval)
-                finally:
-                    thread_db.close()
-
-            threads = [
-                threading.Thread(target=worker_loop, args=(i,), daemon=False)
-                for i in range(args.workers)
-            ]
-            for thread in threads:
-                thread.start()
-            try:
-                for thread in threads:
-                    thread.join()
-            except KeyboardInterrupt:
-                stop.set()
-                for thread in threads:
-                    thread.join()
-            return 0
+            return run_threaded_workers(
+                dsn=args.dsn,
+                worker_id=worker_id,
+                worker_count=args.workers,
+                poll_interval=args.poll_interval,
+            )
 
         while True:
             job = run_once(db, worker_id=worker_id)

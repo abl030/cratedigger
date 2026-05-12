@@ -3,6 +3,7 @@
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from typing import Any, cast
 from unittest.mock import patch
@@ -792,3 +793,38 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(updated.preview_status, "uncertain")
         self.assertEqual(updated.preview_error, "path_missing")
         self.assertEqual(db.get_denylisted_users(42), [])
+
+    def test_threaded_worker_exits_nonzero_when_worker_thread_crashes(self):
+        from scripts import import_preview_worker
+
+        class ThreadDB:
+            def close(self):
+                pass
+
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def run_once(db, *, worker_id):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("db connection died")
+            return None
+
+        with (
+            patch("scripts.import_preview_worker.PipelineDB",
+                  side_effect=lambda dsn: ThreadDB()),
+            patch("scripts.import_preview_worker.run_once",
+                  side_effect=run_once),
+            patch("scripts.import_preview_worker.logger.exception"),
+            patch("scripts.import_preview_worker.logger.error"),
+        ):
+            exit_code = import_preview_worker.run_threaded_workers(
+                dsn="postgresql://example",
+                worker_id="preview-test",
+                worker_count=2,
+                poll_interval=60.0,
+            )
+
+        self.assertEqual(exit_code, 1)
