@@ -1413,6 +1413,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         ])
 
         self.assertEqual(cycle_id, 1)
+        self.assertEqual(db.cycle_metrics[0]["wanted_total"], 0)
         self.assertEqual(new_dirs, 2)
         self.assertEqual(repeated, 0)
         peer_metrics = db.get_peer_dir_daily_metrics()
@@ -1422,6 +1423,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(dashboard["cycles"]["recent"][0]["cycle_total_s"],
                          12.5)
         self.assertEqual(dashboard["peer_dirs"]["totals"]["known_combos"], 2)
+        self.assertEqual(
+            dashboard["coverage"]["wanted_trend"]["current_wanted"], 0)
 
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload

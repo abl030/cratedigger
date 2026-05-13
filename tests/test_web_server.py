@@ -368,6 +368,37 @@ def _make_server():
                     "matches_per_day": 2,
                 },
             ],
+            "wanted_trend": {
+                "current_wanted": 10,
+                "latest_sample_at": "2026-05-05T00:00:00+00:00",
+                "series_24h": [
+                    {
+                        "sampled_at": "2026-05-04T23:00:00+00:00",
+                        "wanted_total": 12,
+                    },
+                    {
+                        "sampled_at": "2026-05-05T00:00:00+00:00",
+                        "wanted_total": 10,
+                        "synthetic": True,
+                    },
+                ],
+                "windows": [
+                    {
+                        "label": "6h",
+                        "hours": 6,
+                        "sample_count": 1,
+                        "start_sample_at": "2026-05-04T23:00:00+00:00",
+                        "end_sample_at": "2026-05-05T00:00:00+00:00",
+                        "start_wanted": 12,
+                        "end_wanted": 10,
+                        "delta": -2,
+                        "delta_per_hour": -2.0,
+                        "drain_per_hour": 2.0,
+                        "eta_hours": 5.0,
+                        "trend": "down",
+                    },
+                ],
+            },
             "top_10_share_24h": 0.75,
             "top_loop_suspects": [
                 {
@@ -1093,8 +1124,19 @@ class TestPipelineRouteContracts(_WebServerCase):
         "active_wanted_searches_6h", "oldest_last_search_at",
         "matches_24h", "matches_6h", "matches_per_hour_24h",
         "matches_per_hour_6h", "match_rate_series_24h",
-        "match_rate_series_28d", "top_10_share_24h", "top_loop_suspects",
-        "stale_wanted",
+        "match_rate_series_28d", "wanted_trend", "top_10_share_24h",
+        "top_loop_suspects", "stale_wanted",
+    }
+    DASHBOARD_WANTED_TREND_FIELDS = {
+        "current_wanted", "latest_sample_at", "series_24h", "windows",
+    }
+    DASHBOARD_WANTED_TREND_POINT_FIELDS = {
+        "sampled_at", "wanted_total",
+    }
+    DASHBOARD_WANTED_TREND_WINDOW_FIELDS = {
+        "label", "hours", "sample_count", "start_sample_at",
+        "end_sample_at", "start_wanted", "end_wanted", "delta",
+        "delta_per_hour", "drain_per_hour", "eta_hours", "trend",
     }
     DASHBOARD_MATCH_RATE_POINT_FIELDS = {
         "bucket_start", "matches", "matches_per_hour",
@@ -1260,6 +1302,24 @@ class TestPipelineRouteContracts(_WebServerCase):
             data["coverage"]["match_rate_series_28d"][0],
             self.DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS,
             "pipeline dashboard daily match rate point",
+        )
+        _assert_required_fields(
+            self,
+            data["coverage"]["wanted_trend"],
+            self.DASHBOARD_WANTED_TREND_FIELDS,
+            "pipeline dashboard wanted trend",
+        )
+        _assert_required_fields(
+            self,
+            data["coverage"]["wanted_trend"]["series_24h"][0],
+            self.DASHBOARD_WANTED_TREND_POINT_FIELDS,
+            "pipeline dashboard wanted trend point",
+        )
+        _assert_required_fields(
+            self,
+            data["coverage"]["wanted_trend"]["windows"][0],
+            self.DASHBOARD_WANTED_TREND_WINDOW_FIELDS,
+            "pipeline dashboard wanted trend window",
         )
         _assert_required_fields(
             self,

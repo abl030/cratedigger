@@ -72,6 +72,42 @@ console.log('renderCoverageCard() shows found-enqueue match rates');
   assertExcludes(html, 'match-rate-chart', 'chart stays collapsed by default');
 }
 
+console.log('renderWantedTrendCard() shows backlog drain and ETA');
+{
+  const html = __test__.renderWantedTrendCard({
+    current_wanted: 10,
+    series_24h: [
+      {sampled_at: '2026-05-05T00:00:00+00:00', wanted_total: 14},
+      {sampled_at: '2026-05-05T06:00:00+00:00', wanted_total: 10},
+    ],
+    windows: [
+      {
+        label: '6h',
+        delta: -4,
+        delta_per_hour: -0.6667,
+        drain_per_hour: 0.6667,
+        eta_hours: 15,
+        trend: 'down',
+      },
+      {
+        label: '24h',
+        delta: 2,
+        delta_per_hour: 0.0833,
+        drain_per_hour: 0,
+        eta_hours: null,
+        trend: 'up',
+      },
+    ],
+  });
+  assertContains(html, 'Wanted Trend', 'card title rendered');
+  assertContains(html, 'Current', 'current row rendered');
+  assertContains(html, '>10</strong>', 'current wanted rendered');
+  assertContains(html, 'down 0.67/hr (-4)', 'drain rate rendered');
+  assertContains(html, 'up 0.08/hr (+2)', 'growth rate rendered');
+  assertContains(html, '15.0h', 'ETA rendered');
+  assertContains(html, 'wanted-trend-line', 'sparkline rendered');
+}
+
 console.log('renderCoverageCard() expands an hourly match-rate chart under the 6h row');
 {
   state.pipelineMatchGraphOpen = false;

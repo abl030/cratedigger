@@ -51,6 +51,11 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 BACKOFF_BASE_MINUTES = 30
 BACKOFF_MAX_MINUTES = 60 * 6  # 6 hours
 DASHBOARD_WINDOWS: tuple[tuple[str, int], ...] = (("24h", 24), ("6h", 6))
+DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
+    ("6h", 6),
+    ("24h", 24),
+    ("7d", 24 * 7),
+)
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -2654,9 +2659,14 @@ class PipelineDB:
         find_download_queued: int = 0,
         find_download_completed: int = 0,
         find_download_drain_time_s: float = 0.0,
+        wanted_total: int | None = None,
     ) -> int:
         """Persist one completed cratedigger cycle's runtime counters."""
         completed = completed_at or datetime.now(timezone.utc)
+        wanted_snapshot = (
+            self._current_wanted_total() if wanted_total is None
+            else max(0, int(wanted_total))
+        )
         cur = self._execute("""
             INSERT INTO cycle_metrics (
                 started_at, created_at, cycle_total_s, browse_time_s,
@@ -2665,11 +2675,11 @@ class PipelineDB:
                 cache_write_errors, peers_browsed, peers_browsed_lazy,
                 fanout_waves, cycle_searches_watchdog_killed,
                 find_download_queued, find_download_completed,
-                find_download_drain_time_s
+                find_download_drain_time_s, wanted_total
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s, %s
             )
             RETURNING id
         """, (
@@ -2679,12 +2689,21 @@ class PipelineDB:
             cache_write_errors, peers_browsed, peers_browsed_lazy,
             fanout_waves, cycle_searches_watchdog_killed,
             find_download_queued, find_download_completed,
-            find_download_drain_time_s,
+            find_download_drain_time_s, wanted_snapshot,
         ))
         row = cur.fetchone()
         self.conn.commit()
         assert row is not None, "INSERT RETURNING should always return a row"
         return int(row["id"])
+
+    def _current_wanted_total(self) -> int:
+        cur = self._execute("""
+            SELECT COUNT(*)::int AS wanted_total
+            FROM album_requests
+            WHERE status = 'wanted'
+        """)
+        row = cur.fetchone() or {}
+        return int(row.get("wanted_total") or 0)
 
     def record_peer_dir_observations(
         self,
@@ -3257,11 +3276,131 @@ class PipelineDB:
         )
         return {
             **summary,
+            "wanted_trend": self._dashboard_wanted_trend(
+                int(summary.get("wanted_total") or 0),
+            ),
             "match_rate_series_24h": self._dashboard_match_rate_series(24),
             "match_rate_series_28d": self._dashboard_daily_match_rate_series(28),
             "top_10_share_24h": top_10_share,
             "top_loop_suspects": top_suspects,
             "stale_wanted": self._dashboard_stale_wanted(),
+        }
+
+    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        cur = self._execute("""
+            SELECT created_at, wanted_total
+            FROM cycle_metrics
+            WHERE wanted_total IS NOT NULL
+              AND created_at >= NOW() - INTERVAL '7 days'
+            ORDER BY created_at ASC, id ASC
+        """)
+        samples: list[tuple[datetime, int]] = []
+        for row in cur.fetchall():
+            created_at = row.get("created_at")
+            if not isinstance(created_at, datetime):
+                continue
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_at = created_at.astimezone(timezone.utc)
+            samples.append((created_at, int(row.get("wanted_total") or 0)))
+
+        series_24h = [
+            self._serialize_wanted_trend_sample(sample_at, wanted)
+            for sample_at, wanted in samples
+            if sample_at >= now - timedelta(hours=24)
+        ]
+        series_24h.append({
+            "sampled_at": now.isoformat(),
+            "wanted_total": current_wanted,
+            "synthetic": True,
+        })
+        latest_sample_at = samples[-1][0].isoformat() if samples else None
+        return {
+            "current_wanted": current_wanted,
+            "latest_sample_at": latest_sample_at,
+            "series_24h": series_24h,
+            "windows": [
+                self._dashboard_wanted_trend_window(
+                    label,
+                    hours,
+                    samples=samples,
+                    now=now,
+                    current_wanted=current_wanted,
+                )
+                for label, hours in DASHBOARD_WANTED_TREND_WINDOWS
+            ],
+        }
+
+    def _dashboard_wanted_trend_window(
+        self,
+        label: str,
+        hours: int,
+        *,
+        samples: list[tuple[datetime, int]],
+        now: datetime,
+        current_wanted: int,
+    ) -> dict[str, Any]:
+        window_start = now - timedelta(hours=hours)
+        window_samples = [(at, wanted) for at, wanted in samples if at >= window_start]
+        if not window_samples:
+            return {
+                "label": label,
+                "hours": hours,
+                "sample_count": 0,
+                "start_sample_at": None,
+                "end_sample_at": now.isoformat(),
+                "start_wanted": None,
+                "end_wanted": current_wanted,
+                "delta": None,
+                "delta_per_hour": None,
+                "drain_per_hour": None,
+                "eta_hours": None,
+                "trend": "unknown",
+            }
+
+        start_at, start_wanted = window_samples[0]
+        elapsed_hours = (now - start_at).total_seconds() / 3600
+        delta = current_wanted - start_wanted
+        if elapsed_hours <= 0:
+            delta_per_hour = None
+            drain_per_hour = None
+            eta_hours = None
+            trend = "unknown"
+        else:
+            delta_per_hour = delta / elapsed_hours
+            drain_per_hour = max(-delta_per_hour, 0.0)
+            eta_hours = (
+                current_wanted / drain_per_hour
+                if drain_per_hour > 0 and current_wanted > 0
+                else None
+            )
+            trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
+
+        return {
+            "label": label,
+            "hours": hours,
+            "sample_count": len(window_samples),
+            "start_sample_at": start_at.isoformat(),
+            "end_sample_at": now.isoformat(),
+            "start_wanted": start_wanted,
+            "end_wanted": current_wanted,
+            "delta": delta,
+            "delta_per_hour": delta_per_hour,
+            "drain_per_hour": drain_per_hour,
+            "eta_hours": eta_hours,
+            "trend": trend,
+        }
+
+    def _serialize_wanted_trend_sample(
+        self,
+        sample_at: datetime,
+        wanted_total: int,
+    ) -> dict[str, Any]:
+        return {
+            "sampled_at": sample_at.isoformat(),
+            "wanted_total": wanted_total,
         }
 
     def _dashboard_match_rate_series(self, hours: int) -> list[dict[str, Any]]:

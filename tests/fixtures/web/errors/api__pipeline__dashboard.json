@@ -69,6 +69,61 @@
     "matches_per_hour_6h": 0,
     "match_rate_series_24h": [],
     "match_rate_series_28d": [],
+    "wanted_trend": {
+      "current_wanted": 9,
+      "latest_sample_at": "2026-05-05T11:20:00+00:00",
+      "series_24h": [
+        {"sampled_at": "2026-05-05T08:00:00+00:00", "wanted_total": 7},
+        {"sampled_at": "2026-05-05T09:00:00+00:00", "wanted_total": 8},
+        {"sampled_at": "2026-05-05T10:00:00+00:00", "wanted_total": 8},
+        {"sampled_at": "2026-05-05T11:20:00+00:00", "wanted_total": 9},
+        {"sampled_at": "2026-05-05T11:30:00+00:00", "wanted_total": 9, "synthetic": true}
+      ],
+      "windows": [
+        {
+          "label": "6h",
+          "hours": 6,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T08:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:30:00+00:00",
+          "start_wanted": 7,
+          "end_wanted": 9,
+          "delta": 2,
+          "delta_per_hour": 0.57,
+          "drain_per_hour": 0,
+          "eta_hours": null,
+          "trend": "up"
+        },
+        {
+          "label": "24h",
+          "hours": 24,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T08:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:30:00+00:00",
+          "start_wanted": 7,
+          "end_wanted": 9,
+          "delta": 2,
+          "delta_per_hour": 0.57,
+          "drain_per_hour": 0,
+          "eta_hours": null,
+          "trend": "up"
+        },
+        {
+          "label": "7d",
+          "hours": 168,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T08:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:30:00+00:00",
+          "start_wanted": 7,
+          "end_wanted": 9,
+          "delta": 2,
+          "delta_per_hour": 0.57,
+          "drain_per_hour": 0,
+          "eta_hours": null,
+          "trend": "up"
+        }
+      ]
+    },
     "top_10_share_24h": 0.91,
     "top_loop_suspects": [],
     "stale_wanted": []

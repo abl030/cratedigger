@@ -225,6 +225,7 @@ function renderPipelineDashboard() {
     <div class="dashboard-grid">
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
+      ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
       ${renderPeerDirCard(peerDirs)}
       ${renderSearchCard(searches)}
       ${renderCycleCard(cycles)}
@@ -234,6 +235,90 @@ function renderPipelineDashboard() {
       ${renderStaleWanted(coverage.stale_wanted || [])}
     </div>
   `;
+}
+
+function renderWantedTrendCard(trend) {
+  const current = trend.current_wanted == null ? null : Number(trend.current_wanted);
+  const windows = Array.isArray(trend.windows) ? trend.windows : [];
+  const etaWindow = windows.find(w => Number(w?.drain_per_hour) > 0 && w?.label === '24h')
+    || windows.find(w => Number(w?.drain_per_hour) > 0);
+  return `
+    <div class="dashboard-card">
+      <div class="dashboard-card-title">Wanted Trend</div>
+      ${renderWantedTrendChart(trend.series_24h || [])}
+      <div class="metric-list">
+        <div class="metric-row"><span>Current</span><strong>${current == null ? 'n/a' : formatCount(current)}</strong></div>
+        ${windows.map(w => `
+          <div class="metric-row">
+            <span>${esc(w.label || '')}</span>
+            <strong class="${wantedTrendClass(w)}">${formatWantedTrendWindow(w)}</strong>
+          </div>
+        `).join('')}
+        <div class="metric-row">
+          <span>ETA</span>
+          <strong>${etaWindow ? formatEtaHours(etaWindow.eta_hours) : 'n/a'}</strong>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderWantedTrendChart(points) {
+  const series = normalizeWantedTrendSeries(points);
+  if (series.length < 2) {
+    return `<div class="wanted-trend-chart"><div class="chart-empty">Collecting wanted snapshots</div></div>`;
+  }
+
+  const width = 240;
+  const height = 64;
+  const minWanted = Math.min(...series.map(p => p.wanted));
+  const maxWanted = Math.max(...series.map(p => p.wanted));
+  const range = Math.max(1, maxWanted - minWanted);
+  const coords = series.map((point, index) => {
+    const x = series.length === 1 ? width : (index / (series.length - 1)) * width;
+    const y = height - ((point.wanted - minWanted) / range) * height;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+  const area = `0,${height} ${coords} ${width},${height}`;
+  const first = series[0]?.time ? awstTime(series[0].time) : '';
+  const last = series[series.length - 1]?.time ? awstTime(series[series.length - 1].time) : '';
+  const latest = series[series.length - 1]?.wanted;
+  return `
+    <div class="wanted-trend-chart">
+      <div class="match-rate-chart-head"><span>Last 24 hours</span><strong>${formatCount(latest)}</strong></div>
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Wanted backlog trend">
+        <polygon class="wanted-trend-area" points="${area}"></polygon>
+        <polyline class="wanted-trend-line" points="${coords}"></polyline>
+      </svg>
+      <div class="match-rate-chart-axis"><span>${first}</span><span>${last}</span></div>
+    </div>
+  `;
+}
+
+function normalizeWantedTrendSeries(points) {
+  return (Array.isArray(points) ? points : []).map(point => {
+    const row = point || {};
+    const wanted = Number(row.wanted_total);
+    return {
+      time: row.sampled_at || '',
+      wanted: Number.isFinite(wanted) ? wanted : 0,
+    };
+  }).filter(point => point.time || Number.isFinite(point.wanted));
+}
+
+function wantedTrendClass(w) {
+  if (!w || w.delta == null) return 'metric-muted';
+  if (w.trend === 'down') return 'metric-good';
+  if (w.trend === 'up') return 'metric-warn';
+  return 'metric-muted';
+}
+
+function formatWantedTrendWindow(w) {
+  if (!w || w.delta == null || w.delta_per_hour == null) return 'collecting';
+  const delta = Number(w.delta);
+  if (delta === 0) return 'flat';
+  const direction = delta < 0 ? 'down' : 'up';
+  return `${direction} ${formatDecimal(Math.abs(w.delta_per_hour))}/hr (${formatSignedCount(delta)})`;
 }
 
 function renderPeerDirCard(peerDirs) {
@@ -599,10 +684,25 @@ function formatCount(value) {
   return Number(value).toLocaleString();
 }
 
+function formatSignedCount(value) {
+  if (value == null || Number.isNaN(Number(value))) return '0';
+  const n = Number(value);
+  const formatted = Math.abs(n).toLocaleString();
+  return n > 0 ? `+${formatted}` : n < 0 ? `-${formatted}` : '0';
+}
+
 function formatDecimal(value) {
   if (value == null || Number.isNaN(Number(value))) return 'n/a';
   const n = Number(value);
   return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+}
+
+function formatEtaHours(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  const hours = Number(value);
+  if (hours < 24) return `${formatDecimal(hours)}h`;
+  const days = hours / 24;
+  return `${days >= 10 ? days.toFixed(0) : days.toFixed(1)}d`;
 }
 
 function formatMatchRate(value) {
@@ -902,12 +1002,17 @@ export async function updateStatus(id, newStatus) {
 }
 
 export const __test__ = {
+  formatEtaHours,
+  formatWantedTrendWindow,
   normalizeMatchRateSeries,
+  normalizeWantedTrendSeries,
   renderDailyMatchRateChart,
   renderCoverageCard,
   renderHourlyMatchRateChart,
   renderMatchRateChart,
   renderPeerDirHeavyQueries,
   renderPipelineNav,
+  renderWantedTrendCard,
+  renderWantedTrendChart,
   withCoverageMatchRates,
 };

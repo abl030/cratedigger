@@ -1314,6 +1314,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             cycle_searches_watchdog_killed=0,
             find_download_queued=5,
             find_download_completed=5,
+            wanted_total=4,
         )
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=2, seconds=300),
@@ -1323,6 +1324,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             cycle_searches_watchdog_killed=1,
             find_download_queued=3,
             find_download_completed=2,
+            wanted_total=5,
         )
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=10, seconds=900),
@@ -1330,6 +1332,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             cycle_total_s=900.0,
             search_time_s=700.0,
             cache_errors=2,
+            wanted_total=6,
         )
 
         self.db.log_search(
@@ -1389,6 +1392,22 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["matches_6h"], 1)
         self.assertAlmostEqual(coverage["matches_per_hour_24h"], 1 / 24)
         self.assertAlmostEqual(coverage["matches_per_hour_6h"], 1 / 6)
+        trend = coverage["wanted_trend"]
+        self.assertEqual(trend["current_wanted"], 3)
+        self.assertEqual([w["label"] for w in trend["windows"]],
+                         ["6h", "24h", "7d"])
+        trend_6h = trend["windows"][0]
+        self.assertEqual(trend_6h["start_wanted"], 5)
+        self.assertEqual(trend_6h["end_wanted"], 3)
+        self.assertEqual(trend_6h["delta"], -2)
+        self.assertEqual(trend_6h["trend"], "down")
+        self.assertGreater(trend_6h["drain_per_hour"], 0)
+        self.assertIsNotNone(trend_6h["eta_hours"])
+        self.assertGreaterEqual(len(trend["series_24h"]), 4)
+        self.assertEqual(
+            set(trend["series_24h"][0]),
+            {"sampled_at", "wanted_total"},
+        )
         self.assertEqual(len(coverage["match_rate_series_24h"]), 24)
         self.assertEqual(
             sum(point["matches"] for point in coverage["match_rate_series_24h"]),

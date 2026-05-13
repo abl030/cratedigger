@@ -2105,7 +2105,12 @@ class FakePipelineDB:
         find_download_queued: int = 0,
         find_download_completed: int = 0,
         find_download_drain_time_s: float = 0.0,
+        wanted_total: int | None = None,
     ) -> int:
+        wanted_snapshot = (
+            self._current_wanted_total() if wanted_total is None
+            else max(0, int(wanted_total))
+        )
         row = {
             "id": len(self.cycle_metrics) + 1,
             "started_at": started_at,
@@ -2127,9 +2132,100 @@ class FakePipelineDB:
             "find_download_queued": find_download_queued,
             "find_download_completed": find_download_completed,
             "find_download_drain_time_s": find_download_drain_time_s,
+            "wanted_total": wanted_snapshot,
         }
         self.cycle_metrics.append(row)
         return int(row["id"])
+
+    def _current_wanted_total(self) -> int:
+        return sum(1 for req in self._requests.values()
+                   if req.get("status") == "wanted")
+
+    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
+        now = _utcnow()
+        samples: list[tuple[datetime, int]] = []
+        for row in sorted(self.cycle_metrics, key=lambda r: r["created_at"]):
+            if row.get("wanted_total") is None:
+                continue
+            created_at = row["created_at"]
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_at = created_at.astimezone(timezone.utc)
+            if created_at >= now - timedelta(days=7):
+                samples.append((created_at, int(row["wanted_total"])))
+
+        def _window(label: str, hours: int) -> dict[str, Any]:
+            window_start = now - timedelta(hours=hours)
+            window_samples = [
+                (at, wanted) for at, wanted in samples
+                if at >= window_start
+            ]
+            if not window_samples:
+                return {
+                    "label": label,
+                    "hours": hours,
+                    "sample_count": 0,
+                    "start_sample_at": None,
+                    "end_sample_at": now.isoformat(),
+                    "start_wanted": None,
+                    "end_wanted": current_wanted,
+                    "delta": None,
+                    "delta_per_hour": None,
+                    "drain_per_hour": None,
+                    "eta_hours": None,
+                    "trend": "unknown",
+                }
+            start_at, start_wanted = window_samples[0]
+            elapsed_hours = (now - start_at).total_seconds() / 3600
+            delta = current_wanted - start_wanted
+            if elapsed_hours <= 0:
+                delta_per_hour = None
+                drain_per_hour = None
+                eta_hours = None
+                trend = "unknown"
+            else:
+                delta_per_hour = delta / elapsed_hours
+                drain_per_hour = max(-delta_per_hour, 0.0)
+                eta_hours = (
+                    current_wanted / drain_per_hour
+                    if drain_per_hour > 0 and current_wanted > 0
+                    else None
+                )
+                trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
+            return {
+                "label": label,
+                "hours": hours,
+                "sample_count": len(window_samples),
+                "start_sample_at": start_at.isoformat(),
+                "end_sample_at": now.isoformat(),
+                "start_wanted": start_wanted,
+                "end_wanted": current_wanted,
+                "delta": delta,
+                "delta_per_hour": delta_per_hour,
+                "drain_per_hour": drain_per_hour,
+                "eta_hours": eta_hours,
+                "trend": trend,
+            }
+
+        return {
+            "current_wanted": current_wanted,
+            "latest_sample_at": samples[-1][0].isoformat() if samples else None,
+            "series_24h": [
+                {"sampled_at": at.isoformat(), "wanted_total": wanted}
+                for at, wanted in samples
+                if at >= now - timedelta(hours=24)
+            ] + [{
+                "sampled_at": now.isoformat(),
+                "wanted_total": current_wanted,
+                "synthetic": True,
+            }],
+            "windows": [
+                _window("6h", 6),
+                _window("24h", 24),
+                _window("7d", 24 * 7),
+            ],
+        }
 
     def record_peer_dir_observations(
         self,
@@ -2281,7 +2377,11 @@ class FakePipelineDB:
                     reverse=True,
                 )[:8],
             },
-            "coverage": {},
+            "coverage": {
+                "wanted_trend": self._dashboard_wanted_trend(
+                    self._current_wanted_total(),
+                ),
+            },
             "peer_dirs": peer_dirs,
             "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
         }

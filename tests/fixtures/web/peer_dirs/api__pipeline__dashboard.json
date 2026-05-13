@@ -129,6 +129,61 @@
       {"bucket_start": "2026-05-04T00:00:00+00:00", "matches": 128, "matches_per_day": 128},
       {"bucket_start": "2026-05-05T00:00:00+00:00", "matches": 27, "matches_per_day": 27}
     ],
+    "wanted_trend": {
+      "current_wanted": 16,
+      "latest_sample_at": "2026-05-05T11:00:00+00:00",
+      "series_24h": [
+        {"sampled_at": "2026-05-05T05:00:00+00:00", "wanted_total": 42},
+        {"sampled_at": "2026-05-05T07:00:00+00:00", "wanted_total": 34},
+        {"sampled_at": "2026-05-05T09:00:00+00:00", "wanted_total": 25},
+        {"sampled_at": "2026-05-05T11:00:00+00:00", "wanted_total": 17},
+        {"sampled_at": "2026-05-05T11:05:00+00:00", "wanted_total": 16, "synthetic": true}
+      ],
+      "windows": [
+        {
+          "label": "6h",
+          "hours": 6,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T05:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:05:00+00:00",
+          "start_wanted": 42,
+          "end_wanted": 16,
+          "delta": -26,
+          "delta_per_hour": -4.27,
+          "drain_per_hour": 4.27,
+          "eta_hours": 3.75,
+          "trend": "down"
+        },
+        {
+          "label": "24h",
+          "hours": 24,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T05:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:05:00+00:00",
+          "start_wanted": 42,
+          "end_wanted": 16,
+          "delta": -26,
+          "delta_per_hour": -4.27,
+          "drain_per_hour": 4.27,
+          "eta_hours": 3.75,
+          "trend": "down"
+        },
+        {
+          "label": "7d",
+          "hours": 168,
+          "sample_count": 4,
+          "start_sample_at": "2026-05-05T05:00:00+00:00",
+          "end_sample_at": "2026-05-05T11:05:00+00:00",
+          "start_wanted": 42,
+          "end_wanted": 16,
+          "delta": -26,
+          "delta_per_hour": -4.27,
+          "drain_per_hour": 4.27,
+          "eta_hours": 3.75,
+          "trend": "down"
+        }
+      ]
+    },
     "top_10_share_24h": 0.43,
     "top_loop_suspects": [],
     "stale_wanted": []
