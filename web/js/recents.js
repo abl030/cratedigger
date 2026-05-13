@@ -198,6 +198,7 @@ function downloadFileCounts(files) {
 
 function downloadingSummary(item) {
   const active = item.active_download_state || {};
+  const importJob = item.active_import_job || null;
   const files = Array.isArray(active.files) ? active.files : [];
   const counts = downloadFileCounts(files);
   const users = [...new Set(files.map(f => f.username).filter(Boolean))];
@@ -207,12 +208,53 @@ function downloadingSummary(item) {
   const filetype = active.filetype || item.format || 'unknown';
   const progress = counts.total ? `${counts.completed}/${counts.total} files` : 'no file state';
   const stateParts = [];
+  if (importJob) {
+    const jobState = importJob.status === 'running' ? 'importing' : 'queued for import';
+    stateParts.push(`${jobState} #${importJob.id}`);
+  }
   if (counts.queued) stateParts.push(`${counts.queued} queued`);
   if (counts.errored) stateParts.push(`${counts.errored} errored`);
   if (active.last_progress_at) stateParts.push(`progress ${awstTime(active.last_progress_at)}`);
   if (active.enqueued_at) stateParts.push(`enqueued ${awstTime(active.enqueued_at)}`);
 
   return [filetype, progress, userSummary, ...stateParts].filter(Boolean).join(' · ');
+}
+
+function downloadingItemCounts(item) {
+  const active = item.active_download_state || {};
+  const files = Array.isArray(active.files) ? active.files : [];
+  return downloadFileCounts(files);
+}
+
+function isWaitingForImport(item) {
+  const active = item.active_download_state || {};
+  if (item.active_import_job || active.processing_started_at) return true;
+
+  const counts = downloadingItemCounts(item);
+  return counts.total > 0
+    && counts.completed >= counts.total
+    && counts.queued === 0
+    && counts.errored === 0;
+}
+
+function downloadingBadge(item) {
+  const job = item.active_import_job || null;
+  if (!job) return ['downloading', 'badge-downloading'];
+  if (job.status === 'running') return ['importing', 'badge-force'];
+  return ['import queued', 'badge-new'];
+}
+
+function downloadingBorderColor(item) {
+  const job = item.active_import_job || null;
+  if (!job) return '#1a3a5a';
+  return job.status === 'running' ? '#36c' : '#1a4a2a';
+}
+
+function renderDownloadingHeader(activeCount, hiddenImportCount) {
+  const activeLabel = `${activeCount} active Soulseek download${activeCount === 1 ? '' : 's'}`;
+  if (!hiddenImportCount) return `<div class="r-date-header">${activeLabel}</div>`;
+  const hiddenLabel = `${hiddenImportCount} complete/waiting for import hidden`;
+  return `<div class="r-date-header">${activeLabel} · ${hiddenLabel}</div>`;
 }
 
 /**
@@ -224,14 +266,15 @@ export function renderDownloadingItems(items) {
   if (items.length === 0) return '<div class="loading">No active downloads</div>';
   return items.map(item => {
     const date = item.updated_at ? awstDate(item.updated_at) : awstDate(item.created_at || '');
+    const [badge, badgeClass] = downloadingBadge(item);
     // Downloading rows are pipeline_request rows — `item.id` is the
     // album_requests.id directly. Always render the inspector button.
     const spBtn = renderSearchPlanButton({ pipelineId: item.id });
     return `
-      <div class="r-item" style="border-left-color:#1a3a5a" onclick="window.toggleDetail('downloading-${item.id}', ${item.id})">
+      <div class="r-item" style="border-left-color:${downloadingBorderColor(item)}" onclick="window.toggleDetail('downloading-${item.id}', ${item.id})">
         <div class="p-top">
           <div>
-            <div class="p-title">${esc(item.album_title)} <span class="badge badge-downloading">downloading</span></div>
+            <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
             <div class="p-artist">${esc(item.artist_name)}</div>
           </div>
           <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
@@ -251,10 +294,27 @@ async function loadImportQueue() {
     const r = await fetch(`${API}/api/import-jobs/timeline`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    el.innerHTML = renderRecentsSubnav() + renderImportQueueItems(data.jobs || []);
+    const jobs = data.jobs || [];
+    el.innerHTML = renderRecentsSubnav()
+      + renderImportQueueHeader(jobs, data.counts || {})
+      + renderImportQueueItems(jobs);
   } catch (e) {
     el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load queue</div>';
   }
+}
+
+function renderImportQueueHeader(jobs, counts) {
+  const queued = Number(counts.queued || 0);
+  const running = Number(counts.running || 0);
+  const activeTotal = queued + running || jobs.length;
+  const shown = jobs.length;
+  const windowText = activeTotal > shown
+    ? `Showing ${shown} of ${activeTotal} active imports`
+    : `${activeTotal} active import${activeTotal === 1 ? '' : 's'}`;
+  const parts = [];
+  if (queued) parts.push(`${queued} queued`);
+  if (running) parts.push(`${running} running`);
+  return `<div class="r-date-header">${[windowText, ...parts].join(' · ')}</div>`;
 }
 
 async function loadDownloading() {
@@ -266,17 +326,14 @@ async function loadDownloading() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const items = data.downloading || [];
-    const count = data.counts?.downloading ?? items.length;
+    const activeDownloads = items.filter(item => !isWaitingForImport(item));
+    const hiddenImportCount = items.length - activeDownloads.length;
     el.innerHTML = renderRecentsSubnav()
-      + `<div class="r-date-header">${formatDownloadingCount(count)}</div>`
-      + renderDownloadingItems(items);
+      + renderDownloadingHeader(activeDownloads.length, hiddenImportCount)
+      + renderDownloadingItems(activeDownloads);
   } catch (e) {
     el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load downloads</div>';
   }
-}
-
-function formatDownloadingCount(count) {
-  return `${count} active download${count === 1 ? '' : 's'}`;
 }
 
 function formatMatchRate(value) {

@@ -30,6 +30,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -69,6 +70,7 @@ MAX_DISTANCE = 0.5
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
 _current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
+_import_total_start: float | None = None
 
 # Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
 # quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
@@ -1018,9 +1020,16 @@ def _log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+def _log_timing(stage: str, start: float) -> None:
+    """Emit a stage timing line for importer bottleneck diagnosis."""
+    _log(f"[TIMING] {stage} elapsed_s={time.monotonic() - start:.1f}")
+
+
 def _emit_and_exit(r) -> NoReturn:
     """Emit ImportResult JSON on stdout and exit."""
     global _preview_temp_root  # noqa: PLW0603
+    if _import_total_start is not None:
+        _log_timing("total", _import_total_start)
     if _preview_temp_root is not None:
         shutil.rmtree(_preview_temp_root, ignore_errors=True)
         _preview_temp_root = None
@@ -1060,6 +1069,9 @@ def _record_bad_extension_warnings(
 
 
 def main():
+    global _import_total_start  # noqa: PLW0603
+    _import_total_start = time.monotonic()
+
     # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
     # Done in main() (not at module import) so importing this module for tests
     # doesn't leak a zero umask into the test process.
@@ -1129,11 +1141,13 @@ def main():
     _current_result = r
 
     # --- Pre-flight: already imported? ---
+    stage_start = time.monotonic()
     beets = BeetsDB()
     import atexit
     atexit.register(beets.close)
     already_in_beets = beets.album_exists(mbid)
     r.already_in_beets = already_in_beets
+    _log_timing("preflight_beets_lookup", stage_start)
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
 
@@ -1165,7 +1179,9 @@ def main():
         _preview_temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
         basename = os.path.basename(os.path.abspath(args.path)) or "album"
         work_path = os.path.join(_preview_temp_root, basename)
+        stage_start = time.monotonic()
         shutil.copytree(args.path, work_path)
+        _log_timing("dry_run_copy", stage_start)
         _log(f"[DRY-RUN] Previewing isolated copy: {work_path}")
 
     # --- Spectral analysis (pre-conversion) ---
@@ -1173,6 +1189,7 @@ def main():
     spectral_bitrate: int | None = None
     existing_spectral_grade: str | None = None
     existing_spectral_bitrate: int | None = None
+    stage_start = time.monotonic()
     try:
         from lib.spectral_check import analyze_album as spectral_analyze
         spectral_result = spectral_analyze(work_path, trim_seconds=30)
@@ -1207,6 +1224,8 @@ def main():
                     _log(f"  existing_spectral_bitrate={existing_spectral_bitrate}")
     except Exception as e:
         _log(f"  [SPECTRAL] error: {e}")
+    finally:
+        _log_timing("spectral_analysis", stage_start)
 
     # --- Convert lossless → V0 (unless keeping lossless on disk) ---
     keep_lossless = args.target_format in ("flac", "lossless")
@@ -1225,9 +1244,13 @@ def main():
     keep_v0_source = has_target or args.preserve_source
     if not keep_lossless:
         _log(f"[CONVERT] {work_path}")
-        converted, failed, original_ext = convert_lossless(
-            work_path, V0_SPEC,
-            keep_source=keep_v0_source)
+        stage_start = time.monotonic()
+        try:
+            converted, failed, original_ext = convert_lossless(
+                work_path, V0_SPEC,
+                keep_source=keep_v0_source)
+        finally:
+            _log_timing("primary_conversion", stage_start)
         r.conversion.converted = converted
         r.conversion.failed = failed
         if converted > 0:
@@ -1272,8 +1295,12 @@ def main():
             not f.lower().endswith(".flac") for f in lossless_files)
         if has_non_flac:
             _log(f"[NORMALIZE] Converting non-FLAC lossless → FLAC")
-            converted, failed, original_ext = convert_lossless(
-                work_path, FLAC_SPEC)
+            stage_start = time.monotonic()
+            try:
+                converted, failed, original_ext = convert_lossless(
+                    work_path, FLAC_SPEC)
+            finally:
+                _log_timing("lossless_normalization", stage_start)
             r.conversion.converted = converted
             r.conversion.failed = failed
             if converted > 0:
@@ -1291,11 +1318,14 @@ def main():
         else:
             _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
         r.final_format = "flac"
+        stage_start = time.monotonic()
         r.v0_probe = _probe_lossless_source_as_v0(work_path)
+        _log_timing("lossless_v0_probe", stage_start)
         if r.v0_probe:
             _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
 
     # --- Quality comparison ---
+    stage_start = time.monotonic()
     new_bitrates = _get_folder_bitrates(work_path, ext_filter=v0_ext_filter)
     if not keep_lossless and supported_lossless_source and converted > 0:
         r.v0_probe = _v0_probe_from_bitrates(new_bitrates)
@@ -1314,6 +1344,7 @@ def main():
     )
     new_is_cbr = len(set(new_bitrates)) == 1 if new_bitrates else False
     existing_info = beets.get_album_info(mbid, _rank_cfg)
+    _log_timing("quality_measurement", stage_start)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
     if args.override_min_bitrate is not None and existing_min_br is not None:
         if args.override_min_bitrate != existing_min_br:
@@ -1504,56 +1535,60 @@ def main():
         target_spec = parse_verified_lossless_target(conv_target)
         _log(f"[TARGET] Converting lossless source → {target_spec.label}")
         r.v0_verification_bitrate = post_conv_br
+        stage_start = time.monotonic()
         # If target has same extension as V0 (.mp3), remove V0 files first
         # so convert_lossless doesn't skip due to existing output files.
         if target_spec.extension == V0_SPEC.extension:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
-        target_converted, target_failed, _ = convert_lossless(
-            work_path, target_spec, keep_source=True)
-        if target_failed > 0:
-            r.exit_code = 1
-            r.decision = "target_conversion_failed"
-            r.error = f"{target_failed} {target_spec.label} conversions failed"
-            _log(f"[ERROR] {r.error}")
-            _emit_and_exit(r)
-        target_achieved = True
-        # Remove V0 temp files (ephemeral verification artifacts) —
-        # may already be gone if target had the same extension
-        if target_spec.extension != V0_SPEC.extension:
-            _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
-        # Remove original lossless files (consumed by target conversion)
-        _remove_lossless_files(work_path)
-        # Update measurements for the target format — include both the
-        # measured min/avg bitrate and the declared format label so the
-        # rank model classifies against the contract (e.g. "opus 128")
-        # rather than the measured VBR number (which lands 95-150 kbps
-        # depending on material).
-        target_bitrates = _get_folder_bitrates(work_path)
-        target_min_br = min(target_bitrates) if target_bitrates else None
-        target_avg_br = (
-            int(sum(target_bitrates) / len(target_bitrates))
-            if target_bitrates else None
-        )
-        target_median_br = (
-            int(statistics.median(target_bitrates)) if target_bitrates else None
-        )
-        target_is_cbr = len(set(target_bitrates)) == 1 if target_bitrates else False
-        r.new_measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=target_min_br,
-            avg_bitrate_kbps=target_avg_br,
-            median_bitrate_kbps=target_median_br,
-            format=target_spec.label,
-            is_cbr=target_is_cbr,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            verified_lossless=will_be_verified_lossless,
-            was_converted_from=(original_ext or "flac"),
-        )
-        r.conversion.target_filetype = target_spec.extension
-        r.final_format = target_spec.label
-        _log(f"  {target_spec.label} conversion complete: {target_converted} files, "
-             f"min_bitrate={target_min_br}kbps, avg_bitrate={target_avg_br}kbps")
-        _log(f"  V0 verification bitrate: {post_conv_br}kbps")
+        try:
+            target_converted, target_failed, _ = convert_lossless(
+                work_path, target_spec, keep_source=True)
+            if target_failed > 0:
+                r.exit_code = 1
+                r.decision = "target_conversion_failed"
+                r.error = f"{target_failed} {target_spec.label} conversions failed"
+                _log(f"[ERROR] {r.error}")
+                _emit_and_exit(r)
+            target_achieved = True
+            # Remove V0 temp files (ephemeral verification artifacts) —
+            # may already be gone if target had the same extension
+            if target_spec.extension != V0_SPEC.extension:
+                _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
+            # Remove original lossless files (consumed by target conversion)
+            _remove_lossless_files(work_path)
+            # Update measurements for the target format — include both the
+            # measured min/avg bitrate and the declared format label so the
+            # rank model classifies against the contract (e.g. "opus 128")
+            # rather than the measured VBR number (which lands 95-150 kbps
+            # depending on material).
+            target_bitrates = _get_folder_bitrates(work_path)
+            target_min_br = min(target_bitrates) if target_bitrates else None
+            target_avg_br = (
+                int(sum(target_bitrates) / len(target_bitrates))
+                if target_bitrates else None
+            )
+            target_median_br = (
+                int(statistics.median(target_bitrates)) if target_bitrates else None
+            )
+            target_is_cbr = len(set(target_bitrates)) == 1 if target_bitrates else False
+            r.new_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=target_min_br,
+                avg_bitrate_kbps=target_avg_br,
+                median_bitrate_kbps=target_median_br,
+                format=target_spec.label,
+                is_cbr=target_is_cbr,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+                verified_lossless=will_be_verified_lossless,
+                was_converted_from=(original_ext or "flac"),
+            )
+            r.conversion.target_filetype = target_spec.extension
+            r.final_format = target_spec.label
+            _log(f"  {target_spec.label} conversion complete: {target_converted} files, "
+                 f"min_bitrate={target_min_br}kbps, avg_bitrate={target_avg_br}kbps")
+            _log(f"  V0 verification bitrate: {post_conv_br}kbps")
+        finally:
+            _log_timing("target_conversion", stage_start)
 
     # --- Clean up kept source files if target was skipped OR preserve-source
     # is active (force/manual import, issue #111). The quality decision has
@@ -1569,13 +1604,17 @@ def main():
     if not keep_lossless and target_cleanup_decision(
             target_achieved, has_target, converted,
             preserve_source=args.preserve_source):
+        stage_start = time.monotonic()
         _remove_lossless_files(work_path)
+        _log_timing("source_cleanup", stage_start)
         _log(f"  [CLEANUP] Removed lossless originals "
              f"(target skipped or preserve-source approved)")
 
     # --- Import ---
     _log(f"[IMPORT] {work_path} → beets (mbid={mbid})")
+    stage_start = time.monotonic()
     import_outcome = run_import(work_path, mbid)
+    _log_timing("beets_import", stage_start)
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
     r.beets_log = beets_lines
@@ -1597,6 +1636,7 @@ def main():
     # Beets owns duplicate replacement. Cratedigger only validates the
     # resulting DB shape and fails loudly if Beets did not leave exactly one
     # row for this release.
+    stage_start = time.monotonic()
     post_import_ids = beets.get_all_album_ids_for_release(mbid)
     if not post_import_ids:
         r.exit_code = 2
@@ -1656,9 +1696,11 @@ def main():
     # Guards against any subprocess layer that dropped umask and created
     # 0o755 dirs despite the systemd unit's UMask=0000 — see GH #84.
     fix_library_modes(album_path)
+    _log_timing("postflight_verification", stage_start)
 
     # --- Cleanup staged dir ---
     if os.path.isdir(work_path):
+        stage_start = time.monotonic()
         for root, dirs, files in os.walk(work_path, topdown=False):
             for f in files:
                 os.remove(os.path.join(root, f))
@@ -1676,10 +1718,13 @@ def main():
             os.rmdir(parent)
         except OSError:
             pass
+        _log_timing("cleanup_staged_dir", stage_start)
 
     # --- Pipeline DB: imported ---
     if request_id:
+        stage_start = time.monotonic()
         update_pipeline_db(request_id, "imported", imported_path=album_path)
+        _log_timing("pipeline_db_update", stage_start)
 
     # --- Final exit ---
     beets.close()
