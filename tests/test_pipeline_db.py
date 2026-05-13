@@ -1300,6 +1300,13 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             album_title="Never Searched",
             source="request",
         )
+        self.req4 = self.db.add_request(
+            mb_release_id="dash-4",
+            artist_name="Dashboard Artist",
+            album_title="Active Download",
+            source="request",
+        )
+        self.db.set_downloading(self.req4, json.dumps({"username": "active"}))
 
     def tearDown(self):
         self.db.close()
@@ -1355,15 +1362,18 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.db.log_search(
             self.req2, query="healthy", elapsed_s=6.0, outcome="found"
         )
+        self.db.log_search(
+            self.req4, query="active download", elapsed_s=7.0, outcome="found"
+        )
 
         metrics = self.db.get_pipeline_dashboard_metrics()
 
         searches_24h = metrics["searches"]["windows"][0]
         self.assertEqual(searches_24h["label"], "24h")
-        self.assertEqual(searches_24h["searches"], 5)
-        self.assertEqual(searches_24h["distinct_requests"], 2)
-        self.assertAlmostEqual(searches_24h["searches_per_24h"], 5)
-        self.assertEqual(searches_24h["outcomes"]["found"], 1)
+        self.assertEqual(searches_24h["searches"], 6)
+        self.assertEqual(searches_24h["distinct_requests"], 3)
+        self.assertAlmostEqual(searches_24h["searches_per_24h"], 6)
+        self.assertEqual(searches_24h["outcomes"]["found"], 2)
         self.assertEqual(searches_24h["outcomes"]["no_match"], 1)
         self.assertEqual(searches_24h["outcomes"]["no_results"], 1)
         self.assertEqual(searches_24h["outcomes"]["exhausted"], 1)
@@ -1371,7 +1381,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
 
         searches_6h = metrics["searches"]["windows"][1]
         self.assertEqual(searches_6h["label"], "6h")
-        self.assertAlmostEqual(searches_6h["searches_per_24h"], 20)
+        self.assertAlmostEqual(searches_6h["searches_per_24h"], 24)
 
         cycles_6h = metrics["cycles"]["windows"][1]
         self.assertEqual(cycles_6h["label"], "6h")
@@ -1383,23 +1393,23 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(cycles_6h["find_download_completed"], 7)
 
         coverage = metrics["coverage"]
-        self.assertEqual(coverage["wanted_total"], 3)
-        self.assertEqual(coverage["wanted_searched_24h"], 2)
+        self.assertEqual(coverage["wanted_total"], 4)
+        self.assertEqual(coverage["wanted_searched_24h"], 3)
         self.assertEqual(coverage["wanted_unsearched_24h"], 1)
         self.assertEqual(coverage["wanted_never_searched"], 1)
-        self.assertEqual(coverage["active_wanted_searches_24h"], 5)
-        self.assertEqual(coverage["matches_24h"], 1)
-        self.assertEqual(coverage["matches_6h"], 1)
-        self.assertAlmostEqual(coverage["matches_per_hour_24h"], 1 / 24)
-        self.assertAlmostEqual(coverage["matches_per_hour_6h"], 1 / 6)
+        self.assertEqual(coverage["active_wanted_searches_24h"], 6)
+        self.assertEqual(coverage["matches_24h"], 2)
+        self.assertEqual(coverage["matches_6h"], 2)
+        self.assertAlmostEqual(coverage["matches_per_hour_24h"], 2 / 24)
+        self.assertAlmostEqual(coverage["matches_per_hour_6h"], 2 / 6)
         trend = coverage["wanted_trend"]
-        self.assertEqual(trend["current_wanted"], 3)
+        self.assertEqual(trend["current_wanted"], 4)
         self.assertEqual([w["label"] for w in trend["windows"]],
                          ["6h", "24h", "7d"])
         trend_6h = trend["windows"][0]
         self.assertEqual(trend_6h["start_wanted"], 5)
-        self.assertEqual(trend_6h["end_wanted"], 3)
-        self.assertEqual(trend_6h["delta"], -2)
+        self.assertEqual(trend_6h["end_wanted"], 4)
+        self.assertEqual(trend_6h["delta"], -1)
         self.assertEqual(trend_6h["trend"], "down")
         self.assertGreater(trend_6h["drain_per_hour"], 0)
         self.assertIsNotNone(trend_6h["eta_hours"])
@@ -1411,7 +1421,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(len(coverage["match_rate_series_24h"]), 24)
         self.assertEqual(
             sum(point["matches"] for point in coverage["match_rate_series_24h"]),
-            1,
+            2,
         )
         self.assertEqual(
             set(coverage["match_rate_series_24h"][0]),
@@ -1420,7 +1430,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(len(coverage["match_rate_series_28d"]), 28)
         self.assertEqual(
             sum(point["matches"] for point in coverage["match_rate_series_28d"]),
-            1,
+            2,
         )
         self.assertEqual(
             set(coverage["match_rate_series_28d"][0]),
@@ -1430,7 +1440,15 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(coverage["top_loop_suspects"][0]["searches_24h"], 4)
         self.assertEqual(coverage["top_loop_suspects"][0]["reset_24h"], 1)
         self.assertEqual(coverage["top_loop_suspects"][0]["problem_24h"], 1)
+        self.assertIn(
+            self.req4,
+            [row["request_id"] for row in coverage["top_loop_suspects"]],
+        )
         self.assertEqual(coverage["stale_wanted"][0]["request_id"], self.req3)
+        self.assertIn(
+            "downloading",
+            [row["status"] for row in coverage["stale_wanted"]],
+        )
         heavy = metrics["peer_dirs"]["heavy_queries"]
         self.assertEqual(heavy[0]["request_id"], self.req1)
         self.assertEqual(heavy[0]["mb_release_id"], "dash-1")

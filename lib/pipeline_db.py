@@ -56,6 +56,9 @@ DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
     ("24h", 24),
     ("7d", 24 * 7),
 )
+# Operator-facing dashboard semantics: active downloads are still wanted
+# backlog, just in the acquisition sub-state.
+DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = ("wanted", "downloading")
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -2700,8 +2703,8 @@ class PipelineDB:
         cur = self._execute("""
             SELECT COUNT(*)::int AS wanted_total
             FROM album_requests
-            WHERE status = 'wanted'
-        """)
+            WHERE status = ANY(%s)
+        """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         row = cur.fetchone() or {}
         return int(row.get("wanted_total") or 0)
 
@@ -3482,7 +3485,7 @@ class PipelineDB:
             WITH wanted AS (
                 SELECT id
                 FROM album_requests
-                WHERE status = 'wanted'
+                WHERE status = ANY(%s)
             ),
             per_request AS (
                 SELECT
@@ -3530,7 +3533,7 @@ class PipelineDB:
             FROM wanted w
             LEFT JOIN per_request pr ON pr.request_id = w.id
             CROSS JOIN match_rates
-        """)
+        """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         row = cur.fetchone() or {}
         wanted_total = int(row.get("wanted_total") or 0)
         searched_24h = int(row.get("wanted_searched_24h") or 0)
@@ -3664,7 +3667,7 @@ class PipelineDB:
             WITH wanted AS (
                 SELECT id, artist_name, album_title, status
                 FROM album_requests
-                WHERE status = 'wanted'
+                WHERE status = ANY(%s)
             ),
             per_request AS (
                 SELECT
@@ -3714,7 +3717,7 @@ class PipelineDB:
             WHERE COALESCE(pr.searches_24h, 0) > 0
             ORDER BY pr.searches_24h DESC, pr.searches_6h DESC, w.id ASC
             LIMIT 12
-        """)
+        """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         return [self._serialize_dashboard_request_row(dict(row))
                 for row in cur.fetchall()]
 
@@ -3723,7 +3726,7 @@ class PipelineDB:
             WITH wanted AS (
                 SELECT id, artist_name, album_title, status, created_at
                 FROM album_requests
-                WHERE status = 'wanted'
+                WHERE status = ANY(%s)
             ),
             per_request AS (
                 SELECT
@@ -3751,7 +3754,7 @@ class PipelineDB:
             LEFT JOIN per_request pr ON pr.request_id = w.id
             ORDER BY pr.last_search_at ASC NULLS FIRST, w.created_at ASC, w.id ASC
             LIMIT 12
-        """)
+        """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         rows = []
         for row in cur.fetchall():
             item = self._serialize_dashboard_request_row(dict(row))

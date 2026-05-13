@@ -51,6 +51,19 @@ class TestFakePipelineDB(unittest.TestCase):
         )
         self.assertEqual(db.status_history, [(42, "downloading")])
 
+    def test_dashboard_wanted_total_includes_downloading(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="downloading"))
+        db.seed_request(make_request_row(id=3, status="imported"))
+
+        db.record_cycle_metrics(cycle_total_s=1.0)
+        dashboard = db.get_pipeline_dashboard_metrics()
+
+        self.assertEqual(db.cycle_metrics[0]["wanted_total"], 2)
+        self.assertEqual(
+            dashboard["coverage"]["wanted_trend"]["current_wanted"], 2)
+
     def test_update_download_state_rewrites_json_state(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))

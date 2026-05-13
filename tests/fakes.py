@@ -2139,7 +2139,7 @@ class FakePipelineDB:
 
     def _current_wanted_total(self) -> int:
         return sum(1 for req in self._requests.values()
-                   if req.get("status") == "wanted")
+                   if req.get("status") in ("wanted", "downloading"))
 
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
         now = _utcnow()
