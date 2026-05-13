@@ -1551,6 +1551,22 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SIMULATE_REQUIRED_FIELDS,
                                 "pipeline simulate response")
 
+    def test_pipeline_simulate_threads_candidate_v0_probe_min(self):
+        status, data = self._get(
+            "/api/pipeline/simulate?"
+            "is_flac=true&is_cbr=false&spectral_grade=likely_transcode"
+            "&spectral_bitrate=160&converted_count=12"
+            "&post_conversion_min_bitrate=237"
+            "&candidate_v0_probe_avg=276&candidate_v0_probe_min=237"
+            "&verified_lossless_target=opus%20128"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["stage2_import"], "import")
+        self.assertTrue(data["verified_lossless"])
+        self.assertEqual(data["final_status"], "imported")
+        self.assertFalse(data["keep_searching"])
+
     def test_import_preview_values_contract(self):
         status, data = self._post("/api/import-preview", {
             "values": {

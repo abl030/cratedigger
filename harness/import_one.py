@@ -59,6 +59,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          V0_PROBE_LOSSLESS_SOURCE,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
+                         SPECTRAL_TRANSCODE_GRADES,
                          build_existing_quality_measurement,
                          comparison_format_hint, determine_verified_lossless,
                          measured_import_decision,
@@ -677,6 +678,9 @@ def _preview_import_result_reuse_reason(
         return "missing"
     if preview.decision not in _REUSABLE_PREVIEW_IMPORT_DECISIONS:
         return f"decision {preview.decision!r} is not importable"
+    if (preview.decision == "provisional_lossless_upgrade"
+            and v0_probe_overrides_spectral(preview.v0_probe)):
+        return "provisional preview superseded by V0 override"
     if preview.exit_code != 0:
         return f"exit_code {preview.exit_code} is not reusable"
     if preview.new_measurement is None:
@@ -1478,6 +1482,8 @@ def main():
             _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
 
     # --- Quality comparison ---
+    quality_is_transcode = is_transcode
+    v0_verified_lossless_override = False
     if reuse_preview and preview_import_result is not None:
         stage_start = time.monotonic()
         assert preview_import_result.new_measurement is not None
@@ -1498,6 +1504,12 @@ def main():
             else args.override_min_bitrate
         )
         will_be_verified_lossless = new_m.verified_lossless
+        v0_verified_lossless_override = (
+            will_be_verified_lossless
+            and spectral_grade in SPECTRAL_TRANSCODE_GRADES
+            and v0_probe_overrides_spectral(r.v0_probe)
+        )
+        quality_is_transcode = is_transcode and not v0_verified_lossless_override
         new_conv_target = preview_conv_target
         new_format_label = new_m.format
         _log_timing("quality_measurement", stage_start)
@@ -1544,14 +1556,19 @@ def main():
 
         # Verified lossless: single source of truth in quality.py. r.v0_probe is
         # populated above (lossless source path) and lets the V0-avg trust
-        # override flip a spectral-suspect spoken-word/sparse-HF lossless source
-        # to verified when the V0 evidence corroborates a genuine master.
+        # override flip a spectral suspect/likely_transcode sparse-HF lossless
+        # source to verified when the V0 evidence corroborates a genuine master.
         will_be_verified_lossless = determine_verified_lossless(
             args.target_format, spectral_grade, converted, is_transcode,
             v0_probe=r.v0_probe)
-        if (will_be_verified_lossless and is_transcode
-                and v0_probe_overrides_spectral(r.v0_probe)):
-            # Audit log: the V0 probe overrode the spectral-derived transcode
+        v0_verified_lossless_override = (
+            will_be_verified_lossless
+            and spectral_grade in SPECTRAL_TRANSCODE_GRADES
+            and v0_probe_overrides_spectral(r.v0_probe)
+        )
+        quality_is_transcode = is_transcode and not v0_verified_lossless_override
+        if v0_verified_lossless_override:
+            # Audit log: the V0 probe overrode the spectral-derived suspect
             # signal. Operators chasing a counter-intuitive verified_lossless
             # decision in download_log JSONB should see this in stderr too.
             _log(f"[V0_OVERRIDE] spectral={spectral_grade} but lossless_source_v0 "
@@ -1569,7 +1586,7 @@ def main():
             target_format=args.target_format,
             verified_lossless_target=new_conv_target,
             converted_count=converted,
-            is_transcode=is_transcode,
+            is_transcode=quality_is_transcode,
             native_codec_family="MP3",
         )
 
@@ -1607,6 +1624,8 @@ def main():
             ),
             would_import=True,
         )
+    elif v0_verified_lossless_override:
+        provisional = ProvisionalLosslessDecisionResult()
     else:
         provisional = provisional_lossless_decision(
             ProvisionalLosslessDecisionInput(
@@ -1648,8 +1667,9 @@ def main():
                 )
                 r.new_measurement = new_m
     elif not reuse_preview:
-        qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode,
-                                    cfg=_rank_cfg)
+        qd = quality_decision_stage(
+            new_m, existing_m, is_transcode=quality_is_transcode,
+            cfg=_rank_cfg)
         decision = qd.decision
         r.decision = decision
 
@@ -1930,10 +1950,10 @@ def main():
 
     # --- Final exit ---
     beets.close()
-    r.exit_code = final_exit_decision(is_transcode)
+    r.exit_code = final_exit_decision(quality_is_transcode)
     if r.decision == "provisional_lossless_upgrade":
         _log("[OK] Provisional lossless-source import — denylist user, keep searching")
-    elif is_transcode:
+    elif quality_is_transcode:
         _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
     else:
         _log("[OK] Import complete")

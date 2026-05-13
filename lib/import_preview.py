@@ -59,6 +59,7 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     import_mode: str = "auto"
     has_nested_audio: bool = False
     candidate_v0_probe_avg: int | None = None
+    candidate_v0_probe_min: int | None = None
     existing_v0_probe_avg: int | None = None
     candidate_v0_probe_kind: str | None = None
     existing_v0_probe_kind: str | None = None
@@ -251,6 +252,7 @@ def preview_import_from_values(
         import_mode=values.import_mode,
         has_nested_audio=values.has_nested_audio,
         candidate_v0_probe_avg=values.candidate_v0_probe_avg,
+        candidate_v0_probe_min=values.candidate_v0_probe_min,
         existing_v0_probe_avg=values.existing_v0_probe_avg,
         candidate_v0_probe_kind=values.candidate_v0_probe_kind,
         existing_v0_probe_kind=values.existing_v0_probe_kind,

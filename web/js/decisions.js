@@ -257,6 +257,10 @@ export function renderSimulatorForm() {
         <input type="number" id="ds-candidate_v0_probe_avg" placeholder="source probe avg">
       </div>
       <div class="ds-field">
+        <label>Candidate source V0 min</label>
+        <input type="number" id="ds-candidate_v0_probe_min" placeholder="source probe min">
+      </div>
+      <div class="ds-field">
         <label>Existing source V0 avg</label>
         <input type="number" id="ds-existing_v0_probe_avg" placeholder="current probe avg">
       </div>
@@ -361,6 +365,7 @@ const _preimport_defaults = {
 };
 const _probe_defaults = {
   candidate_v0_probe_avg: '',
+  candidate_v0_probe_min: '',
   existing_v0_probe_avg: '',
   supported_lossless_source: '',
 };
@@ -466,6 +471,7 @@ export const DS_PRESETS = {
     converted_count: '12', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
     candidate_v0_probe_avg: '228',
+    candidate_v0_probe_min: '',
     existing_v0_probe_avg: '171',
     supported_lossless_source: 'true',
     ..._preimport_defaults,
@@ -483,6 +489,7 @@ export const DS_PRESETS = {
     converted_count: '1', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
     candidate_v0_probe_avg: '214',
+    candidate_v0_probe_min: '',
     existing_v0_probe_avg: '',
     supported_lossless_source: 'true',
     ..._preimport_defaults,
@@ -500,6 +507,7 @@ export const DS_PRESETS = {
     converted_count: '11', verified_lossless: 'false',
     target_format: '', verified_lossless_target: 'opus 128',
     candidate_v0_probe_avg: '171',
+    candidate_v0_probe_min: '',
     existing_v0_probe_avg: '228',
     supported_lossless_source: 'true',
     ..._preimport_defaults,
@@ -557,7 +565,7 @@ export async function runSimulator() {
     'existing_min_bitrate','existing_avg_bitrate',
     'existing_spectral_grade','existing_spectral_bitrate','override_min_bitrate',
     'post_conversion_min_bitrate','converted_count','verified_lossless',
-    'candidate_v0_probe_avg','existing_v0_probe_avg',
+    'candidate_v0_probe_avg','candidate_v0_probe_min','existing_v0_probe_avg',
     'supported_lossless_source',
     'target_format','verified_lossless_target',
     // Preimport gate inputs (issue #91) — audio integrity + nested layout.

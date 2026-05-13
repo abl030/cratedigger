@@ -382,6 +382,7 @@ def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
             import_mode=_str("import_mode") or "auto",
             has_nested_audio=_bool("has_nested_audio"),
             candidate_v0_probe_avg=_int("candidate_v0_probe_avg"),
+            candidate_v0_probe_min=_int("candidate_v0_probe_min"),
             existing_v0_probe_avg=_int("existing_v0_probe_avg"),
             candidate_v0_probe_kind=_str("candidate_v0_probe_kind"),
             existing_v0_probe_kind=_str("existing_v0_probe_kind"),

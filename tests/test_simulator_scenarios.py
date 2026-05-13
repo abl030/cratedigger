@@ -90,6 +90,8 @@ class DownloadScenario:
     # explicitly only for scenarios where is_vbr != not is_cbr.
     is_vbr: bool | None = None
     avg_bitrate: int | None = None
+    candidate_v0_probe_avg: int | None = None
+    candidate_v0_probe_min: int | None = None
 
     def dl_params(self) -> dict:
         """Download-side kwargs for full_pipeline_decision()."""
@@ -104,6 +106,8 @@ class DownloadScenario:
             "converted_count": self.converted_count,
             "post_conversion_min_bitrate": self.post_conversion_min_bitrate,
             "new_format": self.new_format,
+            "candidate_v0_probe_avg": self.candidate_v0_probe_avg,
+            "candidate_v0_probe_min": self.candidate_v0_probe_min,
         }
 
 
@@ -199,11 +203,22 @@ DOWNLOAD_SCENARIOS = [
     DownloadScenario("flac_suspect_245", True, 245, False,
                      spectral_grade="suspect", converted_count=12,
                      post_conversion_min_bitrate=245),
+    # Sundowner - Four One Five Two (2026-05-13): spectral likely_transcode
+    # at ~160kbps, but source-lineage V0 avg/min proves a genuine lossless
+    # source and must bypass the provisional keep-searching lane.
+    DownloadScenario("flac_likely_transcode_high_v0_sundowner", True, 237, False,
+                     spectral_grade="likely_transcode", spectral_bitrate=160,
+                     converted_count=12, post_conversion_min_bitrate=237,
+                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237),
     # FLAC kept on disk (no conversion) — raw FLAC bitrate
     DownloadScenario("flac_genuine_raw", True, 900, False,
                      spectral_grade="genuine",
                      converted_count=0,
                      post_conversion_min_bitrate=None),
+    DownloadScenario("flac_likely_transcode_raw_high_v0", True, 900, False,
+                     spectral_grade="likely_transcode", spectral_bitrate=160,
+                     converted_count=0, post_conversion_min_bitrate=None,
+                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237),
     # MP3 VBR (avg_bitrate drives the preimport spectral gate — issue #93)
     DownloadScenario("mp3_v0_240", False, 240, False,
                      is_vbr=True, avg_bitrate=245),
@@ -782,6 +797,28 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertFalse(r.keep_searching,
                          "Verified lossless lo-fi must not trigger further searching")
 
+    def test_sundowner_high_v0_likely_transcode_imports_verified(self):
+        """Sundowner - Four One Five Two: high source V0 beats spectral false positive.
+
+        This locks the full pipeline behavior, not just the helper: a
+        likely_transcode FLAC with source-lineage V0 avg=276/min=237 is a
+        normal verified import, not a provisional import that denylists the
+        source and keeps searching.
+        """
+        album = ALBUM_MAP["fresh_request"]
+        r = simulate(
+            album,
+            DL_MAP["flac_likely_transcode_high_v0_sundowner"],
+            verified_lossless_target="opus 128",
+        )
+
+        self.assertTrue(r.imported)
+        self.assertEqual(r.stage2_import, "import")
+        self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertEqual(r.final_status, "imported")
+        self.assertFalse(r.denylisted)
+        self.assertFalse(r.keep_searching)
+
     def test_deloris_flac_override_cleared_on_accept(self):
         """target_format="flac" survives quality gate accept.
 
@@ -831,6 +868,20 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertTrue(r.imported)
         self.assertEqual(r.final_status, "imported")
         self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertFalse(r.keep_searching)
+        self.assertFalse(r.denylisted)
+
+    def test_keep_lossless_high_v0_override_is_not_provisional(self):
+        """target_format='flac' uses the same high-V0 override policy."""
+        album = AlbumState("fresh_wants_flac", None, False,
+                           None, None, False, None, target_format="flac")
+        dl = DL_MAP["flac_likely_transcode_raw_high_v0"]
+        r = simulate(album, dl)
+
+        self.assertTrue(r.imported)
+        self.assertEqual(r.stage2_import, "import")
+        self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertEqual(r.final_status, "imported")
         self.assertFalse(r.keep_searching)
         self.assertFalse(r.denylisted)
 

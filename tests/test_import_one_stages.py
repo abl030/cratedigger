@@ -215,6 +215,34 @@ class TestPreviewReuseHelpers(unittest.TestCase):
 
         self.assertIn("existing-beets state changed", reason or "")
 
+    def test_rejects_stale_provisional_preview_when_v0_override_now_verifies(self):
+        from harness import import_one
+        from lib.quality import AudioQualityMeasurement, ImportResult, V0ProbeEvidence
+
+        preview = ImportResult(
+            decision="provisional_lossless_upgrade",
+            already_in_beets=False,
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=141,
+                avg_bitrate_kbps=141,
+                format="opus 128",
+                verified_lossless=False,
+            ),
+            v0_probe=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=237,
+                avg_bitrate_kbps=276,
+                median_bitrate_kbps=279,
+            ),
+        )
+
+        reason = import_one._preview_import_result_reuse_reason(
+            preview,
+            already_in_beets=False,
+        )
+
+        self.assertIn("V0 override", reason or "")
+
     def test_provisional_preview_uses_verified_lossless_target(self):
         from argparse import Namespace
         from harness import import_one

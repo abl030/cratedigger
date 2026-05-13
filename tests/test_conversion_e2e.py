@@ -279,6 +279,16 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
             v0_probe=self._v0(avg=241, min=219, median=239),
         ))
 
+    def test_v0_override_sundowner_likely_transcode_verifies(self):
+        """Real case: Sundowner - Four One Five Two. Spectral reported
+        likely_transcode ~160kbps, but the comparable lossless-source V0
+        probe was avg=276/min=237, so the V0 override should verify it."""
+        self.assertTrue(self._dvl(
+            converted_count=12, is_transcode=True,
+            spectral_grade="likely_transcode",
+            v0_probe=self._v0(avg=276, min=237, median=279),
+        ))
+
     def test_v0_override_fake_flac_shape_stays_unverified(self):
         """Fake-FLAC of 128k MP3 source: V0 probe avg=190/min=180. Below
         either threshold → override does NOT fire → stays unverified."""

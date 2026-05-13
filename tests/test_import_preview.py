@@ -115,6 +115,29 @@ class TestImportPreviewValues(unittest.TestCase):
         assert preview.simulation is not None
         self.assertEqual(preview.simulation["target_final_format"], "opus 128")
 
+    def test_values_preview_high_v0_override_imports_verified(self):
+        preview = preview_import_from_values(
+            ImportPreviewValues(
+                is_flac=True,
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate=160,
+                post_conversion_min_bitrate=237,
+                converted_count=12,
+                candidate_v0_probe_avg=276,
+                candidate_v0_probe_min=237,
+                verified_lossless_target="opus 128",
+            )
+        )
+
+        self.assertEqual(preview.verdict, "would_import")
+        self.assertEqual(preview.reason, "import")
+        self.assertIn("stage2_import:import", preview.stage_chain)
+        assert preview.simulation is not None
+        self.assertTrue(preview.simulation["verified_lossless"])
+        self.assertEqual(preview.simulation["final_status"], "imported")
+        self.assertFalse(preview.simulation["keep_searching"])
+
     def test_values_preview_prefers_provisional_over_stage1_reject(self):
         preview = preview_import_from_values(
             ImportPreviewValues(

@@ -2332,7 +2332,7 @@ def determine_verified_lossless(
        lossless files AND spectral didn't flag them as transcodes.
 
     V0-avg trust override (issue #205-style — Bill Hicks): in either path,
-    when spectral disagrees with V0 evidence (suspect grade but a
+    when spectral disagrees with V0 evidence (suspect/likely_transcode but a
     ``lossless_source_v0`` probe at avg≥230kbps AND min≥200kbps), trust
     the V0 probe and certify as verified. The override is monotonic — it
     only flips False→True, never True→False.
@@ -2399,6 +2399,11 @@ def gate_rank(
     call this so the displayed rank label and the actual gate verdict can
     never disagree.
 
+    Verified lossless sources skip the spectral clamp: the source has already
+    been proven by the lossless/V0 path, and production persists the current
+    spectral bitrate as the actual imported bitrate for those rows rather than
+    the pre-import cliff estimate.
+
     Spectral clamp: when the current measurement carries a spectral estimate
     (set upstream only when the grade is suspect/likely_transcode — see
     ``_check_quality_gate_core()``), classify that estimate against the MP3
@@ -2406,6 +2411,8 @@ def gate_rank(
     legacy low-spectral transcodes.
     """
     rank = measurement_rank(current, cfg)
+    if current.verified_lossless:
+        return rank
     if current.spectral_bitrate_kbps is not None:
         spectral_rank = quality_rank(
             "mp3", current.spectral_bitrate_kbps, is_cbr=False, cfg=cfg)
@@ -3041,6 +3048,10 @@ def get_decision_tree(
                     {"condition": "converted > 0 AND NOT is_transcode",
                      "result": "will_be_verified_lossless = true",
                      "color": "green"},
+                    {"condition": "converted > 0 AND comparable lossless_source_v0 avg≥230/min≥200",
+                     "result": "will_be_verified_lossless = true",
+                     "color": "green",
+                     "effect": "V0 source evidence overrides suspect/likely_transcode spectral false positives"},
                     {"condition": "is_transcode OR not converted",
                      "result": "will_be_verified_lossless = false",
                      "color": "amber"},
@@ -3085,6 +3096,9 @@ def get_decision_tree(
                     {"condition": "spectral = genuine/marginal",
                      "result": "continue", "color": "green",
                      "effect": "clean sources stay on the verified-lossless path"},
+                    {"condition": "candidate V0 passes verified-lossless override",
+                     "result": "continue", "color": "green",
+                     "effect": "source is treated as verified, not provisional"},
                     {"condition": "suspect source has no comparable V0 probe",
                      "result": DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
                      "color": "red",
@@ -3502,6 +3516,20 @@ def full_pipeline_decision(
     if is_flac and target_format in ("flac", "lossless"):
         # FLAC kept on disk (no conversion).
         stage2_new_format = new_format or "flac"
+        candidate_probe_min = candidate_v0_probe_min
+        candidate_probe_full = V0ProbeEvidence(
+            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+            avg_bitrate_kbps=candidate_v0_probe_avg,
+            min_bitrate_kbps=candidate_probe_min,
+        ) if candidate_v0_probe_avg is not None else None
+        will_be_verified = determine_verified_lossless(
+            target_format, spectral_grade,
+            converted_count=0, is_transcode=False,
+            v0_probe=candidate_probe_full)
+        v0_verified_override = (
+            spectral_grade in SPECTRAL_TRANSCODE_GRADES
+            and v0_probe_overrides_spectral(candidate_probe_full)
+        )
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
             avg_bitrate_kbps=min_bitrate,
@@ -3509,21 +3537,25 @@ def full_pipeline_decision(
             format=stage2_new_format,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
-        provisional = provisional_lossless_decision(
-            ProvisionalLosslessDecisionInput(
-                candidate_probe=V0ProbeEvidence(
-                    kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=candidate_v0_probe_avg,
-                ) if candidate_v0_probe_avg is not None else None,
-                existing_probe=V0ProbeEvidence(
-                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=existing_v0_probe_avg,
-                ) if existing_v0_probe_avg is not None else None,
-                spectral_grade=spectral_grade,
-                supported_lossless_source=provisional_source_candidate,
-            ),
-            cfg=cfg,
-        )
+        if v0_verified_override:
+            provisional = ProvisionalLosslessDecisionResult()
+        else:
+            provisional = provisional_lossless_decision(
+                ProvisionalLosslessDecisionInput(
+                    candidate_probe=V0ProbeEvidence(
+                        kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                        avg_bitrate_kbps=candidate_v0_probe_avg,
+                        min_bitrate_kbps=candidate_probe_min,
+                    ) if candidate_v0_probe_avg is not None else None,
+                    existing_probe=V0ProbeEvidence(
+                        kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                        avg_bitrate_kbps=existing_v0_probe_avg,
+                    ) if existing_v0_probe_avg is not None else None,
+                    spectral_grade=spectral_grade,
+                    supported_lossless_source=provisional_source_candidate,
+                ),
+                cfg=cfg,
+            )
         if provisional.decision is not None:
             result["stage2_import"] = provisional.decision
             if provisional.confident_reject:
@@ -3550,15 +3582,7 @@ def full_pipeline_decision(
         # Genuine FLAC on disk is verified lossless (for quality gate). Route
         # through determine_verified_lossless so the V0-avg trust override is
         # consulted and the simulator stays in lockstep with import_one.py.
-        candidate_probe_full = V0ProbeEvidence(
-            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-            avg_bitrate_kbps=candidate_v0_probe_avg,
-            min_bitrate_kbps=candidate_v0_probe_min,
-        ) if candidate_v0_probe_avg is not None else None
-        if determine_verified_lossless(
-                target_format, spectral_grade,
-                converted_count=0, is_transcode=False,
-                v0_probe=candidate_probe_full):
+        if will_be_verified:
             verified_lossless = True
             result["verified_lossless"] = True
 
@@ -3573,13 +3597,31 @@ def full_pipeline_decision(
             spectral_grade=spectral_grade, cfg=cfg)
         import_br = post_conversion_min_bitrate if post_conversion_min_bitrate else min_bitrate
 
-        will_be_verified = (converted_count > 0 and not is_transcode)
+        candidate_probe_min = (
+            candidate_v0_probe_min
+            if candidate_v0_probe_min is not None
+            else post_conversion_min_bitrate
+        )
+        candidate_probe_full = V0ProbeEvidence(
+            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+            avg_bitrate_kbps=candidate_v0_probe_avg,
+            min_bitrate_kbps=candidate_probe_min,
+        ) if candidate_v0_probe_avg is not None else None
+        will_be_verified = determine_verified_lossless(
+            target_format, spectral_grade,
+            converted_count=converted_count,
+            is_transcode=is_transcode,
+            v0_probe=candidate_probe_full)
+        v0_verified_override = (
+            is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
+        )
+        policy_is_transcode = is_transcode and not v0_verified_override
         stage2_new_format = comparison_format_hint(
             explicit_format=new_format,
             verified_lossless_target=(
                 verified_lossless_target if will_be_verified else None),
             converted_count=converted_count,
-            is_transcode=is_transcode,
+            is_transcode=policy_is_transcode,
         )
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=import_br,
@@ -3594,21 +3636,25 @@ def full_pipeline_decision(
             if candidate_v0_probe_avg is not None
             else post_conversion_min_bitrate
         )
-        provisional = provisional_lossless_decision(
-            ProvisionalLosslessDecisionInput(
-                candidate_probe=V0ProbeEvidence(
-                    kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=provisional_probe_avg,
-                ) if provisional_probe_avg is not None else None,
-                existing_probe=V0ProbeEvidence(
-                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=existing_v0_probe_avg,
-                ) if existing_v0_probe_avg is not None else None,
-                spectral_grade=spectral_grade,
-                supported_lossless_source=provisional_source_candidate,
-            ),
-            cfg=cfg,
-        )
+        if v0_verified_override:
+            provisional = ProvisionalLosslessDecisionResult()
+        else:
+            provisional = provisional_lossless_decision(
+                ProvisionalLosslessDecisionInput(
+                    candidate_probe=V0ProbeEvidence(
+                        kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                        avg_bitrate_kbps=provisional_probe_avg,
+                        min_bitrate_kbps=candidate_probe_min,
+                    ) if provisional_probe_avg is not None else None,
+                    existing_probe=V0ProbeEvidence(
+                        kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                        avg_bitrate_kbps=existing_v0_probe_avg,
+                    ) if existing_v0_probe_avg is not None else None,
+                    spectral_grade=spectral_grade,
+                    supported_lossless_source=provisional_source_candidate,
+                ),
+                cfg=cfg,
+            )
         if provisional.decision is not None:
             result["stage2_import"] = provisional.decision
             if provisional.confident_reject:
@@ -3624,7 +3670,7 @@ def full_pipeline_decision(
                 result["target_final_format"] = verified_lossless_target
             return result
         measured = measured_import_decision(
-            MeasuredImportDecisionInput(new_m, existing_m, is_transcode),
+            MeasuredImportDecisionInput(new_m, existing_m, policy_is_transcode),
             cfg=cfg,
         )
         result["stage2_import"] = measured.decision
@@ -3650,16 +3696,7 @@ def full_pipeline_decision(
         # determine_verified_lossless so the V0-avg trust override (Bill
         # Hicks shape — spectral=suspect on spoken-word with high V0
         # evidence) flips False→True consistently with import_one.py.
-        candidate_probe_full = V0ProbeEvidence(
-            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-            avg_bitrate_kbps=candidate_v0_probe_avg,
-            min_bitrate_kbps=candidate_v0_probe_min,
-        ) if candidate_v0_probe_avg is not None else None
-        if determine_verified_lossless(
-                target_format, spectral_grade,
-                converted_count=converted_count,
-                is_transcode=is_transcode,
-                v0_probe=candidate_probe_full):
+        if will_be_verified:
             verified_lossless = True
             result["verified_lossless"] = True
 

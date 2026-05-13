@@ -50,7 +50,7 @@ const SIMULATOR_FIELDS = [
   'existing_spectral_grade', 'existing_spectral_bitrate',
   'override_min_bitrate', 'post_conversion_min_bitrate',
   'converted_count', 'verified_lossless',
-  'candidate_v0_probe_avg', 'existing_v0_probe_avg',
+  'candidate_v0_probe_avg', 'candidate_v0_probe_min', 'existing_v0_probe_avg',
   'supported_lossless_source',
   'target_format', 'verified_lossless_target',
   'audio_check_mode', 'audio_corrupt',
@@ -211,6 +211,8 @@ for (const [name, preset] of Object.entries(DS_PRESETS)) {
          `preset "${name}" missing existing_spectral_grade — stale field inherited from prior preset`);
   assert('candidate_v0_probe_avg' in preset,
          `preset "${name}" missing candidate_v0_probe_avg — stale probe inherited from prior preset`);
+  assert('candidate_v0_probe_min' in preset,
+         `preset "${name}" missing candidate_v0_probe_min — stale probe inherited from prior preset`);
   assert('existing_v0_probe_avg' in preset,
          `preset "${name}" missing existing_v0_probe_avg — stale probe inherited from prior preset`);
   assert('supported_lossless_source' in preset,
@@ -272,6 +274,7 @@ console.log('\nrunSimulator()');
     converted_count: '0',
     verified_lossless: 'false',
     candidate_v0_probe_avg: '228',
+    candidate_v0_probe_min: '217',
     existing_v0_probe_avg: '171',
     supported_lossless_source: 'true',
     target_format: '',
@@ -309,6 +312,8 @@ console.log('\nrunSimulator()');
   await runSimulator();
   assertContains(fetchedUrl, 'candidate_v0_probe_avg=228',
     'runSimulator serializes candidate V0 probe average');
+  assertContains(fetchedUrl, 'candidate_v0_probe_min=217',
+    'runSimulator serializes candidate V0 probe minimum');
   assertContains(fetchedUrl, 'existing_v0_probe_avg=171',
     'runSimulator serializes existing V0 probe average');
   assertContains(fetchedUrl, 'supported_lossless_source=true',

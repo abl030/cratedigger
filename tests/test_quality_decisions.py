@@ -713,6 +713,19 @@ class TestGateRank(unittest.TestCase):
         # With clamp, spectral 128 against mp3_vbr.acceptable=130 → POOR
         self.assertEqual(gate_rank(m, cfg), QualityRank.POOR)
 
+    def test_verified_lossless_ignores_stale_spectral_clamp(self):
+        """Verified lossless is already source-proven; a stale pre-import
+        spectral cliff must not requeue an accepted target conversion."""
+        m = AudioQualityMeasurement(
+            format="opus 128",
+            avg_bitrate_kbps=141,
+            verified_lossless=True,
+            spectral_bitrate_kbps=160,
+        )
+        cfg = QualityRankConfig.defaults()
+        self.assertEqual(gate_rank(m, cfg), measurement_rank(m, cfg))
+        self.assertEqual(quality_gate_decision(m, cfg), "accept")
+
     def test_clamp_does_nothing_when_higher(self):
         """Spectral above measurement rank: no clamp."""
         m = AudioQualityMeasurement(
@@ -1745,6 +1758,38 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["target_final_format"], "opus 128")
         self.assertFalse(r["verified_lossless"])
         self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_live_sundowner_high_v0_likely_transcode_imports_as_verified(self):
+        """Sundowner - Four One Five Two live shape.
+
+        Spectral called the lossless source likely_transcode at ~160kbps, but
+        the source-lineage V0 probe was avg=276/min=237. That is stronger
+        evidence than the spectral false positive, so this must be a normal
+        verified lossless import, not a provisional keep-searching import.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+            converted_count=12,
+            post_conversion_min_bitrate=237,
+            candidate_v0_probe_avg=276,
+            candidate_v0_probe_min=237,
+            existing_min_bitrate=None,
+            existing_v0_probe_avg=None,
+            verified_lossless_target="opus 128",
+        )
+
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["verified_lossless"])
+        self.assertTrue(r["imported"])
+        self.assertFalse(r["denylisted"])
+        self.assertFalse(r["keep_searching"])
+        self.assertEqual(r["final_status"], "imported")
+        self.assertEqual(r["target_final_format"], "opus 128")
+        self.assertEqual(r["stage3_quality_gate"], "accept")
 
     def test_live_creek_drank_cradle_lower_source_rejects_after_better_probe(self):
         """Iron & Wine - The Creek Drank the Cradle / maplebug shape.

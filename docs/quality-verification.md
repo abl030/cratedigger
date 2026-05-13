@@ -55,6 +55,11 @@ the configured lossless-source storage target, but `verified_lossless` remains
 false, the source is denylisted, normal post-import notifications run, and the
 request remains wanted so acquisition continues.
 
+Exception: a comparable `lossless_source_v0` probe at avg ≥230kbps and min
+≥200kbps is treated as stronger evidence than a suspect/`likely_transcode`
+spectral grade. Those imports are verified lossless and follow the normal
+`imported` path instead of the provisional keep-searching path.
+
 Native lossy and on-disk V0 probes are research evidence only in v1. They are
 stored with non-comparable lineage and do not affect import policy.
 
