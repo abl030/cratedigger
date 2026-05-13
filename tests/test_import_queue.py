@@ -1,5 +1,6 @@
 """Tests for the shared import queue worker."""
 
+import json
 import os
 import shutil
 import tempfile
@@ -13,6 +14,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
+    IMPORT_JOB_PREVIEW_ENABLED_ENV,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
@@ -20,15 +22,27 @@ from lib.import_queue import (
     manual_import_payload,
 )
 from lib.import_preview import ImportPreviewResult
+from lib.quality import ImportResult, AudioQualityMeasurement
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_ctx_with_fake_db, make_request_row
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_download_file,
+    make_grab_list_entry,
+    make_request_row,
+)
 
 
 class TestImporterWorker(unittest.TestCase):
-    def _mark_importable(self, db: FakePipelineDB, job):
+    def _mark_importable(
+        self,
+        db: FakePipelineDB,
+        job,
+        *,
+        preview_result: dict[str, Any] | None = None,
+    ):
         updated = db.mark_import_job_preview_importable(
             job.id,
-            preview_result={"verdict": "would_import"},
+            preview_result=preview_result or {"verdict": "would_import"},
             message="ready",
         )
         assert updated is not None
@@ -90,6 +104,7 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=None,
+            preview_import_result=None,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -130,7 +145,48 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
+            preview_import_result=None,
         )
+
+    def test_force_import_job_forwards_preview_import_result(self):
+        from scripts import importer
+
+        preview_ir = ImportResult(
+            decision="import",
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
+        )
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+            preview_enabled=True,
+        )
+        self._mark_importable(
+            db,
+            job,
+            preview_result={
+                "verdict": "would_import",
+                "import_result": json.loads(preview_ir.to_json()),
+            },
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.import_dispatch.dispatch_import_from_db",
+            return_value=DispatchOutcome(True, "imported"),
+        ) as dispatch:
+            importer.process_claimed_job(cast(Any, db), claimed)
+
+        forwarded = dispatch.call_args.kwargs["preview_import_result"]
+        self.assertIsNotNone(forwarded)
+        self.assertEqual(forwarded.decision, "import")
 
     def test_manual_import_failure_marks_job_failed(self):
         from scripts import importer
@@ -691,48 +747,105 @@ class TestImportPreviewWorker(unittest.TestCase):
     def test_automation_job_preview_uses_active_download_current_path(self):
         from scripts import import_preview_worker
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={
-                "filetype": "flac",
-                "enqueued_at": "2026-04-25T00:00:00+00:00",
-                "current_path": "/tmp/staged",
-                "files": [{
-                    "username": "alice",
-                    "filename": "Artist\\Album\\01.flac",
-                    "file_dir": "Artist\\Album",
-                    "size": 123,
-                }],
-            },
-        ))
-        db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
-            preview_enabled=True,
-        )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
-        assert claimed is not None
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
 
-        with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
-            return_value=self._preview("would_import", reason="import"),
-        ) as preview:
-            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                return_value=self._preview("would_import", reason="import"),
+            ) as preview:
+                updated = import_preview_worker.process_claimed_preview_job(db, claimed)
 
-        preview.assert_called_once_with(
-            db,
-            request_id=42,
-            path="/tmp/staged",
-            force=False,
-            source_username="alice",
-            download_log_id=None,
-        )
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "would_import")
+            preview.assert_called_once_with(
+                db,
+                request_id=42,
+                path=staged,
+                force=False,
+                source_username="alice",
+                download_log_id=None,
+            )
+            assert updated is not None
+            self.assertEqual(updated.preview_status, "would_import")
+
+    def test_run_once_requeues_legacy_disabled_automation_job_for_preview(self):
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=False,
+            )
+            self.assertEqual(job.preview_status, "would_import")
+            self.assertEqual(job.preview_message, "Preview gate disabled")
+
+            with (
+                patch.dict(os.environ, {IMPORT_JOB_PREVIEW_ENABLED_ENV: "1"}),
+                patch(
+                    "scripts.import_preview_worker.preview_import_from_path",
+                    return_value=self._preview("would_import", reason="import"),
+                ) as preview,
+            ):
+                updated = import_preview_worker.run_once(
+                    cast(Any, db),
+                    worker_id="preview",
+                )
+
+            preview.assert_called_once_with(
+                db,
+                request_id=42,
+                path=staged,
+                force=False,
+                source_username="alice",
+                download_log_id=None,
+            )
+            assert updated is not None
+            self.assertEqual(updated.status, "queued")
+            self.assertEqual(updated.preview_status, "would_import")
+            self.assertEqual(updated.preview_attempts, 1)
+            self.assertNotEqual(updated.preview_message, "Preview gate disabled")
 
     def test_confident_reject_fails_job_and_denylists_source(self):
         from scripts import import_preview_worker

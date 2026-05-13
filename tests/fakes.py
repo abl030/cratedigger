@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
@@ -1025,6 +1026,37 @@ class FakePipelineDB:
             row["worker_id"] = None
             row["started_at"] = None
             row["heartbeat_at"] = None
+            row["updated_at"] = now
+            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
+        return updated_jobs
+
+    def requeue_disabled_automation_preview_jobs(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[ImportJob]:
+        disabled = [
+            row for row in self._import_jobs
+            if row.get("status") == "queued"
+            and row.get("job_type") == IMPORT_JOB_AUTOMATION
+            and row.get("preview_status") == IMPORT_JOB_PREVIEW_WOULD_IMPORT
+            and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
+            and row.get("preview_result") is None
+        ]
+        disabled.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        updated_jobs = []
+        for row in disabled[:limit]:
+            now = _utcnow()
+            row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
+            row["preview_result"] = None
+            row["preview_message"] = None
+            row["preview_error"] = None
+            row["preview_attempts"] = 0
+            row["preview_worker_id"] = None
+            row["preview_started_at"] = None
+            row["preview_heartbeat_at"] = None
+            row["preview_completed_at"] = None
+            row["importable_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs

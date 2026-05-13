@@ -29,6 +29,7 @@ import msgspec
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
@@ -1222,6 +1223,49 @@ class PipelineDB:
             WHERE import_jobs.id = running.id
             RETURNING import_jobs.*
         """, (limit, message))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def requeue_disabled_automation_preview_jobs(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[ImportJob]:
+        """Move legacy automation jobs into the async preview lane."""
+        cur = self._execute("""
+            WITH disabled AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'queued'
+                  AND job_type = %s
+                  AND preview_status = %s
+                  AND preview_message = %s
+                  AND preview_result IS NULL
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE import_jobs
+            SET preview_status = %s,
+                preview_result = NULL,
+                preview_message = NULL,
+                preview_error = NULL,
+                preview_attempts = 0,
+                preview_worker_id = NULL,
+                preview_started_at = NULL,
+                preview_heartbeat_at = NULL,
+                preview_completed_at = NULL,
+                importable_at = NULL,
+                updated_at = NOW()
+            FROM disabled
+            WHERE import_jobs.id = disabled.id
+            RETURNING import_jobs.*
+        """, (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_PREVIEW_WOULD_IMPORT,
+            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+            limit,
+            IMPORT_JOB_PREVIEW_WAITING,
+        ))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
     def claim_next_import_preview_job(

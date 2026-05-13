@@ -32,7 +32,9 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
+                         ImportResult,
                          DownloadDecision, ValidationResult,
+                         SpectralMeasurement,
                          decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
@@ -1008,7 +1010,7 @@ def _materialize_processing_dir(
         logger.info(f"Staging folder {canonical_path} already exists — "
                     f"resuming or reusing prior attempt")
     else:
-        os.mkdir(canonical_path)
+        os.makedirs(canonical_path, exist_ok=True)
 
     for file in album_data.files:
         # Destination filename keeps the remote basename (no ticks suffix,
@@ -1057,8 +1059,13 @@ def _materialize_processing_dir(
     return True
 
 
-def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
-                            ctx: CratediggerContext) -> "bool | DispatchOutcome | None":
+def process_completed_album(
+    album_data: GrabListEntry,
+    failed_grab: list[Any],
+    ctx: CratediggerContext,
+    *,
+    preview_import_result: ImportResult | None = None,
+) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
     Returns the local processing result:
@@ -1095,7 +1102,11 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
             logger.exception(f"Error writing tags for: {file.import_path}")
     if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
         outcome = _process_beets_validation(
-            album_data, staged_album, ctx)
+            album_data,
+            staged_album,
+            ctx,
+            preview_import_result=preview_import_result,
+        )
         if outcome is not None:
             if outcome.deferred:
                 # Release-lock contention. Propagate ``None`` so
@@ -1110,9 +1121,48 @@ def process_completed_album(album_data: GrabListEntry, failed_grab: list[Any],
     return True
 
 
-def _process_beets_validation(album_data: GrabListEntry,
-                              staged_album: StagedAlbum,
-                              ctx: CratediggerContext) -> "DispatchOutcome | None":
+def _preview_import_result_is_importable(
+    preview_import_result: ImportResult | None,
+) -> bool:
+    return (
+        preview_import_result is not None
+        and preview_import_result.decision in {
+            "import",
+            "transcode_upgrade",
+            "transcode_first",
+            "provisional_lossless_upgrade",
+        }
+        and preview_import_result.new_measurement is not None
+    )
+
+
+def _apply_preimport_from_preview(
+    album_data: GrabListEntry,
+    preview_import_result: ImportResult,
+) -> None:
+    """Populate preimport spectral fields from an accepted async preview."""
+    new_m = preview_import_result.new_measurement
+    existing_m = preview_import_result.existing_measurement
+    if new_m is not None:
+        album_data.download_spectral = SpectralMeasurement.from_parts(
+            new_m.spectral_grade,
+            new_m.spectral_bitrate_kbps,
+        )
+    if existing_m is not None:
+        album_data.current_spectral = SpectralMeasurement.from_parts(
+            existing_m.spectral_grade,
+            existing_m.spectral_bitrate_kbps,
+        )
+        album_data.current_min_bitrate = existing_m.min_bitrate_kbps
+
+
+def _process_beets_validation(
+    album_data: GrabListEntry,
+    staged_album: StagedAlbum,
+    ctx: CratediggerContext,
+    *,
+    preview_import_result: ImportResult | None = None,
+) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
     After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
@@ -1137,7 +1187,17 @@ def _process_beets_validation(album_data: GrabListEntry,
     bv_result.download_folder = current_path
     bv_result.source_dirs = _source_dirs_for_album(album_data)
 
-    if bv_result.valid:
+    if bv_result.valid and _preview_import_result_is_importable(preview_import_result):
+        assert preview_import_result is not None
+        logger.info(
+            "PREIMPORT: reusing async preview measurements for %s - %s "
+            "(decision=%s)",
+            album_data.artist,
+            album_data.title,
+            preview_import_result.decision,
+        )
+        _apply_preimport_from_preview(album_data, preview_import_result)
+    elif bv_result.valid:
         dl_pre = _build_download_info(album_data)
         db = (ctx.pipeline_db_source._get_db()
               if ctx.pipeline_db_source is not None else None)
@@ -1170,7 +1230,12 @@ def _process_beets_validation(album_data: GrabListEntry,
 
     if bv_result.valid:
         return _handle_valid_result(
-            album_data, bv_result, staged_album, ctx)
+            album_data,
+            bv_result,
+            staged_album,
+            ctx,
+            preview_import_result=preview_import_result,
+        )
     return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
 
@@ -1293,9 +1358,14 @@ def _reject_request_auto_import(
     return DispatchOutcome(success=False, message=detail)
 
 
-def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
-                         staged_album: StagedAlbum,
-                         ctx: CratediggerContext) -> "DispatchOutcome | None":
+def _handle_valid_result(
+    album_data: GrabListEntry,
+    bv_result: ValidationResult,
+    staged_album: StagedAlbum,
+    ctx: CratediggerContext,
+    *,
+    preview_import_result: ImportResult | None = None,
+) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
     Returns the ``DispatchOutcome`` summary from ``dispatch_import_core``
@@ -1479,6 +1549,11 @@ def _handle_valid_result(album_data: GrabListEntry, bv_result: ValidationResult,
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=_source_dirs_for_album(album_data),
+                preview_import_result=(
+                    preview_import_result
+                    if _preview_import_result_is_importable(preview_import_result)
+                    else None
+                ),
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
@@ -1968,6 +2043,8 @@ def _run_completed_processing(
     state: ActiveDownloadState,
     db: Any,
     ctx: CratediggerContext,
+    *,
+    preview_import_result: ImportResult | None = None,
 ) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
@@ -1980,7 +2057,12 @@ def _run_completed_processing(
         _persist_updated_download_state(db, request_id, entry, state)
 
     try:
-        outcome = process_completed_album(entry, [], ctx)
+        outcome = process_completed_album(
+            entry,
+            [],
+            ctx,
+            preview_import_result=preview_import_result,
+        )
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
@@ -2065,17 +2147,35 @@ def _enqueue_completed_processing(
             )
         state.processing_started_at = datetime.now(timezone.utc).isoformat()
         _persist_updated_download_state(db, request_id, entry, state)
+    if entry.import_folder is None:
+        entry.import_folder = (
+            state.current_path
+            or _canonical_import_folder_path(entry, ctx.cfg.slskd_download_dir)
+        )
+    staged_album = StagedAlbum.from_entry(
+        entry,
+        default_path=_canonical_import_folder_path(
+            entry,
+            ctx.cfg.slskd_download_dir,
+        ),
+    )
+    materialized = _materialize_processing_dir(entry, staged_album, ctx)
+    if materialized is not True:
+        logger.warning(
+            "Completed download for request %s could not be materialized "
+            "for import preview; leaving it for the next poll cycle",
+            request_id,
+        )
+        return None
+    entry.import_folder = staged_album.current_path
+    state.current_path = staged_album.current_path
+    _persist_updated_download_state(db, request_id, entry, state)
     job = db.enqueue_import_job(
         IMPORT_JOB_AUTOMATION,
         request_id=request_id,
         dedupe_key=automation_import_dedupe_key(request_id),
         payload=automation_import_payload(),
         message=f"Automation import queued for {entry.artist} - {entry.title}",
-        # Automation downloads are not yet safe for the async preview lane:
-        # the importer owns materializing slskd files into the stable
-        # processing folder. Previewing first checks a path that may not exist
-        # yet and terminal-fails valid completed downloads as path_missing.
-        preview_enabled=False,
     )
     if getattr(job, "deduped", False):
         logger.info(

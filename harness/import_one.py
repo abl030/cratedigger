@@ -55,6 +55,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          PostflightInfo, QualityRankConfig,
                          MeasuredImportDecisionInput,
                          ProvisionalLosslessDecisionInput,
+                         ProvisionalLosslessDecisionResult,
                          V0_PROBE_LOSSLESS_SOURCE,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
@@ -645,10 +646,82 @@ def _existing_v0_probe_from_args(args: argparse.Namespace) -> V0ProbeEvidence | 
     )
 
 
+_REUSABLE_PREVIEW_IMPORT_DECISIONS = frozenset({
+    "import",
+    "transcode_upgrade",
+    "transcode_first",
+    "provisional_lossless_upgrade",
+})
+
+
+def _load_preview_import_result(path: str | None) -> ImportResult | None:
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        if not isinstance(payload, dict):
+            raise ValueError("preview import result JSON must be an object")
+        return ImportResult.from_dict(payload)
+    except Exception as exc:
+        _log(f"[PREVIEW] Could not load preview import result: {exc}")
+        return None
+
+
+def _preview_import_result_reuse_reason(
+    preview: ImportResult | None,
+    *,
+    already_in_beets: bool,
+) -> str | None:
+    if preview is None:
+        return "missing"
+    if preview.decision not in _REUSABLE_PREVIEW_IMPORT_DECISIONS:
+        return f"decision {preview.decision!r} is not importable"
+    if preview.exit_code != 0:
+        return f"exit_code {preview.exit_code} is not reusable"
+    if preview.new_measurement is None:
+        return "missing new measurement"
+    if preview.already_in_beets != already_in_beets:
+        return (
+            "existing-beets state changed "
+            f"(preview={preview.already_in_beets}, current={already_in_beets})"
+        )
+    return None
+
+
+def _preview_conversion_target(
+    args: argparse.Namespace,
+    preview: ImportResult,
+) -> str | None:
+    new_m = preview.new_measurement
+    if args.target_format in ("flac", "lossless"):
+        return "lossless"
+    if preview.decision == "provisional_lossless_upgrade":
+        return args.verified_lossless_target or None
+    return conversion_target(
+        args.target_format,
+        bool(new_m and new_m.verified_lossless),
+        args.verified_lossless_target,
+    )
+
+
+def _lossless_filenames(album_path: str) -> list[str]:
+    return sorted(
+        fname for fname in os.listdir(album_path)
+        if _is_lossless_file(fname, album_path)
+    )
+
+
+def _first_lossless_ext(album_path: str) -> str | None:
+    lossless_files = _lossless_filenames(album_path)
+    if not lossless_files:
+        return None
+    return os.path.splitext(lossless_files[0])[1].lstrip(".").lower() or None
+
+
 def _probe_lossless_source_as_v0(album_path: str) -> V0ProbeEvidence | None:
     """Non-destructively encode lossless sources to temp V0 files and measure them."""
-    lossless_files = sorted(
-        f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
+    lossless_files = _lossless_filenames(album_path)
     if not lossless_files:
         return None
     return _temp_v0_probe(
@@ -1094,6 +1167,11 @@ def main():
                              "lib.import_dispatch.dispatch_import_core so the "
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
+    parser.add_argument("--preview-import-result-file", default=None,
+                        help="Path to an async preview ImportResult JSON. When "
+                             "usable, import_one reuses the preview's spectral, "
+                             "quality, and V0-probe values and only performs the "
+                             "filesystem conversion/import work.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1150,6 +1228,17 @@ def main():
     _log_timing("preflight_beets_lookup", stage_start)
     if already_in_beets:
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
+    preview_import_result = _load_preview_import_result(
+        args.preview_import_result_file)
+    preview_reuse_reason = _preview_import_result_reuse_reason(
+        preview_import_result,
+        already_in_beets=already_in_beets,
+    ) if preview_import_result is not None and not args.dry_run else "missing"
+    reuse_preview = preview_import_result is not None and preview_reuse_reason is None
+    if reuse_preview:
+        _log("[PREVIEW] Reusing async import preview measurements")
+    elif preview_import_result is not None:
+        _log(f"[PREVIEW] Ignoring async preview: {preview_reuse_reason}")
 
     # --- Path check (pure decision) ---
     pf = preflight_decision(already_in_beets, os.path.isdir(args.path))
@@ -1190,42 +1279,57 @@ def main():
     existing_spectral_grade: str | None = None
     existing_spectral_bitrate: int | None = None
     stage_start = time.monotonic()
-    try:
-        from lib.spectral_check import analyze_album as spectral_analyze
-        spectral_result = spectral_analyze(work_path, trim_seconds=30)
-        spectral_grade = spectral_result.grade
-        spectral_bitrate = spectral_result.estimated_bitrate_kbps
-        r.spectral.suspect_pct = spectral_result.suspect_pct
-        r.spectral.per_track = [
-            {"grade": t.grade, "hf_deficit_db": round(t.hf_deficit_db, 1),
-             "cliff_detected": t.cliff_detected,
-             "cliff_freq_hz": t.cliff_freq_hz,
-             "estimated_bitrate_kbps": t.estimated_bitrate_kbps}
-            for t in spectral_result.tracks
-        ]
-        _log(f"  spectral_grade={spectral_grade}")
+    if reuse_preview and preview_import_result is not None:
+        preview_new = preview_import_result.new_measurement
+        preview_existing = preview_import_result.existing_measurement
+        if preview_new is not None:
+            spectral_grade = preview_new.spectral_grade
+            spectral_bitrate = preview_new.spectral_bitrate_kbps
+        if preview_existing is not None:
+            existing_spectral_grade = preview_existing.spectral_grade
+            existing_spectral_bitrate = preview_existing.spectral_bitrate_kbps
+        r.spectral = preview_import_result.spectral
+        _log(f"  [PREVIEW] spectral_grade={spectral_grade}")
         if spectral_bitrate is not None:
-            _log(f"  spectral_bitrate={spectral_bitrate}")
-        if spectral_grade in ("suspect", "likely_transcode"):
-            cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
-            if cliff_tracks:
-                r.spectral.cliff_freq_hz = cliff_tracks[0].cliff_freq_hz
-                _log(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
-        # Spectral check on existing beets files
-        if already_in_beets:
-            existing_path = beets.get_album_path(mbid)
-            if existing_path and os.path.isdir(existing_path):
-                existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
-                existing_spectral_grade = existing_spectral.grade
-                existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
-                r.spectral.existing_suspect_pct = existing_spectral.suspect_pct
-                _log(f"  existing_spectral_grade={existing_spectral_grade}")
-                if existing_spectral_bitrate is not None:
-                    _log(f"  existing_spectral_bitrate={existing_spectral_bitrate}")
-    except Exception as e:
-        _log(f"  [SPECTRAL] error: {e}")
-    finally:
+            _log(f"  [PREVIEW] spectral_bitrate={spectral_bitrate}")
         _log_timing("spectral_analysis", stage_start)
+    else:
+        try:
+            from lib.spectral_check import analyze_album as spectral_analyze
+            spectral_result = spectral_analyze(work_path, trim_seconds=30)
+            spectral_grade = spectral_result.grade
+            spectral_bitrate = spectral_result.estimated_bitrate_kbps
+            r.spectral.suspect_pct = spectral_result.suspect_pct
+            r.spectral.per_track = [
+                {"grade": t.grade, "hf_deficit_db": round(t.hf_deficit_db, 1),
+                 "cliff_detected": t.cliff_detected,
+                 "cliff_freq_hz": t.cliff_freq_hz,
+                 "estimated_bitrate_kbps": t.estimated_bitrate_kbps}
+                for t in spectral_result.tracks
+            ]
+            _log(f"  spectral_grade={spectral_grade}")
+            if spectral_bitrate is not None:
+                _log(f"  spectral_bitrate={spectral_bitrate}")
+            if spectral_grade in ("suspect", "likely_transcode"):
+                cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
+                if cliff_tracks:
+                    r.spectral.cliff_freq_hz = cliff_tracks[0].cliff_freq_hz
+                    _log(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
+            # Spectral check on existing beets files
+            if already_in_beets:
+                existing_path = beets.get_album_path(mbid)
+                if existing_path and os.path.isdir(existing_path):
+                    existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
+                    existing_spectral_grade = existing_spectral.grade
+                    existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
+                    r.spectral.existing_suspect_pct = existing_spectral.suspect_pct
+                    _log(f"  existing_spectral_grade={existing_spectral_grade}")
+                    if existing_spectral_bitrate is not None:
+                        _log(f"  existing_spectral_bitrate={existing_spectral_bitrate}")
+        except Exception as e:
+            _log(f"  [SPECTRAL] error: {e}")
+        finally:
+            _log_timing("spectral_analysis", stage_start)
 
     # --- Convert lossless → V0 (unless keeping lossless on disk) ---
     keep_lossless = args.target_format in ("flac", "lossless")
@@ -1242,21 +1346,64 @@ def main():
     # is planned (``verified_lossless_target``) OR the caller asked us to
     # hold it until the quality decision (``--preserve-source``, issue #111).
     keep_v0_source = has_target or args.preserve_source
+    preview_conv_target = (
+        _preview_conversion_target(args, preview_import_result)
+        if reuse_preview and preview_import_result is not None
+        else None
+    )
+    skip_primary_for_preview_target = (
+        reuse_preview
+        and preview_import_result is not None
+        and not keep_lossless
+        and should_run_target_conversion(preview_conv_target)
+        and bool(_lossless_filenames(work_path))
+    )
     if not keep_lossless:
-        _log(f"[CONVERT] {work_path}")
-        stage_start = time.monotonic()
-        try:
-            converted, failed, original_ext = convert_lossless(
-                work_path, V0_SPEC,
-                keep_source=keep_v0_source)
-        finally:
+        if skip_primary_for_preview_target:
+            assert preview_import_result is not None
+            preview_conv = preview_import_result.conversion
+            _log("[CONVERT] Skipping V0 verification conversion; "
+                 "async preview supplied V0 evidence")
+            stage_start = time.monotonic()
+            converted = (
+                preview_conv.converted
+                or len(_lossless_filenames(work_path))
+            )
+            failed = 0
+            original_ext = (
+                preview_conv.original_filetype
+                or _first_lossless_ext(work_path)
+                or "flac"
+            )
+            post_conv_br = preview_conv.post_conversion_min_bitrate
+            if post_conv_br is None and preview_import_result.v0_probe:
+                post_conv_br = preview_import_result.v0_probe.min_bitrate_kbps
+            is_transcode = preview_conv.is_transcode
+            supported_lossless_source = True
+            r.conversion.converted = converted
+            r.conversion.failed = 0
+            r.conversion.was_converted = converted > 0
+            r.conversion.original_filetype = original_ext
+            r.conversion.post_conversion_min_bitrate = post_conv_br
+            r.conversion.is_transcode = is_transcode
+            r.v0_probe = preview_import_result.v0_probe
             _log_timing("primary_conversion", stage_start)
+        else:
+            _log(f"[CONVERT] {work_path}")
+            stage_start = time.monotonic()
+            try:
+                converted, failed, original_ext = convert_lossless(
+                    work_path, V0_SPEC,
+                    keep_source=keep_v0_source)
+            finally:
+                _log_timing("primary_conversion", stage_start)
         r.conversion.converted = converted
         r.conversion.failed = failed
         if converted > 0:
             r.conversion.was_converted = True
             r.conversion.original_filetype = original_ext or "flac"
-            r.conversion.target_filetype = "mp3"
+            if not skip_primary_for_preview_target:
+                r.conversion.target_filetype = "mp3"
             supported_lossless_source = (
                 (original_ext or "").lower() in {"flac", "wav", "m4a", "alac"}
             )
@@ -1272,12 +1419,14 @@ def main():
         # --- Transcode detection ---
         # When keep_v0_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
         v0_ext_filter = {".mp3"} if keep_v0_source and converted > 0 else None
-        post_conv_br = _get_folder_min_bitrate(work_path, ext_filter=v0_ext_filter) if converted > 0 else None
-        r.conversion.post_conversion_min_bitrate = post_conv_br
-        is_transcode = transcode_detection(
-            converted, post_conv_br,
-            spectral_grade=spectral_grade, cfg=_rank_cfg)
-        r.conversion.is_transcode = is_transcode
+        if not skip_primary_for_preview_target:
+            post_conv_br = _get_folder_min_bitrate(
+                work_path, ext_filter=v0_ext_filter) if converted > 0 else None
+            r.conversion.post_conversion_min_bitrate = post_conv_br
+            is_transcode = transcode_detection(
+                converted, post_conv_br,
+                spectral_grade=spectral_grade, cfg=_rank_cfg)
+            r.conversion.is_transcode = is_transcode
         if is_transcode:
             # Threshold tracks the runtime cfg (issue #66) — log the value
             # the decision actually used so retuned deployments stay
@@ -1319,109 +1468,156 @@ def main():
             _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
         r.final_format = "flac"
         stage_start = time.monotonic()
-        r.v0_probe = _probe_lossless_source_as_v0(work_path)
+        if reuse_preview and preview_import_result is not None:
+            r.v0_probe = preview_import_result.v0_probe
+            _log("  [PREVIEW] Reusing lossless source V0 probe")
+        else:
+            r.v0_probe = _probe_lossless_source_as_v0(work_path)
         _log_timing("lossless_v0_probe", stage_start)
         if r.v0_probe:
             _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
 
     # --- Quality comparison ---
-    stage_start = time.monotonic()
-    new_bitrates = _get_folder_bitrates(work_path, ext_filter=v0_ext_filter)
-    if not keep_lossless and supported_lossless_source and converted > 0:
-        r.v0_probe = _v0_probe_from_bitrates(new_bitrates)
-        if r.v0_probe:
-            _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
-    elif not keep_lossless and not supported_lossless_source:
-        # Native lossy candidate: emit a research probe (audit-only,
-        # never eligible for the lossless-source provisional comparison).
-        r.v0_probe = _probe_native_lossy_as_v0(work_path)
-        if r.v0_probe:
-            _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")
-    new_min_br = min(new_bitrates) if new_bitrates else None
-    new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
-    new_median_br = (
-        int(statistics.median(new_bitrates)) if new_bitrates else None
-    )
-    new_is_cbr = len(set(new_bitrates)) == 1 if new_bitrates else False
-    existing_info = beets.get_album_info(mbid, _rank_cfg)
-    _log_timing("quality_measurement", stage_start)
-    existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
-    if args.override_min_bitrate is not None and existing_min_br is not None:
-        if args.override_min_bitrate != existing_min_br:
-            _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
-                 f"beets says {existing_min_br}kbps")
-    effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
-    if effective_existing is not None:
-        _log(f"  prev_min_bitrate={effective_existing}")
-    if new_min_br is not None:
-        _log(f"  new_min_bitrate={new_min_br}")
-    if new_avg_br is not None:
-        _log(f"  new_avg_bitrate={new_avg_br}")
+    if reuse_preview and preview_import_result is not None:
+        stage_start = time.monotonic()
+        assert preview_import_result.new_measurement is not None
+        new_m = preview_import_result.new_measurement
+        existing_m = preview_import_result.existing_measurement
+        r.new_measurement = new_m
+        r.existing_measurement = existing_m
+        r.v0_probe = preview_import_result.v0_probe or r.v0_probe
+        r.existing_v0_probe = (
+            preview_import_result.existing_v0_probe
+            or r.existing_v0_probe
+        )
+        new_min_br = new_m.min_bitrate_kbps
+        new_avg_br = new_m.avg_bitrate_kbps
+        effective_existing = (
+            existing_m.min_bitrate_kbps
+            if existing_m and existing_m.min_bitrate_kbps is not None
+            else args.override_min_bitrate
+        )
+        will_be_verified_lossless = new_m.verified_lossless
+        new_conv_target = preview_conv_target
+        new_format_label = new_m.format
+        _log_timing("quality_measurement", stage_start)
+        _log("  [PREVIEW] Reusing quality measurement and decision")
+        if effective_existing is not None:
+            _log(f"  prev_min_bitrate={effective_existing}")
+        if new_min_br is not None:
+            _log(f"  new_min_bitrate={new_min_br}")
+        if new_avg_br is not None:
+            _log(f"  new_avg_bitrate={new_avg_br}")
+    else:
+        stage_start = time.monotonic()
+        new_bitrates = _get_folder_bitrates(work_path, ext_filter=v0_ext_filter)
+        if not keep_lossless and supported_lossless_source and converted > 0:
+            r.v0_probe = _v0_probe_from_bitrates(new_bitrates)
+            if r.v0_probe:
+                _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
+        elif not keep_lossless and not supported_lossless_source:
+            # Native lossy candidate: emit a research probe (audit-only,
+            # never eligible for the lossless-source provisional comparison).
+            r.v0_probe = _probe_native_lossy_as_v0(work_path)
+            if r.v0_probe:
+                _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")
+        new_min_br = min(new_bitrates) if new_bitrates else None
+        new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
+        new_median_br = (
+            int(statistics.median(new_bitrates)) if new_bitrates else None
+        )
+        new_is_cbr = len(set(new_bitrates)) == 1 if new_bitrates else False
+        existing_info = beets.get_album_info(mbid, _rank_cfg)
+        _log_timing("quality_measurement", stage_start)
+        existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
+        if args.override_min_bitrate is not None and existing_min_br is not None:
+            if args.override_min_bitrate != existing_min_br:
+                _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
+                     f"beets says {existing_min_br}kbps")
+        effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
+        if effective_existing is not None:
+            _log(f"  prev_min_bitrate={effective_existing}")
+        if new_min_br is not None:
+            _log(f"  new_min_bitrate={new_min_br}")
+        if new_avg_br is not None:
+            _log(f"  new_avg_bitrate={new_avg_br}")
 
-    # Verified lossless: single source of truth in quality.py. r.v0_probe is
-    # populated above (lossless source path) and lets the V0-avg trust
-    # override flip a spectral-suspect spoken-word/sparse-HF lossless source
-    # to verified when the V0 evidence corroborates a genuine master.
-    will_be_verified_lossless = determine_verified_lossless(
-        args.target_format, spectral_grade, converted, is_transcode,
-        v0_probe=r.v0_probe)
-    if (will_be_verified_lossless and is_transcode
-            and v0_probe_overrides_spectral(r.v0_probe)):
-        # Audit log: the V0 probe overrode the spectral-derived transcode
-        # signal. Operators chasing a counter-intuitive verified_lossless
-        # decision in download_log JSONB should see this in stderr too.
-        _log(f"[V0_OVERRIDE] spectral={spectral_grade} but lossless_source_v0 "
-             f"avg={r.v0_probe.avg_bitrate_kbps if r.v0_probe else '?'}kbps / "
-             f"min={r.v0_probe.min_bitrate_kbps if r.v0_probe else '?'}kbps "
-             "→ verified_lossless=True")
+        # Verified lossless: single source of truth in quality.py. r.v0_probe is
+        # populated above (lossless source path) and lets the V0-avg trust
+        # override flip a spectral-suspect spoken-word/sparse-HF lossless source
+        # to verified when the V0 evidence corroborates a genuine master.
+        will_be_verified_lossless = determine_verified_lossless(
+            args.target_format, spectral_grade, converted, is_transcode,
+            v0_probe=r.v0_probe)
+        if (will_be_verified_lossless and is_transcode
+                and v0_probe_overrides_spectral(r.v0_probe)):
+            # Audit log: the V0 probe overrode the spectral-derived transcode
+            # signal. Operators chasing a counter-intuitive verified_lossless
+            # decision in download_log JSONB should see this in stderr too.
+            _log(f"[V0_OVERRIDE] spectral={spectral_grade} but lossless_source_v0 "
+                 f"avg={r.v0_probe.avg_bitrate_kbps if r.v0_probe else '?'}kbps / "
+                 f"min={r.v0_probe.min_bitrate_kbps if r.v0_probe else '?'}kbps "
+                 "→ verified_lossless=True")
 
-    # Final format label for the NEW measurement. Compute conv_target early
-    # (originally it was computed after the quality decision — hoisted for
-    # issue #60 so the rank model sees the correct target label).
-    new_conv_target = conversion_target(
-        args.target_format, will_be_verified_lossless,
-        args.verified_lossless_target)
-    new_format_label = comparison_format_hint(
-        target_format=args.target_format,
-        verified_lossless_target=new_conv_target,
-        converted_count=converted,
-        is_transcode=is_transcode,
-        native_codec_family="MP3",
-    )
+        # Final format label for the NEW measurement. Compute conv_target early
+        # (originally it was computed after the quality decision — hoisted for
+        # issue #60 so the rank model sees the correct target label).
+        new_conv_target = conversion_target(
+            args.target_format, will_be_verified_lossless,
+            args.verified_lossless_target)
+        new_format_label = comparison_format_hint(
+            target_format=args.target_format,
+            verified_lossless_target=new_conv_target,
+            converted_count=converted,
+            is_transcode=is_transcode,
+            native_codec_family="MP3",
+        )
 
-    # --- Build measurements ---
-    new_m = AudioQualityMeasurement(
-        min_bitrate_kbps=new_min_br,
-        avg_bitrate_kbps=new_avg_br,
-        median_bitrate_kbps=new_median_br,
-        format=new_format_label,
-        is_cbr=new_is_cbr,
-        spectral_grade=spectral_grade,
-        spectral_bitrate_kbps=spectral_bitrate,
-        verified_lossless=will_be_verified_lossless,
-        was_converted_from=(original_ext or "flac") if converted > 0 else None,
-    )
-    existing_m = build_existing_measurement(
-        existing_info,
-        override_min_bitrate=args.override_min_bitrate,
-        existing_spectral_grade=existing_spectral_grade,
-        existing_spectral_bitrate=existing_spectral_bitrate,
-    )
-    r.new_measurement = new_m
-    r.existing_measurement = existing_m
+        # --- Build measurements ---
+        new_m = AudioQualityMeasurement(
+            min_bitrate_kbps=new_min_br,
+            avg_bitrate_kbps=new_avg_br,
+            median_bitrate_kbps=new_median_br,
+            format=new_format_label,
+            is_cbr=new_is_cbr,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+            verified_lossless=will_be_verified_lossless,
+            was_converted_from=(original_ext or "flac") if converted > 0 else None,
+        )
+        existing_m = build_existing_measurement(
+            existing_info,
+            override_min_bitrate=args.override_min_bitrate,
+            existing_spectral_grade=existing_spectral_grade,
+            existing_spectral_bitrate=existing_spectral_bitrate,
+        )
+        r.new_measurement = new_m
+        r.existing_measurement = existing_m
 
     # --- Quality comparison (pure decision) ---
-    provisional = provisional_lossless_decision(
-        ProvisionalLosslessDecisionInput(
-            candidate_probe=r.v0_probe,
-            existing_probe=r.existing_v0_probe,
-            spectral_grade=spectral_grade,
-            supported_lossless_source=supported_lossless_source,
-        ),
-        cfg=_rank_cfg,
-    )
     qd: StageResult | None = None
-    if provisional.decision is not None:
+    if reuse_preview and preview_import_result is not None:
+        decision = preview_import_result.decision or "import"
+        r.decision = decision
+        r.error = preview_import_result.error
+        provisional = ProvisionalLosslessDecisionResult(
+            decision=(
+                decision if decision == "provisional_lossless_upgrade"
+                else None
+            ),
+            would_import=True,
+        )
+    else:
+        provisional = provisional_lossless_decision(
+            ProvisionalLosslessDecisionInput(
+                candidate_probe=r.v0_probe,
+                existing_probe=r.existing_v0_probe,
+                spectral_grade=spectral_grade,
+                supported_lossless_source=supported_lossless_source,
+            ),
+            cfg=_rank_cfg,
+        )
+    if not reuse_preview and provisional.decision is not None:
         decision = provisional.decision
         r.decision = decision
         r.error = provisional.reason if provisional.confident_reject else None
@@ -1451,7 +1647,7 @@ def main():
                     ),
                 )
                 r.new_measurement = new_m
-    else:
+    elif not reuse_preview:
         qd = quality_decision_stage(new_m, existing_m, is_transcode=is_transcode,
                                     cfg=_rank_cfg)
         decision = qd.decision
@@ -1550,6 +1746,12 @@ def main():
                 _log(f"[ERROR] {r.error}")
                 _emit_and_exit(r)
             target_achieved = True
+            if target_converted > 0:
+                r.conversion.was_converted = True
+                if r.conversion.converted == 0:
+                    r.conversion.converted = target_converted
+                if not r.conversion.original_filetype:
+                    r.conversion.original_filetype = original_ext or "flac"
             # Remove V0 temp files (ephemeral verification artifacts) —
             # may already be gone if target had the same extension
             if target_spec.extension != V0_SPEC.extension:

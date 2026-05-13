@@ -27,7 +27,7 @@ from lib.pipeline_db import (
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.quality import ActiveDownloadState
+from lib.quality import ActiveDownloadState, ImportResult
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
@@ -39,6 +39,27 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "message": outcome.message,
         "deferred": outcome.deferred,
     }
+
+
+def _preview_import_result(job: ImportJob) -> ImportResult | None:
+    """Extract the dry-run import_one result stored by the preview worker."""
+    preview_result = job.preview_result or {}
+    raw = preview_result.get("import_result")
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, ImportResult):
+            return raw
+        if isinstance(raw, dict):
+            return ImportResult.from_dict(raw)
+    except Exception:
+        logger.warning(
+            "Import job %s has an unreadable preview import_result; "
+            "falling back to full import measurement",
+            job.id,
+            exc_info=True,
+        )
+    return None
 
 
 def _cleanup_failed_force_import(
@@ -117,6 +138,7 @@ def execute_import_job(
                 if isinstance(source_dirs, list)
                 else None
             ),
+            preview_import_result=_preview_import_result(job),
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -171,7 +193,14 @@ def execute_automation_import_job(
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db)
     try:
-        result = _run_completed_processing(entry, request_id, state, db, runtime_ctx)
+        result = _run_completed_processing(
+            entry,
+            request_id,
+            state,
+            db,
+            runtime_ctx,
+            preview_import_result=_preview_import_result(job),
+        )
     finally:
         if created_ctx:
             runtime_ctx.pipeline_db_source.close()

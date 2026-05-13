@@ -182,6 +182,63 @@ class TestStageResult(unittest.TestCase):
         self.assertFalse(r.terminal)
 
 
+class TestPreviewReuseHelpers(unittest.TestCase):
+    def test_reuses_importable_preview_when_beets_state_matches(self):
+        from harness import import_one
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        preview = ImportResult(
+            decision="import",
+            already_in_beets=False,
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
+        )
+
+        self.assertIsNone(import_one._preview_import_result_reuse_reason(
+            preview,
+            already_in_beets=False,
+        ))
+
+    def test_rejects_preview_when_existing_beets_state_changed(self):
+        from harness import import_one
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        preview = ImportResult(
+            decision="import",
+            already_in_beets=False,
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
+        )
+
+        reason = import_one._preview_import_result_reuse_reason(
+            preview,
+            already_in_beets=True,
+        )
+
+        self.assertIn("existing-beets state changed", reason or "")
+
+    def test_provisional_preview_uses_verified_lossless_target(self):
+        from argparse import Namespace
+        from harness import import_one
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        preview = ImportResult(
+            decision="provisional_lossless_upgrade",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                verified_lossless=False,
+            ),
+        )
+
+        target = import_one._preview_conversion_target(
+            Namespace(
+                target_format=None,
+                verified_lossless_target="opus 128",
+            ),
+            preview,
+        )
+
+        self.assertEqual(target, "opus 128")
+
+
 class TestPostflightBadExtensionWarnings(unittest.TestCase):
     """Postflight must warn and persist, not mutate already-imported files."""
 

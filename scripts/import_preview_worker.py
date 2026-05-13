@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -23,12 +24,14 @@ from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
     ImportJob,
+    import_preview_enabled_from_env,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.quality import ActiveDownloadState
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
+LEGACY_DISABLED_REQUEUE_LIMIT = 100
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -60,6 +63,47 @@ def _first_state_username(state: ActiveDownloadState) -> str | None:
         if file_state.username:
             return file_state.username
     return None
+
+
+def _materialize_automation_preview_path(
+    db: Any,
+    request_id: int,
+    row: dict[str, Any],
+    state: ActiveDownloadState,
+) -> str:
+    """Ensure automation preview has the same stable folder importer uses."""
+    from lib.config import read_runtime_config
+    from lib.download import (
+        _canonical_import_folder_path,
+        _materialize_processing_dir,
+        reconstruct_grab_list_entry,
+    )
+    from lib.staged_album import StagedAlbum
+
+    cfg = read_runtime_config()
+    entry = reconstruct_grab_list_entry(row, state)
+    if entry.import_folder is None:
+        entry.import_folder = _canonical_import_folder_path(
+            entry,
+            cfg.slskd_download_dir,
+        )
+    ctx = SimpleNamespace(
+        cfg=cfg,
+        pipeline_db_source=SimpleNamespace(_get_db=lambda: db),
+    )
+    staged_album = StagedAlbum.from_entry(
+        entry,
+        default_path=_canonical_import_folder_path(
+            entry,
+            cfg.slskd_download_dir,
+        ),
+    )
+    materialized = _materialize_processing_dir(entry, staged_album, ctx)
+    if materialized is not True:
+        raise ValueError(
+            f"Album request {request_id} could not be materialized for preview"
+        )
+    return staged_album.current_path
 
 
 def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
@@ -104,9 +148,12 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
         if not row:
             raise ValueError(f"Album request {job.request_id} not found")
         state = _state_from_raw(row.get("active_download_state"))
-        if not state.current_path:
-            raise ValueError(
-                f"Album request {job.request_id} has no active download path"
+        if not state.current_path or not os.path.isdir(state.current_path):
+            state.current_path = _materialize_automation_preview_path(
+                db,
+                job.request_id,
+                row,
+                state,
             )
         return {
             "request_id": job.request_id,
@@ -193,6 +240,16 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
 
 
 def run_once(db: PipelineDB, *, worker_id: str) -> ImportJob | None:
+    if import_preview_enabled_from_env():
+        requeued = db.requeue_disabled_automation_preview_jobs(
+            limit=LEGACY_DISABLED_REQUEUE_LIMIT,
+        )
+        if requeued:
+            logger.info(
+                "Requeued %s legacy disabled automation preview job(s)",
+                len(requeued),
+            )
+
     job = db.claim_next_import_preview_job(worker_id=worker_id)
     if job is None:
         return None

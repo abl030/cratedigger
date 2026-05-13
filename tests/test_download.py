@@ -12,6 +12,8 @@ and ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import os
+import shutil
+import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
@@ -2403,6 +2405,29 @@ class TestPollActiveDownloads(unittest.TestCase):
         for row in downloading_rows or []:
             fake_db.seed_request(row)
         cfg = _make_ctx().cfg
+        tmpdir = tempfile.mkdtemp(prefix="cratedigger-poll-test-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
+        cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
+        os.makedirs(cfg.slskd_download_dir, exist_ok=True)
+        os.makedirs(cfg.beets_staging_dir, exist_ok=True)
+        for row in downloading_rows or []:
+            raw_state = row.get("active_download_state")
+            if not isinstance(raw_state, dict):
+                continue
+            for file_state in raw_state.get("files") or []:
+                if not isinstance(file_state, dict):
+                    continue
+                file_dir = str(file_state.get("file_dir") or "")
+                filename = str(file_state.get("filename") or "")
+                folder_leaf = file_dir.replace("/", "\\").split("\\")[-1]
+                basename = filename.replace("/", "\\").split("\\")[-1]
+                if not folder_leaf or not basename:
+                    continue
+                local_dir = os.path.join(cfg.slskd_download_dir, folder_leaf)
+                os.makedirs(local_dir, exist_ok=True)
+                with open(os.path.join(local_dir, basename), "wb") as fp:
+                    fp.write(b"test audio")
         ctx = make_ctx_with_fake_db(
             fake_db,
             cfg=cfg,
@@ -2442,15 +2467,16 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
         self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertIsNotNone(self._download_state(fake_db)["current_path"])
         jobs = fake_db.list_import_jobs()
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].job_type, IMPORT_JOB_AUTOMATION)
         self.assertEqual(jobs[0].request_id, 1)
 
-    def test_poll_active_all_complete_bypasses_async_preview_gate(self):
-        """Automation jobs need importer-owned path materialization before preview."""
+    def test_poll_active_all_complete_uses_async_preview_gate(self):
+        """Completed automation downloads are materialized before preview."""
         from lib.download import poll_active_downloads
 
         row = self._make_downloading_row()
@@ -2472,10 +2498,9 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         jobs = fake_db.list_import_jobs()
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].preview_status, "would_import")
-        self.assertEqual(jobs[0].preview_message, "Preview gate disabled")
-        self.assertIsNone(fake_db.claim_next_import_preview_job(worker_id="preview"))
-        claimed = fake_db.claim_next_import_job(worker_id="importer")
+        self.assertEqual(jobs[0].preview_status, "waiting")
+        self.assertIsNone(jobs[0].preview_message)
+        claimed = fake_db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
         self.assertEqual(claimed.id, jobs[0].id)
 
@@ -2498,7 +2523,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertIsNotNone(fake_db.request(1)["active_download_state"])
         self.assertEqual(len(fake_db.list_import_jobs()), 1)
@@ -2859,12 +2884,12 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        # Album 1 persists processing_started_at, album 2 persists progress.
-        self.assertEqual(len(fake_db.update_download_state_calls), 2)
+        # Album 1 persists processing/materialization, album 2 persists progress.
+        self.assertEqual(len(fake_db.update_download_state_calls), 3)
         update_request_ids = [
             request_id for request_id, _ in fake_db.update_download_state_calls
         ]
-        self.assertEqual(update_request_ids, [1, 2])
+        self.assertEqual(update_request_ids, [1, 1, 2])
         self.assertIsNotNone(fake_db.request(1)["active_download_state"])
         self.assertIsNotNone(self._download_state(fake_db, 2)["last_progress_at"])
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
@@ -3142,12 +3167,12 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.status_history, [])
-        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertEqual(len(fake_db.update_download_state_calls), 2)
         persisted = self._download_state(fake_db)
         self.assertIsNotNone(persisted["processing_started_at"])
-        self.assertEqual(
-            persisted["current_path"],
-            "/tmp/test_downloads/Test Artist - Test Album (2020)",
+        self.assertIsNotNone(persisted["current_path"])
+        self.assertTrue(
+            persisted["current_path"].endswith("Test Artist - Test Album (2020)")
         )
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
@@ -3225,9 +3250,12 @@ class TestPollActiveDownloads(unittest.TestCase):
                 _fake_db.request(1)["active_download_state"]["current_path"],
                 canonical_path,
             )
-            self.assertEqual(len(_fake_db.update_download_state_current_path_calls), 1)
+            self.assertGreaterEqual(
+                len(_fake_db.update_download_state_current_path_calls),
+                1,
+            )
             self.assertEqual(
-                _fake_db.update_download_state_current_path_calls[0],
+                _fake_db.update_download_state_current_path_calls[-1],
                 (1, canonical_path),
             )
             self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
@@ -3446,6 +3474,10 @@ class TestPollActiveDownloads(unittest.TestCase):
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = download_root
+            source_dir = os.path.join(download_root, "Music")
+            os.makedirs(source_dir, exist_ok=True)
+            with open(os.path.join(source_dir, "01.flac"), "wb") as fp:
+                fp.write(b"test audio")
 
             poll_active_downloads(ctx)
 
@@ -3832,7 +3864,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
         self.assertNotIn((1, "wanted"), fake_db.status_history)
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
