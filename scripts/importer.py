@@ -41,19 +41,28 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
-def _cleanup_failed_force_import(
-    db: PipelineDB,
-    job: ImportJob,
-    outcome: DispatchOutcome,
-) -> dict[str, object] | None:
-    if job.job_type != IMPORT_JOB_FORCE or outcome.deferred:
+def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
+    if job.job_type != IMPORT_JOB_FORCE:
         return None
     payload = job.payload or {}
     download_log_id = payload.get("download_log_id")
     if not isinstance(download_log_id, int):
         return None
     failed_path = payload.get("failed_path")
-    failed_path_hint = failed_path if isinstance(failed_path, str) else None
+    return download_log_id, failed_path if isinstance(failed_path, str) else None
+
+
+def _cleanup_failed_force_import(
+    db: PipelineDB,
+    job: ImportJob,
+    outcome: DispatchOutcome,
+) -> dict[str, object] | None:
+    if outcome.deferred:
+        return None
+    force_payload = _force_job_wrong_match_payload(job)
+    if force_payload is None:
+        return None
+    download_log_id, failed_path_hint = force_payload
     try:
         from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
         from lib.wrong_matches import cleanup_wrong_match_source
@@ -93,14 +102,10 @@ def _dismiss_successful_force_import(
     db: PipelineDB,
     job: ImportJob,
 ) -> dict[str, object] | None:
-    if job.job_type != IMPORT_JOB_FORCE:
+    force_payload = _force_job_wrong_match_payload(job)
+    if force_payload is None:
         return None
-    payload = job.payload or {}
-    download_log_id = payload.get("download_log_id")
-    if not isinstance(download_log_id, int):
-        return None
-    failed_path = payload.get("failed_path")
-    failed_path_hint = failed_path if isinstance(failed_path, str) else None
+    download_log_id, failed_path_hint = force_payload
     try:
         from lib.wrong_matches import dismiss_wrong_match_source
 

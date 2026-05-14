@@ -19,20 +19,20 @@ from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, SpectralMeasurement, V0ProbeEvidence,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
-                         V0_PROBE_LOSSLESS_SOURCE,
-                         V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
                          AlbumQualityEvidence,
                          AlbumQualityEvidenceDecisionFacts,
-                         AlbumQualityV0Metric,
                          dispatch_action, compute_effective_override_bitrate,
                          extract_usernames, is_comparable_lossless_source_probe,
                          full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
+                         override_bitrate_from_current_evidence,
                          rejection_backfill_override)
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
+    legacy_current_lossless_v0_probe_from_request,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
+    lossless_source_v0_probe_from_metric,
 )
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
@@ -189,40 +189,6 @@ class EvidenceImportGate:
     candidate_reason: str | None = None
 
 
-def _v0_probe_from_metric(
-    metric: AlbumQualityV0Metric | None,
-) -> V0ProbeEvidence | None:
-    if (
-        metric is None
-        or metric.source_lineage != V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
-        or metric.avg_bitrate_kbps is None
-    ):
-        return None
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=metric.min_bitrate_kbps,
-        avg_bitrate_kbps=metric.avg_bitrate_kbps,
-        median_bitrate_kbps=metric.median_bitrate_kbps,
-    )
-
-
-def _override_min_bitrate_from_current_evidence(
-    evidence: AlbumQualityEvidence | None,
-) -> int | None:
-    if evidence is None:
-        return None
-    measurement = evidence.measurement
-    current_min = measurement.min_bitrate_kbps
-    effective = compute_effective_override_bitrate(
-        current_min,
-        measurement.spectral_bitrate_kbps,
-        measurement.spectral_grade,
-    )
-    if current_min is not None and effective is not None and effective != current_min:
-        return effective
-    return None
-
-
 def _import_allowed_by_evidence_pipeline(result: dict[str, object]) -> bool:
     return bool(result.get("imported"))
 
@@ -375,28 +341,6 @@ def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
             existing.median_bitrate_kbps if existing else None
         ),
     }
-
-
-def _current_lossless_v0_probe_from_request(
-    row: dict[str, object] | None,
-) -> V0ProbeEvidence | None:
-    """Build the current comparable source-probe evidence from album_requests."""
-    if not row:
-        return None
-    def optional_int(value: object | None) -> int | None:
-        return value if isinstance(value, int) else None
-
-    avg = optional_int(row.get("current_lossless_source_v0_probe_avg_bitrate"))
-    if avg is None:
-        return None
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=optional_int(row.get(
-            "current_lossless_source_v0_probe_min_bitrate")),
-        avg_bitrate_kbps=avg,
-        median_bitrate_kbps=optional_int(row.get(
-            "current_lossless_source_v0_probe_median_bitrate")),
-    )
 
 
 def _load_evidence_import_gate(
@@ -1112,18 +1056,18 @@ def dispatch_import_core(
                 candidate_import_job_id=candidate_import_job_id,
                 candidate_download_log_id=candidate_download_log_id,
             )
-            existing_v0_probe = _v0_probe_from_metric(
+            existing_v0_probe = lossless_source_v0_probe_from_metric(
                 evidence_gate.current.v0_metric
                 if evidence_gate.current is not None
                 else None
             )
-            evidence_override = _override_min_bitrate_from_current_evidence(
+            evidence_override = override_bitrate_from_current_evidence(
                 evidence_gate.current
             )
             if evidence_override is not None:
                 override_min_bitrate = evidence_override
             if existing_v0_probe is None:
-                existing_v0_probe = _current_lossless_v0_probe_from_request(
+                existing_v0_probe = legacy_current_lossless_v0_probe_from_request(
                     request_row)
 
             if (
@@ -1151,8 +1095,6 @@ def dispatch_import_core(
                     ),
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
-                    force_import=force,
-                    beets_distance=distance,
                 )
                 evidence_decision = full_pipeline_decision_from_evidence(
                     evidence_gate.candidate,
@@ -1174,12 +1116,12 @@ def dispatch_import_core(
                             if evidence_gate.current is not None
                             else None
                         ),
-                        v0_probe=_v0_probe_from_metric(
+                        v0_probe=lossless_source_v0_probe_from_metric(
                             evidence_gate.candidate.v0_metric
                         ),
                         existing_v0_probe=existing_v0_probe,
                     ).to_json()
-                    dl_info.v0_probe = _v0_probe_from_metric(
+                    dl_info.v0_probe = lossless_source_v0_probe_from_metric(
                         evidence_gate.candidate.v0_metric
                     )
                     dl_info.existing_v0_probe = existing_v0_probe

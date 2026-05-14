@@ -20,7 +20,9 @@ from lib.import_dispatch import run_import_one
 from lib.preimport import inspect_local_files, run_preimport_gates
 from lib.quality_evidence import (
     audio_snapshot_matches,
+    legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
+    lossless_source_v0_probe_from_metric,
     persist_candidate_evidence_from_import_result,
     request_current_owner,
     snapshot_audio_files,
@@ -32,8 +34,6 @@ from lib.quality import (
     compute_effective_override_bitrate,
     full_pipeline_decision,
     quality_gate_decision,
-    V0_PROBE_LOSSLESS_SOURCE,
-    V0ProbeEvidence,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
 
@@ -210,20 +210,6 @@ def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | N
         simulation.get("stage2_import"),
         simulation.get("stage3_quality_gate"),
         imported=bool(simulation.get("imported")),
-    )
-
-
-def _current_lossless_v0_probe(req: dict[str, Any]) -> V0ProbeEvidence | None:
-    avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
-    if not isinstance(avg, int):
-        return None
-    min_br = req.get("current_lossless_source_v0_probe_min_bitrate")
-    median_br = req.get("current_lossless_source_v0_probe_median_bitrate")
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=min_br if isinstance(min_br, int) else None,
-        avg_bitrate_kbps=avg,
-        median_bitrate_kbps=median_br if isinstance(median_br, int) else None,
     )
 
 
@@ -503,16 +489,11 @@ def preview_import_from_path(
             existing_grade if isinstance(existing_grade, str) else None,
         )
 
-        existing_v0_probe = _current_lossless_v0_probe(req)
+        existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
         if current_evidence is not None and current_evidence.v0_metric is not None:
-            metric = current_evidence.v0_metric
-            if metric.source_lineage == "lossless_source":
-                existing_v0_probe = V0ProbeEvidence(
-                    kind=V0_PROBE_LOSSLESS_SOURCE,
-                    min_bitrate_kbps=metric.min_bitrate_kbps,
-                    avg_bitrate_kbps=metric.avg_bitrate_kbps,
-                    median_bitrate_kbps=metric.median_bitrate_kbps,
-                )
+            existing_v0_probe = lossless_source_v0_probe_from_metric(
+                current_evidence.v0_metric
+            )
 
         run = run_import_one(
             path=preview_path,

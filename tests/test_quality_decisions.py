@@ -1075,8 +1075,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             None,
             facts=AlbumQualityEvidenceDecisionFacts(
                 import_mode="force",
-                force_import=True,
-                beets_distance=0.99,
                 verified_lossless_target="opus 128",
             ),
         )
@@ -1085,8 +1083,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             self._current_with_v0_lineage("lossless_source"),
             facts=AlbumQualityEvidenceDecisionFacts(
                 import_mode="force",
-                force_import=True,
-                beets_distance=0.99,
                 verified_lossless_target="opus 128",
             ),
         )
@@ -1112,8 +1108,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             current,
             facts=AlbumQualityEvidenceDecisionFacts(
                 import_mode="force",
-                force_import=True,
-                beets_distance=0.99,
             ),
         )
 

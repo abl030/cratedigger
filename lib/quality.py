@@ -3999,9 +3999,8 @@ def full_pipeline_decision(
 class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     """Action-time facts that are not intrinsic album-quality evidence.
 
-    Match-bypass facts are accepted here so force/manual callers can keep one
-    compact context object, but quality comparison intentionally ignores
-    ``force_import`` and ``beets_distance``.
+    Force/manual callers use ``import_mode`` for provenance only. Beets
+    distance bypass is intentionally outside this quality comparison.
     """
 
     audio_check_mode: str = "normal"
@@ -4012,8 +4011,6 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     target_format: str | None = None
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
-    force_import: bool = False
-    beets_distance: float | None = None
 
 
 def _require_evidence_ready(
@@ -4068,7 +4065,6 @@ def _lossless_source_from_evidence(evidence: AlbumQualityEvidence) -> bool:
         if fmt in _LOSSLESS_EXTS or fmt == "lossless":
             return True
     return _normalised_format(evidence.codec) == "alac"
-    return False
 
 
 def _policy_v0_probe_from_metric(
@@ -4107,7 +4103,7 @@ def _new_format_hint_from_evidence(
     return candidate.measurement.format or candidate.storage_format
 
 
-def _override_bitrate_from_current_evidence(
+def override_bitrate_from_current_evidence(
     current: AlbumQualityEvidence | None,
 ) -> int | None:
     if current is None:
@@ -4209,7 +4205,7 @@ def full_pipeline_decision_from_evidence(
         existing_avg_bitrate=existing_avg,
         existing_spectral_bitrate=existing_spectral_bitrate,
         existing_spectral_grade=existing_spectral_grade,
-        override_min_bitrate=_override_bitrate_from_current_evidence(current),
+        override_min_bitrate=override_bitrate_from_current_evidence(current),
         existing_format=existing_format,
         existing_is_cbr=existing_is_cbr,
         post_conversion_min_bitrate=post_conversion_min,

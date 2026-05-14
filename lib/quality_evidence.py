@@ -15,6 +15,8 @@ from lib.quality import (
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+    V0_SOURCE_LINEAGE_ON_DISK_RESEARCH,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityEvidenceOwner,
@@ -41,10 +43,14 @@ _AUDIO_EXTENSIONS = {
 }
 
 _NEUTRAL_V0_LINEAGE = {
-    V0_PROBE_LOSSLESS_SOURCE: "lossless_source",
-    V0_PROBE_NATIVE_LOSSY_RESEARCH: "native_lossy_research",
-    V0_PROBE_ON_DISK_RESEARCH: "on_disk_research",
+    V0_PROBE_LOSSLESS_SOURCE: V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    V0_PROBE_NATIVE_LOSSY_RESEARCH: V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+    V0_PROBE_ON_DISK_RESEARCH: V0_SOURCE_LINEAGE_ON_DISK_RESEARCH,
 }
+
+
+def _optional_int(value: object | None) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 class SnapshotAudioFilesError(OSError):
@@ -64,24 +70,25 @@ class EvidenceBuildResult:
         return self.evidence is not None
 
 
-def candidate_owner(
+def _candidate_owners(
     *,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
-) -> AlbumQualityEvidenceOwner | None:
-    """Return the persisted candidate owner for an import candidate."""
+) -> list[AlbumQualityEvidenceOwner]:
+    """Return persisted candidate owners for an import candidate."""
 
-    if download_log_id is not None:
-        return AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
-        )
+    owners: list[AlbumQualityEvidenceOwner] = []
     if import_job_id is not None:
-        return AlbumQualityEvidenceOwner(
+        owners.append(AlbumQualityEvidenceOwner(
             owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
             owner_id=import_job_id,
-        )
-    return None
+        ))
+    if download_log_id is not None:
+        owners.append(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=download_log_id,
+        ))
+    return owners
 
 
 def request_current_owner(request_id: int) -> AlbumQualityEvidenceOwner:
@@ -167,6 +174,23 @@ def neutral_v0_metric_from_probe(
     )
 
 
+def lossless_source_v0_probe_from_metric(
+    metric: AlbumQualityV0Metric | None,
+) -> V0ProbeEvidence | None:
+    if (
+        metric is None
+        or metric.source_lineage != V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        or metric.avg_bitrate_kbps is None
+    ):
+        return None
+    return V0ProbeEvidence(
+        kind=V0_PROBE_LOSSLESS_SOURCE,
+        min_bitrate_kbps=metric.min_bitrate_kbps,
+        avg_bitrate_kbps=metric.avg_bitrate_kbps,
+        median_bitrate_kbps=metric.median_bitrate_kbps,
+    )
+
+
 def verified_lossless_proof_from_import_result(
     import_result: ImportResult,
 ) -> VerifiedLosslessProof | None:
@@ -208,16 +232,13 @@ def legacy_current_v0_metric_from_request(
     if not request_row:
         return None
 
-    def optional_int(value: object | None) -> int | None:
-        return value if isinstance(value, int) else None
-
-    min_bitrate = optional_int(
+    min_bitrate = _optional_int(
         request_row.get("current_lossless_source_v0_probe_min_bitrate")
     )
-    avg_bitrate = optional_int(
+    avg_bitrate = _optional_int(
         request_row.get("current_lossless_source_v0_probe_avg_bitrate")
     )
-    median_bitrate = optional_int(
+    median_bitrate = _optional_int(
         request_row.get("current_lossless_source_v0_probe_median_bitrate")
     )
     if min_bitrate is None and avg_bitrate is None and median_bitrate is None:
@@ -229,6 +250,30 @@ def legacy_current_v0_metric_from_request(
         source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
         source_provenance="album_requests.current_lossless_source_v0_probe",
         proof_provenance="legacy_current_v0_probe_seed",
+    )
+
+
+def legacy_current_lossless_v0_probe_from_request(
+    request_row: dict[str, Any] | None,
+) -> V0ProbeEvidence | None:
+    """Build comparable source-probe evidence from legacy request columns."""
+
+    if not request_row:
+        return None
+    avg_bitrate = _optional_int(
+        request_row.get("current_lossless_source_v0_probe_avg_bitrate")
+    )
+    if avg_bitrate is None:
+        return None
+    return V0ProbeEvidence(
+        kind=V0_PROBE_LOSSLESS_SOURCE,
+        min_bitrate_kbps=_optional_int(
+            request_row.get("current_lossless_source_v0_probe_min_bitrate")
+        ),
+        avg_bitrate_kbps=avg_bitrate,
+        median_bitrate_kbps=_optional_int(
+            request_row.get("current_lossless_source_v0_probe_median_bitrate")
+        ),
     )
 
 
@@ -334,17 +379,10 @@ def persist_candidate_evidence_from_import_result(
     target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
-    owners: list[AlbumQualityEvidenceOwner] = []
-    if import_job_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=import_job_id,
-        ))
-    if download_log_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
-        ))
+    owners = _candidate_owners(
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+    )
     if not owners:
         return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")
     if files is None:
@@ -402,17 +440,10 @@ def load_candidate_evidence_for_source(
 ) -> EvidenceBuildResult:
     """Load stored candidate evidence and require source snapshot freshness."""
 
-    owners: list[AlbumQualityEvidenceOwner] = []
-    if import_job_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=import_job_id,
-        ))
-    if download_log_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
-        ))
+    owners = _candidate_owners(
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+    )
     if not owners:
         return EvidenceBuildResult(None, "unowned", "no candidate owner")
 
@@ -448,7 +479,7 @@ def load_or_backfill_current_evidence(
     mb_release_id: str,
     quality_ranks: Any = None,
 ) -> EvidenceBuildResult:
-    """Load current Beets evidence, backfilling when absent or stale."""
+    """Load current Beets evidence, backfilling when absent or incomplete."""
 
     from lib.beets_db import BeetsDB
     from lib.quality import QualityRankConfig
@@ -465,12 +496,6 @@ def load_or_backfill_current_evidence(
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return EvidenceBuildResult(None, "empty_current", "album not in beets")
-
-    album_path = str(getattr(album_info, "album_path", "") or "")
-    if existing is not None and audio_snapshot_matches(album_path, existing.files):
-        errors = existing.policy_incomplete_reasons()
-        if not errors:
-            return EvidenceBuildResult(existing, "ready")
 
     return backfill_current_evidence_from_album_info(
         db,
