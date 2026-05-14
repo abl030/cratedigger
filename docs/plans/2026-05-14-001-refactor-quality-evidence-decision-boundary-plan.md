@@ -1,12 +1,20 @@
 ---
 title: "refactor: Separate quality evidence from decisions"
 type: refactor
-status: completed
+status: superseded
 date: 2026-05-14
 origin: docs/brainstorms/2026-05-14-quality-evidence-decision-boundary-requirements.md
+superseded_by: docs/plans/2026-05-15-001-refactor-evidence-backed-import-mutation-plan.md
 ---
 
 # refactor: Separate quality evidence from decisions
+
+> Superseded on 2026-05-15 by
+> `docs/plans/2026-05-15-001-refactor-evidence-backed-import-mutation-plan.md`.
+> This plan was sufficient for the stale-decision safety boundary, but it did
+> not make R28-R32 explicit enough: snapshot-valid candidate evidence from
+> async preview must be reused at import time, and unchanged candidates must not
+> be remeasured before Beets mutation.
 
 ## Summary
 

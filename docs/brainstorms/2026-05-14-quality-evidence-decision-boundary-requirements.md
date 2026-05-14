@@ -8,10 +8,13 @@ topic: quality-evidence-decision-boundary
 ## Summary
 
 Refactor Cratedigger's quality pipeline around one neutral album-quality
-evidence model and ephemeral action decisions. Expensive measurements may be
-persisted and reused, but import, triage cleanup, simulator, and action-facing
-UI decisions must always be freshly derived from current evidence, candidate
-evidence, and policy.
+evidence model and ephemeral action decisions. Expensive candidate
+measurements are durable work product: once async preview has measured a
+candidate and its fileset snapshot still matches, mutating import must reuse
+that candidate evidence and must not rerun candidate spectral/V0/bitrate
+measurement. Import, triage cleanup, simulator, and action-facing UI decisions
+must always be freshly derived from current evidence, candidate evidence, and
+policy.
 
 ---
 
@@ -41,9 +44,11 @@ matters in a given comparison.
 - A1. Operator: Reviews Wrong Matches, import history, and simulator output,
   and needs decisions to be explainable without risking the library.
 - A2. Async preview worker: Computes expensive candidate evidence ahead of the
-  serial beets mutation lane.
+  serial beets mutation lane so import can reuse those measurements when the
+  candidate fileset is unchanged.
 - A3. Import worker: Owns beets mutation and must compute authoritative import
-  decisions from fresh evidence.
+  decisions from fresh current evidence plus snapshot-valid candidate
+  evidence, without remeasuring unchanged candidates.
 - A4. Wrong Matches triage: Uses candidate/current evidence to decide whether
   a rejected folder can be safely cleared.
 - A5. Quality simulator: Protects quality policy behavior and explains how a
@@ -64,18 +69,21 @@ matters in a given comparison.
     album-quality evidence for that candidate owner, optionally store a
     preview/triage verdict for UI/audit, and record provenance.
   - **Outcome:** Expensive candidate measurements are available for later
-    decision recomputation without carrying decision authority.
+    decision recomputation without carrying decision authority. If the cheap
+    candidate fileset snapshot still matches, later action paths reuse these
+    measurements rather than re-running candidate spectral/V0/bitrate work.
   - **Covered by:** R1, R2, R3, R4, R11, R12, R14, R22, R24
 
 - F2. Mutating import decision
   - **Trigger:** The serial import worker is ready to import a candidate.
   - **Actors:** A3, A6
   - **Steps:** Load candidate evidence for the candidate owner; verify its cheap
-    fileset snapshot; recompute if missing or stale; load fresh current
-    request/Beets evidence; backfill missing current evidence when possible;
-    run the quality decision pipeline; mutate beets only if the freshly
-    computed decision allows it; after successful import, measure final Beets
-    files for current evidence and carry forward only source-proof
+    fileset snapshot; reuse it when the snapshot matches; recompute candidate
+    evidence only when it is missing, stale, malformed, or incomplete; load
+    fresh current request/Beets evidence; backfill missing current evidence
+    when possible; run the quality decision pipeline; mutate beets only if the
+    freshly computed decision allows it; after successful import, measure final
+    Beets files for current evidence and carry forward only source-proof
     classifications that remain valid after conversion.
   - **Outcome:** Import authority comes only from current evidence, candidate
     evidence, current policy, and import context at mutation time.
@@ -132,7 +140,8 @@ matters in a given comparison.
   source candidate. Candidate evidence validity and current evidence validity
   are independent; each evidence record is valid only for the fileset it
   describes.
-- R6. Cached evidence is an optimization. If candidate or current evidence is
+- R6. Cached evidence is an optimization, but snapshot-valid candidate evidence
+  is also the expected import-time input. If candidate or current evidence is
   missing, stale, malformed, or incomplete, the active path must recompute or
   backfill evidence rather than reusing an old decision. If required evidence
   cannot be recomputed or backfilled for a mutating/destructive action, the
@@ -245,16 +254,42 @@ matters in a given comparison.
   `AlbumQualityEvidence` pairs rather than passing policy-shaped probe kinds or
   overloaded import-result blobs.
 
+**Measurement Reuse and Mutation Boundary**
+
+- R28. Candidate evidence reuse is mandatory when safe. If import or cleanup
+  has snapshot-valid candidate evidence, it must reuse the stored candidate
+  measurements and must not rerun candidate spectral analysis, V0 probe
+  generation, bitrate measurement, verified-lossless source probing, or other
+  expensive candidate measurement work. Only the action decision is recomputed.
+- R29. "Recompute the decision" must never be used as shorthand for
+  "remeasure the candidate." Candidate evidence recomputation is allowed only
+  when evidence is missing, stale, malformed, incomplete, or explicitly
+  invalidated by the fileset snapshot guard.
+- R30. Async preview must produce the same typed candidate evidence artifact
+  that mutating import consumes. The handoff may include audit verdicts for UI,
+  but the import path must not rebuild active candidate evidence by decoding an
+  `ImportResult` decision blob or by rerunning the preview harness against the
+  unchanged source.
+- R31. The beets mutation boundary must support a mutation-only path once
+  candidate evidence is snapshot-valid. Any harness operation that mutates
+  Beets must be separable from candidate measurement so unchanged candidates do
+  not pay the preview CPU cost a second time.
+- R32. Import and cleanup provenance must record whether candidate evidence was
+  reused, recomputed, or unavailable. The test suite must include regressions
+  that fail if snapshot-valid preview evidence causes import to invoke
+  candidate spectral/V0/bitrate measurement again.
+
 ---
 
 ## Acceptance Examples
 
-- AE1. **Covers R3, R6, R20, R21, R24, R26.** Given preview measured a
+- AE1. **Covers R3, R6, R20, R21, R24, R26, R28, R29, R32.** Given preview measured a
   candidate and stored an audit verdict of would-import before current evidence
   existed, and a different import later creates stronger current V0/spectral
   evidence, when force import runs for the previewed candidate, it may reuse the
-  candidate measurements, must load fresh current evidence, must recompute the
-  decision, and must reject if current evidence is better.
+  candidate measurements, must not remeasure the unchanged candidate, must load
+  fresh current evidence, must recompute the decision, and must reject if
+  current evidence is better.
 - AE2. **Covers R20, R21, R25.** Given a high-distance wrong match with poor
   quality evidence, when force import is used, the Beets distance gate is
   bypassed but the candidate still rejects through the normal quality pipeline.
@@ -293,6 +328,13 @@ matters in a given comparison.
   stored confident-cleanup verdict, when cleanup is requested, that entry point
   must call the recomputed cleanup decision service and leave files visible if
   evidence cannot be obtained.
+- AE10. **Covers R28, R29, R30, R31, R32.** Given async preview has persisted
+  complete candidate evidence and the candidate fileset snapshot still matches,
+  when automation, manual import, or force import reaches the mutating lane, the
+  import path must run the fresh evidence-pair decision but must not call the
+  candidate measurement functions (`run_preimport_gates`, spectral analysis,
+  V0 probing, candidate bitrate probing, or verified-lossless source probing)
+  again before Beets mutation.
 
 ---
 
@@ -302,6 +344,9 @@ matters in a given comparison.
   cleanup.
 - Async preview still saves CPU for import by persisting candidate evidence,
   while import decisions remain fresh.
+- Snapshot-valid candidate evidence from async preview prevents duplicate
+  candidate measurement at import time. Repeated candidate measurement is a
+  regression unless the snapshot is stale or evidence is incomplete.
 - The quality simulator remains the policy oracle: existing scenario behavior
   is preserved and new incident regressions cover the evidence/decision
   boundary.
@@ -349,6 +394,10 @@ matters in a given comparison.
   lossy storage.
 - Force import must stay boring: one bypass-distance context flag, no bespoke
   quality code.
+- Candidate measurement and Beets mutation are separate boundaries. Async
+  preview owns candidate measurement; import owns fresh decision computation
+  and mutation. A mutating harness path must consume validated evidence instead
+  of silently remeasuring unchanged candidate files.
 
 ---
 
