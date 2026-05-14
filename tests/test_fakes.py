@@ -1723,6 +1723,40 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual([e.request_id for e in db.search_logs], [2])
         self.assertEqual([e.request_id for e in db.denylist], [2])
 
+    def test_delete_request_cascades_album_quality_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        log_id = db.log_download(1, outcome="rejected")
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=1,
+        ))
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+        ))
+
+        db.delete_request(1)
+
+        self.assertIsNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                1,
+            )
+        ))
+        self.assertIsNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                log_id,
+            )
+        ))
+
     def test_get_wanted_prioritizes_new_and_respects_limit(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted",

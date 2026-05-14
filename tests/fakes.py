@@ -1170,6 +1170,37 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
+    def mark_import_job_preview_blocked(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        validate_preview_failure_status(preview_status)
+        result = copy.deepcopy(preview_result or {})
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "queued"
+                and row.get("preview_status") in ("waiting", "running")
+            ):
+                now = _utcnow()
+                row["preview_status"] = preview_status
+                row["preview_result"] = result
+                row["preview_message"] = message
+                row["preview_error"] = error
+                row["message"] = message
+                row["error"] = error
+                row["preview_completed_at"] = now
+                row["preview_worker_id"] = None
+                row["preview_heartbeat_at"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
     def list_stale_import_preview_jobs(
         self,
         *,

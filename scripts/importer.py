@@ -89,6 +89,39 @@ def _cleanup_failed_force_import(
         }
 
 
+def _dismiss_successful_force_import(
+    db: PipelineDB,
+    job: ImportJob,
+) -> dict[str, object] | None:
+    if job.job_type != IMPORT_JOB_FORCE:
+        return None
+    payload = job.payload or {}
+    download_log_id = payload.get("download_log_id")
+    if not isinstance(download_log_id, int):
+        return None
+    failed_path = payload.get("failed_path")
+    failed_path_hint = failed_path if isinstance(failed_path, str) else None
+    try:
+        from lib.wrong_matches import dismiss_wrong_match_source
+
+        return dismiss_wrong_match_source(
+            db,
+            download_log_id,
+            failed_path_hint=failed_path_hint,
+        ).to_dict()
+    except Exception as exc:
+        logger.exception(
+            "Failed to dismiss wrong-match source for import job %s",
+            job.id,
+        )
+        return {
+            "success": False,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def execute_import_job(
     db: PipelineDB,
     job: ImportJob,
@@ -114,6 +147,7 @@ def execute_import_job(
             )
         source_username = payload.get("source_username")
         source_dirs = payload.get("source_dirs")
+        download_log_id = payload.get("download_log_id")
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
@@ -128,6 +162,12 @@ def execute_import_job(
             source_dirs=(
                 [str(source_dir) for source_dir in source_dirs if source_dir]
                 if isinstance(source_dirs, list)
+                else None
+            ),
+            import_job_id=job.id,
+            download_log_id=(
+                int(download_log_id)
+                if isinstance(download_log_id, int)
                 else None
             ),
         )
@@ -190,6 +230,7 @@ def execute_automation_import_job(
             state,
             db,
             runtime_ctx,
+            import_job_id=job.id,
         )
     finally:
         if created_ctx:
@@ -235,6 +276,9 @@ def process_claimed_job(
 
     result = _job_result(outcome)
     if outcome.success:
+        dismissal = _dismiss_successful_force_import(db, job)
+        if dismissal is not None:
+            result["wrong_match_dismissal"] = dismissal
         return db.mark_import_job_completed(
             job.id,
             result=result,

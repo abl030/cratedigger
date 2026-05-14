@@ -84,6 +84,30 @@ class TestWrongMatchCleanupDecision(unittest.TestCase):
         self.assertTrue(decision.uncertain)
         self.assertEqual(decision.skip_reason, "fresh evidence unavailable")
 
+    def test_decision_blocks_confident_reject_when_cleanup_ineligible(self):
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
+
+        preview = ImportPreviewResult(
+            mode="download_log",
+            verdict="confident_reject",
+            confident_reject=True,
+            cleanup_eligible=False,
+            reason="quality_reject_keep_source",
+            download_log_id=7,
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+            return_value=preview,
+        ):
+            decision = decide_wrong_match_cleanup(object(), 7)
+
+        self.assertFalse(decision.delete_allowed)
+        self.assertFalse(decision.uncertain)
+        self.assertTrue(decision.confident_reject)
+        self.assertFalse(decision.cleanup_eligible)
+        self.assertEqual(decision.skip_reason, "quality_reject_keep_source")
+
 
 class TestImporterWorker(unittest.TestCase):
     def _mark_importable(
@@ -177,6 +201,8 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=None,
+            import_job_id=claimed.id,
+            download_log_id=7,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -217,6 +243,8 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
+            import_job_id=claimed.id,
+            download_log_id=7,
         )
 
     def test_force_import_job_does_not_forward_preview_import_result(self):
@@ -903,6 +931,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             source_username="alice",
             download_log_id=7,
             import_job_id=claimed.id,
+            persist_candidate_evidence=True,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -939,6 +968,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             source_username=None,
             download_log_id=None,
             import_job_id=claimed.id,
+            persist_candidate_evidence=True,
         )
         assert updated is not None
         self.assertEqual(updated.preview_status, "would_import")
@@ -987,9 +1017,59 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_username="alice",
                 download_log_id=None,
                 import_job_id=claimed.id,
+                persist_candidate_evidence=True,
             )
             assert updated is not None
             self.assertEqual(updated.preview_status, "would_import")
+
+    def test_automation_preview_reject_blocks_reenqueue_loop(self):
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                return_value=self._preview(
+                    "confident_reject",
+                    reason="spectral_reject",
+                ),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "queued")
+            self.assertEqual(updated.preview_status, "confident_reject")
+            self.assertEqual(updated.preview_error, "spectral_reject")
+            self.assertIsNotNone(db.get_active_import_job_for_request(42))
+            self.assertIsNone(db.claim_next_import_job(worker_id="importer"))
 
     def test_run_once_requeues_legacy_disabled_automation_job_for_preview(self):
         from scripts import import_preview_worker
@@ -1041,6 +1121,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_username="alice",
                 download_log_id=None,
                 import_job_id=updated.id if updated is not None else None,
+                persist_candidate_evidence=True,
             )
             assert updated is not None
             self.assertEqual(updated.status, "queued")

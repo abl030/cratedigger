@@ -710,7 +710,12 @@ def _delete_wrong_match_row(pdb, log_id: int) -> str:
     failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
     resolved_path = resolve_failed_path(failed_path)
     if resolved_path is not None:
-        shutil.rmtree(resolved_path, ignore_errors=True)
+        try:
+            shutil.rmtree(resolved_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return "error"
     pdb.clear_wrong_match_path(log_id)
     return "deleted"
 
@@ -726,6 +731,12 @@ def post_wrong_match_delete(h, body: dict) -> None:
     result = _delete_wrong_match_row(pdb, int(log_id))
     if result == "missing":
         h._error(f"Download log entry {log_id} not found", 404)
+        return
+    if result == "skipped":
+        h._json({"status": "skipped", "download_log_id": log_id})
+        return
+    if result == "error":
+        h._error("Wrong-match cleanup failed", 500)
         return
 
     h._json({"status": "ok", "download_log_id": log_id})

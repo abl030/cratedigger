@@ -10,9 +10,21 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
-from lib.quality import DownloadInfo
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    DownloadInfo,
+)
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_import_result,
+    make_request_row,
+    patch_dispatch_externals,
+)
+from lib.quality_evidence import snapshot_audio_files
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -120,6 +132,96 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch(ir=ir, source_username="baduser")
         denylisted = [e.username for e in r["db"].denylist]
         self.assertIn("baduser", denylisted)
+
+    def test_persisted_candidate_evidence_rejects_before_mutating_import(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        log_id = db.log_download(request_id=42, outcome="rejected")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.flac", "wb") as handle:
+                handle.write(b"audio")
+            files = snapshot_audio_files(tmpdir)
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=log_id,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=900,
+                    median_bitrate_kbps=900,
+                    format="FLAC",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=128,
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="opus 128",
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=141,
+                    avg_bitrate_kbps=240,
+                    median_bitrate_kbps=240,
+                    source_lineage="lossless_source",
+                ),
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=116,
+                    avg_bitrate_kbps=131,
+                    median_bitrate_kbps=131,
+                    format="Opus",
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=96,
+                ),
+                codec="opus",
+                container="opus",
+                storage_format="opus",
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=211,
+                    avg_bitrate_kbps=260,
+                    median_bitrate_kbps=260,
+                    source_lineage="lossless_source",
+                ),
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                verified_lossless_target="opus 128",
+            )
+            with patch_dispatch_externals() as ext:
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    force=True,
+                    target_format="opus 128",
+                    verified_lossless_target="opus 128",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="baduser"),
+                    distance=0.99,
+                    scenario="force_import",
+                    files=[MagicMock(username="baduser", filename="01.flac")],
+                    cfg=cfg,
+                    requeue_on_failure=False,
+                    candidate_download_log_id=log_id,
+                )
+
+            self.assertFalse(result.success)
+            ext.run.assert_not_called()
+            self.assertEqual(db.download_logs[-1].outcome, "rejected")
+            denylisted = [entry.username for entry in db.denylist]
+            self.assertIn("baduser", denylisted)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_downgrade_preserves_validation_result_and_staged_path(self):
         ir = make_import_result(decision="downgrade",

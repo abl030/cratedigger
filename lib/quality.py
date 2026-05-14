@@ -879,8 +879,14 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("measured_at is required")
         if not self.files:
             errors.append("at least one snapshot file is required")
+        relative_paths: set[str] = set()
         for file in self.files:
             errors.extend(file.validation_errors())
+            if file.relative_path in relative_paths:
+                errors.append(
+                    f"duplicate snapshot relative_path: {file.relative_path}"
+                )
+            relative_paths.add(file.relative_path)
         if self.v0_metric is not None:
             errors.extend(self.v0_metric.validation_errors())
         if self.measurement.verified_lossless:
@@ -4004,7 +4010,6 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     has_nested_audio: bool = False
     verified_lossless_target: str | None = None
     target_format: str | None = None
-    supported_lossless_source: bool | None = None
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
     force_import: bool = False
@@ -4044,17 +4049,25 @@ def _lossless_source_from_evidence(evidence: AlbumQualityEvidence) -> bool:
         return True
 
     measurement = evidence.measurement
+    if measurement.verified_lossless and evidence.verified_lossless_proof is not None:
+        return True
     candidates = (
         measurement.was_converted_from,
         evidence.storage_format,
-        evidence.container,
         evidence.codec,
+        evidence.container,
         measurement.format,
     )
     for candidate in candidates:
         fmt = _normalised_format(candidate)
+        if fmt == "m4a":
+            # M4A is only a container; AAC and ALAC share it. Treat ALAC
+            # evidence as lossless, but never infer lossless source from a
+            # bare .m4a extension/container.
+            continue
         if fmt in _LOSSLESS_EXTS or fmt == "lossless":
             return True
+    return _normalised_format(evidence.codec) == "alac"
     return False
 
 
@@ -4144,11 +4157,7 @@ def full_pipeline_decision_from_evidence(
     )
 
     target_format = _evidence_target_format(candidate, facts)
-    supported_lossless_source = (
-        _lossless_source_from_evidence(candidate)
-        if facts.supported_lossless_source is None
-        else facts.supported_lossless_source
-    )
+    supported_lossless_source = _lossless_source_from_evidence(candidate)
     post_conversion_min = (
         facts.post_conversion_min_bitrate
         if facts.post_conversion_min_bitrate is not None

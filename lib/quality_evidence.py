@@ -14,6 +14,7 @@ from lib.quality import (
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
+    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityEvidenceOwner,
@@ -44,6 +45,10 @@ _NEUTRAL_V0_LINEAGE = {
     V0_PROBE_NATIVE_LOSSY_RESEARCH: "native_lossy_research",
     V0_PROBE_ON_DISK_RESEARCH: "on_disk_research",
 }
+
+
+class SnapshotAudioFilesError(OSError):
+    """Raised when a source fileset cannot be snapshotted completely."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +97,12 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     if not os.path.isdir(root):
         return []
     files: list[AlbumQualityEvidenceFile] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
+    walk_errors: list[str] = []
+
+    def onerror(exc: OSError) -> None:
+        walk_errors.append(str(exc))
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=onerror):
         for filename in filenames:
             ext = os.path.splitext(filename)[1].lower()
             if ext not in _AUDIO_EXTENSIONS:
@@ -100,8 +110,10 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
             full_path = os.path.join(dirpath, filename)
             try:
                 stat = os.stat(full_path)
-            except OSError:
-                continue
+            except OSError as exc:
+                raise SnapshotAudioFilesError(
+                    f"could not stat audio file {full_path}: {exc}"
+                ) from exc
             relative_path = os.path.relpath(full_path, root)
             container = ext.lstrip(".")
             files.append(
@@ -114,7 +126,23 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
                     codec=container,
                 )
             )
+    if walk_errors:
+        raise SnapshotAudioFilesError("; ".join(walk_errors))
     return sorted(files, key=lambda f: f.relative_path)
+
+
+def audio_snapshot_matches(
+    root: str,
+    files: list[AlbumQualityEvidenceFile],
+) -> bool:
+    """Return whether ``root`` still has the recorded active audio snapshot."""
+
+    try:
+        current = snapshot_audio_files(root)
+    except OSError:
+        return False
+    expected = sorted(files, key=lambda f: f.relative_path)
+    return current == expected
 
 
 def neutral_v0_metric_from_probe(
@@ -172,6 +200,38 @@ def legacy_verified_lossless_proof_from_request(
     )
 
 
+def legacy_current_v0_metric_from_request(
+    request_row: dict[str, Any] | None,
+) -> AlbumQualityV0Metric | None:
+    """Seed neutral current V0 evidence from request-row source metrics."""
+
+    if not request_row:
+        return None
+
+    def optional_int(value: object | None) -> int | None:
+        return value if isinstance(value, int) else None
+
+    min_bitrate = optional_int(
+        request_row.get("current_lossless_source_v0_probe_min_bitrate")
+    )
+    avg_bitrate = optional_int(
+        request_row.get("current_lossless_source_v0_probe_avg_bitrate")
+    )
+    median_bitrate = optional_int(
+        request_row.get("current_lossless_source_v0_probe_median_bitrate")
+    )
+    if min_bitrate is None and avg_bitrate is None and median_bitrate is None:
+        return None
+    return AlbumQualityV0Metric(
+        min_bitrate_kbps=min_bitrate,
+        avg_bitrate_kbps=avg_bitrate,
+        median_bitrate_kbps=median_bitrate,
+        source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+        source_provenance="album_requests.current_lossless_source_v0_probe",
+        proof_provenance="legacy_current_v0_probe_seed",
+    )
+
+
 def evidence_from_import_result(
     *,
     owner: AlbumQualityEvidenceOwner,
@@ -179,12 +239,17 @@ def evidence_from_import_result(
     import_result: ImportResult | None,
     measured_at: datetime | None = None,
     target_format: str | None = None,
+    files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
     """Build candidate evidence from an ``ImportResult`` and source folder."""
 
     if import_result is None or import_result.new_measurement is None:
         return EvidenceBuildResult(None, "incomplete", "missing new measurement")
-    files = snapshot_audio_files(source_path)
+    if files is None:
+        try:
+            files = snapshot_audio_files(source_path)
+        except OSError as exc:
+            return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
     measurement = import_result.new_measurement
@@ -217,17 +282,29 @@ def evidence_from_album_info(
     """Build current evidence from Beets ``AlbumInfo``-shaped data."""
 
     album_path = getattr(album_info, "album_path", "")
-    files = snapshot_audio_files(str(album_path))
+    try:
+        files = snapshot_audio_files(str(album_path))
+    except OSError as exc:
+        return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
     proof = legacy_verified_lossless_proof_from_request(request_row)
     verified_lossless = proof is not None
+    spectral_grade = None
+    spectral_bitrate = None
+    if request_row:
+        grade_raw = request_row.get("current_spectral_grade")
+        bitrate_raw = request_row.get("current_spectral_bitrate")
+        spectral_grade = grade_raw if isinstance(grade_raw, str) else None
+        spectral_bitrate = bitrate_raw if isinstance(bitrate_raw, int) else None
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
         avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
         median_bitrate_kbps=getattr(album_info, "median_bitrate_kbps", None),
         format=getattr(album_info, "format", None) or None,
         is_cbr=bool(getattr(album_info, "is_cbr", False)),
+        spectral_grade=spectral_grade,
+        spectral_bitrate_kbps=spectral_bitrate,
         verified_lossless=verified_lossless,
     )
     evidence = AlbumQualityEvidence(
@@ -238,6 +315,7 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
+        v0_metric=legacy_current_v0_metric_from_request(request_row),
         verified_lossless_proof=proof,
     )
     errors = evidence.storage_validation_errors()
@@ -254,21 +332,47 @@ def persist_candidate_evidence_from_import_result(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     target_format: str | None = None,
+    files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
-    owner = candidate_owner(
-        download_log_id=download_log_id,
-        import_job_id=import_job_id,
-    )
-    if owner is None:
+    owners: list[AlbumQualityEvidenceOwner] = []
+    if import_job_id is not None:
+        owners.append(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=import_job_id,
+        ))
+    if download_log_id is not None:
+        owners.append(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=download_log_id,
+        ))
+    if not owners:
         return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")
+    if files is None:
+        try:
+            files = snapshot_audio_files(source_path)
+        except OSError as exc:
+            return EvidenceBuildResult(None, "failed", str(exc))
     result = evidence_from_import_result(
-        owner=owner,
+        owner=owners[0],
         source_path=source_path,
         import_result=import_result,
         target_format=target_format,
+        files=files,
     )
     if result.evidence is not None:
-        db.upsert_album_quality_evidence(result.evidence)
+        for owner in owners:
+            db.upsert_album_quality_evidence(AlbumQualityEvidence(
+                owner=owner,
+                measurement=result.evidence.measurement,
+                measured_at=result.evidence.measured_at,
+                files=result.evidence.files,
+                codec=result.evidence.codec,
+                container=result.evidence.container,
+                storage_format=result.evidence.storage_format,
+                target_format=result.evidence.target_format,
+                v0_metric=result.evidence.v0_metric,
+                verified_lossless_proof=result.evidence.verified_lossless_proof,
+            ))
     return result
 
 
@@ -287,3 +391,89 @@ def backfill_current_evidence_from_album_info(
     if result.evidence is not None:
         db.upsert_album_quality_evidence(result.evidence)
     return result
+
+
+def load_candidate_evidence_for_source(
+    db: Any,
+    *,
+    source_path: str,
+    download_log_id: int | None = None,
+    import_job_id: int | None = None,
+) -> EvidenceBuildResult:
+    """Load stored candidate evidence and require source snapshot freshness."""
+
+    owners: list[AlbumQualityEvidenceOwner] = []
+    if import_job_id is not None:
+        owners.append(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=import_job_id,
+        ))
+    if download_log_id is not None:
+        owners.append(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=download_log_id,
+        ))
+    if not owners:
+        return EvidenceBuildResult(None, "unowned", "no candidate owner")
+
+    missing: list[str] = []
+    for owner in owners:
+        evidence = db.load_album_quality_evidence(owner)
+        if evidence is None:
+            missing.append(f"{owner.owner_type}:{owner.owner_id}")
+            continue
+        if not audio_snapshot_matches(source_path, evidence.files):
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                f"candidate source changed since evidence capture: "
+                f"{owner.owner_type}:{owner.owner_id}",
+            )
+        errors = evidence.policy_incomplete_reasons()
+        if errors:
+            return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+        return EvidenceBuildResult(evidence, "ready")
+
+    return EvidenceBuildResult(
+        None,
+        "missing",
+        "no candidate evidence found for " + ", ".join(missing),
+    )
+
+
+def load_or_backfill_current_evidence(
+    db: Any,
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: Any = None,
+) -> EvidenceBuildResult:
+    """Load current Beets evidence, backfilling when absent or stale."""
+
+    from lib.beets_db import BeetsDB
+    from lib.quality import QualityRankConfig
+
+    owner = request_current_owner(request_id)
+    existing = db.load_album_quality_evidence(owner)
+    if existing is not None:
+        errors = existing.policy_incomplete_reasons()
+        if not errors:
+            return EvidenceBuildResult(existing, "ready")
+
+    cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+    with BeetsDB() as beets:
+        album_info = beets.get_album_info(mb_release_id, cfg)
+    if album_info is None:
+        return EvidenceBuildResult(None, "empty_current", "album not in beets")
+
+    album_path = str(getattr(album_info, "album_path", "") or "")
+    if existing is not None and audio_snapshot_matches(album_path, existing.files):
+        errors = existing.policy_incomplete_reasons()
+        if not errors:
+            return EvidenceBuildResult(existing, "ready")
+
+    return backfill_current_evidence_from_album_info(
+        db,
+        request_id=request_id,
+        album_info=album_info,
+    )

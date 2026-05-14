@@ -6733,7 +6733,19 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
         mock_rmtree.assert_called_once_with(
-            "/mnt/virtio/music/slskd/failed_imports/Test", ignore_errors=True)
+            "/mnt/virtio/music/slskd/failed_imports/Test")
+
+    def test_delete_filesystem_error_keeps_wrong_match_pointer(self):
+        self.mock_rmtree.side_effect = OSError("permission denied")
+        self.mock_db.get_download_log_entry.return_value = copy.deepcopy(
+            _DEFAULT_WRONG_MATCH_ENTRY
+        )
+
+        status, data = self._post("/api/wrong-matches/delete", {"download_log_id": 42})
+
+        self.assertEqual(status, 500)
+        self.assertIn("error", data)
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     def test_delete_group_missing_request_id_returns_error(self):
         status, data = self._post("/api/wrong-matches/delete-group", {})
@@ -7237,7 +7249,7 @@ class TestWrongMatchesContract(unittest.TestCase):
             self.mock_db.enqueue_import_job.call_args_list[0].kwargs["payload"]["source_dirs"],
             ["u1\\Artist\\Album"],
         )
-        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.mock_rmtree.assert_called_once_with("/fi/c")
         self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
 
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
@@ -7271,7 +7283,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["remaining"], 2)
         self.assertFalse(data["group_empty"])
-        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.mock_rmtree.assert_called_once_with("/fi/c")
         self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
 
     def test_converge_recomputes_cleanup_and_keeps_uncertain_unmatched_candidate(self):

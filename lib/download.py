@@ -1061,6 +1061,8 @@ def process_completed_album(
     album_data: GrabListEntry,
     failed_grab: list[Any],
     ctx: CratediggerContext,
+    *,
+    import_job_id: int | None = None,
 ) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
@@ -1101,6 +1103,7 @@ def process_completed_album(
             album_data,
             staged_album,
             ctx,
+            import_job_id=import_job_id,
         )
         if outcome is not None:
             if outcome.deferred:
@@ -1120,6 +1123,8 @@ def _process_beets_validation(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
+    *,
+    import_job_id: int | None = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
@@ -1182,6 +1187,7 @@ def _process_beets_validation(
             bv_result,
             staged_album,
             ctx,
+            import_job_id=import_job_id,
         )
     return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
@@ -1310,6 +1316,8 @@ def _handle_valid_result(
     bv_result: ValidationResult,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
+    *,
+    import_job_id: int | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1494,6 +1502,7 @@ def _handle_valid_result(
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=_source_dirs_for_album(album_data),
+                candidate_import_job_id=import_job_id,
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
@@ -1983,6 +1992,8 @@ def _run_completed_processing(
     state: ActiveDownloadState,
     db: Any,
     ctx: CratediggerContext,
+    *,
+    import_job_id: int | None = None,
 ) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
@@ -1999,6 +2010,7 @@ def _run_completed_processing(
             entry,
             [],
             ctx,
+            import_job_id=import_job_id,
         )
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "

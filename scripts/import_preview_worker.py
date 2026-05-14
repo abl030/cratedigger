@@ -170,7 +170,38 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
 def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
     preview_input = _preview_input(db, job)
-    return preview_import_from_path(db, import_job_id=job.id, **preview_input)
+    return preview_import_from_path(
+        db,
+        import_job_id=job.id,
+        persist_candidate_evidence=True,
+        **preview_input,
+    )
+
+
+def _mark_automation_preview_blocked(
+    db: Any,
+    job: ImportJob,
+    *,
+    preview_status: str,
+    reason: str,
+    preview_payload: dict[str, Any],
+) -> ImportJob | None:
+    blocker = getattr(db, "mark_import_job_preview_blocked", None)
+    if callable(blocker):
+        return cast(ImportJob | None, blocker(
+            job.id,
+            preview_status=preview_status,
+            error=reason,
+            preview_result=preview_payload,
+            message=f"Preview blocked automation import: {reason}",
+        ))
+    return db.mark_import_job_preview_failed(
+        job.id,
+        preview_status=preview_status,
+        error=reason,
+        preview_result=preview_payload,
+        message=f"Preview blocked automation import: {reason}",
+    )
 
 
 def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
@@ -199,6 +230,14 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         )
 
     reason = _preview_reason(result)
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        return _mark_automation_preview_blocked(
+            db,
+            job,
+            preview_status=_failure_preview_status(result),
+            reason=reason,
+            preview_payload=preview_payload,
+        )
     return db.mark_import_job_preview_failed(
         job.id,
         preview_status=_failure_preview_status(result),

@@ -986,6 +986,7 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         spectral_grade: str | None = None,
         spectral_bitrate: int | None = None,
         container: str | None = None,
+        codec: str | None = None,
         storage_format: str | None = None,
         v0_lineage: str | None = None,
         v0_min: int | None = None,
@@ -993,6 +994,7 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         v0_proof: str | None = None,
     ) -> AlbumQualityEvidence:
         container = container or fmt.lower().split()[0]
+        codec = codec or container
         storage_format = storage_format or fmt
         metric = None
         if v0_lineage is not None:
@@ -1023,10 +1025,10 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                     mtime_ns=1,
                     extension=container,
                     container=container,
-                    codec=container,
+                    codec=codec,
                 )
             ],
-            codec=container,
+            codec=codec,
             container=container,
             storage_format=storage_format,
             v0_metric=metric,
@@ -1168,6 +1170,28 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         self.assertEqual(
             lossless_source_result["stage2_import"],
             DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+        )
+
+    def test_bare_m4a_container_does_not_prove_lossless_source(self):
+        candidate = self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=77,
+            min_bitrate=256,
+            avg_bitrate=256,
+            fmt="AAC",
+            container="m4a",
+            codec="aac",
+            storage_format="m4a",
+        )
+        result = full_pipeline_decision_from_evidence(
+            candidate,
+            self._current_with_v0_lineage("lossless_source"),
+        )
+
+        self.assertFalse(result["imported"])
+        self.assertEqual(
+            result["stage2_import"],
+            DECISION_LOSSLESS_SOURCE_LOCKED,
         )
 
 

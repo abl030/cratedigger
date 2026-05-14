@@ -2552,6 +2552,36 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             )
         ))
 
+    def test_delete_request_removes_owned_album_quality_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        current_owner = AlbumQualityEvidenceOwner(
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            self.req_id,
+        )
+        candidate_owner = AlbumQualityEvidenceOwner(
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            log_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=current_owner.owner_type,
+            owner_id=current_owner.owner_id,
+        ))
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=candidate_owner.owner_type,
+            owner_id=candidate_owner.owner_id,
+        ))
+
+        self.db.delete_request(self.req_id)
+
+        self.assertIsNone(self.db.load_album_quality_evidence(current_owner))
+        self.assertIsNone(self.db.load_album_quality_evidence(candidate_owner))
+
     def test_validation_rejects_bad_owner_and_bad_snapshot(self):
         from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
 

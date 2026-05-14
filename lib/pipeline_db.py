@@ -1404,6 +1404,52 @@ class PipelineDB:
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
 
+    def mark_import_job_preview_blocked(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        """Record a failed preview while keeping the job active as a blocker.
+
+        Automation preview failures must not become inactive terminal jobs while
+        the request remains ``downloading``. A queued, non-importable job keeps
+        the poller from re-enqueueing the same completed download in a loop.
+        """
+
+        validate_preview_failure_status(preview_status)
+        result = dict(preview_result or {})
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET preview_status = %s,
+                preview_result = %s,
+                preview_message = %s,
+                preview_error = %s,
+                message = %s,
+                error = %s,
+                preview_completed_at = NOW(),
+                preview_worker_id = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+              AND preview_status IN ('waiting', 'running')
+            RETURNING *
+        """, (
+            preview_status,
+            psycopg2.extras.Json(result),
+            message,
+            error,
+            message,
+            error,
+            job_id,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
     def list_stale_import_preview_jobs(
         self,
         *,
@@ -1532,6 +1578,29 @@ class PipelineDB:
         return self.get_request_by_mb_release_id(identity.release_id)
 
     def delete_request(self, request_id: int) -> None:
+        log_cur = self._execute(
+            "SELECT id FROM download_log WHERE request_id = %s",
+            (request_id,),
+        )
+        download_log_ids = [int(row["id"]) for row in log_cur.fetchall()]
+        self._execute(
+            """
+            DELETE FROM album_quality_evidence
+            WHERE owner_type = %s AND owner_id = %s
+            """,
+            (ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT, request_id),
+        )
+        if download_log_ids:
+            self._execute(
+                """
+                DELETE FROM album_quality_evidence
+                WHERE owner_type = %s AND owner_id = ANY(%s)
+                """,
+                (
+                    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    download_log_ids,
+                ),
+            )
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 
