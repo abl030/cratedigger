@@ -1,7 +1,7 @@
 ---
 title: "refactor: Separate quality evidence from decisions"
 type: refactor
-status: active
+status: completed
 date: 2026-05-14
 origin: docs/brainstorms/2026-05-14-quality-evidence-decision-boundary-requirements.md
 ---

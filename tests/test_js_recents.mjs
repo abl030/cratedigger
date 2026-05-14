@@ -27,7 +27,7 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
-console.log('renderImportQueueItems() shows importable next row and preview detail');
+console.log('renderImportQueueItems() shows ready next row and preview detail');
 {
   const html = __test__.renderImportQueueItems([{
     id: 77,
@@ -41,7 +41,7 @@ console.log('renderImportQueueItems() shows importable next row and preview deta
   }]);
   assertContains(html, 'Tender Buttons', 'album title rendered');
   assertContains(html, 'Broadcast', 'artist name rendered');
-  assertContains(html, 'next import', 'first importable row is marked next');
+  assertContains(html, 'next check', 'first ready row is marked next check');
   assertContains(html, 'preview: would_import', 'preview state rendered');
   assertContains(html, 'stage2_import:import', 'stage chain rendered');
 }
@@ -132,7 +132,7 @@ console.log('renderImportQueueItems() shows uncertain preview failures without n
   }]);
   assertContains(html, 'uncertain', 'uncertain badge rendered');
   assertContains(html, 'Preview failed: path_missing', 'failure message rendered');
-  assertExcludes(html, 'next import', 'uncertain rows are not marked next');
+  assertExcludes(html, 'next check', 'uncertain rows are not marked next');
 }
 
 console.log('renderImportQueueItems() prefers terminal import messages over stale preview messages');

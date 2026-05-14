@@ -26,6 +26,7 @@ _PERTH_TZ = ZoneInfo("Australia/Perth")
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.pipeline_db import SearchLogHistoryPage
 
 from lib.import_queue import (
     ImportJob,
@@ -58,6 +59,13 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
                              WantedReconciliationCandidate)
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceOwner,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -660,6 +668,9 @@ class FakePipelineDB:
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
+        self.album_quality_evidence: dict[
+            tuple[str, int], AlbumQualityEvidence,
+        ] = {}
         self._next_bad_audio_hash_id = 0
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
@@ -1761,6 +1772,48 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    def validate_album_quality_evidence_owner(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> bool:
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
+            return owner.owner_id in self._requests
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
+            return any(row.id == owner.owner_id for row in self.download_logs)
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
+            return any(row.get("id") == owner.owner_id for row in self._import_jobs)
+        return False
+
+    def upsert_album_quality_evidence(
+        self,
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        evidence = evidence.sorted_for_storage()
+        errors = evidence.storage_validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if not self.validate_album_quality_evidence_owner(evidence.owner):
+            raise LookupError(
+                "album quality evidence owner does not exist: "
+                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
+            )
+        self.album_quality_evidence[
+            (evidence.owner.owner_type, evidence.owner.owner_id)
+        ] = copy.deepcopy(evidence)
+
+    def load_album_quality_evidence(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> AlbumQualityEvidence | None:
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        evidence = self.album_quality_evidence.get((owner.owner_type, owner.owner_id))
+        return copy.deepcopy(evidence) if evidence is not None else None
+
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row is None:
@@ -1878,6 +1931,20 @@ class FakePipelineDB:
             e for e in self.search_logs if e.request_id != request_id]
         self.denylist = [
             e for e in self.denylist if e.request_id != request_id]
+        self.album_quality_evidence = {
+            key: evidence
+            for key, evidence in self.album_quality_evidence.items()
+            if not (
+                key == (
+                    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                    request_id,
+                )
+                or (
+                    key[0] == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
+                    and all(row.id != key[1] for row in self.download_logs)
+                )
+            )
+        }
         # U1: cascade plans + items with the request, mirroring the real
         # ON DELETE CASCADE FKs from migration 014.
         plan_ids_to_drop = [

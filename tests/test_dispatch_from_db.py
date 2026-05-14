@@ -18,19 +18,23 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state after force/manual import."""
 
     def _dispatch(self, force=True, ir=None, outcome_label=None,
-                  source_username=None, **req_overrides):
+                  source_username=None,
+                  **req_overrides):
         from lib.import_dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
-        req = make_request_row(
-            id=42, mb_release_id="mbid-123",
-            status="manual",
-            artist_name="Son Ambulance",
-            album_title="Someone Else's Deja Vu",
-            min_bitrate=180, current_spectral_bitrate=128,
-            current_spectral_grade="likely_transcode",
-            **req_overrides,
-        )
+        req_kwargs = {
+            "id": 42,
+            "mb_release_id": "mbid-123",
+            "status": "manual",
+            "artist_name": "Son Ambulance",
+            "album_title": "Someone Else's Deja Vu",
+            "min_bitrate": 180,
+            "current_spectral_bitrate": 128,
+            "current_spectral_grade": "likely_transcode",
+        }
+        req_kwargs.update(req_overrides)
+        req = make_request_row(**req_kwargs)
         db.seed_request(req)
 
         if ir is None:
@@ -153,6 +157,21 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     def test_no_force_for_manual_import(self):
         r = self._dispatch(force=False)
         self.assertNotIn("--force", r["cmd"])
+
+    def test_force_import_command_has_no_preview_import_result_channel(self):
+        r = self._dispatch(
+            force=True,
+            min_bitrate=116,
+            current_spectral_grade="likely_transcode",
+            current_lossless_source_v0_probe_avg_bitrate=260,
+        )
+
+        self.assertNotIn(
+            "--preview-import-result-file",
+            r["cmd"],
+            "Force import may bypass distance only; a stale preview "
+            "ImportResult must not be passed to import_one as decision authority.",
+        )
 
     # --- Seam: preserve-source flag (issue #111) ---
 

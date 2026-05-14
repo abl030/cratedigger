@@ -182,89 +182,52 @@ class TestStageResult(unittest.TestCase):
         self.assertFalse(r.terminal)
 
 
-class TestPreviewReuseHelpers(unittest.TestCase):
-    def test_reuses_importable_preview_when_beets_state_matches(self):
+class TestPreviewImportResultSurface(unittest.TestCase):
+    def test_preview_import_result_file_rejected_by_cli_parser(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [
+                sys.executable,
+                import_script,
+                "/tmp/cratedigger-parser-only-album",
+                "mbid-123",
+                "--preview-import-result-file",
+                "/tmp/stale-preview.json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "unrecognized arguments: --preview-import-result-file",
+            result.stderr,
+        )
+
+    def test_preview_import_result_file_absent_from_help(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [sys.executable, import_script, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("--preview-import-result-file", result.stdout)
+
+    def test_no_preview_import_result_reuse_path_in_main(self):
+        import inspect
         from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
 
-        preview = ImportResult(
-            decision="import",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
-        )
+        main_source = inspect.getsource(import_one.main)
 
-        self.assertIsNone(import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=False,
-        ))
-
-    def test_rejects_preview_when_existing_beets_state_changed(self):
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
-
-        preview = ImportResult(
-            decision="import",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
-        )
-
-        reason = import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=True,
-        )
-
-        self.assertIn("existing-beets state changed", reason or "")
-
-    def test_rejects_stale_provisional_preview_when_v0_override_now_verifies(self):
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult, V0ProbeEvidence
-
-        preview = ImportResult(
-            decision="provisional_lossless_upgrade",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=141,
-                avg_bitrate_kbps=141,
-                format="opus 128",
-                verified_lossless=False,
-            ),
-            v0_probe=V0ProbeEvidence(
-                kind="lossless_source_v0",
-                min_bitrate_kbps=237,
-                avg_bitrate_kbps=276,
-                median_bitrate_kbps=279,
-            ),
-        )
-
-        reason = import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=False,
-        )
-
-        self.assertIn("V0 override", reason or "")
-
-    def test_provisional_preview_uses_verified_lossless_target(self):
-        from argparse import Namespace
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
-
-        preview = ImportResult(
-            decision="provisional_lossless_upgrade",
-            new_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=245,
-                verified_lossless=False,
-            ),
-        )
-
-        target = import_one._preview_conversion_target(
-            Namespace(
-                target_format=None,
-                verified_lossless_target="opus 128",
-            ),
-            preview,
-        )
-
-        self.assertEqual(target, "opus 128")
+        self.assertNotIn("preview_import_result", main_source)
+        self.assertNotIn("reuse_preview", main_source)
+        self.assertFalse(hasattr(import_one, "_load_preview_import_result"))
+        self.assertFalse(hasattr(import_one, "_preview_import_result_reuse_reason"))
+        self.assertFalse(hasattr(import_one, "_preview_conversion_target"))
 
 
 class TestPostflightBadExtensionWarnings(unittest.TestCase):

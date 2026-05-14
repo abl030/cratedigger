@@ -13,7 +13,13 @@ from lib.import_preview import (
     preview_import_from_values,
 )
 from lib.preimport import LocalFileInspection, PreImportGateResult
-from lib.quality import AudioQualityMeasurement, ImportResult, full_pipeline_decision
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    AlbumQualityEvidenceOwner,
+    AudioQualityMeasurement,
+    ImportResult,
+    full_pipeline_decision,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -273,6 +279,64 @@ class TestImportPreviewPath(unittest.TestCase):
                 mock_run.call_args.kwargs["existing_v0_probe"].avg_bitrate_kbps,
                 171,
             )
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_path_preview_persists_candidate_evidence_for_job_owner(self):
+        db = self._db()
+        job = db.enqueue_import_job(
+            "manual_import",
+            request_id=42,
+            dedupe_key="manual:42:/tmp/source",
+            payload={"failed_path": "/tmp/source"},
+            preview_enabled=True,
+        )
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=245000,
+                           is_vbr=True,
+                       )), \
+                 patch("lib.import_preview.run_preimport_gates",
+                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.run_import_one",
+                       return_value=SimpleNamespace(
+                           import_result=ImportResult(
+                               decision="import",
+                               new_measurement=AudioQualityMeasurement(
+                                   min_bitrate_kbps=245,
+                                   avg_bitrate_kbps=245,
+                                   median_bitrate_kbps=245,
+                                   format="mp3 v0",
+                               ),
+                           )
+                       )):
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                    force=False,
+                    import_job_id=job.id,
+                )
+
+            self.assertEqual(preview.verdict, "would_import")
+            loaded = db.load_album_quality_evidence(
+                AlbumQualityEvidenceOwner(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                    owner_id=job.id,
+                )
+            )
+            assert loaded is not None
+            self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
+            self.assertEqual([f.relative_path for f in loaded.files], ["01.mp3"])
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

@@ -540,6 +540,62 @@ class TestSimulatorInvariants(unittest.TestCase):
 
 class TestNamedRegressions(unittest.TestCase):
 
+    def test_british_sea_power_stale_preview_rejects_against_fresh_current_probe(self):
+        """Preview was importable, but action-time current evidence is stronger.
+
+        British Sea Power - Do You Like Rock Music? shaped regression:
+        a suspect lossless-source candidate with V0 evidence looked importable
+        when preview had no current source-proof anchor. By force-import time,
+        current Beets evidence has a stronger lossless-source V0 probe, so the
+        mutating decision must reject instead of trusting the stale preview.
+        """
+        stale_preview = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=900,
+            is_cbr=False,
+            spectral_grade="suspect",
+            spectral_bitrate=128,
+            converted_count=10,
+            post_conversion_min_bitrate=141,
+            candidate_v0_probe_min=141,
+            candidate_v0_probe_avg=240,
+            existing_min_bitrate=None,
+            existing_avg_bitrate=None,
+            existing_format=None,
+            existing_is_cbr=False,
+            existing_v0_probe_avg=None,
+            import_mode="force",
+        )
+        fresh_action = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=900,
+            is_cbr=False,
+            spectral_grade="suspect",
+            spectral_bitrate=128,
+            converted_count=10,
+            post_conversion_min_bitrate=141,
+            candidate_v0_probe_min=141,
+            candidate_v0_probe_avg=240,
+            existing_min_bitrate=116,
+            existing_avg_bitrate=131,
+            existing_format="Opus",
+            existing_is_cbr=False,
+            existing_spectral_grade="likely_transcode",
+            existing_v0_probe_avg=260,
+            import_mode="force",
+        )
+
+        self.assertTrue(stale_preview["imported"])
+        self.assertEqual(
+            stale_preview["stage2_import"],
+            "provisional_lossless_upgrade",
+        )
+        self.assertFalse(fresh_action["imported"])
+        self.assertEqual(
+            fresh_action["stage2_import"],
+            "suspect_lossless_downgrade",
+        )
+
     def test_stars_of_the_lid_loop(self):
         """CBR 320 genuine on disk + MP3 downgrade -> backfill fires -> flac only.
 

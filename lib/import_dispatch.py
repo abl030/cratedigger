@@ -11,7 +11,6 @@ import os
 import shutil
 import subprocess as sp
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
@@ -189,7 +188,6 @@ def build_import_one_command(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
-    preview_import_result_file: str | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     cmd = [
@@ -214,8 +212,6 @@ def build_import_one_command(
         cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
     if quality_rank_config_json:
         cmd.extend(["--quality-rank-config", quality_rank_config_json])
-    if preview_import_result_file:
-        cmd.extend(["--preview-import-result-file", preview_import_result_file])
     if existing_v0_probe is not None:
         if existing_v0_probe.min_bitrate_kbps is not None:
             cmd.extend([
@@ -249,60 +245,40 @@ def run_import_one(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
-    preview_import_result: ImportResult | None = None,
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
-    preview_import_result_file: str | None = None
-    try:
-        if preview_import_result is not None:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                prefix="cratedigger-preview-import-result-",
-                suffix=".json",
-                delete=False,
-            ) as fp:
-                fp.write(preview_import_result.to_json())
-                preview_import_result_file = fp.name
-        cmd = build_import_one_command(
-            path=path,
-            mb_release_id=mb_release_id,
-            beets_harness_path=beets_harness_path,
-            request_id=request_id,
-            force=force,
-            preserve_source=preserve_source,
-            dry_run=dry_run,
-            override_min_bitrate=override_min_bitrate,
-            target_format=target_format,
-            verified_lossless_target=verified_lossless_target,
-            quality_rank_config_json=quality_rank_config_json,
-            existing_v0_probe=existing_v0_probe,
-            preview_import_result_file=preview_import_result_file,
-        )
-        result = sp.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            env=beets_subprocess_env(),
-        )
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        return ImportOneRun(
-            command=tuple(cmd),
-            returncode=int(result.returncode),
-            stdout=stdout,
-            stderr=stderr,
-            import_result=parse_import_result(stdout),
-        )
-    finally:
-        if preview_import_result_file:
-            try:
-                os.unlink(preview_import_result_file)
-            except FileNotFoundError:
-                pass
+    cmd = build_import_one_command(
+        path=path,
+        mb_release_id=mb_release_id,
+        beets_harness_path=beets_harness_path,
+        request_id=request_id,
+        force=force,
+        preserve_source=preserve_source,
+        dry_run=dry_run,
+        override_min_bitrate=override_min_bitrate,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+        quality_rank_config_json=quality_rank_config_json,
+        existing_v0_probe=existing_v0_probe,
+    )
+    result = sp.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+        env=beets_subprocess_env(),
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return ImportOneRun(
+        command=tuple(cmd),
+        returncode=int(result.returncode),
+        stdout=stdout,
+        stderr=stderr,
+        import_result=parse_import_result(stdout),
+    )
 
 
 def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
@@ -813,7 +789,6 @@ def dispatch_import_core(
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
     source_dirs: list[str] | None = None,
-    preview_import_result: ImportResult | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -974,7 +949,6 @@ def dispatch_import_core(
                     cfg.quality_ranks.to_json() if cfg is not None else None
                 ),
                 existing_v0_probe=existing_v0_probe,
-                preview_import_result=preview_import_result,
             )
             for line in run.stderr.strip().split("\n"):
                 if line.strip():
@@ -1339,7 +1313,6 @@ def dispatch_import_from_db(
     outcome_label: str = "force_import",
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
-    preview_import_result: ImportResult | None = None,
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
@@ -1386,7 +1359,6 @@ def dispatch_import_from_db(
             outcome_label=outcome_label,
             source_username=source_username,
             source_dirs=source_dirs,
-            preview_import_result=preview_import_result,
         )
 
 
@@ -1399,7 +1371,6 @@ def _dispatch_import_from_db_locked(
     outcome_label: str,
     source_username: str | None,
     source_dirs: list[str] | None,
-    preview_import_result: ImportResult | None,
 ) -> "DispatchOutcome":
     """Body of dispatch_import_from_db, called once the advisory lock is held."""
     from lib.grab_list import DownloadFile
@@ -1598,5 +1569,4 @@ def _dispatch_import_from_db_locked(
         outcome_label=outcome_label,
         requeue_on_failure=False,
         source_dirs=source_dirs,
-        preview_import_result=preview_import_result,
     )

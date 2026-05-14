@@ -39,8 +39,21 @@ from lib.import_queue import (
     validate_payload,
     validate_status,
 )
-from lib.quality import (CooldownConfig, SpectralMeasurement, V0ProbeEvidence,
-                         should_cooldown)
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
+    AlbumQualityEvidenceOwner,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    CooldownConfig,
+    SpectralMeasurement,
+    V0ProbeEvidence,
+    VerifiedLosslessProof,
+    should_cooldown,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 logger = logging.getLogger(__name__)
@@ -1604,6 +1617,279 @@ class PipelineDB:
     ) -> None:
         """Write current comparable source-probe state together."""
         self.update_request_fields(request_id, **update.as_update_fields())
+
+    # --- active album-quality evidence --------------------------------------
+
+    def validate_album_quality_evidence_owner(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> bool:
+        """Return whether an evidence owner is well-formed and present."""
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
+            cur = self._execute(
+                "SELECT 1 FROM album_requests WHERE id = %s",
+                (owner.owner_id,),
+            )
+        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
+            cur = self._execute(
+                "SELECT 1 FROM download_log WHERE id = %s",
+                (owner.owner_id,),
+            )
+        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
+            cur = self._execute(
+                "SELECT 1 FROM import_jobs WHERE id = %s",
+                (owner.owner_id,),
+            )
+        else:  # pragma: no cover - guarded by owner.validation_errors()
+            raise ValueError(f"invalid owner_type: {owner.owner_type!r}")
+        return cur.fetchone() is not None
+
+    def upsert_album_quality_evidence(
+        self,
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        """Atomically replace one owner-scoped evidence row and its snapshot."""
+        evidence = evidence.sorted_for_storage()
+        errors = evidence.storage_validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if not self.validate_album_quality_evidence_owner(evidence.owner):
+            raise LookupError(
+                "album quality evidence owner does not exist: "
+                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
+            )
+
+        v0 = evidence.v0_metric
+        proof = evidence.verified_lossless_proof
+        m = evidence.measurement
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO album_quality_evidence (
+                        owner_type, owner_id, measured_at, codec, container,
+                        storage_format, target_format, min_bitrate_kbps,
+                        avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
+                        spectral_grade, spectral_bitrate_kbps,
+                        verified_lossless, was_converted_from,
+                        v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                        v0_median_bitrate_kbps, v0_source_lineage,
+                        v0_source_provenance, v0_proof_provenance,
+                        verified_lossless_proof_origin,
+                        verified_lossless_source, verified_lossless_classifier,
+                        verified_lossless_detail, updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        NOW()
+                    )
+                    ON CONFLICT (owner_type, owner_id)
+                    DO UPDATE SET
+                        measured_at = EXCLUDED.measured_at,
+                        codec = EXCLUDED.codec,
+                        container = EXCLUDED.container,
+                        storage_format = EXCLUDED.storage_format,
+                        target_format = EXCLUDED.target_format,
+                        min_bitrate_kbps = EXCLUDED.min_bitrate_kbps,
+                        avg_bitrate_kbps = EXCLUDED.avg_bitrate_kbps,
+                        median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
+                        format = EXCLUDED.format,
+                        is_cbr = EXCLUDED.is_cbr,
+                        spectral_grade = EXCLUDED.spectral_grade,
+                        spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
+                        verified_lossless = EXCLUDED.verified_lossless,
+                        was_converted_from = EXCLUDED.was_converted_from,
+                        v0_min_bitrate_kbps = EXCLUDED.v0_min_bitrate_kbps,
+                        v0_avg_bitrate_kbps = EXCLUDED.v0_avg_bitrate_kbps,
+                        v0_median_bitrate_kbps = EXCLUDED.v0_median_bitrate_kbps,
+                        v0_source_lineage = EXCLUDED.v0_source_lineage,
+                        v0_source_provenance = EXCLUDED.v0_source_provenance,
+                        v0_proof_provenance = EXCLUDED.v0_proof_provenance,
+                        verified_lossless_proof_origin =
+                            EXCLUDED.verified_lossless_proof_origin,
+                        verified_lossless_source =
+                            EXCLUDED.verified_lossless_source,
+                        verified_lossless_classifier =
+                            EXCLUDED.verified_lossless_classifier,
+                        verified_lossless_detail =
+                            EXCLUDED.verified_lossless_detail,
+                        updated_at = NOW()
+                    RETURNING id
+                    """,
+                    (
+                        evidence.owner.owner_type,
+                        evidence.owner.owner_id,
+                        evidence.measured_at,
+                        evidence.codec,
+                        evidence.container,
+                        evidence.storage_format,
+                        evidence.target_format,
+                        m.min_bitrate_kbps,
+                        m.avg_bitrate_kbps,
+                        m.median_bitrate_kbps,
+                        m.format,
+                        m.is_cbr,
+                        m.spectral_grade,
+                        m.spectral_bitrate_kbps,
+                        m.verified_lossless,
+                        m.was_converted_from,
+                        v0.min_bitrate_kbps if v0 else None,
+                        v0.avg_bitrate_kbps if v0 else None,
+                        v0.median_bitrate_kbps if v0 else None,
+                        v0.source_lineage if v0 else None,
+                        v0.source_provenance if v0 else None,
+                        v0.proof_provenance if v0 else None,
+                        proof.proof_origin if proof else None,
+                        proof.source if proof else None,
+                        proof.classifier if proof else None,
+                        proof.detail if proof else None,
+                    ),
+                )
+                row = cur.fetchone()
+                assert row is not None
+                evidence_id = int(row["id"])
+                cur.execute(
+                    "DELETE FROM album_quality_evidence_files "
+                    "WHERE evidence_id = %s",
+                    (evidence_id,),
+                )
+                file_rows = [
+                    (
+                        evidence_id,
+                        ordinal,
+                        file.relative_path,
+                        file.size_bytes,
+                        file.mtime_ns,
+                        file.extension,
+                        file.container,
+                        file.codec,
+                    )
+                    for ordinal, file in enumerate(evidence.files)
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO album_quality_evidence_files (
+                        evidence_id, ordinal, relative_path, size_bytes,
+                        mtime_ns, extension, container, codec
+                    )
+                    VALUES %s
+                    """,
+                    file_rows,
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def load_album_quality_evidence(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> AlbumQualityEvidence | None:
+        """Load active album-quality evidence by owner, without legacy fallbacks."""
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        cur = self._execute(
+            """
+            SELECT *
+            FROM album_quality_evidence
+            WHERE owner_type = %s AND owner_id = %s
+            """,
+            (owner.owner_type, owner.owner_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        evidence_id = int(row["id"])
+        files_cur = self._execute(
+            """
+            SELECT relative_path, size_bytes, mtime_ns, extension, container,
+                   codec
+            FROM album_quality_evidence_files
+            WHERE evidence_id = %s
+            ORDER BY relative_path
+            """,
+            (evidence_id,),
+        )
+        file_rows = [dict(r) for r in files_cur.fetchall()]
+        return self._album_quality_evidence_from_row(dict(row), file_rows)
+
+    def _album_quality_evidence_from_row(
+        self,
+        row: dict[str, Any],
+        file_rows: list[dict[str, Any]],
+    ) -> AlbumQualityEvidence:
+        v0_metric = None
+        if (
+            row.get("v0_min_bitrate_kbps") is not None
+            or row.get("v0_avg_bitrate_kbps") is not None
+            or row.get("v0_median_bitrate_kbps") is not None
+            or row.get("v0_source_lineage") is not None
+        ):
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=row.get("v0_min_bitrate_kbps"),
+                avg_bitrate_kbps=row.get("v0_avg_bitrate_kbps"),
+                median_bitrate_kbps=row.get("v0_median_bitrate_kbps"),
+                source_lineage=row.get("v0_source_lineage"),
+                source_provenance=row.get("v0_source_provenance"),
+                proof_provenance=row.get("v0_proof_provenance"),
+            )
+        proof = None
+        if row.get("verified_lossless"):
+            proof = VerifiedLosslessProof(
+                proof_origin=row["verified_lossless_proof_origin"],
+                source=row["verified_lossless_source"],
+                classifier=row["verified_lossless_classifier"],
+                detail=row.get("verified_lossless_detail"),
+            )
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=row["owner_type"],
+                owner_id=int(row["owner_id"]),
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=row.get("min_bitrate_kbps"),
+                avg_bitrate_kbps=row.get("avg_bitrate_kbps"),
+                median_bitrate_kbps=row.get("median_bitrate_kbps"),
+                format=row.get("format"),
+                is_cbr=bool(row.get("is_cbr")),
+                spectral_grade=row.get("spectral_grade"),
+                spectral_bitrate_kbps=row.get("spectral_bitrate_kbps"),
+                verified_lossless=bool(row.get("verified_lossless")),
+                was_converted_from=row.get("was_converted_from"),
+            ),
+            measured_at=row["measured_at"],
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path=file["relative_path"],
+                    size_bytes=int(file["size_bytes"]),
+                    mtime_ns=int(file["mtime_ns"]),
+                    extension=file["extension"],
+                    container=file["container"],
+                    codec=file.get("codec"),
+                )
+                for file in file_rows
+            ],
+            codec=row.get("codec"),
+            container=row.get("container"),
+            storage_format=row.get("storage_format"),
+            target_format=row.get("target_format"),
+            v0_metric=v0_metric,
+            verified_lossless_proof=proof,
+        )
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         """Zero fields that describe files currently on disk in beets.

@@ -114,7 +114,7 @@ function queueBadge(job, index) {
   if (job.status === 'failed') return ['failed', 'badge-failed'];
   if (job.status === 'running') return ['importing', 'badge-force'];
   if (job.preview_status === 'would_import') {
-    return [index === 0 ? 'next import' : 'importable', 'badge-new'];
+    return [index === 0 ? 'next check' : 'ready check', 'badge-new'];
   }
   if (job.preview_status === 'running') return ['previewing', 'badge-warn'];
   if (job.preview_status === 'waiting') return ['waiting preview', 'badge-library'];

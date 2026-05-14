@@ -11,7 +11,7 @@ import sys
 import threading
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -89,10 +89,10 @@ def _materialize_automation_preview_path(
             entry,
             cfg.slskd_download_dir,
         )
-    ctx = SimpleNamespace(
+    ctx = cast(Any, SimpleNamespace(
         cfg=cfg,
         pipeline_db_source=SimpleNamespace(_get_db=lambda: db),
-    )
+    ))
     staged_album = StagedAlbum.from_entry(
         entry,
         default_path=_canonical_import_folder_path(
@@ -170,37 +170,7 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
 def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
     preview_input = _preview_input(db, job)
-    return preview_import_from_path(db, **preview_input)
-
-
-def _denylist_confident_reject(
-    db: Any,
-    job: ImportJob,
-    result: ImportPreviewResult,
-) -> dict[str, Any] | None:
-    if not result.confident_reject or job.request_id is None:
-        return None
-    if result.reason == "path_missing":
-        return None
-
-    try:
-        preview_input = _preview_input(db, job)
-    except Exception:
-        return None
-    source_username = preview_input.get("source_username")
-    if not source_username:
-        return None
-
-    add_denylist = getattr(db, "add_denylist", None)
-    if not callable(add_denylist):
-        return None
-    reason = f"import preview rejected: {_preview_reason(result)}"
-    add_denylist(job.request_id, str(source_username), reason)
-    return {
-        "request_id": job.request_id,
-        "username": str(source_username),
-        "reason": reason,
-    }
+    return preview_import_from_path(db, import_job_id=job.id, **preview_input)
 
 
 def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
@@ -228,9 +198,6 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
             message=f"Preview would import: {_preview_reason(result)}",
         )
 
-    denylist = _denylist_confident_reject(db, job, result)
-    if denylist is not None:
-        preview_payload["denylist"] = denylist
     reason = _preview_reason(result)
     return db.mark_import_job_preview_failed(
         job.id,
@@ -250,8 +217,8 @@ def preview_heartbeat_loop(
     db_factory: Any | None = None,
 ) -> None:
     """Heartbeat a running preview from its own DB session."""
-    db_factory = db_factory or PipelineDB
-    db = db_factory(dsn)
+    factory = db_factory or PipelineDB
+    db = factory(dsn)
     try:
         while not stop.wait(interval):
             if not db.heartbeat_import_job_preview(job_id):
@@ -340,8 +307,8 @@ def preview_recovery_loop(
     interval: float = PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS,
     db_factory: Any | None = None,
 ) -> None:
-    db_factory = db_factory or PipelineDB
-    db = db_factory(dsn)
+    factory = db_factory or PipelineDB
+    db = factory(dsn)
     try:
         while not stop.wait(interval):
             recovered = recover_abandoned_preview_jobs(db)

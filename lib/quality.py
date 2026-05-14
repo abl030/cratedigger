@@ -8,6 +8,7 @@ import configparser
 import enum
 import json
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from enum import IntEnum, StrEnum
 from typing import Any, Literal, Optional, Sequence
 
@@ -722,6 +723,188 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_bitrate_kbps: Optional[int] = None
     verified_lossless: bool = False
     was_converted_from: Optional[str] = None
+
+
+ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE = "download_log_candidate"
+ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE = "import_job_candidate"
+ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT = "request_current"
+ALBUM_QUALITY_EVIDENCE_OWNER_TYPES: tuple[str, ...] = (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+)
+_LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
+    "lossless_source_v0",
+    "native_lossy_research_v0",
+    "on_disk_research_v0",
+)
+V0_SOURCE_LINEAGE_LOSSLESS_SOURCE = "lossless_source"
+V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH = "native_lossy_research"
+V0_SOURCE_LINEAGE_ON_DISK_RESEARCH = "on_disk_research"
+_NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND = "neutral_v0_research"
+
+
+class AlbumQualityEvidenceOwner(msgspec.Struct, frozen=True):
+    """Owner identity for persisted active album-quality evidence.
+
+    Only the three owner families below are persisted in U2:
+    ``download_log_candidate``, ``import_job_candidate``, and
+    ``request_current``. Simulator evidence remains in memory and must not
+    invent a persisted owner type.
+    """
+
+    owner_type: str
+    owner_id: int
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if self.owner_type not in ALBUM_QUALITY_EVIDENCE_OWNER_TYPES:
+            errors.append(f"invalid owner_type: {self.owner_type!r}")
+        if not isinstance(self.owner_id, int) or self.owner_id <= 0:
+            errors.append("owner_id must be a positive integer")
+        return errors
+
+
+class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
+    """One active file-snapshot row used to guard evidence freshness."""
+
+    relative_path: str
+    size_bytes: int
+    mtime_ns: int
+    extension: str
+    container: str
+    codec: str | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.relative_path or self.relative_path.startswith("/"):
+            errors.append("relative_path must be a non-empty relative path")
+        if not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+            errors.append(f"{self.relative_path}: size_bytes must be >= 0")
+        if not isinstance(self.mtime_ns, int) or self.mtime_ns < 0:
+            errors.append(f"{self.relative_path}: mtime_ns must be >= 0")
+        if not self.extension:
+            errors.append(f"{self.relative_path}: extension is required")
+        if not self.container:
+            errors.append(f"{self.relative_path}: container is required")
+        return errors
+
+
+class AlbumQualityV0Metric(msgspec.Struct, frozen=True):
+    """Neutral V0 probe metric plus source/proof provenance.
+
+    This deliberately does not carry the old policy-shaped probe ``kind``.
+    Action code can interpret source/proof provenance later, but the durable
+    evidence row remains a neutral measurement.
+    """
+
+    min_bitrate_kbps: int | None = None
+    avg_bitrate_kbps: int | None = None
+    median_bitrate_kbps: int | None = None
+    source_lineage: str | None = None
+    source_provenance: str | None = None
+    proof_provenance: str | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if (
+            self.min_bitrate_kbps is None
+            and self.avg_bitrate_kbps is None
+            and self.median_bitrate_kbps is None
+        ):
+            errors.append("v0_metric must include at least one bitrate metric")
+        if self.source_lineage in _LEGACY_POLICY_V0_PROBE_KINDS:
+            errors.append("v0_metric.source_lineage must not use legacy probe kinds")
+        if not self.source_lineage:
+            errors.append("v0_metric.source_lineage is required")
+        return errors
+
+
+class VerifiedLosslessProof(msgspec.Struct, frozen=True):
+    """Provenance for a true verified-lossless classification."""
+
+    proof_origin: str
+    source: str
+    classifier: str
+    detail: str | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.proof_origin:
+            errors.append("verified_lossless proof_origin is required")
+        if not self.source:
+            errors.append("verified_lossless source is required")
+        if not self.classifier:
+            errors.append("verified_lossless classifier is required")
+        return errors
+
+
+class AlbumQualityEvidence(msgspec.Struct, frozen=True):
+    """Active neutral album-quality evidence for candidates and current files.
+
+    The evidence wraps ``AudioQualityMeasurement`` instead of duplicating its
+    policy-facing facts. Snapshot rows and intrinsic provenance live here;
+    action provenance such as reused/recomputed/backfilled/fallback outcomes
+    belongs to preview/import/cleanup result surfaces, not to this durable row.
+    """
+
+    owner: AlbumQualityEvidenceOwner
+    measurement: AudioQualityMeasurement
+    measured_at: datetime
+    files: list[AlbumQualityEvidenceFile] = msgspec.field(default_factory=list)
+    codec: str | None = None
+    container: str | None = None
+    storage_format: str | None = None
+    target_format: str | None = None
+    v0_metric: AlbumQualityV0Metric | None = None
+    verified_lossless_proof: VerifiedLosslessProof | None = None
+
+    def sorted_for_storage(self) -> "AlbumQualityEvidence":
+        return AlbumQualityEvidence(
+            owner=self.owner,
+            measurement=self.measurement,
+            measured_at=self.measured_at,
+            files=sorted(self.files, key=lambda f: f.relative_path),
+            codec=self.codec,
+            container=self.container,
+            storage_format=self.storage_format,
+            target_format=self.target_format,
+            v0_metric=self.v0_metric,
+            verified_lossless_proof=self.verified_lossless_proof,
+        )
+
+    def storage_validation_errors(self) -> list[str]:
+        errors = self.owner.validation_errors()
+        if self.measured_at is None:
+            errors.append("measured_at is required")
+        if not self.files:
+            errors.append("at least one snapshot file is required")
+        for file in self.files:
+            errors.extend(file.validation_errors())
+        if self.v0_metric is not None:
+            errors.extend(self.v0_metric.validation_errors())
+        if self.measurement.verified_lossless:
+            if self.verified_lossless_proof is None:
+                errors.append("verified_lossless=true requires proof provenance")
+            else:
+                errors.extend(self.verified_lossless_proof.validation_errors())
+        elif self.verified_lossless_proof is not None:
+            errors.append("verified_lossless=false cannot store proof provenance")
+        return errors
+
+    def policy_incomplete_reasons(self) -> list[str]:
+        """Return reasons this row is not ready for action reducers."""
+
+        reasons = self.storage_validation_errors()
+        if self.measurement.format is None:
+            reasons.append("measurement.format is required")
+        if (
+            self.measurement.min_bitrate_kbps is None
+            and self.measurement.avg_bitrate_kbps is None
+            and self.measurement.median_bitrate_kbps is None
+        ):
+            reasons.append("at least one measurement bitrate metric is required")
+        return reasons
 
 
 class V0ProbeEvidence(msgspec.Struct, frozen=True):
@@ -3805,6 +3988,259 @@ def full_pipeline_decision(
         result["keep_searching"] = True
 
     return result
+
+
+class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
+    """Action-time facts that are not intrinsic album-quality evidence.
+
+    Match-bypass facts are accepted here so force/manual callers can keep one
+    compact context object, but quality comparison intentionally ignores
+    ``force_import`` and ``beets_distance``.
+    """
+
+    audio_check_mode: str = "normal"
+    audio_corrupt: bool = False
+    import_mode: str = "auto"
+    has_nested_audio: bool = False
+    verified_lossless_target: str | None = None
+    target_format: str | None = None
+    supported_lossless_source: bool | None = None
+    converted_count: int | None = None
+    post_conversion_min_bitrate: int | None = None
+    force_import: bool = False
+    beets_distance: float | None = None
+
+
+def _require_evidence_ready(
+    role: str,
+    evidence: AlbumQualityEvidence,
+) -> None:
+    reasons = evidence.policy_incomplete_reasons()
+    if reasons:
+        joined = "; ".join(reasons)
+        raise ValueError(f"{role} album quality evidence is incomplete: {joined}")
+
+
+def _first_bitrate(*values: int | None) -> int:
+    for value in values:
+        if value is not None:
+            return value
+    raise ValueError("album quality evidence has no bitrate metric")
+
+
+def _normalised_format(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalised = value.strip().lower().lstrip(".")
+    return normalised or None
+
+
+def _lossless_source_from_evidence(evidence: AlbumQualityEvidence) -> bool:
+    metric = evidence.v0_metric
+    if (
+        metric is not None
+        and metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+    ):
+        return True
+
+    measurement = evidence.measurement
+    candidates = (
+        measurement.was_converted_from,
+        evidence.storage_format,
+        evidence.container,
+        evidence.codec,
+        measurement.format,
+    )
+    for candidate in candidates:
+        fmt = _normalised_format(candidate)
+        if fmt in _LOSSLESS_EXTS or fmt == "lossless":
+            return True
+    return False
+
+
+def _policy_v0_probe_from_metric(
+    metric: AlbumQualityV0Metric | None,
+) -> V0ProbeEvidence | None:
+    if metric is None:
+        return None
+    kind = (
+        V0_PROBE_LOSSLESS_SOURCE
+        if metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        else _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND
+    )
+    return V0ProbeEvidence(
+        kind=kind,
+        min_bitrate_kbps=metric.min_bitrate_kbps,
+        avg_bitrate_kbps=metric.avg_bitrate_kbps,
+        median_bitrate_kbps=metric.median_bitrate_kbps,
+    )
+
+
+def _evidence_target_format(
+    candidate: AlbumQualityEvidence,
+    facts: AlbumQualityEvidenceDecisionFacts,
+) -> str | None:
+    return facts.target_format if facts.target_format is not None else candidate.target_format
+
+
+def _new_format_hint_from_evidence(
+    candidate: AlbumQualityEvidence,
+    *,
+    supported_lossless_source: bool,
+    target_format: str | None,
+) -> str | None:
+    if supported_lossless_source and target_format not in ("flac", "lossless"):
+        return None
+    return candidate.measurement.format or candidate.storage_format
+
+
+def _override_bitrate_from_current_evidence(
+    current: AlbumQualityEvidence | None,
+) -> int | None:
+    if current is None:
+        return None
+    measurement = current.measurement
+    current_min = measurement.min_bitrate_kbps
+    effective = compute_effective_override_bitrate(
+        current_min,
+        measurement.spectral_bitrate_kbps,
+        measurement.spectral_grade,
+    )
+    if current_min is not None and effective is not None and effective != current_min:
+        return effective
+    return None
+
+
+def full_pipeline_decision_from_evidence(
+    candidate: AlbumQualityEvidence,
+    current: AlbumQualityEvidence | None = None,
+    *,
+    facts: AlbumQualityEvidenceDecisionFacts | None = None,
+    cfg: "QualityRankConfig | None" = None,
+) -> dict[str, Any]:
+    """Run the full quality policy from neutral album-quality evidence.
+
+    This is the evidence-pair entrypoint for action-time reducers. Callers
+    provide durable ``AlbumQualityEvidence`` rows plus narrow action facts;
+    old V0 probe ``kind`` constants are not accepted as public inputs. The
+    transitional call into ``full_pipeline_decision`` derives its comparable
+    V0 probe shape solely from neutral ``v0_metric.source_lineage``.
+    """
+
+    if facts is None:
+        facts = AlbumQualityEvidenceDecisionFacts()
+
+    _require_evidence_ready("candidate", candidate)
+    if current is not None:
+        _require_evidence_ready("current", current)
+
+    candidate_measurement = candidate.measurement
+    current_measurement = current.measurement if current is not None else None
+    candidate_probe = _policy_v0_probe_from_metric(candidate.v0_metric)
+    current_probe = (
+        _policy_v0_probe_from_metric(current.v0_metric)
+        if current is not None
+        else None
+    )
+
+    target_format = _evidence_target_format(candidate, facts)
+    supported_lossless_source = (
+        _lossless_source_from_evidence(candidate)
+        if facts.supported_lossless_source is None
+        else facts.supported_lossless_source
+    )
+    post_conversion_min = (
+        facts.post_conversion_min_bitrate
+        if facts.post_conversion_min_bitrate is not None
+        else (
+            candidate_probe.min_bitrate_kbps
+            if supported_lossless_source and candidate_probe is not None
+            else None
+        )
+    )
+    converted_count = facts.converted_count
+    if converted_count is None:
+        converted_count = (
+            1
+            if (
+                supported_lossless_source
+                and target_format not in ("flac", "lossless")
+                and post_conversion_min is not None
+            )
+            else 0
+        )
+
+    existing_min = None
+    existing_avg = None
+    existing_format = None
+    existing_is_cbr = False
+    existing_spectral_grade = None
+    existing_spectral_bitrate = None
+    if current_measurement is not None:
+        assert current is not None
+        existing_min = current_measurement.min_bitrate_kbps
+        existing_avg = current_measurement.avg_bitrate_kbps
+        existing_format = current_measurement.format or current.storage_format
+        existing_is_cbr = current_measurement.is_cbr
+        existing_spectral_grade = current_measurement.spectral_grade
+        existing_spectral_bitrate = current_measurement.spectral_bitrate_kbps
+
+    return full_pipeline_decision(
+        is_flac=supported_lossless_source,
+        min_bitrate=_first_bitrate(
+            candidate_measurement.min_bitrate_kbps,
+            candidate_measurement.avg_bitrate_kbps,
+            candidate_measurement.median_bitrate_kbps,
+        ),
+        is_cbr=candidate_measurement.is_cbr,
+        avg_bitrate=candidate_measurement.avg_bitrate_kbps,
+        spectral_grade=candidate_measurement.spectral_grade,
+        spectral_bitrate=candidate_measurement.spectral_bitrate_kbps,
+        existing_min_bitrate=existing_min,
+        existing_avg_bitrate=existing_avg,
+        existing_spectral_bitrate=existing_spectral_bitrate,
+        existing_spectral_grade=existing_spectral_grade,
+        override_min_bitrate=_override_bitrate_from_current_evidence(current),
+        existing_format=existing_format,
+        existing_is_cbr=existing_is_cbr,
+        post_conversion_min_bitrate=post_conversion_min,
+        converted_count=converted_count,
+        verified_lossless=candidate_measurement.verified_lossless,
+        verified_lossless_target=facts.verified_lossless_target,
+        target_format=target_format,
+        new_format=_new_format_hint_from_evidence(
+            candidate,
+            supported_lossless_source=supported_lossless_source,
+            target_format=target_format,
+        ),
+        audio_check_mode=facts.audio_check_mode,
+        audio_corrupt=facts.audio_corrupt,
+        import_mode=facts.import_mode,
+        has_nested_audio=facts.has_nested_audio,
+        cfg=cfg,
+        candidate_v0_probe_avg=(
+            candidate_probe.avg_bitrate_kbps
+            if candidate_probe is not None
+            else None
+        ),
+        candidate_v0_probe_min=(
+            candidate_probe.min_bitrate_kbps
+            if candidate_probe is not None
+            else None
+        ),
+        existing_v0_probe_avg=(
+            current_probe.avg_bitrate_kbps
+            if current_probe is not None
+            else None
+        ),
+        existing_v0_probe_kind=(
+            current_probe.kind if current_probe is not None else None
+        ),
+        candidate_v0_probe_kind=(
+            candidate_probe.kind if candidate_probe is not None else None
+        ),
+        supported_lossless_source=supported_lossless_source,
+    )
 
 
 # --- Repair / orphan detection (pure functions) ---

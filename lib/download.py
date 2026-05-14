@@ -32,9 +32,7 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         ImportResult,
                          DownloadDecision, ValidationResult,
-                         SpectralMeasurement,
                          decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
@@ -1063,8 +1061,6 @@ def process_completed_album(
     album_data: GrabListEntry,
     failed_grab: list[Any],
     ctx: CratediggerContext,
-    *,
-    preview_import_result: ImportResult | None = None,
 ) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
@@ -1105,7 +1101,6 @@ def process_completed_album(
             album_data,
             staged_album,
             ctx,
-            preview_import_result=preview_import_result,
         )
         if outcome is not None:
             if outcome.deferred:
@@ -1121,47 +1116,10 @@ def process_completed_album(
     return True
 
 
-def _preview_import_result_is_importable(
-    preview_import_result: ImportResult | None,
-) -> bool:
-    return (
-        preview_import_result is not None
-        and preview_import_result.decision in {
-            "import",
-            "transcode_upgrade",
-            "transcode_first",
-            "provisional_lossless_upgrade",
-        }
-        and preview_import_result.new_measurement is not None
-    )
-
-
-def _apply_preimport_from_preview(
-    album_data: GrabListEntry,
-    preview_import_result: ImportResult,
-) -> None:
-    """Populate preimport spectral fields from an accepted async preview."""
-    new_m = preview_import_result.new_measurement
-    existing_m = preview_import_result.existing_measurement
-    if new_m is not None:
-        album_data.download_spectral = SpectralMeasurement.from_parts(
-            new_m.spectral_grade,
-            new_m.spectral_bitrate_kbps,
-        )
-    if existing_m is not None:
-        album_data.current_spectral = SpectralMeasurement.from_parts(
-            existing_m.spectral_grade,
-            existing_m.spectral_bitrate_kbps,
-        )
-        album_data.current_min_bitrate = existing_m.min_bitrate_kbps
-
-
 def _process_beets_validation(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
-    *,
-    preview_import_result: ImportResult | None = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
@@ -1187,17 +1145,7 @@ def _process_beets_validation(
     bv_result.download_folder = current_path
     bv_result.source_dirs = _source_dirs_for_album(album_data)
 
-    if bv_result.valid and _preview_import_result_is_importable(preview_import_result):
-        assert preview_import_result is not None
-        logger.info(
-            "PREIMPORT: reusing async preview measurements for %s - %s "
-            "(decision=%s)",
-            album_data.artist,
-            album_data.title,
-            preview_import_result.decision,
-        )
-        _apply_preimport_from_preview(album_data, preview_import_result)
-    elif bv_result.valid:
+    if bv_result.valid:
         dl_pre = _build_download_info(album_data)
         db = (ctx.pipeline_db_source._get_db()
               if ctx.pipeline_db_source is not None else None)
@@ -1234,7 +1182,6 @@ def _process_beets_validation(
             bv_result,
             staged_album,
             ctx,
-            preview_import_result=preview_import_result,
         )
     return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
@@ -1363,8 +1310,6 @@ def _handle_valid_result(
     bv_result: ValidationResult,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
-    *,
-    preview_import_result: ImportResult | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1549,11 +1494,6 @@ def _handle_valid_result(
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=_source_dirs_for_album(album_data),
-                preview_import_result=(
-                    preview_import_result
-                    if _preview_import_result_is_importable(preview_import_result)
-                    else None
-                ),
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
@@ -2043,8 +1983,6 @@ def _run_completed_processing(
     state: ActiveDownloadState,
     db: Any,
     ctx: CratediggerContext,
-    *,
-    preview_import_result: ImportResult | None = None,
 ) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
@@ -2061,7 +1999,6 @@ def _run_completed_processing(
             entry,
             [],
             ctx,
-            preview_import_result=preview_import_result,
         )
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "

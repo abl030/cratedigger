@@ -34,6 +34,57 @@ from tests.helpers import (
 )
 
 
+class TestWrongMatchCleanupDecision(unittest.TestCase):
+    def test_decision_recomputes_from_download_log_preview(self):
+        from lib.wrong_match_cleanup_decision import (
+            CLEANUP_DECISION_PROVENANCE,
+            decide_wrong_match_cleanup,
+        )
+
+        db = object()
+        preview = ImportPreviewResult(
+            mode="download_log",
+            verdict="confident_reject",
+            confident_reject=True,
+            cleanup_eligible=True,
+            reason="fresh reject",
+            download_log_id=7,
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+            return_value=preview,
+        ) as recompute:
+            decision = decide_wrong_match_cleanup(db, 7)
+
+        recompute.assert_called_once_with(db, 7)
+        self.assertTrue(decision.delete_allowed)
+        self.assertFalse(decision.uncertain)
+        self.assertEqual(decision.provenance, CLEANUP_DECISION_PROVENANCE)
+
+    def test_decision_blocks_uncertain_fresh_preview(self):
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
+
+        preview = ImportPreviewResult(
+            mode="download_log",
+            verdict="uncertain",
+            uncertain=True,
+            cleanup_eligible=False,
+            reason="fresh evidence unavailable",
+            download_log_id=7,
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+            return_value=preview,
+        ):
+            decision = decide_wrong_match_cleanup(object(), 7)
+
+        self.assertFalse(decision.delete_allowed)
+        self.assertTrue(decision.uncertain)
+        self.assertEqual(decision.skip_reason, "fresh evidence unavailable")
+
+
 class TestImporterWorker(unittest.TestCase):
     def _mark_importable(
         self,
@@ -73,6 +124,26 @@ class TestImporterWorker(unittest.TestCase):
         )
         return db.download_logs[-1].id
 
+    def _cleanup_preview(
+        self,
+        log_id: int,
+        *,
+        verdict: str = "confident_reject",
+        cleanup_eligible: bool = True,
+        reason: str = "fresh cleanup-safe reject",
+    ) -> ImportPreviewResult:
+        return ImportPreviewResult(
+            mode="download_log",
+            verdict=verdict,
+            would_import=verdict == "would_import",
+            confident_reject=verdict == "confident_reject",
+            uncertain=verdict == "uncertain",
+            cleanup_eligible=cleanup_eligible,
+            decision=reason,
+            reason=reason,
+            download_log_id=log_id,
+        )
+
     def test_force_import_job_calls_existing_dispatch_and_completes(self):
         from scripts import importer
 
@@ -106,7 +177,6 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=None,
-            preview_import_result=None,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -147,10 +217,9 @@ class TestImporterWorker(unittest.TestCase):
             outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
-            preview_import_result=None,
         )
 
-    def test_force_import_job_forwards_preview_import_result(self):
+    def test_force_import_job_does_not_forward_preview_import_result(self):
         from scripts import importer
 
         preview_ir = ImportResult(
@@ -186,9 +255,59 @@ class TestImporterWorker(unittest.TestCase):
         ) as dispatch:
             importer.process_claimed_job(cast(Any, db), claimed)
 
-        forwarded = dispatch.call_args.kwargs["preview_import_result"]
-        self.assertIsNotNone(forwarded)
-        self.assertEqual(forwarded.decision, "import")
+        self.assertNotIn("preview_import_result", dispatch.call_args.kwargs)
+
+    def test_force_import_job_does_not_forward_stale_preview_import_result_as_authority(self):
+        from scripts import importer
+
+        preview_ir = ImportResult(
+            decision="import",
+            already_in_beets=False,
+            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=141),
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            min_bitrate=116,
+            verified_lossless=False,
+            current_spectral_grade="likely_transcode",
+            current_lossless_source_v0_probe_avg_bitrate=240,
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+            preview_enabled=True,
+        )
+        self._mark_importable(
+            db,
+            job,
+            preview_result={
+                "verdict": "would_import",
+                "import_result": json.loads(preview_ir.to_json()),
+            },
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.import_dispatch.dispatch_import_from_db",
+            return_value=DispatchOutcome(True, "imported"),
+        ) as dispatch:
+            importer.process_claimed_job(cast(Any, db), claimed)
+
+        self.assertNotIn(
+            "preview_import_result",
+            dispatch.call_args.kwargs,
+            "Stored preview ImportResult is audit/evidence input only; force "
+            "import must recompute the action decision against current evidence.",
+        )
 
     def test_manual_import_failure_marks_job_failed(self):
         from scripts import importer
@@ -243,7 +362,10 @@ class TestImporterWorker(unittest.TestCase):
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "Pre-import gate rejected"),
-            ):
+            ), patch(
+                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+                return_value=self._cleanup_preview(log_id),
+            ) as preview:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
@@ -251,8 +373,78 @@ class TestImporterWorker(unittest.TestCase):
             self.assertFalse(os.path.exists(source))
             self.assertEqual(db.get_wrong_matches(), [])
             result = self._result(updated)
+            preview.assert_called_once_with(db, log_id)
             self.assertEqual(result["cleanup"]["success"], True)
             self.assertEqual(result["cleanup"]["cleared_rows"], 1)
+            self.assertEqual(
+                result["cleanup"]["cleanup_decision"]["delete_allowed"],
+                True,
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_failed_force_import_job_skips_cleanup_when_fresh_evidence_uncertain(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            self._mark_importable(
+                db,
+                job,
+                preview_result={
+                    "verdict": "confident_reject",
+                    "confident_reject": True,
+                    "cleanup_eligible": True,
+                },
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(False, "Pre-import gate rejected"),
+            ), patch(
+                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+                return_value=self._cleanup_preview(
+                    log_id,
+                    verdict="uncertain",
+                    cleanup_eligible=False,
+                    reason="fresh evidence unavailable",
+                ),
+            ) as preview:
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            result = self._result(updated)
+            preview.assert_called_once_with(db, log_id)
+            self.assertEqual(result["cleanup"]["success"], False)
+            self.assertTrue(result["cleanup"]["skipped"])
+            self.assertEqual(
+                result["cleanup"]["cleanup_decision"]["delete_allowed"],
+                False,
+            )
+            self.assertEqual(
+                result["cleanup"]["cleanup_decision"]["uncertain"],
+                True,
+            )
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
@@ -293,6 +485,9 @@ class TestImporterWorker(unittest.TestCase):
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 side_effect=reject_again,
+            ), patch(
+                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
+                return_value=self._cleanup_preview(log_id),
             ):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
@@ -707,6 +902,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             force=True,
             source_username="alice",
             download_log_id=7,
+            import_job_id=claimed.id,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -742,6 +938,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             force=False,
             source_username=None,
             download_log_id=None,
+            import_job_id=claimed.id,
         )
         assert updated is not None
         self.assertEqual(updated.preview_status, "would_import")
@@ -789,6 +986,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 force=False,
                 source_username="alice",
                 download_log_id=None,
+                import_job_id=claimed.id,
             )
             assert updated is not None
             self.assertEqual(updated.preview_status, "would_import")
@@ -842,6 +1040,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 force=False,
                 source_username="alice",
                 download_log_id=None,
+                import_job_id=updated.id if updated is not None else None,
             )
             assert updated is not None
             self.assertEqual(updated.status, "queued")
@@ -853,7 +1052,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        db.dsn = "postgresql://fake"
+        setattr(db, "dsn", "postgresql://fake")
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -914,7 +1113,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        db.dsn = "postgresql://fake"
+        dsn = "postgresql://fake"
+        setattr(db, "dsn", dsn)
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -938,7 +1138,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         thread = threading.Thread(
             target=import_preview_worker.preview_recovery_loop,
             kwargs={
-                "dsn": db.dsn,
+                "dsn": dsn,
                 "stop": stop,
                 "interval": 0.01,
                 "db_factory": lambda dsn: db,
@@ -964,7 +1164,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             import_preview_worker.STALE_PREVIEW_MESSAGE,
         )
 
-    def test_confident_reject_fails_job_and_denylists_source(self):
+    def test_confident_reject_fails_job_without_denylisting_source(self):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -992,7 +1192,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.preview_status, "confident_reject")
         self.assertEqual(updated.preview_error, "spectral_reject")
-        self.assertEqual(db.get_denylisted_users(42)[0]["username"], "alice")
+        self.assertEqual(db.get_denylisted_users(42), [])
 
     def test_uncertain_preview_fails_without_denylisting(self):
         from scripts import import_preview_worker

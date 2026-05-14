@@ -27,7 +27,7 @@ from lib.pipeline_db import (
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.quality import ActiveDownloadState, ImportResult
+from lib.quality import ActiveDownloadState
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
@@ -39,27 +39,6 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "message": outcome.message,
         "deferred": outcome.deferred,
     }
-
-
-def _preview_import_result(job: ImportJob) -> ImportResult | None:
-    """Extract the dry-run import_one result stored by the preview worker."""
-    preview_result = job.preview_result or {}
-    raw = preview_result.get("import_result")
-    if raw is None:
-        return None
-    try:
-        if isinstance(raw, ImportResult):
-            return raw
-        if isinstance(raw, dict):
-            return ImportResult.from_dict(raw)
-    except Exception:
-        logger.warning(
-            "Import job %s has an unreadable preview import_result; "
-            "falling back to full import measurement",
-            job.id,
-            exc_info=True,
-        )
-    return None
 
 
 def _cleanup_failed_force_import(
@@ -76,14 +55,27 @@ def _cleanup_failed_force_import(
     failed_path = payload.get("failed_path")
     failed_path_hint = failed_path if isinstance(failed_path, str) else None
     try:
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
         from lib.wrong_matches import cleanup_wrong_match_source
 
+        decision = decide_wrong_match_cleanup(db, download_log_id)
+        if not decision.delete_allowed:
+            return {
+                "success": False,
+                "skipped": True,
+                "download_log_id": download_log_id,
+                "failed_path_hint": failed_path_hint,
+                "reason": decision.skip_reason,
+                "cleanup_decision": decision.to_dict(),
+            }
         cleanup = cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
         )
-        return cleanup.to_dict()
+        result = cleanup.to_dict()
+        result["cleanup_decision"] = decision.to_dict()
+        return result
     except Exception as exc:
         logger.exception(
             "Failed to clean wrong-match source for import job %s",
@@ -138,7 +130,6 @@ def execute_import_job(
                 if isinstance(source_dirs, list)
                 else None
             ),
-            preview_import_result=_preview_import_result(job),
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -199,7 +190,6 @@ def execute_automation_import_job(
             state,
             db,
             runtime_ctx,
-            preview_import_result=_preview_import_result(job),
         )
     finally:
         if created_ctx:

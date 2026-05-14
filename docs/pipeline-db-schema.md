@@ -4,6 +4,45 @@ The pipeline DB is PostgreSQL. DSN: `192.168.100.11:5432/cratedigger`. Access vi
 
 Full schema lives in `migrations/*.sql`. This doc covers the fields that appear in debugging and the JSONB audit blobs.
 
+## `album_quality_evidence` — active quality evidence
+
+Active reusable album-quality evidence is stored relationally, not in JSONB.
+One row exists per owner:
+
+- `owner_type TEXT` — exactly `download_log_candidate`, `import_job_candidate`,
+  or `request_current`. Simulator evidence is ephemeral and has no persisted
+  owner.
+- `owner_id INTEGER` — the owning `download_log.id`, `import_jobs.id`, or
+  `album_requests.id`, validated by `PipelineDB` before write.
+- `measured_at TIMESTAMPTZ` — when this evidence snapshot was measured.
+- `codec`, `container`, `storage_format`, `target_format` — album-level
+  intrinsic storage facts.
+- `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
+  `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`,
+  `was_converted_from` — the wrapped `AudioQualityMeasurement` facts.
+- `v0_min_bitrate_kbps`, `v0_avg_bitrate_kbps`,
+  `v0_median_bitrate_kbps`, `v0_source_lineage`,
+  `v0_source_provenance`, `v0_proof_provenance` — neutral V0 metric and
+  provenance. Legacy policy-shaped probe kinds are rejected here.
+- `verified_lossless BOOLEAN` plus `verified_lossless_proof_origin`,
+  `verified_lossless_source`, `verified_lossless_classifier`,
+  `verified_lossless_detail` — proof provenance is present only when the
+  boolean is true.
+
+## `album_quality_evidence_files` — snapshot guard rows
+
+Each active evidence row owns typed file-snapshot rows:
+
+- `evidence_id BIGINT` — FK to `album_quality_evidence(id) ON DELETE CASCADE`.
+- `ordinal INTEGER` and `relative_path TEXT` — stable sorted snapshot order.
+- `size_bytes BIGINT`, `mtime_ns BIGINT`, `extension TEXT`,
+  `container TEXT`, `codec TEXT` — file identity and container facts used to
+  decide whether cached evidence is still valid.
+
+Action provenance such as reused/recomputed/backfilled/fallback outcomes is not
+stored in these evidence tables; preview/import/cleanup result surfaces own
+that audit trail.
+
 ## `album_requests` — quality-tracking fields
 
 - `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. Set by quality gate requeue paths and backfill. Cleared on quality gate accept. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
@@ -61,13 +100,17 @@ Key fields:
   and CLI callers.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
-- `preview_status TEXT` — async readiness stage: `waiting`, `running`,
-  `would_import`, `confident_reject`, `uncertain`, or `error`. New jobs use
-  `waiting` only when the async preview gate is enabled; preview-disabled or
-  raw/default inserts are `would_import` immediately with
+- `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,
+  `would_import`, `confident_reject`, `uncertain`, or `error`. The legacy
+  `would_import` token is queue readiness only. It is not import authority, and
+  workers must recompute the mutating decision from fresh evidence at import
+  time. New jobs use `waiting` only when the async preview gate is enabled;
+  preview-disabled or raw/default inserts are `would_import` immediately with
   `preview_message='Preview gate disabled'`.
 - `preview_result JSONB`, `preview_message`, `preview_error` — durable
-  no-mutation preview audit visible in Recents and CLI output.
+  no-mutation preview audit visible in Recents and CLI output. Stored verdicts
+  are display/audit facts; they must not authorize import, cleanup, denylist, or
+  request-current updates.
 - `preview_attempts`, `preview_worker_id`, `preview_started_at`,
   `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
   recovery metadata.
@@ -83,9 +126,10 @@ live worker's job.
 
 Async preview workers run outside the beets mutation lane. They claim queued
 jobs with `preview_status='waiting'`, call the no-mutation import preview path,
-then either set `preview_status='would_import'` and `importable_at` or fail the
-job with preview audit details. This lets spectral/measurement work run with
-tunable parallelism while beets writes stay serial.
+persist candidate evidence when an owner exists, then either mark the job ready
+for the final import-time check or fail the preview with audit details. This
+lets spectral/measurement work run with tunable parallelism while beets writes
+stay serial, without letting preview decisions become later mutation authority.
 
 The preview gate is opt-in at deployment time. When disabled, no preview worker
 is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema

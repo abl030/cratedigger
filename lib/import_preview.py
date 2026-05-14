@@ -18,6 +18,7 @@ import msgspec
 
 from lib.import_dispatch import run_import_one
 from lib.preimport import inspect_local_files, run_preimport_gates
+from lib.quality_evidence import persist_candidate_evidence_from_import_result
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -326,6 +327,7 @@ def preview_import_from_path(
     force: bool = True,
     source_username: str | None = None,
     download_log_id: int | None = None,
+    import_job_id: int | None = None,
 ) -> ImportPreviewResult:
     """Preview a real source folder with no source, beets, or DB mutation."""
     req = db.get_request(request_id)
@@ -455,12 +457,36 @@ def preview_import_from_path(
             run.import_result,
             cfg=cfg.quality_ranks,
         )
+        evidence_status: str | None = None
+        evidence_reason: str | None = None
+        try:
+            evidence = persist_candidate_evidence_from_import_result(
+                db,
+                source_path=path,
+                import_result=run.import_result,
+                download_log_id=download_log_id,
+                import_job_id=import_job_id,
+                target_format=req.get("target_format") if req else None,
+            )
+            evidence_status = evidence.status
+            evidence_reason = evidence.reason
+        except Exception as exc:
+            evidence_status = "failed"
+            evidence_reason = f"{type(exc).__name__}: {exc}"
         return _preview_result(
             mode="path",
             verdict=verdict,
             decision=run.import_result.decision if run.import_result else reason,
             reason=reason,
-            detail=run.import_result.error if run.import_result else "import_one.py emitted no JSON",
+            detail=(
+                run.import_result.error
+                if run.import_result and run.import_result.error
+                else evidence_reason
+                if evidence_status in {"failed", "incomplete", "empty_fileset"}
+                else "import_one.py emitted no JSON"
+                if run.import_result is None
+                else None
+            ),
             stage_chain=chain,
             request_id=request_id,
             download_log_id=download_log_id,

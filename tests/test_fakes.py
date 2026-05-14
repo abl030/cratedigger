@@ -12,6 +12,7 @@ from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralContext, SpectralMeasurement, ValidationResult
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
+    make_album_quality_evidence,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
@@ -21,6 +22,144 @@ from tests.helpers import (
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_album_quality_evidence_round_trips_like_pipeline_db(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="b.mp3",
+                    size_bytes=2,
+                    mtime_ns=2,
+                    extension="mp3",
+                    container="mp3",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="a.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        )
+
+        db.upsert_album_quality_evidence(evidence)
+        loaded = db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(
+            [file.relative_path for file in loaded.files],
+            ["a.mp3", "b.mp3"],
+        )
+        loaded.files.append(AlbumQualityEvidenceFile(
+            relative_path="mutated.mp3",
+            size_bytes=3,
+            mtime_ns=3,
+            extension="mp3",
+            container="mp3",
+        ))
+        reloaded = db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+            )
+        )
+        assert reloaded is not None
+        self.assertEqual(
+            [file.relative_path for file in reloaded.files],
+            ["a.mp3", "b.mp3"],
+        )
+
+    def test_album_quality_evidence_validates_owner_and_snapshot(self):
+        from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
+
+        db = FakePipelineDB()
+        self.assertFalse(db.validate_album_quality_evidence_owner(
+            AlbumQualityEvidenceOwner("request_current", 99)
+        ))
+        with self.assertRaisesRegex(ValueError, "invalid owner_type"):
+            db.validate_album_quality_evidence_owner(
+                AlbumQualityEvidenceOwner("simulator", 1)
+            )
+        db.seed_request(make_request_row(id=42))
+        with self.assertRaisesRegex(ValueError, "container is required"):
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_id=42,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="bad.mp3",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="mp3",
+                        container="",
+                    ),
+                ],
+            ))
+
+    def test_album_quality_evidence_supports_download_log_candidate_owner(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        log_id = db.log_download(request_id=42, outcome="rejected")
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+        )
+
+        db.upsert_album_quality_evidence(evidence)
+
+        self.assertIsNotNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=log_id,
+            )
+        ))
+
+    def test_album_quality_evidence_supports_import_job_candidate_owner(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        job = db.enqueue_import_job(
+            "manual_import",
+            request_id=42,
+            payload={"failed_path": "/tmp/candidate"},
+            preview_enabled=False,
+        )
+
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        ))
+
+        loaded = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        ))
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
+
     def test_record_attempt_updates_retry_metadata(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))

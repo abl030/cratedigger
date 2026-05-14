@@ -248,26 +248,21 @@ class TestDispatchCoreSeams(unittest.TestCase):
         self.assertIn("--preserve-source", cmd)
         self.assertNotIn("--request-id", cmd)
 
-    def test_shared_import_one_command_supports_preview_result_file(self):
+    def test_shared_import_one_command_does_not_accept_preview_result_file(self):
         from lib.import_dispatch import build_import_one_command
 
         cmd = build_import_one_command(
             path="/tmp/album",
             mb_release_id="mbid-123",
             beets_harness_path=_HARNESS,
-            preview_import_result_file="/tmp/preview.json",
         )
 
-        self.assertIn("--preview-import-result-file", cmd)
-        idx = cmd.index("--preview-import-result-file")
-        self.assertEqual(cmd[idx + 1], "/tmp/preview.json")
+        self.assertNotIn("--preview-import-result-file", cmd)
 
-    def test_preview_import_result_passed_to_import_one(self):
-        cmd = self._get_cmd(preview_import_result=make_import_result())
+    def test_dispatch_core_has_no_preview_import_result_channel(self):
+        cmd = self._get_cmd()
 
-        self.assertIn("--preview-import-result-file", cmd)
-        idx = cmd.index("--preview-import-result-file")
-        self.assertTrue(cmd[idx + 1].endswith(".json"))
+        self.assertNotIn("--preview-import-result-file", cmd)
 
 
 if __name__ == "__main__":

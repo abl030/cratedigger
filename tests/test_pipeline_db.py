@@ -17,6 +17,7 @@ from unittest.mock import patch
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+from tests.helpers import make_album_quality_evidence
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
@@ -37,7 +38,20 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["peer_dir_daily_aggregates", "peer_dir_observations", "cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in [
+        "album_quality_evidence",
+        "peer_dir_daily_aggregates",
+        "peer_dir_observations",
+        "cycle_metrics",
+        "bad_audio_hashes",
+        "import_jobs",
+        "user_cooldowns",
+        "source_denylist",
+        "search_log",
+        "download_log",
+        "album_tracks",
+        "album_requests",
+    ]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -63,6 +77,8 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("cycle_metrics", table_names)
         self.assertIn("peer_dir_observations", table_names)
         self.assertIn("peer_dir_daily_aggregates", table_names)
+        self.assertIn("album_quality_evidence", table_names)
+        self.assertIn("album_quality_evidence_files", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
@@ -2234,6 +2250,351 @@ class TestApplyTransitionDB(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertIsNone(req["search_filetype_override"])
+
+
+@requires_postgres
+class TestAlbumQualityEvidenceStorage(unittest.TestCase):
+    """Active relational album-quality evidence storage."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="evidence-uuid",
+            artist_name="Evidence Artist",
+            album_title="Evidence Album",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_upsert_load_request_current_round_trips_typed_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=860,
+                avg_bitrate_kbps=912,
+                median_bitrate_kbps=899,
+                format="flac",
+                spectral_grade="genuine",
+                verified_lossless=True,
+                was_converted_from="flac",
+            ),
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="02 - Beta.flac",
+                    size_bytes=2000,
+                    mtime_ns=20,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="01 - Alpha.flac",
+                    size_bytes=1000,
+                    mtime_ns=10,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+            ],
+            codec="flac",
+            container="flac",
+            storage_format="flac",
+            target_format="lossless",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=228,
+                median_bitrate_kbps=225,
+                source_lineage="lossless_container_source",
+                source_provenance="transcoded from verified FLAC candidate",
+                proof_provenance="spectral genuine plus V0 probe",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="import",
+                source="lossless candidate",
+                classifier="spectral+v0",
+                detail="genuine spectral result",
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_id, self.req_id)
+        self.assertEqual(loaded.measurement.format, "flac")
+        self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertIsNotNone(loaded.verified_lossless_proof)
+        self.assertEqual(
+            [file.relative_path for file in loaded.files],
+            ["01 - Alpha.flac", "02 - Beta.flac"],
+        )
+        self.assertEqual(loaded.files[0].mtime_ns, 10)
+        assert loaded.v0_metric is not None
+        self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
+        self.assertEqual(
+            loaded.v0_metric.source_lineage,
+            "lossless_container_source",
+        )
+
+    def test_upsert_load_download_log_candidate_uses_neutral_v0_shape(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+            AlbumQualityV0Metric,
+        )
+
+        log_id = self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="user",
+            outcome="rejected",
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=111,
+        )
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=150,
+                avg_bitrate_kbps=221,
+                median_bitrate_kbps=219,
+                source_lineage="native_lossy_candidate",
+                source_provenance="probe of downloaded MP3 files",
+                proof_provenance="research-only source line",
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=log_id,
+            )
+        )
+
+        assert loaded is not None
+        assert loaded.v0_metric is not None
+        self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 221)
+        self.assertEqual(loaded.v0_metric.source_lineage, "native_lossy_candidate")
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(history[0]["v0_probe_kind"], "lossless_source_v0")
+
+    def test_import_job_candidate_owner_round_trips(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        job = self.db.enqueue_import_job(
+            "manual_import",
+            request_id=self.req_id,
+            payload={"failed_path": "/tmp/candidate"},
+            preview_enabled=False,
+        )
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
+
+    def test_duplicate_owner_upsert_replaces_parent_and_snapshot_rows(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        owner = AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="02.mp3",
+                    size_bytes=2,
+                    mtime_ns=2,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="03.mp3",
+                    size_bytes=3,
+                    mtime_ns=3,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+
+        loaded = self.db.load_album_quality_evidence(owner)
+        assert loaded is not None
+        self.assertEqual([file.relative_path for file in loaded.files], ["03.mp3"])
+        cur = self.db._execute(
+            "SELECT count(*) AS n FROM album_quality_evidence "
+            "WHERE owner_type = %s AND owner_id = %s",
+            (owner.owner_type, owner.owner_id),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["n"], 1)
+
+    def test_failed_child_replace_rolls_back_existing_snapshot(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        owner = AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="old.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+
+        with self.assertRaises(Exception):
+            self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=owner.owner_type,
+                owner_id=owner.owner_id,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="dup.mp3",
+                        size_bytes=2,
+                        mtime_ns=2,
+                        extension="mp3",
+                        container="mp3",
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="dup.mp3",
+                        size_bytes=3,
+                        mtime_ns=3,
+                        extension="mp3",
+                        container="mp3",
+                    ),
+                ],
+            ))
+
+        loaded = self.db.load_album_quality_evidence(owner)
+        assert loaded is not None
+        self.assertEqual([file.relative_path for file in loaded.files], ["old.mp3"])
+
+    def test_legacy_scalars_are_not_loaded_as_active_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        self.db.update_request_fields(
+            self.req_id,
+            current_lossless_source_v0_probe_min_bitrate=165,
+            current_lossless_source_v0_probe_avg_bitrate=228,
+            current_lossless_source_v0_probe_median_bitrate=225,
+            verified_lossless=True,
+        )
+
+        self.assertIsNone(self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        ))
+
+    def test_validation_rejects_bad_owner_and_bad_snapshot(self):
+        from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
+
+        with self.assertRaisesRegex(ValueError, "invalid owner_type"):
+            self.db.validate_album_quality_evidence_owner(
+                AlbumQualityEvidenceOwner("simulator", 1)
+            )
+        self.assertFalse(self.db.validate_album_quality_evidence_owner(
+            AlbumQualityEvidenceOwner("request_current", 999999)
+        ))
+        with self.assertRaisesRegex(ValueError, "extension is required"):
+            self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_id=self.req_id,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="bad",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="",
+                        container="mp3",
+                    ),
+                ],
+            ))
+
+    def test_policy_incomplete_reasons_do_not_enter_reducer_shape(self):
+        from lib.quality import (
+            AudioQualityMeasurement,
+            AlbumQualityEvidenceOwner,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_id=self.req_id,
+            measurement=AudioQualityMeasurement(format=None),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner("request_current", self.req_id)
+        )
+
+        assert loaded is not None
+        reasons = loaded.policy_incomplete_reasons()
+        self.assertIn("measurement.format is required", reasons)
+        self.assertIn("at least one measurement bitrate metric is required", reasons)
 
 
 @requires_postgres
