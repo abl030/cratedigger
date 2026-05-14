@@ -5,7 +5,9 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -846,6 +848,121 @@ class TestImportPreviewWorker(unittest.TestCase):
             self.assertEqual(updated.preview_status, "would_import")
             self.assertEqual(updated.preview_attempts, 1)
             self.assertNotEqual(updated.preview_message, "Preview gate disabled")
+
+    def test_run_once_heartbeats_while_preview_is_running(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.dsn = "postgresql://fake"
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+            preview_enabled=True,
+        )
+        initial_claim = db.claim_next_import_preview_job(worker_id="peek")
+        assert initial_claim is not None
+        assert initial_claim.preview_heartbeat_at is not None
+        db.requeue_stale_import_preview_jobs(
+            older_than=timedelta(seconds=-1),
+            message="test reset",
+        )
+        heartbeat_seen = threading.Event()
+
+        def preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+            baseline = db.get_import_job(initial_claim.id)
+            assert baseline is not None
+            baseline_heartbeat = baseline.preview_heartbeat_at
+            assert baseline_heartbeat is not None
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                current = db.get_import_job(initial_claim.id)
+                assert current is not None
+                if (
+                    current.preview_heartbeat_at is not None
+                    and current.preview_heartbeat_at > baseline_heartbeat
+                ):
+                    heartbeat_seen.set()
+                    break
+                time.sleep(0.005)
+            return self._preview("would_import", reason="import")
+
+        with (
+            patch("scripts.import_preview_worker.PipelineDB",
+                  side_effect=lambda dsn: db),
+            patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=preview,
+            ),
+        ):
+            updated = import_preview_worker.run_once(
+                cast(Any, db),
+                worker_id="preview",
+                heartbeat_interval=0.01,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "would_import")
+        self.assertTrue(heartbeat_seen.is_set())
+
+    def test_preview_recovery_loop_requeues_abandoned_running_rows(self):
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.dsn = "postgresql://fake"
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+            ),
+            preview_enabled=True,
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="dead-worker")
+        assert claimed is not None
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        for row in db._import_jobs:
+            if row["id"] == claimed.id:
+                row["preview_started_at"] = old
+                row["preview_heartbeat_at"] = old
+                row["updated_at"] = old
+
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=import_preview_worker.preview_recovery_loop,
+            kwargs={
+                "dsn": db.dsn,
+                "stop": stop,
+                "interval": 0.01,
+                "db_factory": lambda dsn: db,
+            },
+        )
+        thread.start()
+        try:
+            deadline = time.monotonic() + 0.5
+            recovered = None
+            while time.monotonic() < deadline:
+                recovered = db.get_import_job(claimed.id)
+                if recovered is not None and recovered.preview_status == "waiting":
+                    break
+                time.sleep(0.005)
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
+
+        assert recovered is not None
+        self.assertEqual(recovered.preview_status, "waiting")
+        self.assertEqual(
+            recovered.preview_message,
+            import_preview_worker.STALE_PREVIEW_MESSAGE,
+        )
 
     def test_confident_reject_fails_job_and_denylists_source(self):
         from scripts import import_preview_worker

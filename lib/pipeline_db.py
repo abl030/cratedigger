@@ -1425,6 +1425,7 @@ class PipelineDB:
                   AND preview_status = 'running'
                   AND COALESCE(preview_heartbeat_at, preview_started_at, updated_at) < %s
                 ORDER BY updated_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
                 LIMIT %s
             )
             UPDATE import_jobs
@@ -1437,6 +1438,8 @@ class PipelineDB:
                 updated_at = NOW()
             FROM stale
             WHERE import_jobs.id = stale.id
+              AND import_jobs.status = 'queued'
+              AND import_jobs.preview_status = 'running'
             RETURNING import_jobs.*
         """, (cutoff, limit, message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]

@@ -9,7 +9,6 @@ import os
 import socket
 import sys
 import threading
-import time
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -32,6 +31,9 @@ from lib.quality import ActiveDownloadState
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
 LEGACY_DISABLED_REQUEUE_LIMIT = 100
+PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
+PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
+PREVIEW_STALE_AGE = timedelta(hours=1)
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -239,7 +241,66 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
     )
 
 
-def run_once(db: PipelineDB, *, worker_id: str) -> ImportJob | None:
+def preview_heartbeat_loop(
+    *,
+    dsn: str,
+    job_id: int,
+    stop: threading.Event,
+    interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+    db_factory: Any | None = None,
+) -> None:
+    """Heartbeat a running preview from its own DB session."""
+    db_factory = db_factory or PipelineDB
+    db = db_factory(dsn)
+    try:
+        while not stop.wait(interval):
+            if not db.heartbeat_import_job_preview(job_id):
+                return
+    except Exception:
+        logger.warning("Preview heartbeat failed for job %s", job_id, exc_info=True)
+    finally:
+        close = getattr(db, "close", None)
+        if callable(close):
+            close()
+
+
+def process_claimed_preview_job_with_heartbeat(
+    db: Any,
+    job: ImportJob,
+    *,
+    heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+) -> ImportJob | None:
+    dsn = getattr(db, "dsn", None)
+    if not dsn:
+        return process_claimed_preview_job(db, job)
+
+    stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=preview_heartbeat_loop,
+        kwargs={
+            "dsn": str(dsn),
+            "job_id": job.id,
+            "stop": stop,
+            "interval": heartbeat_interval,
+            "db_factory": PipelineDB,
+        },
+        daemon=True,
+        name=f"preview-heartbeat-{job.id}",
+    )
+    heartbeat_thread.start()
+    try:
+        return process_claimed_preview_job(db, job)
+    finally:
+        stop.set()
+        heartbeat_thread.join(timeout=5.0)
+
+
+def run_once(
+    db: PipelineDB,
+    *,
+    worker_id: str,
+    heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+) -> ImportJob | None:
     if import_preview_enabled_from_env():
         requeued = db.requeue_disabled_automation_preview_jobs(
             limit=LEGACY_DISABLED_REQUEUE_LIMIT,
@@ -254,18 +315,48 @@ def run_once(db: PipelineDB, *, worker_id: str) -> ImportJob | None:
     if job is None:
         return None
     logger.info("Claimed import preview job %s (%s)", job.id, job.job_type)
-    return process_claimed_preview_job(db, job)
+    return process_claimed_preview_job_with_heartbeat(
+        db,
+        job,
+        heartbeat_interval=heartbeat_interval,
+    )
 
 
 def recover_abandoned_preview_jobs(
     db: PipelineDB,
     *,
-    older_than: timedelta = timedelta(hours=1),
+    older_than: timedelta = PREVIEW_STALE_AGE,
 ) -> list[ImportJob]:
     return db.requeue_stale_import_preview_jobs(
         older_than=older_than,
         message=STALE_PREVIEW_MESSAGE,
     )
+
+
+def preview_recovery_loop(
+    *,
+    dsn: str,
+    stop: threading.Event,
+    interval: float = PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS,
+    db_factory: Any | None = None,
+) -> None:
+    db_factory = db_factory or PipelineDB
+    db = db_factory(dsn)
+    try:
+        while not stop.wait(interval):
+            recovered = recover_abandoned_preview_jobs(db)
+            if recovered:
+                logger.warning(
+                    "Requeued %s abandoned import preview job(s)",
+                    len(recovered),
+                )
+    except Exception:
+        logger.exception("Import preview recovery loop crashed")
+        raise
+    finally:
+        close = getattr(db, "close", None)
+        if callable(close):
+            close()
 
 
 def run_threaded_workers(
@@ -279,6 +370,11 @@ def run_threaded_workers(
     errors: list[BaseException] = []
     error_lock = threading.Lock()
 
+    def record_error(exc: BaseException) -> None:
+        with error_lock:
+            errors.append(exc)
+        stop.set()
+
     def worker_loop(index: int) -> None:
         thread_db = PipelineDB(dsn)
         thread_worker_id = f"{worker_id}:preview-{index}"
@@ -288,17 +384,27 @@ def run_threaded_workers(
                 if job is None:
                     stop.wait(poll_interval)
         except BaseException as exc:
-            with error_lock:
-                errors.append(exc)
-            stop.set()
+            record_error(exc)
             logger.exception("Import preview worker thread %s crashed", index)
         finally:
             thread_db.close()
+
+    def recovery_loop() -> None:
+        try:
+            preview_recovery_loop(dsn=dsn, stop=stop, db_factory=PipelineDB)
+        except BaseException as exc:
+            record_error(exc)
 
     threads = [
         threading.Thread(target=worker_loop, args=(i,), daemon=False)
         for i in range(worker_count)
     ]
+    recovery_thread = threading.Thread(
+        target=recovery_loop,
+        daemon=False,
+        name="preview-recovery",
+    )
+    recovery_thread.start()
     for thread in threads:
         thread.start()
     try:
@@ -308,7 +414,11 @@ def run_threaded_workers(
         stop.set()
         for thread in threads:
             thread.join()
+        recovery_thread.join()
         return 0
+
+    stop.set()
+    recovery_thread.join()
 
     if errors:
         logger.error(
@@ -346,7 +456,7 @@ def main() -> int:
                 len(recovered),
             )
 
-        if args.workers > 1 and not args.once:
+        if not args.once:
             return run_threaded_workers(
                 dsn=args.dsn,
                 worker_id=worker_id,
@@ -354,12 +464,8 @@ def main() -> int:
                 poll_interval=args.poll_interval,
             )
 
-        while True:
-            job = run_once(db, worker_id=worker_id)
-            if args.once:
-                return 0
-            if job is None:
-                time.sleep(args.poll_interval)
+        run_once(db, worker_id=worker_id)
+        return 0
     finally:
         db.close()
 
