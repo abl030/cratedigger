@@ -13,12 +13,17 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
+import msgspec
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.import_preview import ImportPreviewResult, preview_import_from_path
-from lib.import_evidence import ensure_candidate_evidence_for_action
+from lib.import_evidence import (
+    CANDIDATE_STATUS_REUSED,
+    ensure_candidate_evidence_for_action,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -27,7 +32,11 @@ from lib.import_queue import (
     import_preview_enabled_from_env,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
-from lib.quality import ActiveDownloadState
+from lib.quality import ActiveDownloadState, AlbumQualityEvidence
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    load_candidate_evidence_for_source,
+)
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
@@ -91,6 +100,34 @@ def _first_state_username(state: ActiveDownloadState) -> str | None:
     return None
 
 
+def derive_canonical_import_folder(
+    db: Any,
+    job: ImportJob,
+    row: dict[str, Any],
+    state: ActiveDownloadState,
+) -> str:
+    """Cheaply derive the canonical automation import folder.
+
+    Computes the same path ``_materialize_automation_preview_path`` would
+    settle on, without performing any filesystem materialization. Used by
+    the preview-worker front-gate to test stored candidate evidence's
+    snapshot against the current source location before deciding whether
+    to skip measurement.
+    """
+    del db, job  # parameters reserved for future per-job overrides
+    from lib.config import read_runtime_config
+    from lib.download import (
+        _canonical_import_folder_path,
+        reconstruct_grab_list_entry,
+    )
+
+    cfg = read_runtime_config()
+    entry = reconstruct_grab_list_entry(row, state)
+    if entry.import_folder:
+        return entry.import_folder
+    return _canonical_import_folder_path(entry, cfg.slskd_download_dir)
+
+
 def _materialize_automation_preview_path(
     db: Any,
     request_id: int,
@@ -130,6 +167,108 @@ def _materialize_automation_preview_path(
             f"Album request {request_id} could not be materialized for preview"
         )
     return staged_album.current_path
+
+
+def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
+    """Cheap source-path derivation for the candidate-evidence front-gate.
+
+    Returns the path the evidence snapshot would have captured, or ``None``
+    when the path cannot be derived without invoking measurement-time
+    materialization. ``None`` is a graceful skip: the worker falls through
+    to the existing measurement codepath.
+    """
+    payload = job.payload or {}
+    if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
+        failed_path = payload.get("failed_path")
+        if isinstance(failed_path, str) and failed_path:
+            return failed_path
+        return None
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if job.request_id is None:
+            return None
+        row = db.get_request(job.request_id)
+        if not row:
+            return None
+        state_raw = row.get("active_download_state")
+        if state_raw is None:
+            return None
+        try:
+            state = _state_from_raw(state_raw)
+        except ValueError:
+            return None
+        try:
+            return derive_canonical_import_folder(db, job, row, state)
+        except Exception:
+            logger.debug(
+                "front-gate path derivation failed for job %s; "
+                "falling through to measurement",
+                job.id,
+                exc_info=True,
+            )
+            return None
+    return None
+
+
+def _reused_evidence_preview_payload(
+    job: ImportJob,
+    evidence: AlbumQualityEvidence,
+    source_path: str,
+) -> dict[str, Any]:
+    """Synthesize a preview_result payload for the reused-evidence branch.
+
+    Mirrors the shape ``ImportPreviewResult.to_dict()`` produces so
+    downstream consumers (web UI recents tab, decision-tree viewers) see
+    the keys they already render. Adds top-level ``candidate_status``
+    provenance so the reused path is distinguishable from the measured
+    path.
+    """
+    del evidence  # measurement is recorded in the evidence row itself
+    payload = msgspec.to_builtins(ImportPreviewResult(
+        mode="reused",
+        verdict="would_import",
+        would_import=True,
+        decision="candidate_evidence_reused",
+        reason="candidate_evidence_reused",
+        stage_chain=["preview:candidate_evidence_reused"],
+        request_id=job.request_id,
+        download_log_id=_download_log_id_from_job(job),
+        source_path=source_path,
+    ))
+    assert isinstance(payload, dict)
+    payload["candidate_status"] = CANDIDATE_STATUS_REUSED
+    return payload
+
+
+def _front_gate_check(
+    db: Any,
+    job: ImportJob,
+) -> tuple[EvidenceBuildResult | None, str | None]:
+    """Run the cheap candidate-evidence front-gate for ``job``.
+
+    Returns ``(result, source_path)``. ``result is None`` means the
+    front-gate could not run at all (path-derivation deferred to the
+    measurement path) and the caller should fall through. A non-None
+    result with ``status == 'ready'`` means measurement can be skipped.
+    """
+    source_path = _front_gate_source_path(db, job)
+    if not source_path:
+        return None, None
+    try:
+        result = load_candidate_evidence_for_source(
+            db,
+            source_path=source_path,
+            download_log_id=_download_log_id_from_job(job),
+            import_job_id=job.id,
+        )
+    except Exception:
+        logger.debug(
+            "front-gate evidence load failed for job %s; "
+            "falling through to measurement",
+            job.id,
+            exc_info=True,
+        )
+        return None, source_path
+    return result, source_path
 
 
 def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
@@ -229,6 +368,32 @@ def _mark_automation_preview_blocked(
 
 
 def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
+    # Front-gate: if stored candidate evidence already passes the cheap
+    # snapshot guard, mark the job importable without invoking measurement.
+    # The post-measurement gate below remains as belt-and-braces for the
+    # fall-through path.
+    front_gate_result, front_gate_source = _front_gate_check(db, job)
+    if (
+        front_gate_result is not None
+        and front_gate_result.status == "ready"
+        and front_gate_result.evidence is not None
+        and front_gate_source is not None
+    ):
+        reused_payload = _reused_evidence_preview_payload(
+            job,
+            front_gate_result.evidence,
+            front_gate_source,
+        )
+        logger.info(
+            "Reused candidate evidence for import job %s; skipping preview measurement",
+            job.id,
+        )
+        return db.mark_import_job_preview_importable(
+            job.id,
+            preview_result=reused_payload,
+            message="Reused stored candidate evidence (snapshot matched)",
+        )
+
     try:
         result = execute_preview_job(db, job)
     except Exception as exc:

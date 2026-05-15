@@ -5033,5 +5033,207 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
         self.assertEqual(result.variant_tag, "unwild")
 
 
+class TestPreviewFrontGateSlice(unittest.TestCase):
+    """Integration slice: preview-worker front-gate short-circuits measurement.
+
+    Exercises the real ``process_claimed_preview_job`` against the real
+    ``load_candidate_evidence_for_source`` and a FakePipelineDB. Asserts
+    that when stored candidate evidence already passes the snapshot guard,
+    the worker marks the job importable WITHOUT invoking
+    ``preview_import_from_path`` / ``run_preimport_gates`` / spectral
+    analysis or, for automation jobs, the materialization helper.
+
+    Covers AE4 for both force/manual and automation job types via the
+    same code path used in production.
+    """
+
+    def _evidence(self, source_path: str, owner_type: str, owner_id: int):
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.helpers import make_album_quality_evidence
+
+        return make_album_quality_evidence(
+            owner_type=owner_type,
+            owner_id=owner_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3 V0",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+        )
+
+    def test_force_job_with_valid_evidence_short_circuits_no_measurement(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            db.upsert_album_quality_evidence(self._evidence(
+                source,
+                ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                log_id,
+            ))
+
+            sentinels = {
+                "preview_called": False,
+                "preimport_called": False,
+            }
+
+            def _sentinel_preview(*args, **kwargs):
+                sentinels["preview_called"] = True
+                raise AssertionError(
+                    "preview_import_from_path must not be called when evidence is valid"
+                )
+
+            def _sentinel_preimport(*args, **kwargs):
+                sentinels["preimport_called"] = True
+                raise AssertionError(
+                    "run_preimport_gates must not be called when evidence is valid"
+                )
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=_sentinel_preview,
+            ), patch(
+                "lib.preimport.run_preimport_gates",
+                side_effect=_sentinel_preimport,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db),
+                    claimed,
+                )
+
+        self.assertFalse(sentinels["preview_called"])
+        self.assertFalse(sentinels["preimport_called"])
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+
+    def test_automation_job_with_valid_evidence_skips_materialization(self):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            automation_import_dedupe_key,
+        )
+        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            db.upsert_album_quality_evidence(self._evidence(
+                staged,
+                ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                claimed.id,
+            ))
+
+            sentinels = {
+                "preview_called": False,
+                "preimport_called": False,
+                "materialize_called": False,
+            }
+
+            def _sentinel_preview(*args, **kwargs):
+                sentinels["preview_called"] = True
+                raise AssertionError(
+                    "preview_import_from_path must not be called when evidence is valid"
+                )
+
+            def _sentinel_preimport(*args, **kwargs):
+                sentinels["preimport_called"] = True
+                raise AssertionError(
+                    "run_preimport_gates must not be called when evidence is valid"
+                )
+
+            def _sentinel_materialize(*args, **kwargs):
+                sentinels["materialize_called"] = True
+                raise AssertionError(
+                    "_materialize_processing_dir must not be called when evidence is valid"
+                )
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=_sentinel_preview,
+            ), patch(
+                "lib.preimport.run_preimport_gates",
+                side_effect=_sentinel_preimport,
+            ), patch(
+                "lib.download._materialize_processing_dir",
+                side_effect=_sentinel_materialize,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db),
+                    claimed,
+                )
+
+        self.assertFalse(sentinels["preview_called"])
+        self.assertFalse(sentinels["preimport_called"])
+        self.assertFalse(sentinels["materialize_called"])
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

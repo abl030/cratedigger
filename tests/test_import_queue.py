@@ -1564,15 +1564,21 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            self._seed_job_candidate_evidence(db, claimed.id, source)
+
+            preview_result = self._preview(
+                "would_import",
+                reason="import",
+                source_path=source,
+            )
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                # Simulate production: preview measures + persists evidence.
+                self._seed_job_candidate_evidence(db, claimed.id, source)
+                return preview_result
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
-                return_value=self._preview(
-                    "would_import",
-                    reason="import",
-                    source_path=source,
-                ),
+                side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -1612,15 +1618,20 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            self._seed_job_candidate_evidence(db, claimed.id, source)
+
+            preview_result = self._preview(
+                "would_import",
+                reason="import",
+                source_path=source,
+            )
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                self._seed_job_candidate_evidence(db, claimed.id, source)
+                return preview_result
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
-                return_value=self._preview(
-                    "would_import",
-                    reason="import",
-                    source_path=source,
-                ),
+                side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -1671,15 +1682,20 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            self._seed_job_candidate_evidence(db, claimed.id, staged)
+
+            preview_result = self._preview(
+                "would_import",
+                reason="import",
+                source_path=staged,
+            )
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                self._seed_job_candidate_evidence(db, claimed.id, staged)
+                return preview_result
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
-                return_value=self._preview(
-                    "would_import",
-                    reason="import",
-                    source_path=staged,
-                ),
+                side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(db, claimed)
 
@@ -1782,17 +1798,20 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             self.assertEqual(job.preview_status, "would_import")
             self.assertEqual(job.preview_message, "Preview gate disabled")
-            self._seed_job_candidate_evidence(db, job.id, staged)
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                self._seed_job_candidate_evidence(db, job.id, staged)
+                return self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=staged,
+                )
 
             with (
                 patch.dict(os.environ, {IMPORT_JOB_PREVIEW_ENABLED_ENV: "1"}),
                 patch(
                     "scripts.import_preview_worker.preview_import_from_path",
-                    return_value=self._preview(
-                        "would_import",
-                        reason="import",
-                        source_path=staged,
-                    ),
+                    side_effect=fake_preview,
                 ) as preview,
             ):
                 updated = import_preview_worker.run_once(
@@ -1838,7 +1857,6 @@ class TestImportPreviewWorker(unittest.TestCase):
             initial_claim = db.claim_next_import_preview_job(worker_id="peek")
             assert initial_claim is not None
             assert initial_claim.preview_heartbeat_at is not None
-            self._seed_job_candidate_evidence(db, initial_claim.id, source)
             db.requeue_stale_import_preview_jobs(
                 older_than=timedelta(seconds=-1),
                 message="test reset",
@@ -1861,6 +1879,9 @@ class TestImportPreviewWorker(unittest.TestCase):
                         heartbeat_seen.set()
                         break
                     time.sleep(0.005)
+                # Simulate production: preview persists evidence as a
+                # side-effect so the post-measurement gate sees it.
+                self._seed_job_candidate_evidence(db, initial_claim.id, source)
                 return self._preview(
                     "would_import",
                     reason="import",
@@ -2034,3 +2055,354 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 1)
+
+
+class TestImportPreviewWorkerFrontGate(unittest.TestCase):
+    """U1: worker short-circuits measurement when stored candidate evidence
+    already passes the snapshot guard.
+
+    Covers AE4 (re-claim of valid evidence skips measurement) for both
+    force/manual and automation job types.
+    """
+
+    def _seed_evidence_for_job(
+        self,
+        db: FakePipelineDB,
+        job_id: int,
+        source_path: str,
+    ) -> None:
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3 V0",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+        ))
+
+    def _seed_evidence_for_download_log(
+        self,
+        db: FakePipelineDB,
+        download_log_id: int,
+        source_path: str,
+    ) -> None:
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=download_log_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3 V0",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+        ))
+
+    def test_force_job_valid_evidence_skips_measurement(self):
+        """AE4 force/manual: matching snapshot + valid evidence → no measurement."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            # Seed download_log_candidate evidence — force/manual path uses it.
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+            ) as preview, patch(
+                "lib.preimport.run_preimport_gates",
+            ) as preimport, patch(
+                "lib.spectral_check.analyze_album",
+            ) as spectral:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+        preview.assert_not_called()
+        preimport.assert_not_called()
+        spectral.assert_not_called()
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+        self.assertIsNotNone(updated.importable_at)
+
+    def test_manual_job_valid_evidence_skips_measurement(self):
+        """AE4 manual: matching snapshot + valid evidence → no measurement."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, source),
+                payload=manual_import_payload(failed_path=source),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            # Manual jobs have no download_log; seed import_job_candidate.
+            self._seed_evidence_for_job(db, claimed.id, source)
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+            ) as preview, patch(
+                "lib.preimport.run_preimport_gates",
+            ) as preimport:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+        preview.assert_not_called()
+        preimport.assert_not_called()
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+
+    def test_automation_job_valid_evidence_skips_measurement_and_materialization(self):
+        """AE4 automation: matching snapshot + valid evidence → no measurement.
+
+        Crucially, no materialization either: the path-derivation helper must
+        not invoke _materialize_processing_dir.
+        """
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                dedupe_key=automation_import_dedupe_key(42),
+                payload={},
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_job(db, claimed.id, staged)
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+            ) as preview, patch(
+                "lib.preimport.run_preimport_gates",
+            ) as preimport, patch(
+                "lib.download._materialize_processing_dir",
+            ) as materialize:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+        preview.assert_not_called()
+        preimport.assert_not_called()
+        materialize.assert_not_called()
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+
+    def test_missing_evidence_falls_through_to_full_measurement(self):
+        """No evidence row → worker runs full preview measurement (legacy path)."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            # No evidence seeded → front-gate misses → measurement runs.
+
+            preview_result = ImportPreviewResult(
+                mode="path",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="import",
+                stage_chain=["preview:import"],
+                source_path=source,
+            )
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                # Simulate production: preview persists candidate evidence.
+                db.upsert_album_quality_evidence(make_album_quality_evidence(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    owner_id=download_log_id,
+                    files=snapshot_audio_files(source),
+                ))
+                return preview_result
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=fake_preview,
+            ) as preview:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+        # Front-gate misses (no evidence) → preview is called.
+        preview.assert_called_once()
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        # Provenance reflects the measured path, not the reused path.
+        assert updated.preview_result is not None
+        self.assertNotEqual(
+            updated.preview_result.get("candidate_status"),
+            "reused",
+        )
+
+    def test_snapshot_mismatch_falls_through_to_full_measurement(self):
+        """Stale snapshot → measurement runs; new evidence replaces stale row."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            # Seed evidence with files that don't match the on-disk snapshot.
+            from lib.quality import AlbumQualityEvidenceFile
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="stale.mp3",
+                    size_bytes=999,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                )],
+            ))
+
+            preview_result = ImportPreviewResult(
+                mode="path",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="import",
+                stage_chain=["preview:import"],
+                source_path=source,
+            )
+
+            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                # Simulate production: preview re-measures and persists fresh
+                # evidence with the actual on-disk snapshot.
+                db.upsert_album_quality_evidence(make_album_quality_evidence(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    owner_id=download_log_id,
+                    files=snapshot_audio_files(source),
+                ))
+                return preview_result
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=fake_preview,
+            ) as preview:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
+
+        # Snapshot mismatch → front-gate misses → preview ran.
+        preview.assert_called_once()
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        # The stale evidence row was replaced.
+        from lib.quality import AlbumQualityEvidenceOwner
+        evidence = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=download_log_id,
+        ))
+        assert evidence is not None
+        self.assertEqual(len(evidence.files), 1)
+        self.assertEqual(evidence.files[0].relative_path, "01.mp3")
