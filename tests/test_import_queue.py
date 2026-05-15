@@ -12,10 +12,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
-from lib.import_dispatch import (
-    DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
-    DispatchOutcome,
-)
+from lib.import_dispatch import DispatchOutcome
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,

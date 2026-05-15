@@ -47,8 +47,7 @@ from lib.import_evidence import (
 )
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
-                      repair_mp3_headers, trigger_meelo_clean)
-from lib.preimport import inspect_local_files, run_preimport_gates
+                      trigger_meelo_clean)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -70,6 +69,13 @@ DISPATCH_CODE_REQUEUED_FOR_PREVIEW = "requeued_for_preview"
 # leaves the job in ``running`` for ``requeue_running_import_jobs`` on next
 # worker boot to recover. NEVER write terminal failure on this code.
 DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
+# U4: programmer-error code returned by ``dispatch_import_from_db`` when
+# neither ``import_job_id`` nor ``download_log_id`` is supplied. After U3
+# the only production caller (``scripts/importer.py``) always supplies
+# ``import_job_id``, so this code only surfaces from test seams or future
+# misuse. The legacy direct-measurement branch that previously handled
+# this case was deleted in U4 because no production path reaches it.
+DISPATCH_CODE_BAD_REQUEST = "bad_request"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -1303,14 +1309,20 @@ def dispatch_import_core(
                  or candidate_download_log_id is not None)
                 and evidence_gate.candidate is None
             ):
+                # U4: outer callers (``_dispatch_import_from_db_locked`` and
+                # ``lib/download.py::_process_beets_validation``) already
+                # call ``ensure_candidate_evidence_for_action`` and requeue
+                # via ``_requeue_import_job_to_preview`` when evidence is
+                # missing. Reaching this inner site means a caller bypassed
+                # the outer gate (test seam or future misuse). Behave
+                # consistently with the outer invariant — requeue rather
+                # than hard-fail — so the importer never measures and
+                # never writes a terminal failure on missing evidence.
                 reason = evidence_gate.candidate_reason or evidence_gate.candidate_status
-                return DispatchOutcome(
-                    success=False,
-                    message=(
-                        "Candidate quality evidence unavailable at import "
-                        f"time: {reason or 'missing'}"
-                    ),
-                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                return _requeue_import_job_to_preview(
+                    db,
+                    import_job_id=candidate_import_job_id,
+                    reason=reason or "missing",
                 )
             if evidence_gate.candidate is not None and not _current_evidence_allows_action(
                 evidence_gate
@@ -1882,8 +1894,29 @@ def _dispatch_import_from_db_locked(
     import_job_id: int | None,
     download_log_id: int | None,
 ) -> "DispatchOutcome":
-    """Body of dispatch_import_from_db, called once the advisory lock is held."""
+    """Body of dispatch_import_from_db, called once the advisory lock is held.
+
+    Precondition: at least one of ``import_job_id`` or ``download_log_id``
+    MUST be supplied. After U4 (importer-never-measures refactor) the only
+    production caller is ``scripts/importer.py``, which always supplies
+    ``import_job_id``. The previous legacy direct-measurement branch that
+    ran ``inspect_local_files`` / ``run_preimport_gates`` for callers that
+    omitted both IDs has been deleted; the importer never measures.
+    """
     from lib.grab_list import DownloadFile
+
+    if import_job_id is None and download_log_id is None:
+        # Programmer-error: every production caller supplies at least
+        # ``import_job_id``. Reject up front rather than silently measuring.
+        return DispatchOutcome(
+            success=False,
+            message=(
+                "dispatch_import_from_db requires import_job_id or "
+                "download_log_id (importer never measures; preview owns "
+                "candidate evidence production)"
+            ),
+            code=DISPATCH_CODE_BAD_REQUEST,
+        )
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
@@ -1911,215 +1944,41 @@ def _dispatch_import_from_db_locked(
 
     label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
 
-    if import_job_id is not None or download_log_id is not None:
-        candidate_result = ensure_candidate_evidence_for_action(
-            db,
-            source_path=failed_path,
-            import_job_id=import_job_id,
-            download_log_id=download_log_id,
-        )
-        if not candidate_result.available or candidate_result.evidence is None:
-            reason = (
-                candidate_result.provenance.fallback_reason
-                or candidate_result.provenance.candidate_status
-                or "missing"
-            )
-            # U2: requeue to preview rather than failing. Preview owns
-            # candidate-evidence production; the importer never measures.
-            return _requeue_import_job_to_preview(
-                db,
-                import_job_id=import_job_id,
-                reason=reason,
-            )
-        dl_info = _download_info_from_candidate_evidence(
-            candidate_result.evidence,
-            username=source_username,
-        )
-        return dispatch_import_core(
-            path=failed_path,
-            mb_release_id=mbid,
-            request_id=request_id,
-            label=label,
-            force=force,
-            override_min_bitrate=None,
-            target_format=req.get("target_format"),
-            verified_lossless_target=cfg.verified_lossless_target,
-            beets_harness_path=cfg.beets_harness_path,
-            db=db,
-            dl_info=dl_info,
-            distance=0.0,
-            scenario="force_import" if force else "manual_import",
-            files=files,
-            cfg=cfg,
-            outcome_label=outcome_label,
-            requeue_on_failure=False,
-            source_dirs=source_dirs,
-            candidate_import_job_id=import_job_id,
-            candidate_download_log_id=download_log_id,
-            prevalidated_candidate_result=candidate_result,
-        )
-
-    # --- Shared pre-import gates (audio + spectral) ---
-    # Force only skips the beets distance check (--force in import_one.py);
-    # audio integrity and spectral transcode detection always run so a
-    # force/manual import can't quietly replace an existing copy with a
-    # transcode the auto path would have rejected.
-    #
-    # Repair MP3 headers BEFORE inspect_local_files — broken headers can make
-    # mutagen fail to read bitrate_mode, leaving download_is_vbr=None. Treated
-    # as CBR by the spectral gate, that would falsely reject a VBR album
-    # force-imported here (the auto path only gets headers repaired before
-    # validate_audio, but inspection metadata there comes from slskd, not
-    # filesystem scan — so the problem is unique to force/manual). Idempotent:
-    # run_preimport_gates still calls repair_mp3_headers internally.
-    try:
-        repair_mp3_headers(failed_path)
-    except Exception:
-        logger.debug("pre-inspect mp3 header repair failed", exc_info=True)
-    inspection = inspect_local_files(failed_path)
-
-    # --- Reject nested-folder layouts early ---
-    # The preimport gates (validate_audio / analyze_album / repair_mp3_headers)
-    # recurse, but the downstream harness (harness/import_one.py) still uses
-    # os.listdir for bitrate measurement and conversion. A nested force/manual
-    # import would pass gates and then produce an empty/misclassified
-    # measurement — better to fail fast with a clear message so the user can
-    # flatten the folder themselves. Auto-path downloads are already
-    # flattened by process_completed_album, so this only affects force/manual.
-    if inspection.has_nested_audio:
-        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
-        detail = ("Audio files are in subdirectories — flatten the folder "
-                  "before import (multi-disc layouts are not supported here).")
-        logger.warning(f"{mode} REJECTED (nested layout): {label} — {detail}")
-        _record_rejection_and_maybe_requeue(
-            db, request_id, DownloadInfo(username=source_username),
-            distance=0.0,
-            scenario="nested_layout",
-            detail=detail,
-            error=None,
-            requeue=False,
-            # outcome="rejected" — force_import/manual_import are reserved for
-            # SUCCESSFUL imports (see CLAUDE.md). The /api/pipeline/log "imported"
-            # counter filters on outcome IN ('success','force_import'), so tagging
-            # a rejection as force_import mis-counts it as imported. Source
-            # attribution for rejections is available via download_log.soulseek_username
-            # + the surrounding request row.
-            outcome_label="rejected",
-            validation_result=ValidationResult(
-                distance=0.0,
-                scenario="nested_layout",
-                detail=detail,
-                failed_path=failed_path,
-                source_dirs=source_dirs,
-            ).to_json(),
-            staged_path=failed_path,
-        )
-        return DispatchOutcome(success=False, message=detail)
-    # download_log.soulseek_username can be a comma-joined list of peers for
-    # multi-source downloads. Split before denylisting so a spectral reject
-    # blocks each real peer, not the literal combined string.
-    source_usernames: set[str] = {
-        u.strip() for u in (source_username or "").split(",") if u.strip()
-    }
-    preimport = run_preimport_gates(
-        path=failed_path,
-        mb_release_id=mbid,
-        label=label,
-        download_filetype=inspection.filetype,
-        download_min_bitrate_bps=inspection.min_bitrate_bps,
-        download_is_vbr=inspection.is_vbr,
-        cfg=cfg,
-        db=db,
-        request_id=request_id,
-        usernames=source_usernames,
-        # Don't propagate the download's spectral into on-disk state on the
-        # force/manual path: if dispatch_import_core subsequently fails
-        # (downgrade, no JSON, timeout), the DB would be left claiming the
-        # failed download is on-disk. The auto path is safe to propagate
-        # because the spectral decision happens immediately before the
-        # import subprocess and a failure there still means the files
-        # ended up in failed_imports/ unchanged.
-        propagate_download_to_existing=False,
-        # Reuse the inspection computed for the nested-layout gate to
-        # avoid a second mutagen walk (~100ms per album).
-        precomputed_inspection=inspection,
+    candidate_result = ensure_candidate_evidence_for_action(
+        db,
+        source_path=failed_path,
+        import_job_id=import_job_id,
+        download_log_id=download_log_id,
     )
-
-    if not preimport.valid:
-        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
-        logger.warning(
-            f"{mode} REJECTED (preimport gate): {label} "
-            f"scenario={preimport.scenario} detail={preimport.detail}")
-
-        dl_info = DownloadInfo(
-            username=source_username,
-            filetype=inspection.filetype or None,
-            bitrate=inspection.min_bitrate_bps,
-            is_vbr=inspection.is_vbr,
-            download_spectral=preimport.download_spectral,
-            current_spectral=preimport.existing_spectral,
-            existing_min_bitrate=preimport.existing_min_bitrate,
+    if not candidate_result.available or candidate_result.evidence is None:
+        reason = (
+            candidate_result.provenance.fallback_reason
+            or candidate_result.provenance.candidate_status
+            or "missing"
         )
-        _record_rejection_and_maybe_requeue(
-            db, request_id, dl_info,
-            distance=0.0,
-            scenario=preimport.scenario or "preimport_reject",
-            detail=preimport.detail,
-            error=None,
-            requeue=False,
-            # outcome="rejected" — force_import/manual_import are reserved for
-            # SUCCESSFUL imports (see CLAUDE.md). Tagging a gate-rejection as
-            # force_import would mis-count it as imported in the UI's "imported"
-            # counter (web/routes/pipeline.py and lib/pipeline_db.py::get_log).
-            outcome_label="rejected",
-            validation_result=ValidationResult(
-                distance=0.0,
-                scenario=preimport.scenario or "preimport_reject",
-                detail=preimport.detail,
-                failed_path=failed_path,
-                source_dirs=source_dirs,
-                corrupt_files=list(preimport.corrupt_files),
-                matched_bad_hash_id=preimport.matched_bad_hash_id,
-                matched_bad_track_path=preimport.matched_bad_track_path,
-            ).to_json(),
-            staged_path=failed_path,
+        # U2: requeue to preview rather than failing. Preview owns
+        # candidate-evidence production; the importer never measures.
+        return _requeue_import_job_to_preview(
+            db,
+            import_job_id=import_job_id,
+            reason=reason,
         )
-        return DispatchOutcome(
-            success=False,
-            message=f"Pre-import gate rejected: {preimport.detail or preimport.scenario}")
-
-    # Compute override from DB state — grade-aware: current_spectral_bitrate only
-    # lowers the override when current_spectral_grade is suspect/likely_transcode.
-    # Re-read the request row so we pick up the measured existing spectral that
-    # run_preimport_gates just wrote via _persist_spectral_state. (Force/manual
-    # paths pass propagate_download_to_existing=False, so no download-as-proxy
-    # propagation happens — we only pick up what beets actually measured.)
-    req = db.get_request(request_id) or req
-    override_min_bitrate = compute_effective_override_bitrate(
-        req.get("min_bitrate"),
-        req.get("current_spectral_bitrate"),
-        req.get("current_spectral_grade"))
-
+    dl_info = _download_info_from_candidate_evidence(
+        candidate_result.evidence,
+        username=source_username,
+    )
     return dispatch_import_core(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
         label=label,
         force=force,
-        override_min_bitrate=override_min_bitrate,
+        override_min_bitrate=None,
         target_format=req.get("target_format"),
         verified_lossless_target=cfg.verified_lossless_target,
         beets_harness_path=cfg.beets_harness_path,
         db=db,
-        dl_info=DownloadInfo(
-            username=source_username,
-            filetype=inspection.filetype or None,
-            bitrate=inspection.min_bitrate_bps,
-            is_vbr=inspection.is_vbr,
-            download_spectral=preimport.download_spectral,
-            current_spectral=preimport.existing_spectral,
-            existing_min_bitrate=preimport.existing_min_bitrate,
-        ),
+        dl_info=dl_info,
         distance=0.0,
         scenario="force_import" if force else "manual_import",
         files=files,
@@ -2129,4 +1988,5 @@ def _dispatch_import_from_db_locked(
         source_dirs=source_dirs,
         candidate_import_job_id=import_job_id,
         candidate_download_log_id=download_log_id,
+        prevalidated_candidate_result=candidate_result,
     )

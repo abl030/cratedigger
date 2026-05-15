@@ -27,12 +27,47 @@ from tests.helpers import (
 from tests.fakes import FakePipelineDB
 
 
+def _mock_beets_db_for_dispatch():
+    """Mock BeetsDB so ``_load_evidence_import_gate`` can fetch a stub
+    ``AlbumInfo`` without a real beets connection.
+
+    ``album_path=None`` makes ``ensure_current_evidence_for_action`` skip
+    the audio-snapshot guard and trust the seeded REQUEST_CURRENT
+    evidence row outright — exactly what the orchestration tests need.
+    """
+    from lib.beets_db import AlbumInfo
+    info = AlbumInfo(
+        album_id=1,
+        track_count=10,
+        min_bitrate_kbps=180,
+        avg_bitrate_kbps=180,
+        format="MP3",
+        is_cbr=True,
+        album_path=None,  # type: ignore[arg-type]
+    )
+    instance = MagicMock()
+    instance.get_album_info.return_value = info
+    cls = MagicMock()
+    cls.return_value.__enter__ = MagicMock(return_value=instance)
+    cls.return_value.__exit__ = MagicMock(return_value=False)
+    return cls
+
+
 class TestDispatchFromDbOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state after force/manual import."""
 
     def _dispatch(self, force=True, ir=None, outcome_label=None,
                   source_username=None,
                   **req_overrides):
+        """Drive a force/manual import through the evidence-gated dispatch path.
+
+        After U4 the importer never measures: ``dispatch_import_from_db``
+        requires ``import_job_id`` and consults pre-recorded candidate +
+        current quality evidence. This helper seeds matching evidence rows
+        so existing orchestration tests still exercise the post-evidence
+        decision logic (downgrade prevention, quality gate, denylist,
+        cleanup).
+        """
         from lib.import_dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
@@ -57,9 +92,61 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            # Realistic candidate file so snapshot_audio_files produces a
+            # stable hash for the evidence row's file manifest.
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+
+            # Enqueue an import_job — the importer-supplied ID is now
+            # mandatory at the dispatch boundary.
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            import_job_id = job.id
+
+            # Seed candidate evidence matching the on-disk snapshot.
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=import_job_id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 320",
+            ))
+            # Seed current (on-disk) evidence so override-min-bitrate
+            # derivation flows through the same grade-aware logic the
+            # legacy branch used (compute_effective_override_bitrate of
+            # min_bitrate=180 vs likely_transcode spectral=128 → 128).
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
+                    avg_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
+                    median_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
+                    format="MP3",
+                    spectral_bitrate_kbps=req_kwargs.get(
+                        "current_spectral_bitrate"),
+                    spectral_grade=req_kwargs.get("current_spectral_grade"),
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3",
+            ))
+
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -69,6 +156,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=force, source_username=source_username,
                     outcome_label=outcome_label,
+                    import_job_id=import_job_id,
                 )
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
@@ -240,9 +328,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
-                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
-                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -258,9 +343,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 )
 
             self.assertTrue(result.success)
-            repair.assert_not_called()
-            inspect.assert_not_called()
-            gates.assert_not_called()
             cmd = ext.run.call_args[0][0]
             self.assertIn("--quality-evidence-action-file", cmd)
         finally:
@@ -322,9 +404,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
-                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
-                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
-                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -341,9 +420,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 )
 
             self.assertTrue(result.success)
-            repair.assert_not_called()
-            inspect.assert_not_called()
-            gates.assert_not_called()
             cmd = ext.run.call_args[0][0]
             self.assertIn("--quality-evidence-action-file", cmd)
             self.assertNotIn("--force", cmd)
@@ -405,9 +481,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 handle.write(b" changed")
 
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
-                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
-                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -424,9 +497,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
             self.assertFalse(result.success)
             self.assertEqual(result.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
-            repair.assert_not_called()
-            inspect.assert_not_called()
-            gates.assert_not_called()
             ext.run.assert_not_called()
             # Job is back on the preview lane.
             row = next(r for r in db._import_jobs if r["id"] == job.id)
@@ -475,9 +545,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             # No upsert_album_quality_evidence — candidate evidence is missing.
 
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
-                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
-                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -494,9 +561,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
             self.assertFalse(result.success)
             self.assertEqual(result.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
-            repair.assert_not_called()
-            inspect.assert_not_called()
-            gates.assert_not_called()
             ext.run.assert_not_called()
             row = next(r for r in db._import_jobs if r["id"] == job.id)
             self.assertEqual(row["status"], "queued")
@@ -549,9 +613,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  _patch.object(db_any, "requeue_import_job_for_preview",
                               side_effect=RuntimeError("boom")), \
-                 patch("lib.import_dispatch.repair_mp3_headers"), \
-                 patch("lib.import_dispatch.inspect_local_files"), \
-                 patch("lib.import_dispatch.run_preimport_gates"), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -678,6 +739,11 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=320)
         tmpdir = tempfile.mkdtemp()
         try:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
@@ -689,6 +755,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True,
+                    import_job_id=job.id,
                 )
                 return result, ext, tmpdir
         finally:
@@ -720,15 +787,26 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.recorded_attempts, [])
 
-    def test_contention_skips_preimport_gates(self):
-        """Contended call must not even run inspect_local_files / run_preimport_gates."""
+    def test_contention_skips_evidence_lookup(self):
+        """Contended call must not consult candidate evidence either.
+
+        After U4 the importer never measures; the only evidence-side cost
+        before the lock is the early bail-out, so the contended path must
+        not even call ``ensure_candidate_evidence_for_action``.
+        """
         db = self._seed_db()
         db.set_advisory_lock_result(False)
         tmpdir = tempfile.mkdtemp()
         try:
             from lib.import_dispatch import dispatch_import_from_db
-            with patch("lib.import_dispatch.run_preimport_gates") as mock_gates, \
-                 patch("lib.import_dispatch.inspect_local_files") as mock_inspect, \
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            with patch(
+                "lib.import_dispatch.ensure_candidate_evidence_for_action"
+            ) as mock_ensure, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -737,10 +815,10 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True,
+                    import_job_id=job.id,
                 )
             self.assertFalse(result.success)
-            mock_gates.assert_not_called()
-            mock_inspect.assert_not_called()
+            mock_ensure.assert_not_called()
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -766,7 +844,29 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=320)
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch_dispatch_externals() as ext, \
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 320",
+            ))
+            with patch_dispatch_externals(), \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config", return_value=cfg) as mock_read:
@@ -775,12 +875,71 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                     request_id=42,
                     failed_path=tmpdir,
                     force=True,
+                    import_job_id=job.id,
                 )
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         mock_read.assert_called_once_with()
+
+
+class TestDispatchFromDbPrecondition(unittest.TestCase):
+    """U4: calling dispatch_import_from_db with neither ``import_job_id``
+    nor ``download_log_id`` is a programmer error.
+
+    After the importer-never-measures refactor, the legacy direct-measurement
+    branch that ran ``inspect_local_files`` / ``run_preimport_gates`` for
+    callers that omitted both IDs has been deleted. The only production
+    caller (``scripts/importer.py``) always supplies ``import_job_id``;
+    a call that omits both is misuse and must surface as a typed
+    ``DispatchOutcome`` error rather than silently measuring.
+    """
+
+    def test_missing_both_ids_returns_bad_request(self):
+        from lib.import_dispatch import (
+            DISPATCH_CODE_BAD_REQUEST,
+            dispatch_import_from_db,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Artist",
+            album_title="Album",
+        ))
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals() as ext, \
+                 patch(
+                     "lib.import_dispatch.ensure_candidate_evidence_for_action"
+                 ) as mock_ensure, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,
+                    force=True,
+                    # NOTE: deliberately omit import_job_id and download_log_id.
+                )
+            self.assertFalse(result.success)
+            self.assertEqual(result.code, DISPATCH_CODE_BAD_REQUEST)
+            self.assertIn("import_job_id", result.message)
+            # No measurement helper consulted, no import_one subprocess.
+            mock_ensure.assert_not_called()
+            ext.run.assert_not_called()
+            # No download_log row written; the request status is untouched.
+            self.assertEqual(db.download_logs, [])
+            self.assertEqual(db.request(42)["status"], "manual")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

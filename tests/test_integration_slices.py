@@ -1135,6 +1135,14 @@ class TestForceImportSlice(unittest.TestCase):
     def test_force_import_success(self):
         """Force-import → imported, download_log outcome=force_import."""
         from lib.import_dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.helpers import make_album_quality_evidence
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1156,8 +1164,46 @@ class TestForceImportSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3 320",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=180, avg_bitrate_kbps=180,
+                    median_bitrate_kbps=180, format="MP3",
+                    spectral_bitrate_kbps=128,
+                    spectral_grade="likely_transcode",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3",
+            ))
+            # album_path=None makes ensure_current_evidence_for_action
+            # skip the audio-snapshot guard and trust the seeded
+            # _REQUEST_CURRENT row directly.
+            beets_info_no_path = AlbumInfo(
+                album_id=1, track_count=10, min_bitrate_kbps=320,
+                avg_bitrate_kbps=320, format="MP3",
+                is_cbr=False,
+                album_path=None,  # type: ignore[arg-type]
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
                  patch("lib.config.read_runtime_config",
                        return_value=cfg):
                 ext.run.return_value = MagicMock(
@@ -1165,6 +1211,7 @@ class TestForceImportSlice(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True, source_username="user1",
+                    import_job_id=job.id,
                 )
         finally:
             import shutil
@@ -1186,6 +1233,14 @@ class TestForceImportSlice(unittest.TestCase):
         which covers the auto path.
         """
         from lib.import_dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.helpers import make_album_quality_evidence
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1210,14 +1265,48 @@ class TestForceImportSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=833,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3 320",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=833,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192, avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192, format="MP3",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3",
+            ))
+            beets_info_no_path = AlbumInfo(
+                album_id=1, track_count=10, min_bitrate_kbps=320,
+                avg_bitrate_kbps=320, format="MP3",
+                is_cbr=False,
+                album_path=None,  # type: ignore[arg-type]
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 dispatch_import_from_db(
                     db, request_id=833, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True, source_username="ttttsv",
+                    import_job_id=job.id,
                 )
         finally:
             import shutil
@@ -5293,9 +5382,6 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 beets_harness_path=_HARNESS, pipeline_db_enabled=True
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.repair_mp3_headers"), \
-                 patch("lib.import_dispatch.inspect_local_files"), \
-                 patch("lib.import_dispatch.run_preimport_gates"), \
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 outcome = dispatch_import_from_db(
                     cast(Any, db),
