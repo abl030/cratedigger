@@ -671,6 +671,7 @@ def _reject_import_from_evidence_decision(
     db: "PipelineDB",
     request_id: int,
     dl_info: DownloadInfo,
+    import_result: ImportResult,
     distance: float,
     decision: str,
     detail: str,
@@ -682,8 +683,18 @@ def _reject_import_from_evidence_decision(
     source_path_cleanup_scenario: str,
     cooled_down_users: set[str] | None,
 ) -> DispatchOutcome:
-    """Record a persisted-evidence rejection before beets can mutate files."""
+    """Record a persisted-evidence rejection before beets can mutate files.
 
+    Threads ``import_result`` through ``_populate_dl_info_from_import_result``
+    so the same top-level ``download_log`` columns the post-import reject
+    path populates (``bitrate``, ``actual_filetype``, ``spectral_grade``,
+    ``existing_min_bitrate``, ``v0_probe_*``, etc.) get filled here too.
+    Without this, the Recents UI rendered evidence-decision rejections
+    as just ``"downgrade · username"`` because every quality column
+    came back NULL — see ``TestRejectImportFromEvidenceDecision``.
+    """
+
+    _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
     _record_rejection_and_maybe_requeue(
         db,
@@ -1384,7 +1395,7 @@ def dispatch_import_core(
                         "import-time persisted evidence rejected candidate "
                         f"(decision={decision})"
                     )
-                    dl_info.import_result = ImportResult(
+                    evidence_import_result = ImportResult(
                         decision=decision,
                         new_measurement=evidence_gate.candidate.measurement,
                         existing_measurement=(
@@ -1396,15 +1407,12 @@ def dispatch_import_core(
                             evidence_gate.candidate.v0_metric
                         ),
                         existing_v0_probe=existing_v0_probe,
-                    ).to_json()
-                    dl_info.v0_probe = lossless_source_v0_probe_from_metric(
-                        evidence_gate.candidate.v0_metric
                     )
-                    dl_info.existing_v0_probe = existing_v0_probe
                     return _reject_import_from_evidence_decision(
                         db=db,
                         request_id=request_id,
                         dl_info=dl_info,
+                        import_result=evidence_import_result,
                         distance=distance,
                         decision=decision,
                         detail=detail,
