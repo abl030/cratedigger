@@ -300,6 +300,83 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         self.assertIsNone(row["beets_scenario"])
 
 
+class TestRejectImportFromEvidenceDecision(unittest.TestCase):
+    """Evidence-decision rejections must populate download_log columns.
+
+    Bug: ``_reject_import_from_evidence_decision`` built ``ImportResult``
+    JSON for the JSONB column but skipped
+    ``_populate_dl_info_from_import_result``, so every top-level
+    quality column landed NULL. The Recents UI rendered just
+    ``"downgrade · username"`` instead of the full quality verdict.
+
+    Live reproducer: download_log id 14570 — Faux Pas - Entropy Begins
+    at Home, decision=downgrade, new=127kbps mp3 likely_transcode,
+    existing=192kbps mp3 cbr. JSONB had everything; columns were all
+    NULL.
+    """
+
+    def test_evidence_rejection_populates_download_log_columns(self) -> None:
+        from lib.import_dispatch import _reject_import_from_evidence_decision
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        dl_info = DownloadInfo(filetype="mp3", username="user1")
+        ir = ImportResult(
+            decision="downgrade",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=127,
+                avg_bitrate_kbps=127,
+                median_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+            ),
+            existing_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=192,
+                median_bitrate_kbps=192,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                dl_info=dl_info,
+                import_result=ir,
+                distance=0.1279,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+                requeue_on_failure=True,
+                validation_result=None,
+                staged_path="/tmp/cratedigger-evidence-reject-test",
+                scenario="downgrade",
+                files=None,
+                source_path_cleanup_scenario="downgrade",
+                cooled_down_users=None,
+            )
+
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "rejected")
+        self.assertEqual(log.beets_scenario, "downgrade")
+        self.assertEqual(log.beets_distance, 0.1279)
+        # Top-level quality columns the UI reads.
+        self.assertEqual(log.extra["actual_filetype"], "mp3")
+        self.assertEqual(log.extra["slskd_filetype"], "mp3")
+        self.assertEqual(log.extra["bitrate"], 127_000)
+        self.assertEqual(log.extra["actual_min_bitrate"], 127)
+        self.assertEqual(log.extra["spectral_grade"], "likely_transcode")
+        self.assertEqual(log.extra["spectral_bitrate"], 128)
+        self.assertEqual(log.extra["existing_min_bitrate"], 192)
+        self.assertEqual(log.extra["existing_spectral_bitrate"], None)
+        # The full ImportResult is still serialized into the JSONB.
+        self.assertIsNotNone(log.import_result)
+
+
 class TestDispatchImport(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
